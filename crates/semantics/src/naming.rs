@@ -5,8 +5,9 @@
 use {
     crate::{
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module,
-            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
+            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
     },
@@ -73,6 +74,9 @@ pub struct ItemNaming {
     pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: SortedSet<BindingId>,
+    /// The variables of top-level `for` loops. They stay bound in the global environment like
+    /// a top-level assignment, so the item exports their type.
+    pub loop_bound_slots: SortedSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
@@ -138,6 +142,7 @@ struct NamingDraft {
     unused_parameters: Vec<UnusedAssignment>,
     used_top_level_names: BTreeSet<Symbol>,
     captured_slots: BTreeSet<BindingId>,
+    loop_bound_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
@@ -165,6 +170,7 @@ impl NamingDraft {
             unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
             captured_slots: self.captured_slots.into(),
+            loop_bound_slots: self.loop_bound_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
@@ -444,7 +450,6 @@ impl Context<'_> {
                 lhs,
                 rhs,
             } => {
-                use crate::hir::BinaryOperator;
                 // `a %op% b` calls `%op%`: a quiet read that keeps a project definition alive.
                 if let Some(name) = special_name {
                     self.naming.quiet_operator_reads.insert(*name);
@@ -752,10 +757,12 @@ impl Context<'_> {
                         name: variable,
                         range,
                     } = self.module[variable];
+                    // A top-level loop leaves its variable bound in the global environment, so
+                    // later statements read the type it exports.
                     let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
-                    // A top-level loop leaves its variable bound in the global environment.
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(variable);
+                        self.naming.loop_bound_slots.insert(slot);
                     }
                     self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
@@ -1049,6 +1056,16 @@ impl Context<'_> {
                     self.premint_frame_assignments(arm.body);
                 }
             }
+            // R never evaluates a formula's or a help request's operands, and resolution skips
+            // them, so an assignment inside binds nothing in this frame.
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Tilde | BinaryOperator::Help,
+                ..
+            }
+            | ExpressionKind::Unary {
+                operator: UnaryOperator::Tilde | UnaryOperator::Help,
+                ..
+            } => {}
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }

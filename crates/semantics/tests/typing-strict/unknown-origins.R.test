@@ -224,3 +224,175 @@ ages: fn(df: data.frame) -> double[]
 153..159 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 187..193 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
+
+#==== strict_covered_origins
+#---- trust_on_a_binding_covers_an_unknown_source
+#~~~~ R/main.R
+#: fn(x: integer) -> integer
+f <- function(x) {
+  #: @trust integer
+  y <- x %then% 2L
+  y
+}
+#++++
+== R/main.R
+f: fn(x: integer) -> integer
+
+#---- if_unknown_on_a_binding_covers_an_unknown_source
+#~~~~ R/main.R
+#: fn(x: integer) -> integer
+f <- function(x) {
+  #: @if-unknown integer
+  y <- x %then% 2L
+  y
+}
+#++++
+== R/main.R
+f: fn(x: integer) -> integer
+
+#---- plain_annotation_on_a_binding_covers_an_unknown_source
+#~~~~ R/main.R
+#: fn(x: integer) -> integer
+f <- function(x) {
+  #: integer
+  y <- x %then% 2L
+  y
+}
+#++++
+== R/main.R
+f: fn(x: integer) -> integer
+
+#---- unannotated_binding_of_an_unknown_source_is_the_origin
+#~~~~ R/main.R
+#: fn(x: integer) -> integer
+f <- function(x) {
+  y <- x %then% 2L
+  y
+}
+#++++
+== R/main.R
+f: fn(x: integer) -> integer
+55..66 error[strict] strict mode: could not determine the type of `y`; add a type annotation
+
+#==== strict_package_origins
+#---- r6_constructor_result_is_a_strict_origin
+#~~~~ R/main.R
+#description Imports: R6
+Account <- R6::R6Class("Account", public = list(balance = 0))
+#: fn() -> double
+opening <- function() {
+  account <- Account$new()
+  account$balance
+}
+#++++
+== R/main.R
+Account: Any
+opening: fn() -> double
+142..155 error[strict] strict mode: could not determine the type of `account`; add a type annotation
+
+#---- qualified_untyped_export_is_a_strict_origin
+#~~~~ R/main.R
+#description Imports: glue
+#: fn(x: character) -> character
+f <- function(x) glue::glue("a {x}")
+#++++
+== R/main.R
+f: fn(x: character) -> character
+77..87 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+
+#---- bare_untyped_export_of_an_imported_package_is_a_strict_origin
+#~~~~ R/main.R
+#namespace import(glue)
+#description Imports: glue
+#: fn(x: character) -> character
+f <- function(x) glue("a {x}")
+#++++
+== R/main.R
+f: fn(x: character) -> character
+101..105 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+
+#---- bare_untyped_export_of_an_attached_package_is_a_strict_origin
+#~~~~ scripts/run.R
+#description Imports: glue
+library(glue)
+greeting <- glue("a {1}")
+#++++
+== scripts/run.R
+Any
+greeting: Unknown
+41..49 warning[unused] `greeting` is assigned but never used.
+53..57 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+
+#==== strict_loop_variable
+#---- loop_variable_after_the_loop_may_be_null
+#~~~~ R/main.R
+#: fn(x: double[]) -> double | NULL
+last_of <- function(x) {
+  for (value in x) {}
+  value
+}
+#: fn(x: double[]) -> double
+last_strict <- function(x) {
+  for (value in x) {}
+  value
+}
+#: fn(n: integer) -> integer
+last_index <- function(n) {
+  for (i in (1:n)) {}
+  i
+}
+#: fn(n: integer) -> integer | character
+last_relabelled <- function(n) {
+  for (i in 1:n) if (i > 1L) i <- "late"
+  i
+}
+#++++
+== R/main.R
+last_of: fn(x: double[]) -> double | NULL
+last_strict: fn(x: double[]) -> double
+last_index: fn(n: integer) -> integer
+last_relabelled: fn(n: integer) -> integer | character
+175..180 error[type-mismatch] expected `double`, found `double | NULL`
+
+#==== strict_operator_values
+#---- an_operator_read_as_a_value_takes_and_returns_any
+#~~~~ R/main.R
+#: fn(xs: double[]) -> double
+total <- function(xs) Reduce(`+`, xs)
+#: fn(m: matrix, s: double[]) -> matrix
+scaled <- function(m, s) sweep(m, 2, s, `*`)
+#: fn(a: double, b: double) -> double
+added <- function(a, b) `+`(a, b)
+#: fn(xs: list[double]) -> list[Any]
+flattened <- function(xs) lapply(xs, c)
+#++++
+== R/main.R
+total: fn(xs: double[]) -> double
+scaled: fn(m: matrix, s: double[]) -> matrix
+added: fn(a: double, b: double) -> double
+flattened: fn(xs: list[double]) -> list[Any]
+
+#==== strict_top_level_loop_variable
+#---- a_later_statement_reads_the_loop_variable_type
+#~~~~ scripts/run.R
+values <- c(1, 2, 3)
+for (value in values) {}
+last_value <- value
+for (index in 1:3) {}
+last_index <- index
+print(c(last_value, last_index))
+if (TRUE) { label <- "s"; for (label in 1:3) {} }
+#: integer
+last_label <- label
+print(last_label)
+#++++
+== scripts/run.R
+values: double[]
+NULL
+last_value: double | NULL
+NULL
+last_index: integer
+double[]
+NULL
+last_label: integer
+integer

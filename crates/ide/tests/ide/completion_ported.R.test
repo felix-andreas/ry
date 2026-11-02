@@ -244,3 +244,147 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
 completion: none
 hint @5: integer
+
+#==== completion_expected_type
+#---- condition_ranks_logical_results_first
+#: fn(x: double) -> character
+is_label <- function(x) format(x)
+#: fn(x: double) -> logical
+is_small <- function(x) x < 1
+check <- function(value) {
+  if (is_$0(value)) 1
+}
+#++++
+hover 155..158: is_
+hover-definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `check`
+  edit 139..139 -> "<T>"
+  edit 145..145 -> ": T"
+  edit 146..146 -> " -> double | NULL"
+action: Add inferred type annotations for the whole file
+  edit 139..139 -> "<T>"
+  edit 145..145 -> ": T"
+  edit 146..146 -> " -> double | NULL"
+completion (86): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
+hint @139<T>
+hint @145: T
+hint @146 -> double | NULL
+
+#---- condition_without_a_call_ranks_logical_results_first
+#: fn(x: double) -> character
+is_label <- function(x) format(x)
+#: fn(x: double) -> logical
+is_small <- function(x) x < 1
+check <- function(value) {
+  if (is_$0) 1
+}
+#++++
+hover 155..158: is_
+hover-definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `check`
+  edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
+action: Add inferred type annotations for the whole file
+  edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
+completion (86): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
+hint @127: <T> fn([value]: T) -> double | NULL
+
+#---- argument_ranks_the_parameter_type_first
+#: fn(label: character) -> character
+shout <- function(label) toupper(label)
+#: fn() -> double
+total_count <- function() 3
+#: fn() -> character
+total_name <- function() "a"
+report <- function() {
+  shout(total_$0())
+}
+#++++
+hover 204..210: total_
+hover-definition: installed total_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed total_ from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(label: character) -> character
+parameters: [label: character]
+action: Add inferred type annotation for `report`
+  edit 193..193 -> " -> character"
+action: Add inferred type annotations for the whole file
+  edit 193..193 -> " -> character"
+completion (3): total_name, total_count, .__S3MethodsTable__.
+hint @193 -> character
+
+#---- overloads_accept_any_parameter_type
+squares <- function(values) {
+  positions <- seq_along(values)
+  lapply(se$0(values), function(i) i^2)
+}
+#++++
+hover 72..74: se
+hover-definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(X: list[named: T], FUN: fn(T) -> double, ...: Any) -> list[named: double] (active)
+parameters: [X: list[named: T]] | FUN: fn(T) -> double | ...: Any
+signature: <T, U> fn(X: list[T] | T[] | formula | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+parameters: [X: list[T] | T[] | formula | NULL] | FUN: fn(T) -> U | ...: Any
+action: Add inferred type annotation for `squares`
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> list[named: double]"
+action: Add inferred type annotations for the whole file
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> list[named: double]"
+completion (82): seq_along, se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+hint @19<T>
+hint @26: T
+hint @27 -> list[named: double]
+hint @41: integer[]
+hint @84FUN =
+
+#---- unknown_types_keep_their_order
+count_rows <- function(x) nrow(x)
+count_names <- function(x) names(x)
+check <- function(value) {
+  if (count_$0(value)) 1
+}
+#++++
+hover 103..109: count_
+hover-definition: installed count_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed count_ from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `check`
+  edit 87..87 -> "<T>"
+  edit 93..93 -> ": T"
+  edit 94..94 -> " -> double | NULL"
+action: Add inferred type annotations for the whole file
+  edit 22..22 -> "<T>"
+  edit 24..24 -> ": T"
+  edit 25..25 -> " -> Any"
+  edit 57..57 -> "<T>"
+  edit 59..59 -> ": T"
+  edit 60..60 -> " -> Any"
+  edit 87..87 -> "<T>"
+  edit 93..93 -> ": T"
+  edit 94..94 -> " -> double | NULL"
+completion (7): count_names, count_rows, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, List.count_if
+hint @22<T>
+hint @24: T
+hint @25 -> Any
+hint @57<T>
+hint @59: T
+hint @60 -> Any
+hint @87<T>
+hint @93: T
+hint @94 -> double | NULL

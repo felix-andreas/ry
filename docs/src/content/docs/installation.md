@@ -31,7 +31,7 @@ instead.
 
 **Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has one archive
 per platform: `ry-x86_64-unknown-linux-gnu.tar.gz`,
-`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-msvc.zip`. Name the tag in the URL,
+`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL,
 because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
 points at 0.1.1. On a Mac:
 
@@ -63,8 +63,8 @@ nix profile install github:felix-andreas/ry
 
 ## R
 
-`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`
-and `ry load` need a GNU R installation built as a shared library (see the
+`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`,
+`ry load`, `ry test` and `ry document` need a GNU R installation built as a shared library (see the
 [CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
 R's R sources and the default packages from your GNU R installation instead of shipping them, so
 ry stays independent of R's license.
@@ -103,7 +103,7 @@ From 0.4.0-beta on, the release archives hold `ry`, ry's runtime (`libR.so`, `li
 `R.dll`), and `ry-rcmd`, which `ry load` uses to compile a package's `src/`. Keep them in the same
 directory, or put the runtime and `ry-rcmd` together in `../lib/ry/` relative to `ry`. The
 Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
-`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
+`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `x86_64-pc-windows-gnu` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
 it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 

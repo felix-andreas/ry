@@ -32,7 +32,8 @@ hover-definition: installed . from base, stats, utils, methods, graphics, grDevi
 definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (128+): .BY, .GRP, .I, .N, .NGRP, .SD, ...elt, ...length
@@ -78,7 +79,8 @@ hover 67..72: tax: double[]
 definition: none
 references: none
 rename: none
-signature: none
+signature: fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
+parameters: [...: Any] | [recursive]: logical | [use.names]: logical
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 action: Rewrite `:=` with `DataFrame.with_columns`
@@ -172,3 +174,79 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (2): amount, team
 hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- a_query_list_shows_the_list_signature
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(total = sum(amount), n = .N$0), by = team]
+#++++
+hover 102..104: .N: integer
+hover-definition: installed .N from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed .N from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[], n: integer[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[], n: integer[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..117 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum(), n = Expr.len())"
+completion (3): .NGRP, .NotYetImplemented, .NotYetUsed
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[], n: integer[]}
+
+#---- a_query_list_argument_name
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(to$0tal = sum(amount)), by = team]
+#++++
+hover 77..82: total: double
+definition 77..82
+references: 77..82*
+rename: 1 edit(s)
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..109 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum())"
+completion (12): totals, toBibtex, toeplitz, toeplitz2, toLatex, tolower, topenv, topo.colors
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[]}
+
+#---- a_query_list_callee
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, $0.(total = sum(amount)), by = team]
+#++++
+hover 67..109: DataFrame{team: character[], total: double[]}
+hover-definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..109 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum())"
+completion (128+): c, sum, DataFrame, amount, team, sales, totals, by
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[]}
+
+#---- a_bare_dot_call_outside_a_query_is_not_a_list
+f <- function(x) .(x$0)
+#++++
+hover 19..20: x: T
+hover-definition: local 14..15
+definition 14..15
+references: 14..15*, 19..20
+rename: 2 edit(s)
+signature: none
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame

@@ -8,8 +8,7 @@
 use {
     crate::{
         Db, TypeDefinitions,
-        check::ExpressionTypes,
-        hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        hir::{ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         infer::apply_definition,
         types::{Atomic, Ty, TyKind, union_of, unknown},
     },
@@ -49,7 +48,7 @@ pub fn match_findings<'db>(
     db: &'db dyn Db,
     definitions: Definitions<'db>,
     module: &Module,
-    types: &ExpressionTypes<'db>,
+    mut type_of: impl FnMut(ExprId) -> Option<Ty<'db>>,
 ) -> Vec<MatchFinding> {
     let mut findings = Vec::new();
     let checker = Coverage { db, definitions };
@@ -57,10 +56,7 @@ pub fn match_findings<'db>(
         let ExpressionKind::Match { scrutinee, arms } = *module.kind(expression) else {
             continue;
         };
-        let subject = types
-            .get(&scrutinee)
-            .copied()
-            .unwrap_or_else(|| unknown(db));
+        let subject = type_of(scrutinee).unwrap_or_else(|| unknown(db));
         let subject = structural(db, definitions, subject);
         let mut rows: Vec<Vec<Pat>> = Vec::with_capacity(arms.len());
         for arm in module[arms].iter() {

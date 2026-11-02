@@ -1595,10 +1595,12 @@ fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
         [
             "check",
             "fmt",
+            "migrate",
             "run",
             "R",
             "load",
             "test",
+            "document",
             "debug-adapter",
             "server",
             "debug",

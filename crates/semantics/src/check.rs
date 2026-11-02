@@ -23,7 +23,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
+        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
@@ -856,27 +856,38 @@ fn check_item_in<'db>(
         }
     }
     let recorded = mem::take(&mut context.recorded.0);
-    let expression_types: ExpressionTypes = recorded
-        .into_iter()
-        .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
-        .collect();
-    let mut pattern_types = vec![None; module.pattern_count()];
-    for (&id, &ty) in &context.recorded_patterns {
-        if let Some(slot) = pattern_types.get_mut(id.index()) {
-            *slot = Some(context.table.resolve(context.db, ty));
+    let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
+        let ty = (*recorded.get(scrutinee.index())?)?;
+        Some(context.table.resolve(db, ty))
+    });
+    let editor_facts = db.editor_facts();
+    let mut expression_types = ExpressionTypes::default();
+    let mut pattern_types = PatternTypes::default();
+    let mut literal_expectations = SortedMap::default();
+    let mut loop_variables = SortedMap::default();
+    if editor_facts {
+        expression_types = recorded
+            .into_iter()
+            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+            .collect();
+        let mut patterns = vec![None; module.pattern_count()];
+        for (&id, &ty) in &context.recorded_patterns {
+            if let Some(slot) = patterns.get_mut(id.index()) {
+                *slot = Some(context.table.resolve(context.db, ty));
+            }
         }
+        pattern_types = PatternTypes(ThinVec::from(patterns));
+        literal_expectations = context
+            .recorded_expectations
+            .iter()
+            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .collect();
+        loop_variables = context
+            .recorded_loop_variables
+            .iter()
+            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .collect();
     }
-    let pattern_types = PatternTypes(ThinVec::from(pattern_types));
-    let literal_expectations = context
-        .recorded_expectations
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
-    let loop_variables = context
-        .recorded_loop_variables
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -893,7 +904,7 @@ fn check_item_in<'db>(
     errors.dedup();
     let mut top_level_bindings = Vec::new();
     for (&id, info) in &naming.bindings {
-        if info.kind != BindingKind::TopLevel {
+        if info.kind != BindingKind::TopLevel && !naming.loop_bound_slots.contains(&id) {
             continue;
         }
         let Some(entry) = context.environment.get(id) else {
@@ -908,9 +919,32 @@ fn check_item_in<'db>(
         } else {
             TypeScheme::monomorphic(unknown(db))
         };
-        top_level_bindings.push((info.name, binding_scheme));
+        top_level_bindings.push((id, info.name, binding_scheme));
     }
-    let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
+    // A loop variable that shares its name with another exported slot leaves no record of
+    // which slot is live at the end of the item, so that name exports as undetermined.
+    let ambiguous: FxHashSet<_> = top_level_bindings
+        .iter()
+        .filter(|(id, name, _)| {
+            naming.loop_bound_slots.contains(id)
+                && top_level_bindings
+                    .iter()
+                    .any(|(other, other_name, _)| other != id && other_name == name)
+        })
+        .map(|(_, name, _)| *name)
+        .collect();
+    let mut exported: FxHashSet<_> = FxHashSet::default();
+    let top_level_bindings: Vec<_> = top_level_bindings
+        .into_iter()
+        .filter_map(|(_, name, scheme)| {
+            if !ambiguous.contains(&name) {
+                return Some((name, scheme));
+            }
+            exported
+                .insert(name)
+                .then(|| (name, TypeScheme::monomorphic(unknown(db))))
+        })
+        .collect();
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         expression_types,
@@ -920,8 +954,16 @@ fn check_item_in<'db>(
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: context.selected_overloads.into_iter().collect(),
-        callee_targets: context.callee_targets.into_iter().collect(),
+        selected_overloads: if editor_facts {
+            context.selected_overloads.into_iter().collect()
+        } else {
+            SortedMap::default()
+        },
+        callee_targets: if editor_facts {
+            context.callee_targets.into_iter().collect()
+        } else {
+            SortedMap::default()
+        },
         masked_reads: context.masked_reads.into_iter().collect(),
         column_misses: context.column_misses.into_iter().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
@@ -955,7 +997,7 @@ fn close_scheme<'db>(
 }
 
 struct ResidualCloser<'db> {
-    binders: Vec<(Name<'db>, Constraint)>,
+    binders: ThinVec<(Name<'db>, Constraint)>,
     generalized: FxHashMap<InferenceVar, Ty<'db>>,
     /// Only variables some parameter abstracts generalize; any other constrained
     /// variable is one fixed type nobody chooses, so it takes the constraint's default.
@@ -2063,11 +2105,7 @@ fn shape_verdict<'db>(
             },
         });
     }
-    let filled = |formal: usize| {
-        targets
-            .iter()
-            .any(|target| *target == Some(ArgumentTarget::Named(formal)))
-    };
+    let filled = |formal: usize| targets.contains(&Some(ArgumentTarget::Named(formal)));
     let mut missing: Vec<String> = function
         .named
         .iter()
@@ -3366,6 +3404,27 @@ impl<'db> Checker<'db, '_> {
             && let Some(ty) = self.quiet_global_read(id, name)
         {
             return ty;
+        }
+        if let Some(name) = naming.non_locals.get(&id)
+            && let Some(scheme) = operator_value(self.db, name)
+        {
+            return self.instantiate(&scheme);
+        }
+        // A package's export list or the project's imports name the binding, but no stub
+        // types it. An unresolved name is not an origin: naming reports it. A base name with no
+        // stub is an intrinsic such as `c`, `list` or `[[` whose calls are typed specially, so
+        // reading it as a value is left unchecked rather than reported.
+        if let Some(name) = naming.non_locals.get(&id)
+            && !is_base_export(self.db, name)
+            && (self
+                .globals
+                .is_some_and(|globals| globals.library_candidates(name).is_some())
+                || imported_by_name(self.db, name))
+        {
+            self.record_strict_origin(
+                id,
+                StrictOriginKind::UndeterminedReference(name.to_string()),
+            );
         }
         unknown(self.db)
     }
@@ -4980,13 +5039,36 @@ impl<'db> Checker<'db, '_> {
                 .find(|(_, info)| info.range == variable_range)
                 .map(|(id, _)| *id)
         });
-        self.check_loop_body(
+        let variable_written = self.check_loop_body(
             loop_expression,
             None,
             body,
             false,
             loop_slot.map(|slot| (slot, element)),
         );
+        // R leaves the variable at the last element, or sets it to `NULL` when the sequence
+        // is empty, whatever it held before the loop. A `from:to` range always has an element.
+        // A body that assigns the variable leaves its state at the end of the body instead.
+        if let Some(slot) = loop_slot {
+            let mut range = sequence;
+            while let ExpressionKind::Paren(inner) = self.module.kind(range) {
+                range = *inner;
+            }
+            let never_empty = matches!(
+                self.module.kind(range),
+                ExpressionKind::Binary {
+                    operator: BinaryOperator::Sequence,
+                    ..
+                }
+            );
+            let last =
+                variable_written.map_or(element, |written| union_of(self.db, [element, written]));
+            let after = match never_empty {
+                true => last,
+                false => union_of(self.db, [last, null(self.db)]),
+            };
+            self.environment.set(slot, EnvEntry::Mono(after));
+        }
         null(self.db)
     }
 
@@ -5023,7 +5105,8 @@ impl<'db> Checker<'db, '_> {
 
     /// Iterates to a fixed point from the join of the pre-loop state and the previous
     /// pass's exit writes; diagnostics count only on the final pass, and a slot still
-    /// changing at the cap widens to `Unknown`.
+    /// changing at the cap widens to `Unknown`. Returns the loop variable's type at the end
+    /// of the body when the body assigns it.
     fn check_loop_body(
         &mut self,
         loop_expression: ExprId,
@@ -5031,7 +5114,7 @@ impl<'db> Checker<'db, '_> {
         body: ExprId,
         runs_at_least_once: bool,
         loop_variable: Option<(BindingId, Ty<'db>)>,
-    ) {
+    ) -> Option<Ty<'db>> {
         const LOOP_PASS_CAP: usize = 3;
         let mut passes = 0;
         loop {
@@ -5046,11 +5129,22 @@ impl<'db> Checker<'db, '_> {
                 self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
             }
             self.infer(body);
+            let mut variable_written = None;
             let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
                 .environment
                 .writes_since(mark)
                 .into_iter()
-                .filter(|(slot, _)| loop_variable.is_none_or(|(loop_slot, _)| *slot != loop_slot))
+                .filter(|(slot, entry)| {
+                    let is_variable =
+                        loop_variable.is_some_and(|(loop_slot, _)| *slot == loop_slot);
+                    if is_variable {
+                        variable_written = Some(match entry {
+                            Some(EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty)) => *ty,
+                            Some(EnvEntry::Scheme(_)) | None => unknown(self.db),
+                        });
+                    }
+                    !is_variable
+                })
                 .collect();
             self.environment.rollback(mark);
             // A read this pass discovered the slot's pre-loop state through the cross-item
@@ -5069,7 +5163,7 @@ impl<'db> Checker<'db, '_> {
                         }
                     }
                 }
-                return;
+                return variable_written;
             }
             if passes >= LOOP_PASS_CAP {
                 for slot in changed {
@@ -5081,7 +5175,8 @@ impl<'db> Checker<'db, '_> {
                         );
                     }
                 }
-                return;
+                // The pass that wrote the variable never converged either.
+                return variable_written.map(|_| unknown(self.db));
             }
             // Not yet stable: this pass ran under a stale entry state, so its diagnostics are
             // discarded.
@@ -8642,7 +8737,17 @@ impl<'db> Checker<'db, '_> {
                 }
                 let ty = match candidates.last() {
                     Some(scheme) => self.instantiate(scheme),
-                    None => unknown(self.db),
+                    None => match operator_value(self.db, &name) {
+                        Some(scheme) => self.instantiate(&scheme),
+                        // An export list names the function but no stub types it.
+                        None => {
+                            self.record_strict_origin(
+                                callee,
+                                StrictOriginKind::UndeterminedReference(name.to_string()),
+                            );
+                            unknown(self.db)
+                        }
+                    },
                 };
                 Some(self.record(callee, ty))
             }
@@ -15950,7 +16055,10 @@ impl<'db> Checker<'db, '_> {
         let mut binders = Vec::new();
         let mut mapping: FxHashMap<InferenceVar, Name<'db>> = FxHashMap::default();
         let body = self.abstract_vars(resolved, &mut binders, &mut mapping);
-        TypeScheme { binders, body }
+        TypeScheme {
+            binders: ThinVec::from(binders),
+            body,
+        }
     }
 
     fn abstract_vars(
@@ -16871,6 +16979,29 @@ fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<Inferenc
         into.insert(*var);
     }
     for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
+}
+
+/// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result
+/// depends on R's coercion and dispatch rules for the operand types, which one signature cannot
+/// state, so it takes and returns `Any`.
+fn is_base_export(db: &dyn Db, name: &str) -> bool {
+    stubs(db).is_some_and(|library| {
+        library
+            .exports_by_namespace
+            .get("base")
+            .is_some_and(|exports| exports.contains(name))
+    })
+}
+
+fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",
+        "&&", "||",
+    ];
+    if !OPERATORS.contains(&name) {
+        return None;
+    }
+    lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
 }
 
 #[cfg(test)]

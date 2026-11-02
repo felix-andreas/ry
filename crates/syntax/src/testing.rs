@@ -232,6 +232,11 @@ pub fn check_parse_invariants(input: &str) {
         if let Some(inner) = window.root().descendants().nth(1) {
             let nested = Arc::new(window.subtree(inner));
             check_navigation(&SyntaxNode::new_root(nested.clone()), nested.text());
+            let detached = nested.detach();
+            assert!(
+                detached == *nested && detached.same_parents(&nested),
+                "a detached window differs from its source for input {input:?}"
+            );
         }
     }
 
@@ -373,22 +378,12 @@ impl Entropy for ByteStream<'_> {
 }
 
 /// Runs `case` once per seed and, when one fails, panics with the command that replays exactly
-/// that seed. The seeds are `0..fuzz_iterations(default)`. `FUZZ_SEED=<seed>` runs only that
-/// seed, or, with `FUZZ_ITERS` set as well, that many seeds starting there. Each seed is the
+/// that seed. The seeds are [`fuzz_seeds`]: `0..default` normally, only `FUZZ_SEED` for a replay,
+/// and a window from it when `FUZZ_ITERS` or `FUZZ_DEPTH` is set as well. Each seed is the
 /// harness's whole input: the case builds its generator with `SplitMix64(seed)` and must draw
 /// nothing else, so the replay reproduces the failure byte for byte.
 pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
-    let iterations: Option<u64> = env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok());
-    let seeds = match env::var("FUZZ_SEED")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        Some(first) => first..first.saturating_add(iterations.unwrap_or(1)),
-        None => 0..iterations.unwrap_or(default as u64),
-    };
-    for seed in seeds {
+    for seed in fuzz_seeds(default) {
         if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
             panic!(
                 "seed {seed} failed; replay with\n    {}",
@@ -396,6 +391,27 @@ pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
             );
         }
     }
+}
+
+/// The seeds [`for_each_seed`] runs, for a harness that has to write its own replay command.
+/// They start at `FUZZ_SEED` (0 when unset). Their count is `FUZZ_ITERS` when set, else
+/// `default` times `FUZZ_DEPTH` when that is set, else one seed when `FUZZ_SEED` names a replay,
+/// else `default`. `FUZZ_DEPTH` lets a campaign deepen a test whose loops have different
+/// defaults while keeping their proportions.
+pub fn fuzz_seeds(default: usize) -> Range<u64> {
+    let first = variable("FUZZ_SEED");
+    let count = match (variable("FUZZ_ITERS"), variable("FUZZ_DEPTH"), first) {
+        (Some(iterations), _, _) => iterations,
+        (None, Some(depth), _) => (default as u64).saturating_mul(depth),
+        (None, None, Some(_)) => 1,
+        (None, None, None) => default as u64,
+    };
+    let first = first.unwrap_or(0);
+    first..first.saturating_add(count)
+}
+
+fn variable(name: &str) -> Option<u64> {
+    env::var(name).ok().and_then(|value| value.parse().ok())
 }
 
 /// `FUZZ_SEED=<seed> cargo test -p <package> --test <binary> <test> -- --exact`, from what cargo
@@ -413,21 +429,33 @@ pub fn replay_command(seed: u64) -> String {
             _ => stem,
         })
         .unwrap_or_default();
-    let target = if binary.is_empty() || binary == package.replace('-', "_") {
-        "--lib".to_owned()
-    } else {
+    // A library's unit-test binary is named after the library, which need not match the package
+    // (`ry-lang` builds `ry`), so an integration test is recognized by its source file instead.
+    let integration = match env::var_os("CARGO_MANIFEST_DIR") {
+        Some(manifest) if !binary.is_empty() => {
+            let tests = Path::new(&manifest).join("tests");
+            tests.join(format!("{binary}.rs")).exists()
+                || tests.join(&binary).join("main.rs").exists()
+        }
+        _ => !binary.is_empty() && binary != package.replace('-', "_"),
+    };
+    let target = if integration {
         format!("--test {binary}")
+    } else {
+        "--lib".to_owned()
     };
     let test = std::thread::current().name().unwrap_or("").to_owned();
     format!("FUZZ_SEED={seed} cargo test -p {package} {target} {test} -- --exact")
 }
 
-/// `FUZZ_ITERS` overrides each harness's default budget.
+/// A harness's budget: `FUZZ_ITERS` when set, else `default` times `FUZZ_DEPTH` when that is
+/// set, else `default`.
 pub fn fuzz_iterations(default: usize) -> usize {
-    env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+    match (variable("FUZZ_ITERS"), variable("FUZZ_DEPTH")) {
+        (Some(iterations), _) => iterations as usize,
+        (None, Some(depth)) => default.saturating_mul(depth as usize),
+        (None, None) => default,
+    }
 }
 
 pub fn random_bytes(rng: &mut SplitMix64) -> String {

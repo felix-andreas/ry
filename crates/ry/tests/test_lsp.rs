@@ -29,6 +29,7 @@ use {
         panic::CatchUnwindLayer,
         router::Router,
     },
+    ry::server::simulation::{ClientOptions, Notification, Outgoing, Simulation},
     std::{fs, future::ready, ops::ControlFlow, path::PathBuf, process::Stdio, time::Duration},
     tempfile::TempDir,
     tokio::{
@@ -1227,6 +1228,102 @@ async fn dependency_affecting_save_requests_diagnostic_refresh() {
     context.save(&uri);
     context.recv_refresh().await;
     context.shutdown().await;
+}
+
+/// An edit to a package file leaves other open documents' pushes as they were until a save, and
+/// any save must then bring them up to date, including a save of a document the server does not
+/// analyze as R: an open NAMESPACE, or one it never saw opened.
+#[test]
+fn any_save_republishes_documents_that_an_edit_elsewhere_changed() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let root = temp_dir.path();
+    let files = [
+        ("DESCRIPTION", "Package: shapes\nVersion: 0.1.0\n"),
+        ("NAMESPACE", "export(square)\n"),
+        ("R/shapes.R", "square <- function(side) side * side\n"),
+        ("scripts/analysis.R", "square(4)\n"),
+    ];
+    for (relative, text) in files {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("failed to create parent directory");
+        }
+        fs::write(path, text).expect("failed to write initial test file");
+    }
+    let uri = |relative: &str| Url::from_file_path(root.join(relative)).expect("absolute path");
+    let (shapes, analysis, namespace) = (
+        uri("R/shapes.R"),
+        uri("scripts/analysis.R"),
+        uri("NAMESPACE"),
+    );
+    let options = ClientOptions {
+        pull_diagnostics: false,
+        utf8: false,
+        cold: false,
+    };
+    let mut simulation = Simulation::start(root, options);
+    let open = |uri: &Url, language: &str, text: &str| {
+        Notification::DidOpen(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem::new(
+                uri.clone(),
+                language.to_owned(),
+                1,
+                text.to_owned(),
+            ),
+        })
+    };
+    let rewrite = |uri: &Url, version: i32, text: &str| {
+        Notification::DidChange(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier::new(uri.clone(), version),
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_owned(),
+            }],
+        })
+    };
+    let save = |uri: &Url| {
+        Notification::DidSave(DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier::new(uri.clone()),
+            text: None,
+        })
+    };
+    // Whether the last publish for `analysis` reports `square` as unresolved.
+    let unresolved_square = |simulation: &mut Simulation| {
+        simulation.settle();
+        simulation
+            .drain_outgoing()
+            .into_iter()
+            .filter_map(|message| match message {
+                Outgoing::PublishDiagnostics(params) if params.uri == analysis => Some(params),
+                _ => None,
+            })
+            .last()
+            .map(|params| {
+                messages(params)
+                    .iter()
+                    .any(|message| message.contains("`square`"))
+            })
+    };
+
+    simulation.notify(open(&shapes, "r", "square <- function(side) side * side\n"));
+    simulation.notify(open(&analysis, "r", "square(4)\n"));
+    simulation.notify(open(&namespace, "namespace", "export(square)\n"));
+    assert_eq!(unresolved_square(&mut simulation), Some(false));
+
+    simulation.notify(rewrite(&shapes, 2, "cube <- function(side) side^3\n"));
+    assert_eq!(unresolved_square(&mut simulation), None);
+    simulation.notify(save(&namespace));
+    assert_eq!(unresolved_square(&mut simulation), Some(true));
+
+    simulation.notify(rewrite(
+        &shapes,
+        3,
+        "square <- function(side) side * side\n",
+    ));
+    assert_eq!(unresolved_square(&mut simulation), None);
+    simulation.notify(save(&uri("R/never_opened.R")));
+    assert_eq!(unresolved_square(&mut simulation), Some(false));
 }
 
 #[tokio::test]
