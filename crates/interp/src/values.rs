@@ -12,6 +12,7 @@ use {
         records::NativeKind,
         strings::Encoding,
     },
+    rustc_hash::FxHashMap,
     std::borrow::Cow,
 };
 
@@ -217,16 +218,16 @@ pub struct Globals {
     /// while it selects an inherited method, so that selection itself never dispatches.
     pub allow_primitive_methods: bool,
     /// Primitives the methods package turned generic, by primitive index.
-    pub primitive_methods: rustc_hash::FxHashMap<u32, crate::dispatch::PrimitiveMethods>,
+    pub primitive_methods: FxHashMap<u32, crate::dispatch::PrimitiveMethods>,
     /// Environments `attach` put on the search path are ordinary enclosures of the global
     /// environment; this keeps `Autoloads` and the like alive between `attach` and first use.
     pub keep: Vec<Sexp>,
     /// `.cache_class`: each S4 class's S3 class vector (the class and what it extends), which
     /// the methods package keeps current as it defines and removes classes.
-    pub s4_extends: rustc_hash::FxHashMap<Box<[u8]>, Sexp>,
+    pub s4_extends: FxHashMap<Box<[u8]>, Sexp>,
     /// The implicit class vectors S3 dispatch builds for unclassed objects, by dimension shape
     /// and type, so that dispatching on a plain vector allocates no class vector.
-    pub implicit_classes: rustc_hash::FxHashMap<(u8, SexpType), Sexp>,
+    pub implicit_classes: FxHashMap<(u8, SexpType), Sexp>,
     /// S4 definitions a package loader holds back until a lookup needs them.
     pub deferred_definitions: Vec<crate::methods::DeferredDefinitions>,
 }
@@ -417,6 +418,49 @@ pub unsafe fn set_mkchar_bytes(
     let charsxp = heap.mk_char(bytes, encoding)?;
     heap.set_element(vector, index, charsxp);
     Ok(())
+}
+
+/// Interns the native strings one vectorized call produces, through a table of the call's own
+/// results in front of the heap's string table. The heap's table holds every string of the
+/// session, so at millions of strings each probe misses cache, while a call that extracts
+/// repeating pieces (a code inside ids, a year inside dates) has few distinct results whose table
+/// stays in cache. A call whose results rarely repeat would only pay for the inserts, so the memo
+/// switches itself off after a window with few hits.
+#[derive(Default)]
+pub struct StringMemo<'a> {
+    pieces: FxHashMap<&'a [u8], Sexp>,
+    lookups: usize,
+    hits: usize,
+    off: bool,
+}
+
+impl StringMemo<'_> {
+    /// The vector the strings are stored into must keep them alive, since the memo does not
+    /// protect them; the collector never moves a string, so the borrowed bytes stay valid.
+    pub unsafe fn mk_char(&mut self, bytes: &[u8]) -> R<Sexp> {
+        const WINDOW: usize = 1 << 16;
+        if self.off {
+            return Ok(crate::heap().mk_char(bytes, Encoding::Native)?);
+        }
+        self.lookups += 1;
+        if self.lookups == WINDOW {
+            if self.hits < WINDOW / 8 {
+                self.off = true;
+                self.pieces = FxHashMap::default();
+            }
+            self.lookups = 0;
+            self.hits = 0;
+        }
+        if let Some(&found) = self.pieces.get(bytes) {
+            self.hits += 1;
+            return Ok(found);
+        }
+        let made = crate::heap().mk_char(bytes, Encoding::Native)?;
+        if !self.off {
+            self.pieces.insert(made.bytes(), made);
+        }
+        Ok(made)
+    }
 }
 
 pub unsafe fn install(name: &str) -> R<Sexp> {

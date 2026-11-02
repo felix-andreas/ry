@@ -906,6 +906,8 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();
+    // Rounded numbers repeat, so their strings go through the call's memo.
+    let mut memo = values::StringMemo::default();
     for index in 0..count {
         let text = if mode == "character" {
             values::string_at(vector, index)
@@ -919,7 +921,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         let shortfall = width.saturating_sub(display_width(&text));
         // GNU R writes an `fg` zero as a bare "0", whatever the width.
         if shortfall == 0 || (format == "fg" && text == "0") {
-            values::set_mkchar(result, index, &text)?;
+            store_string(result, index, &text, &mut memo)?;
             continue;
         }
         padded.clear();
@@ -938,9 +940,23 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             padded.extend(std::iter::repeat_n(' ', shortfall));
             padded.push_str(&text);
         }
-        values::set_mkchar(result, index, &padded)?;
+        store_string(result, index, &padded, &mut memo)?;
     }
     Ok(result)
+}
+
+unsafe fn store_string(
+    vector: Sexp,
+    index: usize,
+    text: &str,
+    memo: &mut values::StringMemo<'_>,
+) -> R<()> {
+    if text.is_ascii() {
+        values::set_elt(vector, index, memo.mk_char(text.as_bytes())?);
+        Ok(())
+    } else {
+        values::set_mkchar(vector, index, text)
+    }
 }
 
 /// One number in C `printf` style: `d`, `f`, `e`, `E`, `g`, `G`, `fg`.

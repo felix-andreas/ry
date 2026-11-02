@@ -288,6 +288,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
         if starts.is_empty() || stops.is_empty() {
             return Err(error("invalid substring arguments"));
         }
+        let mut memo = values::StringMemo::default();
         for index in 0..count {
             let start = starts[index % starts.len()];
             let stop = stops[index % stops.len()];
@@ -304,7 +305,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 if first == 0 && last == bytes.len() {
                     set_elt(result, index, charsxp);
                 } else {
-                    values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Native)?;
+                    set_elt(result, index, memo.mk_char(&bytes[first..last])?);
                 }
                 continue;
             }

@@ -649,6 +649,8 @@ pub unsafe fn coerce_atomic(
     Ok(result)
 }
 
+/// The caller stores the string at once into a vector it keeps rooted, so the string skips the
+/// root handle `values::mkchar` would push for it.
 unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
     let mut cursor = &mut buffer[..];
     // Eleven bytes hold every `i32`, so the write cannot run out of room.
@@ -656,7 +658,7 @@ unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
         return values::mkchar(&value.to_string());
     }
     let written = 12 - cursor.len();
-    values::mkchar_bytes(&buffer[..written], Encoding::Native)
+    Ok(crate::heap().mk_char(&buffer[..written], Encoding::Native)?)
 }
 
 fn parse_complex(text: &str) -> Option<Rcomplex> {
