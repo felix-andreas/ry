@@ -1,0 +1,452 @@
+[stdout]
+| f -0x1.3333333333333p+0 0x1p+0 
+| f -0x1.333332e666666p+0 0x1p+0 
+| f -0x1.3333333333333p+0 0x1.0000004p+0 
+| f -0x1.18bb657da91p-2 0x1.60bddbbbaad16p+0 
+| f -0x1.d527b377c0198p-1 0x1.1da44e60a8bebp+0 
+| f -0x1.d5281dc29f512p-1 0x1.1da44e60a8bebp+0 
+| f -0x1.d527b377c0198p-1 0x1.1da4193b3927ap+0 
+| f -0x1.c208677526ddcp-1 0x1.9f935e6d04aep-1 
+| f -0x1.c2086577a08aep-1 0x1.9f935e6d04aep-1 
+| f -0x1.c208677526ddcp-1 0x1.9f9362c410bfp-1 
+| f -0x1.7a25af38a1be2p-1 0x1.14231d528ad34p-1 
+| f -0x1.3c74f67404b02p-2 -0x1.17ebc19c9941p-2 
+| f -0x1.7a25ad2299597p-1 0x1.14231d528ad34p-1 
+| f -0x1.7a25af38a1be2p-1 0x1.14232132354e9p-1 
+| f -0x1.2d46f944966d8p-1 0x1.16c433e12bb3fp-2 
+| f -0x1.56916963934d5p-1 0x1.ac06931ac3e0bp-2 
+| f -0x1.56916adb84b55p-1 0x1.ac06931ac3e0bp-2 
+| f -0x1.56916963934d5p-1 0x1.ac068dd98f68bp-2 
+| f -0x1.316d08ad5fd8ap-1 0x1.3fa3db415e0eap-2 
+| f -0x1.316d0a159e1b1p-1 0x1.3fa3db415e0eap-2 
+| f -0x1.316d08ad5fd8ap-1 0x1.3fa3d6ab0cd05p-2 
+| f -0x1.0647ce1835d12p-1 0x1.c14befc33123cp-3 
+| f -0x1.0647cfe6a5ae2p-1 0x1.c14befc33123cp-3 
+| f -0x1.0647ce1835d12p-1 0x1.c14be5c9b32cep-3 
+| f -0x1.93796d56d6c8fp-2 0x1.1b8a866e25817p-3 
+| f -0x1.93797331a4d18p-2 0x1.1b8a866e25817p-3 
+| f -0x1.93796d56d6c8fp-2 0x1.1b8a78d8ee669p-3 
+| f -0x1.24d95b4652514p-2 0x1.6af9261cb6f56p-5 
+| f -0x1.24d9621999ba9p-2 0x1.6af9261cb6f56p-5 
+| f -0x1.24d95b4652514p-2 0x1.6af8ee7a05ac8p-5 
+| f -0x1.39c9b574c46c8p-3 -0x1.3a787c3b0726p-7 
+| f -0x1.39c9c44f86b56p-3 -0x1.3a787c3b0726p-7 
+| f -0x1.39c9b574c46c8p-3 -0x1.3a7928789018ap-7 
+| f -0x1.4195f451f22c7p-4 0x1.91a63f595d08ep-6 
+| f -0x1.41962197ba223p-4 0x1.91a63f595d08ep-6 
+| f -0x1.4195f451f22c7p-4 0x1.91a5cdbbfca9cp-6 
+| f -0x1.6dd63b66ec8p-11 -0x1.c81a0af165a4p-10 
+| f 0x1.e8bda6ab802cep-3 -0x1.f430545a8c7a7p-5 
+| f -0x1.6df51cc55a06bp-11 -0x1.c81a0af165a4p-10 
+| f -0x1.6dd63b66ec8p-11 -0x1.c815a03ad129bp-10 
+| f 0x1.4b06bd7d98ccdp-4 -0x1.803e85af7aca3p-7 
+| f 0x1.6a6312af84babp-3 -0x1.28be24c7e4a4p-5 
+| f 0x1.4b0686e91f0f7p-4 -0x1.803e85af7aca3p-7 
+| f 0x1.4b06bd7d98ccdp-4 -0x1.803ee8c743dbp-7 
+| f 0x1.4d55b087adea2p-3 -0x1.9c47ee0927b71p-8 
+| f 0x1.4d558c588c52ep-3 -0x1.9c47ee0927b71p-8 
+| f 0x1.4d55b087adea2p-3 -0x1.9c48aa7c666fcp-8 
+| f 0x1.9fd872cfa5bc6p-3 0x1.288855974e39cp-6 
+| f 0x1.9fd887e251ccp-3 0x1.288855974e39cp-6 
+| f 0x1.9fd872cfa5bc6p-3 0x1.288829cbe48bcp-6 
+| f 0x1.409214a1286fep-2 0x1.4a0eccf1d1e1cp-4 
+| f 0x1.40921dc35f24dp-2 0x1.4a0eccf1d1e1cp-4 
+| f 0x1.409214a1286fep-2 0x1.4a0ebe9f6de64p-4 
+| f 0x1.9176fb240d2d7p-2 0x1.42133ff531323p-3 
+| f 0x1.917702b5c429bp-2 0x1.42133ff531323p-3 
+| f 0x1.9176fb240d2d7p-2 0x1.4213378ac1379p-3 
+| f 0x1.f0ad16e31229ap-2 0x1.bad0b7579c834p-3 
+| f 0x1.f0ad12fc7a6d9p-2 0x1.bad0b7579c834p-3 
+| f 0x1.f0ad16e31229ap-2 0x1.bad0bc9d584a2p-3 
+| f 0x1.0c9bf8861ea4ep-1 0x1.0a7a4bd59b73ap-2 
+| f 0x1.0c9bf9a32a104p-1 0x1.0a7a4bd59b73ap-2 
+| f 0x1.0c9bf8861ea4ep-1 0x1.0a7a4a0610ccp-2 
+| f 0x1.362bbce18fe68p-1 0x1.73a24bf6d10a7p-2 
+| f 0x1.362bbe2417f3ap-1 0x1.73a24bf6d10a7p-2 
+| f 0x1.362bbce18fe68p-1 0x1.73a2498d457ep-2 
+| f 0x1.64040568efa94p-1 0x1.d56926623f07cp-2 
+| f 0x1.64040685a3c3fp-1 0x1.d56926623f07cp-2 
+| f 0x1.64040568efa94p-1 0x1.d569240f4d12bp-2 
+| f 0x1.65040fb35771ap-1 0x1.ee8dee51e5434p-2 
+| f 0x1.650410322d3a3p-1 0x1.ee8dee51e5434p-2 
+| f 0x1.65040fb35771ap-1 0x1.ee8ded0b05fc9p-2 
+| f 0x1.6c2b0f876eba7p-1 0x1.01aa1b7a18048p-1 
+| f 0x1.81c4de566372p-1 0x1.20ba17bccf514p-1 
+| f 0x1.81c4debbb34dcp-1 0x1.20ba17bccf514p-1 
+| f 0x1.81c4de566372p-1 0x1.20ba172e09e08p-1 
+| f 0x1.c590f4c72d94ep-1 0x1.8522c37488aa1p-1 
+| f 0x1.9e37e57e5aaebp-1 0x1.4adc6295249d1p-1 
+| f 0x1.9e37e5d209af4p-1 0x1.4adc6295249d1p-1 
+| f 0x1.9e37e57e5aaebp-1 0x1.4adc621b30abp-1 
+| f 0x1.b8491addba31fp-1 0x1.76823bc4928d9p-1 
+| f 0x1.b8491b153723bp-1 0x1.76823bc4928d9p-1 
+| f 0x1.b8491addba31fp-1 0x1.76823b6e131fbp-1 
+| f 0x1.cb2607f3567bap-1 0x1.9c3221714048ap-1 
+| f 0x1.cb26081ef64dcp-1 0x1.9c3221714048ap-1 
+| f 0x1.cb2607f3567bap-1 0x1.9c3221280be6cp-1 
+| f 0x1.e039c8492c0ffp-1 0x1.c0b0d85d23548p-1 
+| f 0x1.e039c8316265p-1 0x1.c0b0d85d23548p-1 
+| f 0x1.e039c8492c0ffp-1 0x1.c0b0d886b5367p-1 
+| f 0x1.eccb65db48773p-1 0x1.d89ed80ff5715p-1 
+| f 0x1.eccb65e8a7a93p-1 0x1.d89ed80ff5715p-1 
+| f 0x1.eccb65db48773p-1 0x1.d89ed7f7c6f65p-1 
+| f 0x1.f5b47383460dp-1 0x1.ebcdf904f6acap-1 
+| f 0x1.f5b4738f2b85p-1 0x1.ebcdf904f6acap-1 
+| f 0x1.f5b47383460dp-1 0x1.ebcdf8f44a567p-1 
+| f 0x1.ff2452876d7a6p-1 0x1.fddf366b3f055p-1 
+| f 0x1.ff2452835b3cdp-1 0x1.fddf366b3f055p-1 
+| f 0x1.ff2452876d7a6p-1 0x1.fddf367038f8fp-1 
+| f 0x1.fed05ea5f61c5p-1 0x1.fd914d3586c16p-1 
+| f 0x1.fed05eaaab6c3p-1 0x1.fd914d3586c16p-1 
+| f 0x1.fed05ea5f61c5p-1 0x1.fd914d2ef0242p-1 
+| f 0x1.feff8b257364p-1 0x1.fdf9ab9092d98p-1 
+| f 0x1.ff49b070d2ddfp-1 0x1.fe8af62d2ef8dp-1 
+| f 0x1.ffd1bf09c5049p-1 0x1.ffa2f3182ce86p-1 
+| f 0x1.ffd1bf0bae0c2p-1 0x1.ffa2f3182ce86p-1 
+| f 0x1.ffd1bf09c5049p-1 0x1.ffa2f315562c4p-1 
+| f 0x1.ffff19807c22ep-1 0x1.fffe2124a0256p-1 
+| f 0x1.ffff1980c4cd1p-1 0x1.fffe2124a0256p-1 
+| f 0x1.ffff19807c22ep-1 0x1.fffe212419ddp-1 
+| f 0x1.ffffff79f112fp-1 0x1.fffffeaca426ep-1 
+| f 0x1.ffffff7a11876p-1 0x1.fffffeaca426ep-1 
+| f 0x1.ffffff79f112fp-1 0x1.fffffeac74a4dp-1 
+| f 0x1.fffffffaf13ecp-1 0x1.fffffff5bb773p-1 
+| f 0x1.fffffffaf56f4p-1 0x1.fffffff5bb773p-1 
+| f 0x1.fffffffaf13ecp-1 0x1.fffffff5b5817p-1 
+| f 0x1.ffffffff0f25dp-1 0x1.fffffffe220bap-1 
+| f 0x1.ffffffff0fa13p-1 0x1.fffffffe220bap-1 
+| f 0x1.ffffffff0eaa7p-1 0x1.fffffffe220bap-1 
+| f 0x1.ffffffff0f25dp-1 0x1.fffffffe2287ep-1 
+| f 0x1.ffffffff0f25dp-1 0x1.fffffffe218f6p-1 
+| f 0x1.ffffffff0f25dp-1 0x1.fffffffe220bap-1 
+| par 0x1.ffffffff0f25dp-1 0x1.fffffffe220bap-1 
+| objective 0x1.d03027eb92p-67 
+| convergence 0 X-convergence (3) 
+| iterations 35 evaluations 45 74 
+| f -0x1.3333333333333p+0 0x1p+0 
+| g -0x1.3333333333333p+0 0x1p+0 
+| f -0x1.18bb6531cd45cp-2 0x1.60bddb8d34326p+0 
+| f -0x1.d527b333add4p-1 0x1.1da44e5df16c4p+0 
+| g -0x1.d527b333add4p-1 0x1.1da44e5df16c4p+0 
+| f -0x1.c2087c87e0473p-1 0x1.9f935b8b49197p-1 
+| g -0x1.c2087c87e0473p-1 0x1.9f935b8b49197p-1 
+| f -0x1.7a25c3654083ap-1 0x1.14231aa2d7161p-1 
+| f -0x1.3c755154cb8c6p-2 -0x1.17ebe31fe3ce2p-2 
+| g -0x1.7a25c3654083ap-1 0x1.14231aa2d7161p-1 
+| f -0x1.2d470a3de39ccp-1 0x1.16c4318ef73a1p-2 
+| f -0x1.5691a33b9919ap-1 0x1.ac07162807bap-2 
+| g -0x1.5691a33b9919ap-1 0x1.ac07162807bap-2 
+| f -0x1.316d231229598p-1 0x1.3fa4062a43106p-2 
+| g -0x1.316d231229598p-1 0x1.3fa4062a43106p-2 
+| f -0x1.0647ce9d0cfcfp-1 0x1.c14bf46b40a79p-3 
+| g -0x1.0647ce9d0cfcfp-1 0x1.c14bf46b40a79p-3 
+| f -0x1.9379a77b6665fp-2 0x1.1b8b5afc08903p-3 
+| g -0x1.9379a77b6665fp-2 0x1.1b8b5afc08903p-3 
+| f -0x1.24da13338d7ccp-2 0x1.6afcfe57b4d18p-5 
+| g -0x1.24da13338d7ccp-2 0x1.6afcfe57b4d18p-5 
+| f -0x1.39cc691cedabp-3 -0x1.3a77c8c207174p-7 
+| g -0x1.39cc691cedabp-3 -0x1.3a77c8c207174p-7 
+| f -0x1.4197c98088a97p-4 0x1.91a594b1161d2p-6 
+| g -0x1.4197c98088a97p-4 0x1.91a594b1161d2p-6 
+| f -0x1.6d16698c211p-11 -0x1.c821ece8c993p-10 
+| f 0x1.e8c27c754e9f4p-3 -0x1.f43be85799005p-5 
+| g -0x1.6d16698c211p-11 -0x1.c821ece8c993p-10 
+| f 0x1.4b0b2cb93b07dp-4 -0x1.804e89e596946p-7 
+| f 0x1.6a52fc7173157p-3 -0x1.28b14729e1f22p-5 
+| g 0x1.4b0b2cb93b07dp-4 -0x1.804e89e596946p-7 
+| f 0x1.4d59714b795d6p-3 -0x1.9c55234b29924p-8 
+| g 0x1.4d59714b795d6p-3 -0x1.9c55234b29924p-8 
+| f 0x1.9fd61ca25aaefp-3 0x1.2887acc7ff7cdp-6 
+| g 0x1.9fd61ca25aaefp-3 0x1.2887acc7ff7cdp-6 
+| f 0x1.409a05de1c32p-2 0x1.4a12bed25d37ap-4 
+| g 0x1.409a05de1c32p-2 0x1.4a12bed25d37ap-4 
+| f 0x1.916f6c0417ffcp-2 0x1.422788db72bb8p-3 
+| g 0x1.916f6c0417ffcp-2 0x1.422788db72bb8p-3 
+| f 0x1.f09e472bc247ep-2 0x1.baea2b6d77ef8p-3 
+| g 0x1.f09e472bc247ep-2 0x1.baea2b6d77ef8p-3 
+| f 0x1.0cdcbc5351671p-1 0x1.0ae21b84bd6bfp-2 
+| g 0x1.0cdcbc5351671p-1 0x1.0ae21b84bd6bfp-2 
+| f 0x1.358852851bbb5p-1 0x1.73732efc92e3ap-2 
+| g 0x1.358852851bbb5p-1 0x1.73732efc92e3ap-2 
+| f 0x1.62ed2a8980a52p-1 0x1.d3ed9a71db862p-2 
+| g 0x1.62ed2a8980a52p-1 0x1.d3ed9a71db862p-2 
+| f 0x1.61c89b2219d47p-1 0x1.e481ff408cde3p-2 
+| g 0x1.61c89b2219d47p-1 0x1.e481ff408cde3p-2 
+| f 0x1.6636549cfa8f6p-1 0x1.f2b55e1da1c77p-2 
+| f 0x1.74c847b80aeb4p-1 0x1.0dd00afc4944p-1 
+| g 0x1.74c847b80aeb4p-1 0x1.0dd00afc4944p-1 
+| f 0x1.c129a7f9162b8p-1 0x1.7bc7efceec0d7p-1 
+| f 0x1.9408571a5afe4p-1 0x1.3ace18d59da3fp-1 
+| g 0x1.9408571a5afe4p-1 0x1.3ace18d59da3fp-1 
+| f 0x1.b10aa3cc15669p-1 0x1.69462c189e4e9p-1 
+| g 0x1.b10aa3cc15669p-1 0x1.69462c189e4e9p-1 
+| f 0x1.c4e1a577263d8p-1 0x1.8fec9005a721ep-1 
+| g 0x1.c4e1a577263d8p-1 0x1.8fec9005a721ep-1 
+| f 0x1.da9faf3a0f533p-1 0x1.b5896617c927ep-1 
+| g 0x1.da9faf3a0f533p-1 0x1.b5896617c927ep-1 
+| f 0x1.e8afa02576aabp-1 0x1.d0e853c77ee7bp-1 
+| g 0x1.e8afa02576aabp-1 0x1.d0e853c77ee7bp-1 
+| f 0x1.f1b93d9ec6ad5p-1 0x1.e3e9a21df4f98p-1 
+| g 0x1.f1b93d9ec6ad5p-1 0x1.e3e9a21df4f98p-1 
+| f 0x1.fb87738093137p-1 0x1.f6887bc508e7dp-1 
+| g 0x1.fb87738093137p-1 0x1.f6887bc508e7dp-1 
+| f 0x1.fe0a8f0a39078p-1 0x1.fbee55cc96792p-1 
+| g 0x1.fe0a8f0a39078p-1 0x1.fbee55cc96792p-1 
+| f 0x1.ffcf0540797a4p-1 0x1.ff981d2314e56p-1 
+| g 0x1.ffcf0540797a4p-1 0x1.ff981d2314e56p-1 
+| f 0x1.fff8fea1ebddp-1 0x1.fff2481c8ff36p-1 
+| g 0x1.fff8fea1ebddp-1 0x1.fff2481c8ff36p-1 
+| f 0x1.0000d4138d1ep+0 0x1.00019936eb56cp+0 
+| g 0x1.0000d4138d1ep+0 0x1.00019936eb56cp+0 
+| f 0x1.ffffffda7f2eep-1 0x1.ffffffc0a4988p-1 
+| g 0x1.ffffffda7f2eep-1 0x1.ffffffc0a4988p-1 
+| f 0x1.ffffffffe2368p-1 0x1.ffffffffc0fa9p-1 
+| g 0x1.ffffffffe2368p-1 0x1.ffffffffc0fa9p-1 
+| f 0x1.ffffffffe2368p-1 0x1.ffffffffc0fa9p-1 
+| par 0x1.ffffffffe2368p-1 0x1.ffffffffc0fa9p-1 
+| objective 0x1.036ef68c8p-71 
+| convergence 0 X-convergence (3) 
+| iterations 35 evaluations 43 36 
+| f -0x1.3333333333333p+0 0x1p+0 
+| g -0x1.3333333333333p+0 0x1p+0 
+| h -0x1.3333333333333p+0 0x1p+0 
+| f -0x1.2cdf358049a2cp+0 0x1.6173dc900ce2cp+0 
+| g -0x1.2cdf358049a2cp+0 0x1.6173dc900ce2cp+0 
+| h -0x1.2cdf358049a2cp+0 0x1.6173dc900ce2cp+0 
+| f -0x1.05ebd266fac89p+0 0x1.07e52a494d027p+0 
+| f -0x1.26b885dcf9365p-1 -0x1.76105fc61fe8p-6 
+| g -0x1.05ebd266fac89p+0 0x1.07e52a494d027p+0 
+| h -0x1.05ebd266fac89p+0 0x1.07e52a494d027p+0 
+| f -0x1.b40d9aab603ddp-1 0x1.66ec0b4e6397p-1 
+| f -0x1.14aaf33517078p-1 0x1.e2ce407ef04ep-5 
+| g -0x1.b40d9aab603ddp-1 0x1.66ec0b4e6397p-1 
+| h -0x1.b40d9aab603ddp-1 0x1.66ec0b4e6397p-1 
+| f -0x1.4d8b82ec7d022p-1 0x1.8c7f343926834p-2 
+| g -0x1.4d8b82ec7d022p-1 0x1.8c7f343926834p-2 
+| h -0x1.4d8b82ec7d022p-1 0x1.8c7f343926834p-2 
+| f -0x1.d2acb3e505fbap-2 0x1.5ae9739d6f311p-3 
+| g -0x1.d2acb3e505fbap-2 0x1.5ae9739d6f311p-3 
+| h -0x1.d2acb3e505fbap-2 0x1.5ae9739d6f311p-3 
+| f -0x1.26903c29b62d2p-2 0x1.be72aecade936p-5 
+| g -0x1.26903c29b62d2p-2 0x1.be72aecade936p-5 
+| h -0x1.26903c29b62d2p-2 0x1.be72aecade936p-5 
+| f -0x1.8121f7401939p-4 -0x1.d5726eab5f0ap-6 
+| g -0x1.8121f7401939p-4 -0x1.d5726eab5f0ap-6 
+| h -0x1.8121f7401939p-4 -0x1.d5726eab5f0ap-6 
+| f 0x1.1c460cdbd3aep-5 -0x1.f7891f8ebf665p-7 
+| g 0x1.1c460cdbd3aep-5 -0x1.f7891f8ebf665p-7 
+| h 0x1.1c460cdbd3aep-5 -0x1.f7891f8ebf665p-7 
+| f 0x1.4a66c05a95a9fp-3 0x1.2d28f3d17b5f3p-7 
+| g 0x1.4a66c05a95a9fp-3 0x1.2d28f3d17b5f3p-7 
+| h 0x1.4a66c05a95a9fp-3 0x1.2d28f3d17b5f3p-7 
+| f 0x1.69d872afa944ep-2 0x1.6866fbaca9331p-4 
+| g 0x1.69d872afa944ep-2 0x1.6866fbaca9331p-4 
+| h 0x1.69d872afa944ep-2 0x1.6866fbaca9331p-4 
+| f 0x1.b8e746e4419abp-2 0x1.6f78d666a4b38p-3 
+| g 0x1.b8e746e4419abp-2 0x1.6f78d666a4b38p-3 
+| h 0x1.b8e746e4419abp-2 0x1.6f78d666a4b38p-3 
+| f 0x1.09d814ebf5b5ep-1 0x1.0a0feeb943e7ep-2 
+| f 0x1.61732b6c54f5ap-1 0x1.a2e64e469a882p-2 
+| g 0x1.09d814ebf5b5ep-1 0x1.0a0feeb943e7ep-2 
+| h 0x1.09d814ebf5b5ep-1 0x1.0a0feeb943e7ep-2 
+| f 0x1.2f0478e5200ebp-1 0x1.5fd74ec509b6ep-2 
+| f 0x1.5d2c8a85cb68ap-1 0x1.c122995192019p-2 
+| g 0x1.2f0478e5200ebp-1 0x1.5fd74ec509b6ep-2 
+| h 0x1.2f0478e5200ebp-1 0x1.5fd74ec509b6ep-2 
+| f 0x1.5242d2abbe2bep-1 0x1.b8d2047fd1a29p-2 
+| f 0x1.888ff32af4728p-1 0x1.1d53715146d6dp-1 
+| g 0x1.5242d2abbe2bep-1 0x1.b8d2047fd1a29p-2 
+| h 0x1.5242d2abbe2bep-1 0x1.b8d2047fd1a29p-2 
+| f 0x1.7338e403cc79ep-1 0x1.0a8866242f768p-1 
+| f 0x1.a14c466ca9cbep-1 0x1.47e95f2ebddd3p-1 
+| g 0x1.7338e403cc79ep-1 0x1.0a8866242f768p-1 
+| h 0x1.7338e403cc79ep-1 0x1.0a8866242f768p-1 
+| f 0x1.92589a339caa3p-1 0x1.39ea4eaf3d26p-1 
+| f 0x1.b8cdb3df2f721p-1 0x1.720d1885c191ap-1 
+| g 0x1.92589a339caa3p-1 0x1.39ea4eaf3d26p-1 
+| h 0x1.92589a339caa3p-1 0x1.39ea4eaf3d26p-1 
+| f 0x1.afdcd47f651c8p-1 0x1.6a5199e61337bp-1 
+| g 0x1.afdcd47f651c8p-1 0x1.6a5199e61337bp-1 
+| h 0x1.afdcd47f651c8p-1 0x1.6a5199e61337bp-1 
+| f 0x1.dd5b3a0da65a1p-1 0x1.b903b45e86c44p-1 
+| g 0x1.dd5b3a0da65a1p-1 0x1.b903b45e86c44p-1 
+| h 0x1.dd5b3a0da65a1p-1 0x1.b903b45e86c44p-1 
+| f 0x1.eaca03b66019cp-1 0x1.d61ac2997a845p-1 
+| g 0x1.eaca03b66019cp-1 0x1.d61ac2997a845p-1 
+| h 0x1.eaca03b66019cp-1 0x1.d61ac2997a845p-1 
+| f 0x1.f9787ff67dcfep-1 0x1.f295cc03b1046p-1 
+| g 0x1.f9787ff67dcfep-1 0x1.f295cc03b1046p-1 
+| h 0x1.f9787ff67dcfep-1 0x1.f295cc03b1046p-1 
+| f 0x1.ff0b127348acfp-1 0x1.fe07133f44a45p-1 
+| g 0x1.ff0b127348acfp-1 0x1.fe07133f44a45p-1 
+| h 0x1.ff0b127348acfp-1 0x1.fe07133f44a45p-1 
+| f 0x1.fffa54de5fa96p-1 0x1.fff439fe4595bp-1 
+| g 0x1.fffa54de5fa96p-1 0x1.fff439fe4595bp-1 
+| h 0x1.fffa54de5fa96p-1 0x1.fff439fe4595bp-1 
+| f 0x1.ffffff0898b9ap-1 0x1.fffffe0126129p-1 
+| g 0x1.ffffff0898b9ap-1 0x1.fffffe0126129p-1 
+| h 0x1.ffffff0898b9ap-1 0x1.fffffe0126129p-1 
+| f 0x1.fffffffffff9fp-1 0x1.fffffffffff36p-1 
+| g 0x1.fffffffffff9fp-1 0x1.fffffffffff36p-1 
+| h 0x1.fffffffffff9fp-1 0x1.fffffffffff36p-1 
+| f 0x1p+0 0x1p+0 
+| g 0x1p+0 0x1p+0 
+| h 0x1p+0 0x1p+0 
+| f 0x1p+0 0x1p+0 
+| par 0x1p+0 0x1p+0 
+| objective 0x0p+0 
+| convergence 0 X-convergence (3) 
+| iterations 25 evaluations 33 26 
+| f -0x1.3333333333333p+0 0x1p+0 
+| f -0x1.2cdf358049a2cp+0 0x1.6173dc900ce2cp+0 
+| f -0x1.a23d8fa9737eap-1 0x1.1725ea89b22adp-1 
+| f -0x1.0046e3fa7e315p+0 0x1.f53653e69a94ep-1 
+| f -0x1.96f0f05f29e36p-1 0x1.2f57c6e3180d6p-1 
+| f -0x1.2f1c12c9c51ffp-1 0x1.3cc67c3fc7d67p-2 
+| f -0x1.ad819d58108aap-2 0x1.2b5016c0ab3e9p-3 
+| f -0x1.b91bc59e00ec7p-3 0x1.377354d0782ap-8 
+| f -0x1.5c833c25ac0aap-4 -0x1.3f19a0c2a45bbp-7 
+| f 0x1.4b4fdd3055a47p-3 -0x1.1cd3d60b4fa62p-5 
+| f 0x1.cd7bb19c4584ep-3 0x1.7edb171926cfcp-5 
+| f 0x1p-1 0x1.657eda6e264c4p-3 
+| f 0x1.43ede1fd781e6p-2 0x1.6e48cbf617702p-4 
+| f 0x1.96d3135cb4136p-2 0x1.3166b01eb6494p-3 
+| f 0x1p-1 0x1.baeab15206467p-3 
+| f 0x1p-1 0x1p-2 
+| f 0x1p-1 0x1p-2 
+| par 0x1p-1 0x1p-2 
+| objective 0x1p-2 
+| convergence 0 both X-convergence and relative convergence (5) 
+| iterations 13 evaluations 16 13 
+| par 0x1p+1 0x0p+0 0x1.fffff06bbda5p+0 0x0p+0 
+| objective 0x1.0c000000000b6p+6 
+| convergence 0 relative convergence (4) 
+| iterations 6 evaluations 9 24 
+| par 0x1p+1 0x0p+0 0x1p+1 0x0p+0 
+| objective 0x1.0cp+6 
+| convergence 0 both X-convergence and relative convergence (5) 
+| iterations 6 evaluations 8 6 
+| par 0x1p+1 0x0p+0 0x1p+1 0x0p+0 
+| objective 0x1.0cp+6 
+| convergence 0 both X-convergence and relative convergence (5) 
+| iterations 3 evaluations 4 3 
+| par 0x1.fffffffffffffp+1 -0x1p+1 0x1p+1 -0x1p+2 
+| objective -0x1.4p+2 
+| convergence 0 both X-convergence and relative convergence (5) 
+| iterations 3 evaluations 5 3 
+| par 0x1.a8f5c28dadbb2p+1 -0x1.5e7ff4ac71274p+3 0x1.ec15cc0c8fe26p-4 
+| objective 0x1.8ce367e4f3516p+2 
+| convergence 0 relative convergence (4) 
+| iterations 38 evaluations 41 176 
+| par 0x1.a8f5c2bf4a42fp+1 -0x1.5a82506a38fa3p+3 0x1.ec15cc8a1ef83p-4 
+| objective 0x1.8ce367e51d1ap+2 
+| convergence 0 relative convergence (4) 
+| iterations 38 evaluations 41 173 
+| par 0x1.a8f5c28f5aacp+1 -0x1.8p+1 0x0p+0 
+| objective 0x1.972589e38bc8p+2 
+| convergence 0 both X-convergence and relative convergence (5) 
+| iterations 16 evaluations 19 54 
+|   0:     24.200000: -1.20000  1.00000
+|   1:     11.298090: -0.916319  1.11579
+|   2:     3.6832653: -0.878971 0.811671
+|   3:     3.0264111: -0.738569 0.539330
+|   4:     2.8738710: -0.669080 0.417996
+|   5:     2.7399461: -0.596536 0.312149
+|   6:     2.4721420: -0.512267 0.219383
+|   7:     1.9715170: -0.394019 0.138449
+|   8:     1.7942340: -0.285988 0.0443101
+|   9:     1.4393081: -0.153222 -0.00959680
+|  10:     1.1968650: -0.0785139 0.0245146
+|  11:     1.0016961: -0.000696349 -0.00174001
+|  12:    0.87823307: 0.0808212 -0.0117281
+|  13:    0.80844393: 0.162768 -0.00629170
+|  14:    0.68863014: 0.203045 0.0180988
+|  15:    0.50226244: 0.313088 0.0805843
+|  16:    0.37094000: 0.392027 0.157302
+|  17:    0.30110961: 0.484979 0.216267
+|  18:    0.24838461: 0.525122 0.260628
+|  19:    0.15712889: 0.604556 0.362744
+|  20:    0.14975086: 0.693216 0.456961
+|  21:   0.097345475: 0.690984 0.473152
+|  22:   0.074919430: 0.728091 0.526978
+|  23:   0.050655822: 0.789126 0.614854
+|  24:   0.033264540: 0.845784 0.705613
+|  25:   0.013501068: 0.884534 0.781102
+|  26:  0.0075988869: 0.927000 0.854564
+|  27:  0.0029619374: 0.954465 0.908023
+|  28: 0.00077922602: 0.972116 0.945142
+|  29: 0.00019764487: 0.991268 0.981510
+|  30: 2.4278304e-05: 0.996174 0.992053
+|  31: 3.4539882e-07: 0.999626 0.999207
+|  32: 3.3528148e-09: 0.999947 0.999895
+|  33: 2.3909559e-10:  1.00001  1.00002
+|  34: 2.0297874e-16:  1.00000  1.00000
+|  35: 4.2919664e-22:  1.00000  1.00000
+|   0:     93.200000: -1.20000 0.500000
+|   5:    0.77579033: 0.161126 -0.000886273
+|  10:    0.27358297: 0.478289 0.225018
+|   0:     116.00000:  1.00000  1.00000  1.00000  1.00000
+|   2:    -5.0000000:  4.00000 -2.00000  2.00000 -4.00000
+| par -0x1.56916963934d5p-1 0x1.ac06931ac3e0bp-2 
+| objective 0x1.6fdabf31a5f63p+1 
+| convergence 1 iteration limit reached without convergence (10) 
+| iterations 4 evaluations 8 10 
+| par -0x1.7a25c3654083ap-1 0x1.14231aa2d7161p-1 
+| objective 0x1.8361700659c65p+1 
+| convergence 1 function evaluation limit reached without convergence (9) 
+| iterations 4 evaluations 7 4 
+| par -0x1.b40d9aab603ddp-1 0x1.66ec0b4e6397p-1 
+| objective 0x1.be700984370f9p+1 
+| convergence 1 function evaluation limit reached without convergence (9) 
+| iterations 4 evaluations 6 4 
+| [1] "NA/NaN function evaluation"
+| par 0x0p+0 
+| objective 0x0p+0 
+| convergence 0 X-convergence (3) 
+| iterations 1 evaluations 1 1 
+| par 0x0p+0 
+| objective 0x0p+0 
+| convergence 0 X-convergence (3) 
+| iterations 1 evaluations 1 1 
+| par 0x0p+0 0x0p+0 
+| objective 0x0p+0 
+| convergence 0 X-convergence (3) 
+| iterations 2 evaluations 2 2 
+| par 0x0p+0 0x0p+0 
+| objective 0x0p+0 
+| convergence 0 X-convergence (3) 
+| iterations 2 evaluations 2 4 
+| par -0x1.3333333333333p+0 0x1p+0 
+| objective 0x0p+0 
+| convergence 1 See PORT documentation.  Code (18) 
+| iterations 0 evaluations 0 0 
+| $par
+| [1] -1.2  1.0
+| 
+| $objective
+| [1] 0
+| 
+| $convergence
+| [1] 1
+| 
+| $iterations
+| [1] 0
+| 
+| $evaluations
+| function gradient 
+|        0        0 
+| 
+| $message
+| [1] "'control' component 'rel.tol' = 1, is out of range"
+| 
+| par -0x1.3333333333333p+0 0x1p+0 
+| objective 0x0p+0 
+| convergence 1 'control' component 'rel.tol' = 0.5, is out of range 
+| iterations 0 evaluations 0 0 
+| [1] "a" "b"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("a", "b")

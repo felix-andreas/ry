@@ -29,6 +29,8 @@ The quality bar is four things.
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
+- **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
+
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
@@ -48,14 +50,12 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
-- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
-  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
-  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
-  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
-  with a block cache and linear topic ordering").
-- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
-  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
-  after `ry load`, `ry test` and `ry document`.
+- **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
+  on finbench is `readRDS` of the 29 MB compressed cache. Splitting it per file, or a faster
+  format, would cut it (`decisions.md`, "`ry document` is roxygen2 with block and topic caches").
+- **Tarballs built on ry's runtime record owner 0/0** where GNU R's record `root/root`: ry's
+  `file.info` has no `uname`/`grname` columns, so `utils::tar` falls back to ids. Harmless for
+  installing, but `ry build` output is not byte-identical to GNU R's.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
   3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for
@@ -2292,10 +2292,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
       `format`/`strptime` do not recycle the format.
     - The fancy-regex backtrack limit is unbounded, so a catastrophic POSIX pattern can hang.
     - `iconv(sub = , "ASCII//TRANSLIT")`.
-  - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
-    `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
-    0.036 between `besselI` results), an F value in nlme's `anova`, gmp's `factorialZ` and
-    `asNumeric` precision, the C symbols of commonmark, and openssl's bignum "not valid integer".
+  - Smaller classes: Bessel's `IJKY.R` (a relative difference of 0.036 between `besselI`
+    results), an F value in nlme's `anova`, 12 of data.table's `test.data.table()` tests
+    (901.2, 1138.2, 2125.03, 2125.05, 2211.119, 2211.24, 2211.349, 2252.1, 2258.4, 2258.5,
+    2291.1, 2300.4), and four tinytest failures in RcppSimdJson.
+  - A process the oracle kills at its deadline leaves an empty `.Rout`, because ry buffers
+    stdout; reproduce a hang with `ry run` in the background and `gdb -p` to see where it is.
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
@@ -2305,9 +2307,29 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
-    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
-    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
-    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates.
+    `nlminb` now runs PORT's drivers (`crates/interp/src/stats_port_minimizer.rs`); rerun these
+    tests to see what is left.
+  - `nlminb` PORT divergences from GNU R (netlib sources: <https://netlib.org/port/>, the `drmn*`,
+    `dg7q*`, `dd7d*`, `dl7*`, `ds7*`, `ds3grd` files; never GNU R's `portsrc.f`). Every routine
+    of the six drivers is translated. Bit for bit with GNU R: unbounded runs with finite
+    differences, a gradient, or a Hessian; bounded runs with a Hessian; the bounded 4-variable
+    quadratic in all three modes; the nlme-like likelihood with and without `scale` and bounds;
+    `trace`; `iter.max`/`eval.max`; starts on an active bound; control errors and code 18
+    (`stats__nlminb_port_paths`). Still diverging: Rosenbrock from (-1.2, 1) in the box
+    [-2, 0.5] x [-2, 2] with finite differences (`DRMNFB`, 21 vs 23 iterations) and with a
+    gradient (`DRMNGB`, 19 vs 22), and a run whose objective returns NaN or Inf partway
+    (`walled` in `nlminb(c(0, 3), ...)`, 14 vs 24 iterations). Suspects: `DRMNGB`'s bound
+    bookkeeping (`DS7BQN`, `DD7DGB`, the `G0` aliasing, `DV7IPR` permutations) and `DRMNG`'s
+    restore path after a failed evaluation (`TOOBIG`, statements 190-200). Compare evaluated
+    points with `sprintf("%a")` against Rscript to find the first differing step.
+    A bounded run (finite differences or gradient) that ends with no free variable reports
+    X-convergence (3) where GNU R reports 5 unless the objective is 0 there:
+    `nlminb(1, function(x) sum((x-3)^2), lower=0, upper=2)`. `DD7DGB` leaves `NRED` unset in
+    that case and ry uses NaN; keeping the previous `nreduc` fixes `lower = upper` starts but
+    breaks the zero-objective start pinned in `stats__nlminb_port_paths`. Also minor:
+    a gradient that returns a list errors on ry and works in GNU R, and a non-numeric
+    objective misses GNU R's "NAs introduced by coercion" warning (`stats_port.rs`, `Objective`).
   - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
     700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
@@ -2356,9 +2378,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Indexing a compact sequence materializes it.** `1:n`, `seq_len` and `seq_along` of at least
-  2^20 elements are compact ALTREP objects, but `x[i]` and `x[[i]]` on one expand the whole
-  vector, because subsetting does not call `Elt` or `Extract_subset` (the item above).
+- **Indexing a compact sequence materializes it.** `1:n`, `n:1`, `seq_len` and `seq_along` of at
+  least 2^20 elements are compact ALTREP objects (`sequence` in `crates/interp/src/arith.rs`;
+  doubles past `INT_MAX`), but `x[i]` and `x[[i]]` on one expand the whole vector once, keeping
+  the expansion in data2, because subsetting does not call `Elt` or `Extract_subset` (the item
+  above). Subsetting `seq_len(2^31)` therefore allocates 16 GB where GNU R reads elements.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function

@@ -38,6 +38,9 @@ fn routines_return_correct_values() {
     assert_eq!(r.strings(r.element(list, 4)), vec![Some("item_5".into())]);
     let names = unsafe { (r.api().Rf_getAttrib)(list, r.data("R_NamesSymbol")) };
     assert_eq!(r.strings(names)[0], Some("n1".into()));
+    // GNU R removes an attribute before it rejects NULL, so removing one from NULL succeeds.
+    let removed = unsafe { (r.api().Rf_setAttrib)(r.nil(), r.data("R_NamesSymbol"), r.nil()) };
+    assert_eq!(removed, r.nil());
 
     let matrix = r
         .call("rytest_matrix", &[r.integer(2), r.integer(3)])

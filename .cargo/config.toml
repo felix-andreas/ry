@@ -1,3 +1,8 @@
+[alias]
+# `cargo test --release` builds with the release profile's fat LTO, whose link of a libr or polars
+# test binary needs more memory than a 16 GB machine has. The bench profile is release without it.
+test-release = "test --profile bench"
+
 [env]
 # PCRE2 is compiled from the sources pcre2-sys bundles, so a release binary does not depend on the
 # system library being installed.

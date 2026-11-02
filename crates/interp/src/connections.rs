@@ -390,6 +390,8 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .ok()
         .and_then(entry)
         .ok_or_else(invalid)?;
+    // The `conn_id` object itself identifies the connection, not its address: a package may
+    // store its own pointer there, as curl does with its multi handle.
     let id = values::get_attr(object, values::install("conn_id")?);
     // Closing clears the `conn_id` address, so an object kept past `close()` stays invalid even
     // once a new connection takes its slot. Any other address is accepted, because curl stores
@@ -1576,6 +1578,7 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
     }
     let con = resolve_con(call.arg(1))?.1;
     let separator = values::require_string(call.arg(2), "sep")?;
+    let use_bytes = values::as_logical_scalar(call.arg(3)) == 1;
     with_open(con, "wt", || {
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
@@ -1585,10 +1588,11 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
             line.clear();
             let charsxp = text.element(index);
             // Only Latin-1 text needs re-encoding for the UTF-8 session; every other string,
-            // bytes-declared or invalid UTF-8 included, goes out as the bytes it holds.
+            // bytes-declared or invalid UTF-8 included, goes out as the bytes it holds, and
+            // `useBytes = TRUE` writes Latin-1 text as its bytes too.
             if charsxp == values::na_string() {
                 line.extend_from_slice(b"NA");
-            } else if charsxp.has_gp(heap::object::gp::LATIN1) {
+            } else if !use_bytes && charsxp.has_gp(heap::object::gp::LATIN1) {
                 line.extend_from_slice(values::char_str(charsxp).as_bytes());
             } else {
                 line.extend_from_slice(charsxp.bytes());

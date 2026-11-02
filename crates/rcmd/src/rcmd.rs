@@ -35,6 +35,7 @@ mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
 
+pub mod front_end;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -313,7 +314,7 @@ pub struct HomeSources<'a> {
     pub include: &'a Path,
     /// ry's built `libR.so`, which holds the interpreter.
     pub libr: &'a Path,
-    /// The `ry-rcmd` binary that `bin/R` and `bin/Rscript` run.
+    /// The front end that `bin/R` and `bin/Rscript` run: `ry-rcmd`, or `ry` itself.
     pub rcmd: &'a Path,
     /// The GNU R installation (`R RHOME`) whose base packages, `share/` and `etc/` files the
     /// home links to.
@@ -426,8 +427,13 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         }
     }
 
+    // The scripts run the front end through a link named `ry-rcmd`, which is how a multi-call
+    // `ry` knows to act as the front end (`front_end::invoked_as_front_end`).
+    let front_end = root.join("bin/exec/ry-rcmd");
+    fs::create_dir_all(root.join("bin/exec")).map_err(io_error(&root.join("bin/exec")))?;
+    link(sources.rcmd, &front_end)?;
+    let rcmd = format!("{}/bin/exec/ry-rcmd", home.display());
     let home = home.display();
-    let rcmd = sources.rcmd.display();
     let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
     // `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR` stay plain `NAME='value'` lines: the
@@ -519,6 +525,50 @@ exec "$cmd" $extra "$@"
     )
 }
 
+/// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
+/// ([`cached_home`]) from `libr`, a front end, and the base R of `gnu_r_home`. The front end is
+/// the `ry-rcmd` beside `libr` when there is one (a development build), and otherwise the
+/// running executable, which is `ry` (a release, whose runtime is extracted from `ry` itself) or
+/// a front end already.
+pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+    let beside = libr.with_file_name(if cfg!(windows) {
+        "ry-rcmd.exe"
+    } else {
+        "ry-rcmd"
+    });
+    let rcmd = if beside.is_file() {
+        beside
+    } else {
+        std::env::current_exe().map_err(io_error(Path::new("the running executable")))?
+    };
+    let cache = cache_directory()
+        .ok_or_else(|| {
+            Error::Package(
+                "ry's R home lives in a cache directory, and none of XDG_CACHE_HOME, LOCALAPPDATA \
+                 (on Windows) or HOME is set"
+                    .into(),
+            )
+        })?
+        .join("ry")
+        .join("home");
+    cached_home(&cache, libr, &rcmd, gnu_r_home)
+}
+
+/// The user's cache directory: `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, then
+/// `~/.cache`. ry's extracted runtime and its R homes both live here, so they must agree.
+pub fn cache_directory() -> Option<PathBuf> {
+    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    variable("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| variable("LOCALAPPDATA"))
+                .flatten()
+                .map(PathBuf::from)
+        })
+        .or_else(|| variable("HOME").map(|home| Path::new(&home).join(".cache")))
+}
+
 /// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
 /// first time it is asked for, with ry's embedded headers and the base R of `gnu_r_home`.
 /// The home is named by everything it is built from, so a rebuilt `libR` or another GNU R gets
@@ -554,7 +604,7 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     let staging = cache.join(format!(
         ".{}-{}",
         home.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        staging_suffix()
     ));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
@@ -580,13 +630,15 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     )
     .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
     if let Err(error) = assembled {
-        // The assembly error is the one to report. A staging directory left behind is named by
-        // this process's id and removed first by the next assembly under that id.
+        // The assembly error is the one to report; a staging directory left behind wastes disk
+        // but is never mistaken for a home.
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The runtime a home was built for, so a home for a rebuilt `libR` replaces the old one.
-    let source = libr.display().to_string();
+    // The runtime and front end a home was built for, so a home for a rebuilt `libR` replaces
+    // the old one. Two copies of `ry` that share one extracted runtime keep a home each, since a
+    // home in use by the other copy must not be pruned.
+    let source = format!("{}\n{}", libr.display(), rcmd.display());
     write(&staging.join(".libr"), &source)?;
     match fs::rename(&staging, &home) {
         Ok(()) => {
@@ -630,7 +682,11 @@ fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Pat
     ] {
         let path = root.join(front_end);
         remove_file_if_present(&path)?;
-        fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        // `ry.exe` carries the runtime when it is the front end, so a link saves its size six
+        // times over.
+        if fs::hard_link(sources.rcmd, &path).is_err() {
+            fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        }
     }
     for library in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
         let from = gnu.join("bin/x64").join(library);
@@ -1210,7 +1266,10 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         }
                     }
                 }
-                let library = library.unwrap_or_else(|| home.join("library"));
+                let library = match library {
+                    Some(library) => library,
+                    None => default_library(home)?,
+                };
                 let mut output = String::new();
                 for package in packages {
                     let installed = install(home, &package, &library, &options)?;
@@ -1234,6 +1293,31 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
             "usage: R CMD INSTALL|SHLIB|config ... or R RHOME".into(),
         )),
     }
+}
+
+/// The library `R CMD INSTALL` installs into without `-l`: the first of `.libPaths()` in a
+/// session of the home's R, as for GNU R, so `R_LIBS`, `R_LIBS_USER` and the site library
+/// decide it in the same order.
+pub fn default_library(home: &Path) -> Result<PathBuf> {
+    let mut command = Command::new(home.join("bin").join("Rscript"));
+    command.args(["--no-echo", "--no-restore", "-e", "cat(.libPaths()[1L])"]);
+    let output = command
+        .output()
+        .map_err(|error| Error::Command(format!("{command:?}"), error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::Command(
+            format!("{command:?}"),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let library = String::from_utf8_lossy(&output.stdout);
+    let library = library.trim();
+    if library.is_empty() {
+        return Err(Error::Package(
+            "the R session reported no library to install into".into(),
+        ));
+    }
+    Ok(PathBuf::from(library))
 }
 
 /// `R CMD config VAR`: the value `etc/Makeconf` gives the variable.
@@ -1418,6 +1502,16 @@ pub fn install(
 }
 
 /// The FNV-1a hash of `bytes`, which names a cached home the same way in every build of ry.
+/// A name part unique to this process and moment, for staging files and directories that are
+/// renamed into place. The process id alone is not enough: containers sharing a cache volume
+/// often run with the same process id.
+pub fn staging_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos());
+    format!("{}-{nanos:09}", std::process::id())
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
