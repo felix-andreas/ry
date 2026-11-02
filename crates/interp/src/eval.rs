@@ -303,8 +303,9 @@ pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
 /// Its expression is the code's source, as for any other promise; the code itself sits in the
 /// attribute slot, which a promise otherwise never uses (see `force_promise`).
 pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
-    let promise = make_promise(bytecode::source_of(code), env)?;
-    crate::heap().set_attrib(promise, code);
+    let heap = crate::heap();
+    let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
+    heap.root(promise);
     Ok(promise)
 }
 

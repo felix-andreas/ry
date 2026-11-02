@@ -1892,10 +1892,33 @@ pub unsafe fn loop_count(code: Sexp) -> usize {
     length(code.cdr().element(LOOPS)) / 4
 }
 
-/// Runs a compiled promise's code in `env`, the frame it was compiled for. The optimizing tier
-/// is not entered: promise code has no loops and no closure of its own.
+/// Runs a compiled promise's code in `env`, the frame it was compiled for. Promise code has no
+/// loops (`compiles_as_promise` rejects them) and no closure of its own, so this skips the entry
+/// profile, the loop states and the optimizing tier that `run` sets up for a function body.
 pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
-    run(nil(), code, env)
+    let heap = crate::heap();
+    heap.root(code);
+    let mark = heap.handle_mark();
+    let register_count = values::ints(code.cdr().element(REGISTERS))[0] as usize;
+    let base = interp().bytecode.registers.len();
+    reserve_registers(base + register_count)?;
+    let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
+    env.set_gp_bits(gp::COMPILED_FRAME, true);
+    let mut machine = Machine {
+        function: nil(),
+        code,
+        env,
+        base,
+        mark,
+        loops: &mut [],
+    };
+    let result = execute_code(&mut machine, 0);
+    interp().bytecode.registers.truncate(base);
+    env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    }
 }
 
 unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
@@ -1920,7 +1943,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         loops: &mut loops,
     };
     let entered = match interp().bytecode.tier {
-        Some(tier) if function != nil() => (tier.enter)(&mut machine),
+        Some(tier) => (tier.enter)(&mut machine),
         _ => None,
     };
     let result = match entered {
