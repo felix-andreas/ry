@@ -392,8 +392,11 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
 /// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
 /// constant, whose evaluation needs nothing of the code that made it. `break`, `next` and
 /// `return` act on the activation that evaluates them, which for a promise is not the one that
-/// made it, and a loop or a function definition is left out so that promise code never runs a
-/// back edge or carries a body of its own.
+/// made it, and a loop is left out so that promise code never runs a back edge. A function
+/// definition nested in a larger argument is left out too, but one that is the whole argument
+/// (`vapply(x, function(v) ...)`) compiles: its [`Op::Closure`] then gives every closure the
+/// argument makes one shared compiled body, where closures the AST evaluator makes would each
+/// compile their own, and so would each tier up on their own.
 unsafe fn compiles_as_promise(expression: Sexp) -> bool {
     unsafe fn free_of_control(expression: Sexp, depth: u32) -> bool {
         match expression.kind() {
@@ -417,7 +420,9 @@ unsafe fn compiles_as_promise(expression: Sexp) -> bool {
             _ => true,
         }
     }
-    expression.kind() == SexpType::Language && free_of_control(expression, LOOP_SEARCH_DEPTH)
+    expression.kind() == SexpType::Language
+        && (expression.car() == symbols().function
+            || free_of_control(expression, LOOP_SEARCH_DEPTH))
 }
 
 /// A body is worth compiling when it does more than evaluate one constant or symbol.
@@ -2703,7 +2708,7 @@ pub unsafe fn loop_count(code: Sexp) -> usize {
 }
 
 /// Runs a compiled promise's code in `env`, the frame it was compiled for. Promise code has no
-/// loops (`compiles_as_promise` rejects them) and no closure of its own, so this skips the entry
+/// loops (`compiles_as_promise` rejects them) and runs for no closure, so this skips the entry
 /// profile, the loop states and the optimizing tier that `run` sets up for a function body.
 pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();

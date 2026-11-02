@@ -6202,3 +6202,46 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+## Compiled bodies share one deoptimization exit
+
+- **Previous shape.** Every guard's cold block boxed the live unboxed registers and slots itself,
+  with one runtime call per value, then called `jit_deopt`. A body with many guards carried that
+  boxing code once per guard, so the cold blocks were most of the IR Cranelift compiled.
+- **Target shape.** Each guard's cold block only stores the raw values it must hand back into one
+  stack scratch area (8 bytes per cell) and jumps, with its exit number, to a single shared cold
+  block that calls `runtime::jit_deopt_exit`. The layout of each exit (registers and slots with
+  their representations, and the bytecode pc) lives in `Compiled::exits` (`runtime::Exit`), so the
+  runtime boxes the values and flushes dirty slots from that table.
+- **Why a table.** The layout is static per guard, so it costs nothing to keep beside the code,
+  and boxing is cold work: doing it in Rust from a table instead of in emitted code shrinks every
+  compiled body without slowing any path that runs often.
+- **Impact.** On the why-ry programs the IR shrank by about 31% and Cranelift time by about 40%.
+
+## Native functions loop, read vectors, and inline small callees
+
+- **Previous shape.** Native functions (`decisions.md`, "Native scalar functions") took scalars
+  only and refused every loop, so a typed kernel such as a dot product or a running sum went
+  through `jit_call` with a frame and boxed arguments.
+- **Target shape.** `crates/jit/src/native.rs` also takes plain integer, double and logical
+  vectors (as their object pointers; the caller roots them and the body allocates nothing), and
+  compiles `for` over `seq_len`, `seq_along`, `a:b` or a vector, `while`, `repeat`, `break`,
+  `next`, `length`, and `[[`/`[` with a scalar index. A typed tier-1 caller passes vector
+  arguments straight through (`Argument::Unboxed`/`Argument::Slot` in `Action::NativeCall`).
+  Every case R would warn or fail on (an index out of range or `NA`, a length above
+  `.Machine$integer.max`, a fractional `a:b` start, a pending interrupt at a loop's back edge)
+  returns `FAILED`, and tier 0 reruns the call.
+- **Scoping.** A local first assigned inside a loop, an `if` branch or the right operand of
+  `&&`/`||` goes out of scope where that region ends, so a later read refuses the function rather
+  than guess whether R would find it bound.
+- **Inlining.** A native call of a callee whose body has at most 24 calls and operators and no
+  `return` walks the callee's body in place (its own locals, loops and lookup environment), up
+  to three levels deep and never into a callee already being inlined. Both walks (typing and
+  emitting) decide the same way, because the decision reads only the callee's body.
+- **Strict mode does not drop guards.** A strict-clean program is a hint, not a contract: values
+  from stubs or untyped packages can still differ from their declared types at run time. Typed
+  code is faster because its closures compile at their first call and their calls go frameless,
+  not because guards disappear.
+- **Impact.** `sq <- function(x) x * x + 1` summed over 100,000 doubles 50 times runs in 0.035 s
+  on ry against 1.99 s on GNU R; the same loop through `g <- function(x) sq(x) - sq(x - 1)` runs in
+  0.056 s against 5.44 s, with both `sq` calls inlined into `g`'s 144-byte native function.

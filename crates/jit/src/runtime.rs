@@ -91,12 +91,27 @@ pub mod outcome {
     pub const LOAD_INVALIDATED: i32 = 4;
 }
 
-/// A compiled body. Owned by an external pointer in the code's `TIER1` constant, whose
-/// protected weak reference, keyed on the enclosure, keeps every object the machine code embeds
-/// alive while the enclosure lives.
+/// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
+/// every object the machine code embeds alive: through a weak reference keyed on the enclosure
+/// for code tied to its enclosure, or directly for portable code.
 pub struct Compiled {
     pub entry: unsafe extern "C" fn(*mut Activation) -> *mut Header,
+    /// The enclosure the code was compiled for.
     pub enclosure: Sexp,
+    /// Whether the code runs for any enclosure its lookups resolve the same way from. It does
+    /// when every function it speculates on is bound in a long-lived environment (the global
+    /// environment, the search path or a namespace), so nothing it embeds dies with an
+    /// enclosure. A closure made afresh by each call of its parent (`vapply(x, function(v) ...)`)
+    /// or each R6 object's copy of a method then shares one compilation.
+    pub portable: bool,
+    /// For portable code, a weak reference keyed on the enclosure whose lookups the epoch and
+    /// stamps were last proven for; `NULL` otherwise. A weak reference rather than the
+    /// enclosure's address, because a dead enclosure's address can come back as a new one whose
+    /// lookups nobody checked.
+    pub checked: Cell<Sexp>,
+    /// Which speculations start from the enclosure, so that portable code resolves them from
+    /// each activation's own.
+    pub rooted: Box<[bool]>,
     /// Tier 0's register count; the slot root cells follow.
     pub registers: usize,
     pub slots: Vec<Sexp>,
@@ -149,11 +164,14 @@ impl Exit {
 /// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
-/// before the name was watched.
+/// before the name was watched. Portable code running for an enclosure other than the checked
+/// one always walks, and leaves the epoch and stamps to the checked enclosure.
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    if !thorough {
+    let enclosure = frame.enclosure();
+    let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
+    if !thorough && checked {
         if epoch == compiled.epoch.get() {
             return true;
         }
@@ -169,25 +187,35 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
             return true;
         }
     }
-    for (speculation, stamp) in compiled.speculations.iter().zip(&compiled.stamps) {
+    for ((speculation, stamp), &rooted) in compiled
+        .speculations
+        .iter()
+        .zip(&compiled.stamps)
+        .zip(&compiled.rooted)
+    {
         // The body's own lookups start past its frame, because the compiler cannot see the
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
-        if speculation.env == compiled.enclosure
+        if rooted
             && heap
                 .frame_cell(frame, speculation.symbol)
                 .is_some_and(|cell| may_be_function(cell.cdr()))
         {
             return false;
         }
-        match resolve_function(speculation.symbol, speculation.env) {
+        let start = if rooted { enclosure } else { speculation.env };
+        match resolve_function(speculation.symbol, start) {
             Some(found)
                 if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }
-        stamp.set(heap.lookup_stamp(speculation.symbol));
+        if checked {
+            stamp.set(heap.lookup_stamp(speculation.symbol));
+        }
     }
-    compiled.epoch.set(epoch);
+    if checked {
+        compiled.epoch.set(epoch);
+    }
     true
 }
 
@@ -639,7 +667,10 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
             let machine = machine(activation);
             let compiled = compiled(activation);
             if std::env::var_os("RY_JIT_LOG").is_some() {
-                eprintln!("jit: deopt at pc {pc} (reason {why})");
+                eprintln!(
+                    "jit: deopt at pc {pc} (reason {why}) in {}",
+                    crate::describe(machine.code)
+                );
             }
             if why == reason::SPECULATION && activation.pending.is_none() {
                 invalidate(machine.code);

@@ -138,6 +138,9 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
         let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
         match result {
             Ok(compiled) => {
+                if std::env::var_os("RY_JIT_LOG").is_some() {
+                    eprintln!("jit: the compile above ran at the first call");
+                }
                 counters[profile::TIER_STATE] = 1;
                 Some(compiled)
             }
@@ -179,6 +182,26 @@ unsafe fn compiled_for<'a>(
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
+            let address = tier1.external_address() as *const Compiled;
+            if !address.is_null() && (*address).portable {
+                let compiled = &*address;
+                let enclosure = machine.env.enclosure();
+                if compiled.checked.get().weak_key() != enclosure {
+                    // The epoch and stamps were proven for another enclosure's lookups, so the
+                    // next run walks every speculation from this one before trusting them.
+                    let heap = heap();
+                    let weak = heap
+                        .alloc_weak_ref(enclosure, values::nil(), values::nil(), 0, false)
+                        .ok()?;
+                    heap.set_element(tier1.external_protected(), 0, weak);
+                    compiled.checked.set(weak);
+                    compiled.epoch.set(u64::MAX);
+                    for stamp in &compiled.stamps {
+                        stamp.set(u64::MAX);
+                    }
+                }
+                return Some(compiled);
+            }
             if tier1.external_protected().weak_key() != values::nil() {
                 let compiled = &*(tier1.external_address() as *const Compiled);
                 // Closures made by one `function` expression share their body but not their
@@ -232,7 +255,7 @@ unsafe fn compiled_for<'a>(
     }
 }
 
-unsafe fn describe(code: Sexp) -> String {
+pub(crate) unsafe fn describe(code: Sexp) -> String {
     unsafe {
         let source = code.cdr().element(bytecode::SOURCE);
         interp::deparse::deparse_one_line(source)
@@ -320,9 +343,25 @@ unsafe fn compile_in<'a>(
             .iter()
             .map(|&block| plan.insts[plan.blocks[block].start].pc)
             .collect();
+        let rooted: Box<[bool]> = plan
+            .speculations
+            .iter()
+            .map(|speculation| speculation.env == enclosure)
+            .collect();
+        let portable = plan
+            .speculations
+            .iter()
+            .zip(&rooted)
+            .all(|(speculation, &rooted)| {
+                (rooted || long_lived(speculation.env))
+                    && owner(speculation).is_some_and(|env| long_lived(env))
+            });
         let compiled = Box::new(Compiled {
             entry,
             enclosure,
+            portable,
+            checked: Cell::new(values::nil()),
+            rooted,
             registers: plan.registers,
             slots: plan.slots.to_vec(),
             loops: plan.loops,
@@ -343,6 +382,9 @@ unsafe fn compile_in<'a>(
         // compiled code embeds. They hang off a weak reference keyed on the enclosure, because
         // the body outlives any one closure: R6 gives every object's methods the same body, and a
         // strong reference would keep the first object compiled for alive with its finalizer.
+        // Portable code embeds nothing that dies with the enclosure, so it holds its objects
+        // directly; element 0 is the weak reference `checked` names, set here to the compiling
+        // enclosure.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
@@ -358,18 +400,67 @@ unsafe fn compile_in<'a>(
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
-            let weak = heap
-                .alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
-                .map_err(|_| error("the JIT could not allocate its code object"))?;
+            let weak = if compiled.portable {
+                heap.alloc_weak_ref(enclosure, values::nil(), values::nil(), 0, false)
+            } else {
+                heap.alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
+            }
+            .map_err(|_| error("the JIT could not allocate its code object"))?;
             heap.root(weak);
+            let held = if compiled.portable {
+                heap.set_element(protected, 0, weak);
+                compiled.checked.set(weak);
+                protected
+            } else {
+                weak
+            };
             let address = Box::into_raw(compiled) as *mut c_void;
-            heap.alloc_external_ptr(address, values::nil(), weak)
+            heap.alloc_external_ptr(address, values::nil(), held)
                 .map_err(|_| error("the JIT could not allocate its code object"))
         })();
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
         Ok(&*(pointer.external_address() as *const Compiled))
+    }
+}
+
+/// Whether `env` lives as long as the session normally does: the global and base environments,
+/// a namespace, a namespace's imports, or an environment on the search path.
+unsafe fn long_lived(env: Sexp) -> bool {
+    unsafe {
+        let known = heap().known();
+        if env == known.global_env
+            || env == known.base_env
+            || env.enclosure() == known.base_namespace
+            || interp::envir::is_namespace(env)
+        {
+            return true;
+        }
+        let mut search = known.global_env.enclosure();
+        while search != known.empty_env {
+            if search == env {
+                return true;
+            }
+            search = search.enclosure();
+        }
+        false
+    }
+}
+
+/// The environment whose frame holds the binding a speculation found.
+unsafe fn owner(speculation: &analysis::Speculation) -> Option<Sexp> {
+    unsafe {
+        let heap = heap();
+        let empty = heap.known().empty_env;
+        let mut env = speculation.env;
+        while env != empty {
+            if heap.frame_cell(env, speculation.symbol) == Some(speculation.cell) {
+                return Some(env);
+            }
+            env = env.enclosure();
+        }
+        None
     }
 }
 

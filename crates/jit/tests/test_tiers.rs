@@ -735,6 +735,40 @@ fn run_time_binding_shadows_cached_global_function() {
 }
 
 #[test]
+fn closures_from_one_site_share_code_but_not_lookups() {
+    // Each call of `make` makes a new closure from one `function` expression, so the closures
+    // share one compiled body. Code whose functions all live in long-lived environments runs
+    // for every closure, but each new enclosure's lookups are checked again: one that binds its
+    // own `g` must reach it, and a closure that calls a function local to its enclosure must
+    // call its own.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function(v) v + 1\napply1 <- function(f, x) f(x)");
+        run(
+            "make <- function(shadow) { if (shadow) g <- function(v) \"local\"; apply1(function(v) g(v), 1) }",
+        );
+        run("scaled <- function(k) { h <- function(v) v * k; apply1(function(v) h(v), 1) }");
+        let mut outcomes = Vec::new();
+        for _ in 0..4 {
+            outcomes.push(("make(FALSE)", run("make(FALSE)"), "2"));
+        }
+        outcomes.push(("make(TRUE)", run("make(TRUE)"), "\"local\""));
+        outcomes.push(("make(FALSE)", run("make(FALSE)"), "2"));
+        for k in 1..6 {
+            outcomes.push((
+                "scaled",
+                run(&format!("scaled({k})")),
+                ["1", "2", "3", "4", "5"][k - 1],
+            ));
+        }
+        jit::install_mode(Mode::Off);
+        for (call, outcome, expected) in outcomes {
+            assert_eq!(outcome, expected, "{call}");
+        }
+    });
+}
+
+#[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
     with_interpreter(|| unsafe {

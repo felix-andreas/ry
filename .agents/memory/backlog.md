@@ -494,9 +494,11 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
   Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
   per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
-  Next: widen natives to vectors, loops and local closures (`Ty::Closure` is only inlined today),
-  then give non-native compiled callees a direct entry with no environment when their frame cannot
-  escape.
+  Natives now loop, read plain vectors and inline small native callees (`decisions.md`, "Native
+  functions loop, read vectors, and inline small callees"). Next: local closures (`Ty::Closure` is
+  only inlined today), vector results and `Array<T>` arguments (`annotations::plain_admits` rejects
+  an Array mask), then a direct entry with no environment for non-native compiled callees whose
+  frame cannot escape.
 - **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
   its closure for the session, so a helper defined inside a function keeps that function's frame
   (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
