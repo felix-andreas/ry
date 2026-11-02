@@ -1,0 +1,31 @@
+[stdout]
+| [1] 0
+| [1] 0
+| [1] "a" "b" "a" "b"
+| [1] "the 'internal' method for http:// URLs is defunct"
+| [1] "scheme not supported in URL 'https://x.org/a'"
+| [1] "the 'internal' method for ftp:// URLs is defunct"
+| [1] "scheme not supported in URL 'foo://x'"
+| [1] "cannot open URL 'file://SRCzz', reason 'No such file or directory'"
+| [1] "cannot open destfile 'SRC/x/y', reason 'Not a directory'"
+| [1] "the 'internal' method of url() is defunct for http:// and ftp:// URLs"
+| [1] "https:// URLs are not supported by the \"internal\" method"
+| [1] "ftps:// URLs are not supported by this method"
+| [1] "URL scheme unsupported by this method"
+| [1] "a" "b"
+| [1] "hi"
+| [1] "socket"
+| [1] "localhost"
+| [1] "ping"
+| [1] 4
+| [1] "got:"
+| [1] "pong"
+| [1] ""
+| [1] FALSE
+| [1] "socket not established"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

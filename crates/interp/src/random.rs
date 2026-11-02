@@ -20,8 +20,8 @@ use {
         unwind::{R, error},
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
-            integer_vector, ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at,
-            symbols, unbound,
+            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, real_vector, reals,
+            reals_mut, string_at, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
@@ -399,11 +399,26 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
         ));
     }
     let size = size as usize;
+    // The draws go straight into the result: GNU R's working memory here is the result and one
+    // integer table, and a scratch buffer of doubles would more than double the peak for a large
+    // permutation.
+    let integer = count <= f64::from(i32::MAX);
+    let result = if integer {
+        alloc_uninit(SexpType::Integer, size)?
+    } else {
+        alloc_uninit(SexpType::Real, size)?
+    };
+    let mut store = |index: usize, value: u64| {
+        if integer {
+            ints_mut(result)[index] = value as i32;
+        } else {
+            reals_mut(result)[index] = value as f64;
+        }
+    };
     let rng = rng();
-    let mut drawn = Vec::with_capacity(size);
     if replace || size < 2 {
-        for _ in 0..size {
-            drawn.push(next_index(rng, count) + 1.0);
+        for index in 0..size {
+            store(index, next_index(rng, count) as u64 + 1);
         }
     } else {
         // Partial Fisher-Yates over `0..count`: the drawn slot takes the value of the last
@@ -411,29 +426,40 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
         // population much larger than the sample a map of those slots replaces the full table.
         let mut remaining = count as u64;
         if remaining <= (size as u64).saturating_mul(8).max(1 << 16) {
-            let mut slots: Vec<u64> = (0..remaining).collect();
-            for _ in 0..size {
-                let slot = next_index(rng, remaining as f64) as usize;
-                drawn.push(slots[slot] as f64 + 1.0);
-                remaining -= 1;
-                slots.swap_remove(slot);
+            // A 32-bit table halves the working memory whenever the population allows it.
+            if remaining <= u64::from(u32::MAX) {
+                let slots: Vec<u32> = (0..remaining as u32).collect();
+                shuffle_prefix(rng, slots, size, &mut store);
+            } else {
+                let slots: Vec<u64> = (0..remaining).collect();
+                shuffle_prefix(rng, slots, size, &mut store);
             }
         } else {
             let mut moved: FxHashMap<u64, u64> = FxHashMap::default();
-            for _ in 0..size {
+            for index in 0..size {
                 let slot = next_index(rng, remaining as f64) as u64;
-                drawn.push(moved.get(&slot).copied().unwrap_or(slot) as f64 + 1.0);
+                store(index, moved.get(&slot).copied().unwrap_or(slot) + 1);
                 remaining -= 1;
                 let last = moved.get(&remaining).copied().unwrap_or(remaining);
                 moved.insert(slot, last);
             }
         }
     }
-    if count > f64::from(i32::MAX) {
-        real_vector(&drawn)
-    } else {
-        let indices: Vec<i32> = drawn.iter().map(|&value| value as i32).collect();
-        integer_vector(&indices)
+    Ok(result)
+}
+
+/// Draws `size` values without replacement from the table `slots`, which holds the population
+/// still to draw from.
+fn shuffle_prefix<T: Copy + Into<u64>>(
+    rng: &mut Rng,
+    mut slots: Vec<T>,
+    size: usize,
+    store: &mut impl FnMut(usize, u64),
+) {
+    for index in 0..size {
+        let slot = next_index(rng, slots.len() as f64) as usize;
+        store(index, slots[slot].into() + 1);
+        slots.swap_remove(slot);
     }
 }
 

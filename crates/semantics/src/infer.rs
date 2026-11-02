@@ -1833,6 +1833,11 @@ mod tests {
                 variadic: None,
                 ret: int,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         let positional_interface = Ty::new(
@@ -1843,6 +1848,11 @@ mod tests {
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));

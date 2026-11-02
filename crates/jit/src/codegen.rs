@@ -555,9 +555,70 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
+            Action::Construct {
+                dst,
+                layout,
+                base,
+                count,
+            } => {
+                let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (16 * count.max(1)) as u32,
+                    3,
+                ));
+                for index in 0..count {
+                    let register = base + index;
+                    let ty = before.registers[register];
+                    let (kind, bits) = match ty {
+                        Ty::Dbl => {
+                            let value = self.use_register(register, ty);
+                            (
+                                representation::DOUBLE,
+                                self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
+                            )
+                        }
+                        Ty::Int | Ty::Lgl => {
+                            let value = self.use_register(register, ty);
+                            let kind = if ty == Ty::Int {
+                                representation::INTEGER
+                            } else {
+                                representation::LOGICAL
+                            };
+                            (kind, self.builder.ins().sextend(I64, value))
+                        }
+                        _ => (representation::BOXED, self.load_register(register)),
+                    };
+                    let kind = self.builder.ins().iconst(I64, kind as i64);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, kind, buffer, (16 * index) as i32);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+                }
+                let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+                let layout = self.builder.ins().iconst(I32, i64::from(layout));
+                let count = iconst(&mut self.builder, count);
+                let value = self
+                    .call(
+                        runtime::jit_construct as *const () as usize,
+                        &[I64, I32, I64, I64],
+                        Some(I64),
+                        &[self.activation, layout, pointer, count],
+                    )
+                    .ok_or(Refusal("the record helper returned nothing"))?;
+                self.store_register(dst, value);
+                self.set_visible(&before, true);
+            }
             Action::Move { dst, src, ty } => {
-                let value = self.use_register(src, ty);
-                self.def_register(dst, ty, value);
+                // Only a scalar lives in a variable; any other value lives in the window.
+                if ty.is_unboxed() {
+                    let value = self.use_register(src, ty);
+                    self.def_register(dst, ty, value);
+                } else {
+                    let value = self.load_register(src);
+                    self.store_register(dst, value);
+                }
             }
             Action::Step {
                 effect,
@@ -1314,7 +1375,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let join = self.builder.create_block();
                 self.builder.ins().brif(in_range, fast, &[], slow, &[]);
                 self.builder.switch_to_block(fast);
-                let width = if matches!(result, Ty::Int | Ty::Lgl) {
+                let list = types[0] == Ty::List;
+                let width = if !list && matches!(result, Ty::Int | Ty::Lgl) {
                     4
                 } else {
                     8
@@ -1323,6 +1385,15 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
                 match result {
+                    // A list element speculated to be a scalar is checked, then unboxed; any
+                    // other element hands the read to tier 0.
+                    Ty::Int | Ty::Lgl | Ty::Dbl if list => {
+                        let element = self.builder.ins().load(I64, flags(), address, DATA);
+                        let fits = self.check(element, result);
+                        self.hand_off_unless(position, before, fits);
+                        let value = self.unbox(element, result);
+                        self.def_register(dst, result, value);
+                    }
                     Ty::Int | Ty::Lgl => {
                         let value = self.builder.ins().load(I32, flags(), address, DATA);
                         self.builder.def_var(self.integers[dst], value);
@@ -2775,6 +2846,9 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         | Op::Slot => vec![operand(1)],
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
         Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
+        Op::Move => vec![operand(1)],
+        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
+        Op::MatchCondition => vec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

@@ -1829,6 +1829,28 @@ an empty script took over 300 s in a debug build. It now takes about 7 s, with t
 `opt-level = 2` in the dev profile. Under stress, every eighth collection is major while the heap
 is small, and past that one per sixteenth of the live objects, which keeps the total linear.
 
+**Peak memory comes from what the heap keeps alive, not from the allocator.** At 1e6 rows the base
+kernels' peak RSS was 1.1 to 1.6 times GNU R's (`format` was the 1.6), and three causes accounted for it:
+- **Leaves skip the mark stack.** `Heap::mark` sets a leaf's mark bit without pushing it, where a
+  leaf is a CHARSXP or atomic vector with no attributes that is not ALTREP. Otherwise a
+  million-element character vector pushes every CHARSXP, which grows the mark stack to 8 MB, and
+  the stack keeps its capacity. Every non-leaf object's attrib slot is still traced, which the
+  interpreter's compiled promises depend on.
+- **The young budget for large vectors is 16 MB, not 64 MB.** It counts only large vectors
+  allocated since the last collection, so 64 MB let dead temporaries pile up about 50 MB above
+  GNU R's peak, whose 64 MB `R_VSIZE` also counts live data. The setup of
+  `tools/bench/base/kernels.R` went from 166 MB to 148 MB (GNU R 134 MB) with no slower kernel.
+- **Builtins write into the result vector.** `sample.int` and the random deviates built Rust
+  vectors and copied them, holding about 10 MB of scratch at the peak.
+- **Rejected:** mapping large vector bodies with `mmap` and unmapping them once a collection leaves
+  them unused did not lower any peak (rowSums rose from 168 to 173 MB), and
+  `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB. The same peaks with glibc
+  `malloc` in libR confirm that the allocator's retention is not the gap.
+- **Not heap:** ry starts about 13 MB above GNU R, and smaps puts all of it in clean, file-backed
+  code pages (about 18 MB of `libR.so` and 9 MB of the `ry` binary faulted in, against 3 MB of
+  GNU R's `libR.so`); anonymous memory is at parity. RELR relocations would cut `.rela.dyn` but
+  need glibc 2.36.
+
 **Removing a binding is O(1) amortized** (`crates/heap/src/env.rs`). The slot stays in place with a
 sentinel symbol, the hash index drops its key, and the frame compacts once half its slots are
 removed. Removing by shifting kept insertion order but rewrote every later index entry, so `rm()`
@@ -2142,6 +2164,32 @@ primitives, and nothing built or installed packages.
   function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
   Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
   custom candidate generator and always takes the Gaussian step.
+  - The Rmath helpers and quantiles were rewritten the same way: `stirlerr` and `bd0` from
+    Loader (2000), with the half-integer table recomputed in mpmath and the deviance series
+    summed by one shared Horner-evaluated `progression_series` (which also replaced the
+    continued fraction behind `log1pmx` and `lgamma1p`); `qgamma` as Halley's method on
+    `ln P(ln y)` from Wilson-Hilferty and the leading series and asymptotic terms (Abramowitz
+    and Stegun 26.4.17, 6.5.29, 6.5.32), polished to the closest double; `dnchisq` as the
+    Poisson mixture summed outward from its peak (Johnson, Kotz and Balakrishnan), with
+    Patnaik's two-moment approximation past a peak of 1e10; `d1mach`/`i1mach` from the PORT
+    paper (Fox, Hall and Schryer 1978). `qgeom` keeps an absolute 1e-12 fuzz because that is
+    what GNU R's answers show. GNU R's `dnchisq` truncates its sum at an absolute 5e-15, so in
+    the tails ry differs from it but matches mpmath; `test_rmath` allows that absolute error.
+- **One L-BFGS-B, written from the BSD reference v3.0** (Zhu, Byrd, Lu and Nocedal's Fortran,
+  `lbfgsb.f`). `crates/interp/src/stats_lbfgsb.rs` is the only implementation: `optim` calls it
+  through `stats_optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
+  callbacks. GNU R behaves as a hybrid of the versions, found by comparing every iterate bitwise
+  (`%a`) against Rscript: the subspace step backtracks to the box without v3.0's Morales-Nocedal
+  projection, and the Cauchy search keeps the `f2` floor (`eps * f2_org`) and is skipped for an
+  unconstrained problem once memory exists. The order of additions matters to the last bit and
+  is pinned with comments where it is not the reference's (grouped terms in `cmprlb`, `cauchy`,
+  the subspace product and `formk`'s (2,1) block, ungrouped in its diagonal blocks). Traces,
+  messages and the abnormal line-search exit were matched the same way, and
+  `stats__lbfgsb_paths` and `test_numerics` hold the result exactly. The trace text for a line
+  search that exhausts 20 evaluations is unverified, since no case reached it in GNU R.
+- **KalmanLike and `prod` accumulate as GNU R observably does.** The Kalman filter subtracts and
+  adds term by term (`y -= z_i a_i`, `V[i,j] += m T`), and `prod` multiplies each argument in long
+  double, combines arguments in double, and lets the first NaN win, so `prod(NaN, NA)` is NaN.
 - **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
   scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options
   are ignored, as before.
@@ -3255,6 +3303,30 @@ first lines R had already read, leaving R mid-command.
   `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
   Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
   GNU R returns.
+- **One UNCMIN, one QUADPACK, one interval search, all in `interp`.** libR used to carry its own
+  copies of the routines behind `optif9`/`fdhess`, `Rdqags`/`Rdqagi` and `findInterval2`, next to
+  the interpreter's `nlm`, `integrate` and `findInterval`. The single copies are
+  `interp::stats_nlm` (all three methods, analytic derivatives, the `msg` bits, `fdhess`),
+  `interp::stats_optimize::{qags, qagi}` (writing into caller-owned `Subintervals`, so the C
+  entry points pass `work`/`iwork` straight through) and `interp::arith::find_interval`; libR
+  only converts C callbacks and arguments, as `lbfgsb` does. GNU R black box decided the details
+  the copies disagreed on: the cubic backtrack groups its coefficient as `3 * t3 * (...)`, and a
+  non-finite value (which nlm turns into the largest double) shrinks the step by ten. nlm's call
+  protocol is also GNU R's, as observed through call counts: an uncached probe at the start whose
+  value is ignored and which alone decides whether `gradient` and `hessian` attributes count
+  (wrong length or mode warns and ignores them), a ring of the five latest evaluations, and the
+  error "non-finite value supplied by 'nlm'" instead of a call at a non-finite point. Where GNU R
+  reads past a later attribute that is too short or missing, ry errors or uses zeros.
+  `stats__uncmin_quadpack.R` pins the iterates at full precision and the call protocol.
+  Methods 2 (double dogleg) and 3 (More-Hebdon hook) match GNU R bit for bit, which took these
+  departures from the textbook, all found by tracing every evaluation in `%a`: the trust-region
+  update retries with a doubled radius only for a Newton step whose decrease the model predicted
+  to within a tenth; after the switch to central differences an analytic gradient builds the
+  Hessian from gradient calls; the hook's mu update uses the derivative at mu = 0 (`phip0`); both
+  `phip0` and `phip` square `sqrt(dot)` instead of using the dot product; and the unfactored
+  secant update sums its two corrections before adding them to H. The libR case
+  `optif9_trust_region` compares at tolerance zero, so it assumes reference-BLAS rounding in the
+  GNU R that recorded it (GNU R's `ddot_` and `dnrm2_` come from the system BLAS).
 - **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
   documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
   (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
@@ -3591,10 +3663,10 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** All of it lives in `crates/heap/src/heap.rs`:
   - `Heap::young_parent` caches the last store target the barrier found unmarked. Marks change only inside a collection, which clears the cache, so a repeated store into the same young vector costs one compare.
   - `Heap::copy_elements` copies a range between vectors with one barrier decision for the whole range, and `Rf_duplicate` uses it.
-  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 64 MB, GNU R's initial `R_VSIZE`, or half the old generation if that is larger.
+  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 16 MB, or half the old generation if that is larger ("Peak memory comes from what the heap keeps alive" says why not GNU R's 64 MB).
   - The major-collection limit falls back towards twice the survivors by an eighth per collection instead of at once, as GNU R shrinks its trigger.
 - **Kernels.** `duplicated`/`unique` without incomparables hash a plain key per type, and for an all-ASCII character vector they hash the CHARSXP pointer, because interning makes equal ASCII text one object (`crates/interp/src/sort.rs`). `strsplit` with `fixed = TRUE` builds its `memchr::memmem` finder once per pattern and collects byte ranges instead of `String`s (`crates/interp/src/strings.rs`). `char_str` validates ASCII-flagged strings strictly, which runs a word at a time, but only as a hint: native code can set any gp bit through `SETLEVELS`, so the flag never licenses `from_utf8_unchecked`.
-- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. The cost is memory: up to 64 MB of dead large vectors, the same slack GNU R allows, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
+- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. These timings were taken with a 64 MB large-vector budget; at 16 MB `fread` at 1e6 rows measured the same, and 1e7 rows is not re-measured. The cost is memory: up to the budget in dead large vectors, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
 
 ## What keeps a dropped object alive: registers, handles, caches and dying finalizers
 
@@ -5084,6 +5156,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
 - The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
 
+## Every load of a strict package is checked
+
+- Before, only `ry load`'s first load ran the strict check; `load_all()`, a console reload and the load a console makes at start ran a package strict mode would refuse.
+- The load index records whether strict mode covers any file (`PackageIndex::strict`, the same test as `prepare_purity`), and every plan carries it as `Plan::strict`, so a host decides without reading ry's configuration twice.
+- A host checks a plan that changes something (`!is_noop()`): GNU R's `.Call` routine and `ry load --emit-plan` through `load::strict_value`, ry's runtime through a host callback (`ry_runtime::set_check`, registered by every command that runs the runtime via `repl::set_package_check_on_ry_runtime`). The loader's crate cannot depend on the CLI's analysis, which is why it is a callback. A refusal turns the plan into an error before R sees it, so nothing runs and the old bindings stay.
+- Whether a package is strict is decided per package root on both runtimes, from that package's own `ry.toml` (`load::strict_config`): GNU R's routine reads it directly, and ry's runtime asks a second host callback, the strict query, before each plan. Taking it from the command's configuration instead would let a lax script `load_all()` a strict package unchecked.
+- The first plan of a session that has a verdict (`ry load` on ry's runtime) skips the callback: the concurrent check already covers that load, and checking again would serialize what the verdict overlaps.
+- The check is the whole-package `preflight::check_package` with its fingerprint-cached clean verdict, so a reload of a large strict package pays a full analysis; checking only the changed files is in `backlog.md`.
+
+## Lazy definitions keep source references
+
+- Before, a lazy definition on ry's runtime lowered its node without a srcfile, so `print(f)` deparsed and tracebacks named no file, except under the debugger, which built a whole-file srcfile per force.
+- A plan's files become per-file handles (`FileSource`) holding the source and the `keep.source` option read when the handle is made. The first force from a file that keeps source builds its `srcfile` (`srcfilecopy` semantics) and stores it in the handle, so a file costs nothing unless one of its definitions is used, and the srcfile is shared by all of them.
+- The definition is reparsed alone after as many spaces as its line has bytes before it, and its srcrefs are computed against the line's real text (bytes and character columns both match GNU R's parser), lowered with a line offset (`interp::lower::lower_node_at_line`), which gives exact line and column srcrefs without parsing or lowering the whole file. The tree in the handle is used directly when no srcref is wanted.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
@@ -5193,6 +5280,40 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## utils' sockets, internal downloads and allocation profiling
+
+- `make.socket` and friends keep their `TcpStream`s and `TcpListener`s in one locked map in
+  `crates/interp/src/utils.rs`, keyed by the OS handle, because that handle is the `socket`
+  number R code sees and passes back.
+- `download.file(method = "internal")` and `url(method = "internal")` read only `file://`
+  URLs and give GNU R's "defunct" or "not supported" errors for the rest, as R 4.2 and later do.
+- `Rprofmem` logs a vector only when its data exceeds 128 bytes, sized as GNU R counts it (data
+  rounded up to 8 bytes plus a 48-byte header), because GNU R takes smaller vectors from pages of
+  small cells. ry has no such pages, so it writes no `new page:` lines. The heap calls a plain
+  `fn(usize) -> bool` reporter (`Heap::report_allocations`), which costs one compare per vector
+  while no profile runs. The reporter returns false to end the profile (a failed write), since
+  it runs while the heap is mutably borrowed and must not reach the heap itself. The bytecode compiler hides its own vectors with `Heap::swap_report_threshold`.
+- `Rprof` raises intervals below 10 ms to 10 ms with GNU R's warning, since GNU R's timer cannot
+  sample faster.
+- `system(intern = FALSE)` and `system2` return invisibly, as in GNU R.
+
+## One session temporary directory, removed at exit
+
+- **Previous shape.** The interpreter's `tempdir()` made `RtmpRy<pid>` and libR's front end
+  made a second `Rtmp<pid>` for native code's `R_TempDir`. Neither was ever removed, so every
+  run leaked two directories into `/tmp`.
+- **Target shape.** `interp::system::session_temp_dir` is the only one: a `mkdtemp`
+  `RtmpXXXXXX` under the first writable `R_TMPDIR`, `TMPDIR`, `TMP` or `TEMP`, as in GNU R.
+  libR passes it to native code. `session::finish` removes it, but only in the process that
+  created it, so a forked `mcparallel` child that ends never deletes its parent's directory.
+- **Order at exit.** `session::finish` runs the exit finalizers (the `run_exit_finalizers`
+  hook, so `quit()` runs them too) and only then removes the directory, because a finalizer
+  may still write there. The embedding exits (`R_CleanUp`, `Rf_endEmbeddedR`) remove it
+  through `R_CleanTempDir` after their finalizers.
+- **`tempdir(check = TRUE)` recreates the same path**, not a fresh name as GNU R does,
+  because native code already copied it as `R_TempDir`. It is created private, and an
+  existing directory at that path must belong to the current user.
 
 ## Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting
 
@@ -5377,9 +5498,60 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
 - **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.
 
+## Inferred signatures carry body facts that a call reads
+
+- **Previous shape.** An inferred `FunctionType` was its parameters, its return and the `inferred`
+  bit. A call could only see the joined return and each formal's optionality, so three things R
+  decides from the call were lost: which branch a flag's default selects, which arguments the callee
+  captures with `substitute()` instead of evaluating, and which formals another formal's default
+  forces. The checker reported `pDist(...) - p` (DistributionUtils), typed withr's `wrap(f, pre)`
+  template in the caller's frame, and accepted `g()` for `function(x, y = x) y`.
+- **Shape.** `types::FunctionType` gains inferred-only fields, empty on every declared or stub
+  signature: `flag_return` (a formal with a literal logical default, never reassigned, that the
+  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()`, from
+  `check::FormalUses`; a bare forward to another call counts as an evaluation), `default_reads` (an
+  optional formal that a forced formal's default forces), `missing_tested` (formals tested with
+  `missing()`) and `condition_only` (formals read only as a whole `if`/`while` condition, the only
+  ones that take logical text, since `!` and `&&` reject strings). `map_child_types` and `for_each_child` walk the branch types, so they
+  instantiate and generalize with the signature. The call site reads them: `flag_selected_return`
+  returns one branch when the flag is omitted or a literal (a forwarded `...` is assumed not to
+  carry the flag, since the opposite reports DistributionUtils' ordinary `pDist(densFn, q, ...)`), `quoted_arguments` types a captured
+  argument as `Unknown` without inferring it, and `match_arguments` reports a formal as missing when
+  both it and the formal whose default reads it are left out.
+- **Why on the type, not a side query.** The facts belong to the function value, which flows through
+  bindings, lists and callbacks; a per-item side table would only serve direct calls to a named
+  definition and would need its own invalidation. They are derived once from the body that inference
+  already walks, so there is no second source of truth.
+- **Limits.** An annotation has no syntax for these facts, so a written-back annotation is less
+  precise (`test_roundtrip.rs` lists the flag case). Branch selection needs the flag's default to be
+  a literal and the tail to be the only return.
+- **Related leniencies, no model change.** An apply-family element gets the inferred-scalar leniency
+  a direct call gives (`lapply(0:(n - 1L), Eulerian, n = n)`); a string that reads as a logical fits
+  an inferred `logical` parameter listed in `condition_only`; and at a `match.fun` caller, a bare
+  formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
+  `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
+  as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.
+
+## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
+
+- Previous shape: `Reduce`'s stub `fn(f: fn(U, T) -> U, ...)` pinned the accumulator to the start type, so a function whose return is wider (`T | NULL`, a union of list shapes) was reported as "must return `T`", although R simply carries the wider value forward.
+- Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
+- A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
+- `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
+
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
 - **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
 - **Shape.** `ry test` is `ry load` running an R driver (`crates/ry/src/test.R`) that calls `testthat::test_dir(load_package = "none", package =)` against the namespace `load_all()` built, so testthat's own reporters print the output and helpers, setup files and the package environment behave as under `devtools::test()`. Nothing in the reporter path is reimplemented, which keeps the output identical for CI.
 - **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
 - **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.
+
+## Records, tuples and tags compile natively
+
+- **Previous shape.** `Op::Construct` was an opaque step in the JIT (a helper call that re-read registers through the activation), a guarded `match` fell back to the `match` special for the whole expression, and `l[[i]]` on a plain list returned a boxed element, so arithmetic on it ran in tier 0.
+- **Construct.** `Action::Construct` writes `(kind, bits)` pairs into a stack buffer using `runtime::representation`'s encoding and calls `runtime::jit_construct`, which builds the slots and allocates through `Heap::alloc_record_slots`. Unboxed doubles, integers and logicals go straight into unboxed slots (`Slot::Real`, `Slot::Integer`, `Slot::Logical`); a double whose upper word collides with an integer or logical prefix stays a handle, and slots past `UNBOXED_SLOTS` are boxed in codegen.
+- **Guarded match.** The guard compiles in place with the arm's bound names read from registers (`Compiler::bound`), and `Op::MatchCondition` applies the special's condition rules (a record gets the boundary error). Anything that would reach the frame by name evaluates in a scratch child frame holding the bindings, through `Op::BoundEval`: a call the compiler cannot inline (a closure's promises would read the frame), `[[`-style subject dispatch, and every runtime fallback. A guard that assigns, creates a closure, nests a `match`, leaves a loop or calls a bound name (`guard_compiles_in_place`) runs whole through `Op::BoundEval`, which keeps the special's semantics: an assignment in a guard never reaches the function's frame. The JIT turns `MatchCondition` on a logical into a move, so a guard of plain arithmetic and comparisons runs natively.
+- **`MatchFail`** always signals an error, so the JIT treats it as `PureUnlessObserved` and leaves every register `Bottom` after it. As an opaque step that fell through with its registers' stale types, it widened the join after each `match` (a reused temporary still typed as the scrutinee's record) and left the loop's arithmetic in tier 0.
+- **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
+- **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
+- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger` and data-science `readings` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
