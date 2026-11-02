@@ -13,7 +13,7 @@ use {
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
     },
-    std::collections::HashSet,
+    std::collections::{HashMap, HashSet},
     syntax::{TextRange, TextSize},
 };
 
@@ -100,32 +100,51 @@ pub(crate) fn resolve_field<'db>(
     item: Item<'db>,
     field: ExprId,
 ) -> FieldTarget {
-    let mut resolver = Resolver {
-        db,
-        files,
-        visited: HashSet::new(),
-    };
-    let found = item_hir(db, item).as_ref().and_then(|hir| {
-        let ExpressionKind::Field {
-            target,
-            name: Some(name),
-            ..
-        } = hir.kind(field)
-        else {
-            return None;
-        };
-        let name = hir[*name].name;
-        Some((name, resolver.sites(item, *target, name, 0)))
-    });
-    let Some((name, sites)) = found else {
+    let Some((name, sites)) = precise_sites(db, files, item, field) else {
         return FieldTarget {
             name: Symbol::new(""),
             sites: Vec::new(),
             precise: false,
         };
     };
+    if !sites.is_empty() {
+        return FieldTarget {
+            name,
+            sites,
+            precise: true,
+        };
+    }
+    FieldTarget {
+        name,
+        sites: project_declarations(db, files, name),
+        precise: false,
+    }
+}
+
+/// The sites the receiver's constructions declare, empty when the receiver cannot be followed.
+fn precise_sites<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    field: ExprId,
+) -> Option<(Symbol, Vec<NavigationTarget>)> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Field {
+        target,
+        name: Some(name),
+        ..
+    } = hir.kind(field)
+    else {
+        return None;
+    };
+    let name = hir[*name].name;
+    let mut resolver = Resolver {
+        db,
+        files,
+        visited: HashSet::new(),
+    };
     let mut targets: Vec<NavigationTarget> = Vec::new();
-    for site in sites {
+    for site in resolver.sites(item, *target, name, 0) {
         let Some(node) = item_node(db, site.item) else {
             continue;
         };
@@ -137,77 +156,77 @@ pub(crate) fn resolve_field<'db>(
             targets.push(target);
         }
     }
-    if !targets.is_empty() {
-        return FieldTarget {
-            name,
-            sites: targets,
-            precise: true,
-        };
-    }
-    FieldTarget {
-        name,
-        sites: project_declarations(db, files, name),
-        precise: false,
-    }
+    Some((name, targets))
 }
 
-/// Every read, write and declaration of the field `target` names. A read whose own resolution
-/// shares a site with the target's is the same field. A precise target only takes precise reads,
-/// so that a rename never edits a read it merely guessed at.
+/// Every read, write and declaration of the field `target` names. A guessed target is the
+/// by-name set of declarations, which every same-named access reaches, so all of them belong to
+/// it. A precise
+/// target takes the precise reads that reach one of its sites, so that a rename never edits a
+/// read it merely guessed at.
 pub(crate) fn field_occurrences(
     db: &dyn Db,
     files: ProjectFiles,
     target: &FieldTarget,
 ) -> Vec<Occurrence> {
+    // A field nothing in the project declares (a column of a package's data frame, say) is no
+    // symbol the project owns, so same-named reads are not known to be the same field.
+    if target.sites.is_empty() {
+        return Vec::new();
+    }
+    let declaration = |file, range| Occurrence {
+        file,
+        range,
+        is_declaration: true,
+    };
     let mut result: Vec<Occurrence> = target
         .sites
         .iter()
-        .map(|site| Occurrence {
-            file: site.file,
-            range: site.range,
-            is_declaration: true,
-        })
+        .map(|site| declaration(site.file, site.range))
         .collect();
-    let name = target.name.as_str();
-    for &file in files.files(db) {
-        if !file.text(db).contains(name) {
+    let Some(spellings) = field_index(db, files).by_name.get(target.name.as_str()) else {
+        return result;
+    };
+    let accesses = spellings
+        .iter()
+        .filter(|spelled| spelled.kind == SpellingKind::Access);
+    if !target.precise {
+        result.extend(accesses.map(|spelled| Occurrence {
+            file: spelled.file,
+            range: spelled.range,
+            is_declaration: false,
+        }));
+        return result;
+    }
+    let target_sites: HashSet<NavigationTarget> = target.sites.iter().copied().collect();
+    for spelled in accesses {
+        let file = spelled.file;
+        let Some(position) = position_in_item(db, file, spelled.range.start()) else {
             continue;
-        }
-        for spelled in field_spellings(db, file) {
-            if spelled.name != name || spelled.kind != SpellingKind::Access {
-                continue;
-            }
-            let Some(position) = position_in_item(db, file, spelled.range.start()) else {
-                continue;
+        };
+        let Some(hir) = item_hir(db, position.item).as_ref() else {
+            continue;
+        };
+        let relative = spelled.range - position.item_offset;
+        let Some(index) = hir.expressions().position(|expression| {
+            matches!(expression.kind, ExpressionKind::Field { name: Some(name), .. }
+                if hir.name_range(*name) == relative)
+        }) else {
+            continue;
+        };
+        let Some((_, sites)) = precise_sites(db, files, position.item, ExprId::new(index)) else {
+            continue;
+        };
+        if sites.iter().any(|site| target_sites.contains(site)) {
+            let here = NavigationTarget {
+                file,
+                range: spelled.range,
             };
-            let Some(hir) = item_hir(db, position.item).as_ref() else {
-                continue;
-            };
-            let relative = spelled.range - position.item_offset;
-            let Some(index) = hir.expressions().position(|expression| {
-                matches!(expression.kind, ExpressionKind::Field { name: Some(name), .. }
-                    if hir.name_range(*name) == relative)
-            }) else {
-                continue;
-            };
-            let resolved = resolve_field(db, files, position.item, ExprId::new(index));
-            if target.precise && !resolved.precise {
-                continue;
-            }
-            if resolved
-                .sites
-                .iter()
-                .any(|site| target.sites.contains(site))
-            {
-                result.push(Occurrence {
-                    file,
-                    range: spelled.range,
-                    is_declaration: resolved.sites.contains(&NavigationTarget {
-                        file,
-                        range: spelled.range,
-                    }),
-                });
-            }
+            result.push(Occurrence {
+                file,
+                range: spelled.range,
+                is_declaration: sites.contains(&here),
+            });
         }
     }
     result
@@ -216,23 +235,50 @@ pub(crate) fn field_occurrences(
 /// Every declaration of a field named `name` in the project, the fallback for a read whose
 /// receiver cannot be followed.
 fn project_declarations(db: &dyn Db, files: ProjectFiles, name: Symbol) -> Vec<NavigationTarget> {
-    let name = name.as_str();
-    let mut sites = Vec::new();
+    field_index(db, files)
+        .by_name
+        .get(name.as_str())
+        .into_iter()
+        .flatten()
+        .filter(|spelled| spelled.kind != SpellingKind::Access)
+        .map(|spelled| NavigationTarget {
+            file: spelled.file,
+            range: spelled.range,
+        })
+        .collect()
+}
+
+/// Every field spelling in the project by name. Any edit rebuilds it, but only from the per-file
+/// memos, and it spares each request a scan of every file, which a fallback read or a references
+/// request over a common name like `value` would otherwise repeat thousands of times.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct FieldIndex {
+    by_name: HashMap<String, Vec<IndexedSpelling>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+struct IndexedSpelling {
+    file: SourceFile,
+    kind: SpellingKind,
+    range: TextRange,
+}
+
+#[salsa::tracked(returns(ref))]
+fn field_index(db: &dyn Db, files: ProjectFiles) -> FieldIndex {
+    let mut by_name: HashMap<String, Vec<IndexedSpelling>> = HashMap::new();
     for &file in files.files(db) {
-        if !file.text(db).contains(name) {
-            continue;
-        }
-        sites.extend(
-            field_spellings(db, file)
-                .iter()
-                .filter(|spelled| spelled.name == name && spelled.kind != SpellingKind::Access)
-                .map(|spelled| NavigationTarget {
+        for spelled in field_spellings(db, file) {
+            by_name
+                .entry(spelled.name.clone())
+                .or_default()
+                .push(IndexedSpelling {
                     file,
+                    kind: spelled.kind,
                     range: spelled.range,
-                }),
-        );
+                });
+        }
     }
-    sites
+    FieldIndex { by_name }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

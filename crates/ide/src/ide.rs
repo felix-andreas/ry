@@ -76,7 +76,7 @@ pub struct DebugSection {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NavigationTarget {
     pub file: SourceFile,
     pub range: TextRange,
