@@ -464,14 +464,15 @@ pub fn format_complex_with(
     if is_na_real(value.r) || is_na_real(value.i) {
         return "NA".into();
     }
-    // GNU R rounds only to decide which parts print as zero and which sign the imaginary part
-    // shows; a nonzero part prints from its unrounded value.
+    // GNU R rounds only to decide which parts print as zero; a nonzero part prints from its
+    // unrounded value.
     let rounded = round_complex(value, digits);
     let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
     let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
     let real_text = format_real_with(real_part, real, "NA");
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
-    let sign = if imaginary_part < 0.0 && imaginary_text != "0" {
+    // A negative part rounded to zero keeps its sign unless it prints as a bare `0`.
+    let sign = if value.i < 0.0 && imaginary_text != "0" {
         '-'
     } else {
         '+'

@@ -2429,9 +2429,24 @@ fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
+    // GNU R counts the arguments before matching them, and blames the calling closure for a
+    // wrong count or a lone argument that is not `x`.
+    if call.is_empty() || call.len() > 2 {
+        let name = if significant { "signif" } else { "round" };
+        return Err(error(format!(
+            "{} arguments passed to '{name}' which requires 1 or 2 arguments",
+            call.len()
+        )));
+    }
+    let missing_operand = "argument \"x\" is missing, with no default";
+    if let [only] = call.args
+        && only.tag != nil()
+        && values::symbol_name(only.tag) != "x"
+    {
+        return Err(error(missing_operand));
+    }
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0])
-        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0]).ok_or_else(|| call.error(missing_operand))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),

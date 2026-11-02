@@ -625,6 +625,12 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
                 "object of type 'symbol' is not subsettable",
             ));
         }
+        SexpType::Dots => {
+            return Err(crate::unwind::error_in(
+                call,
+                "object of type '...' is not subsettable",
+            ));
+        }
         SexpType::Pairlist | SexpType::Language => {
             let list = values::pairlist_to_list(object)?;
             let result = subset(list, indices, drop, call)?;
@@ -1032,7 +1038,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     }
     if matches!(
         object.kind(),
-        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+        SexpType::Pairlist | SexpType::Language
     ) {
         let list = values::pairlist_to_list(object)?;
         return subset2(list, indices, exact, call);
@@ -1330,6 +1336,10 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
                 "$ operator not defined for this S4 class",
             ))
         }
+        SexpType::Dots => Err(crate::unwind::error_in(
+            call,
+            "object of type '...' is not subsettable",
+        )),
         _ => Err(crate::unwind::error_in(
             call,
             "$ operator is invalid for atomic vectors",

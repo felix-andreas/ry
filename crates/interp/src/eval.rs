@@ -580,7 +580,9 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
         "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "==", "!=", "<", ">", "<=", ">=", "&", "|",
         "!",
     ];
+    // `round` and `signif` count and match their own arguments, as GNU R's do.
     if OPERATORS.contains(&definition.name)
+        || matches!(definition.name, "round" | "signif")
         || (definition.arity >= 0 && args.len() != definition.arity as usize)
     {
         return Ok(());
@@ -2571,6 +2573,18 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };
+    // A bare `...` splices like an argument list, of which `substitute` keeps the first
+    // element, or `NULL` when the dots are empty.
+    if expression == symbols().dots {
+        let wrapped = values::pairlist(&[(nil(), expression)], SexpType::Pairlist)?;
+        crate::heap().root(wrapped);
+        let substituted = substitute_list(wrapped, env)?;
+        return Ok(if substituted == nil() {
+            nil()
+        } else {
+            substituted.car()
+        });
+    }
     let result = substitute(expression, env)?;
     Ok(result)
 }

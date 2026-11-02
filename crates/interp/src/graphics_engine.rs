@@ -506,7 +506,9 @@ unsafe fn open_default_device() -> R<()> {
     crate::heap().root(function);
     eval::apply(nil(), function, &[], values::global_env())?;
     if no_devices() {
-        return Err(error("no active or default device"));
+        return Err(error(
+            "no active device and default getOption(\"device\") is invalid",
+        ));
     }
     Ok(())
 }

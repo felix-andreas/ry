@@ -525,8 +525,9 @@ unsafe fn print_matrix_rows(
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
     // GNU R sizes numbered labels by the digits of one past the last row, so nine rows already
-    // reserve two digits and no rows reserve one.
-    let numbered_width = if numbered_rows {
+    // reserve two digits and no rows reserve one. A matrix without rows reserves that width
+    // even when it has (empty) row names.
+    let numbered_width = if numbered_rows || rows == 0 {
         format!("[{},]", rows + 1).len()
     } else {
         0

@@ -474,11 +474,27 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
+    let limit = warning_limit();
     let state = interp();
-    if state.warnings.len() < 50 {
+    if state.warnings.len() < limit {
         state.warnings.push((call, message.to_owned()));
     }
     Ok(())
+}
+
+/// How many deferred warnings are kept: `getOption("nwarnings")`, 50 by default.
+pub unsafe fn warning_limit() -> usize {
+    let option = crate::envir::get_option("nwarnings");
+    let value = if option == nil() {
+        f64::NAN
+    } else {
+        values::as_real_scalar(option)
+    };
+    if value.is_finite() && value >= 1.0 {
+        value as usize
+    } else {
+        50
+    }
 }
 
 /// A warning printed as it happens: the first line of the call, then the message on the same
@@ -521,13 +537,15 @@ pub unsafe fn print_warnings() -> R<()> {
         }
         text.push('\n');
     } else {
+        let limit = warning_limit();
         match warnings.len() {
             ..=10 => text.push_str("Warning messages:\n"),
-            count @ ..50 => text.push_str(&format!(
+            count if count < limit => text.push_str(&format!(
                 "There were {count} warnings (use warnings() to see them)\n"
             )),
-            _ => text
-                .push_str("There were 50 or more warnings (use warnings() to see the first 50)\n"),
+            _ => text.push_str(&format!(
+                "There were {limit} or more warnings (use warnings() to see the first {limit})\n"
+            )),
         }
         if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {
