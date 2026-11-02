@@ -2320,7 +2320,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - The plot gallery (`oracle gallery`) passes on every device. On agg, no figure has a pixel
+  - The plot gallery (`oracle gallery`) passes on every device, at seeds 1 to 8 on png, pdf and
+    svg as well as by default. On agg, no figure has a pixel
     off by more than 64 levels at any seed from 0 to 24, and 140 of the 149 are identical. The
     other nine (`contour_methods`, `contour_volcano`, `hist_density`, `lm_diagnostics`,
     `log_axes`, `ts_decomposition`, `xspline_shapes`, `pa_correlation`,
