@@ -88,15 +88,41 @@ pub const BUILTINS: &[BuiltinDef] = &[
         link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok())
     }),
     internal("setFileTime", 2, do_sys_set_file_time).invisible(),
+    // GNU R's `R_ShowFiles` sends each header, a blank line, the file and a newline through the
+    // pager; ry's console is the pager, so the same text goes to the console.
     internal("file.show", 5, |call| unsafe {
+        let delete = values::as_logical_scalar(call.arg(3)) == 1;
+        let mut text = Vec::new();
         for index in 0..length(call.arg(0)) {
-            if let Some(path) = values::string_at(call.arg(0), index) {
-                let text = std::fs::read_to_string(&*path).map_err(|failure| {
-                    call.error(format!("cannot open file '{path}': {failure}"))
-                })?;
-                crate::write_console(text.as_bytes(), false);
+            let Some(path) = values::string_at(call.arg(0), index) else {
+                continue;
+            };
+            if let Some(header) = values::string_at(call.arg(1), index)
+                && !header.is_empty()
+            {
+                text.extend_from_slice(format!("{header}\n\n").as_bytes());
+            }
+            let expanded = crate::connections::expand_path(&path);
+            match std::fs::read(&expanded) {
+                Ok(contents) => {
+                    text.extend_from_slice(&contents);
+                    text.push(b'\n');
+                    if delete {
+                        // A temporary file the pager could not remove is left for the session's
+                        // temporary directory cleanup, as under GNU R.
+                        std::fs::remove_file(&expanded).ok();
+                    }
+                }
+                Err(failure) => text.extend_from_slice(
+                    format!(
+                        "Cannot open file '{path}': {}\n\n",
+                        crate::connections::os_message(&failure)
+                    )
+                    .as_bytes(),
+                ),
             }
         }
+        crate::write_console(&text, false);
         Ok(nil())
     })
     .invisible(),
@@ -213,7 +239,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
                     .filter(|left| !left.is_zero())
                 {
                     crate::unwind::poll_interrupt()?;
-                    std::thread::sleep(left.min(slice));
+                    // GNU R answers help server requests while it sleeps.
+                    crate::help_server::wait_and_serve(left.min(slice));
                 }
             }
             Ok(nil())

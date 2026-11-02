@@ -54,6 +54,12 @@ ry run script.R a b  # on ry's runtime
 
 `-i script.R` runs the script and then opens the console instead of exiting.
 
+## Help
+
+`?mean`, `help("mean")` and `help(package = "stats")` print R's help pages as in GNU R. With
+`help_type = "html"` or `help.start()`, ry's runtime starts R's help server and opens the page in
+your browser; the server answers while the console waits for input, as GNU R's does.
+
 ## Typed code at the console
 
 You can type [inline annotations](/type-checking/inline-annotations) at the prompt and in scripts.

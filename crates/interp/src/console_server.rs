@@ -45,6 +45,11 @@ pub unsafe fn read_while_serving(read: impl FnOnce() -> Option<String> + Send) -
     platform::read_while_serving(read)
 }
 
+/// Wakes the console's wait for input, so it answers the help server's queued requests.
+pub fn wake() {
+    platform::wake();
+}
+
 /// Answers the requests queued while a command runs. Called from the evaluator's interrupt poll.
 pub fn service() {
     // SAFETY: the poll runs on the interpreter's thread.
@@ -89,7 +94,7 @@ unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
 mod platform {
     use {
         super::{Adapter, Request, SERVICE_REQUESTED, Transport, answer_plain, response},
-        crate::{interp, unwind::INTERRUPT_REQUESTED},
+        crate::{help_server, interp, unwind::INTERRUPT_REQUESTED},
         serde_json::{Value, json},
         std::{
             collections::{BTreeMap, VecDeque},
@@ -107,6 +112,8 @@ mod platform {
 
     enum Event {
         Input(Option<String>),
+        /// The help server queued a request, which it holds itself.
+        Help,
         Request(u64, Value),
         Closed(u64),
     }
@@ -246,8 +253,18 @@ mod platform {
         serde_json::from_slice(&body).ok()
     }
 
+    pub fn wake() {
+        // One token answers every queued request, and a script that never prompts would
+        // otherwise collect one per request.
+        let mut events = lock(&EVENTS);
+        if !events.iter().any(|event| matches!(event, Event::Help)) {
+            events.push_back(Event::Help);
+            ARRIVED.notify_all();
+        }
+    }
+
     fn push(event: Event) {
-        let poke = !matches!(event, Event::Input(_));
+        let poke = !matches!(event, Event::Input(_) | Event::Help);
         lock(&EVENTS).push_back(event);
         ARRIVED.notify_all();
         if poke {
@@ -292,9 +309,11 @@ mod platform {
     pub unsafe fn read_while_serving(
         read: impl FnOnce() -> Option<String> + Send,
     ) -> Option<String> {
-        if lock(&SERVER).is_none() {
+        if lock(&SERVER).is_none() && !help_server::running() {
             return read();
         }
+        // Requests that arrived while a command ran were left for the prompt.
+        unsafe { help_server::serve_pending() };
         // A command a client terminated unwinds at its next statement; one that ended first must
         // not take the stale adapter into the next command.
         let state = interp();
@@ -328,6 +347,7 @@ mod platform {
                     }
                     Some(Event::Request(connection, message)) => idle_request(connection, message),
                     Some(Event::Closed(connection)) => closed(connection),
+                    Some(Event::Help) => unsafe { help_server::serve_pending() },
                     None => {}
                 }
             }
@@ -344,6 +364,9 @@ mod platform {
             match event {
                 Event::Request(connection, message) => busy_request(connection, message),
                 Event::Closed(connection) => closed(connection),
+                // GNU R's help server answers only while R waits, so the request stays queued
+                // for the prompt.
+                Event::Help => {}
                 Event::Input(input) => {
                     lock(&EVENTS).push_front(Event::Input(input));
                     return;
@@ -506,6 +529,8 @@ mod platform {
                     }
                     // A line typed while a request's code is stopped waits for the prompt; the
                     // stop itself must not end, or the debugger would take it for a hang-up.
+                    Some(Event::Help) if wait => unsafe { help_server::serve_pending() },
+                    Some(Event::Help) => {}
                     Some(Event::Input(input)) if wait => *lock(&STASHED_INPUT) = Some(input),
                     Some(Event::Input(input)) => {
                         lock(&EVENTS).push_front(Event::Input(input));
@@ -539,6 +564,8 @@ mod platform {
     }
 
     pub fn finish() {}
+
+    pub fn wake() {}
 
     pub unsafe fn read_while_serving(
         read: impl FnOnce() -> Option<String> + Send,

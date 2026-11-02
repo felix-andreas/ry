@@ -47,6 +47,7 @@ pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_engine;
 pub mod graphics_render;
+pub mod help_server;
 pub mod http;
 pub mod latex;
 pub mod linalg;
