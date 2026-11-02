@@ -121,3 +121,14 @@ f()
 x: integer
 f: fn() -> integer
 integer
+
+#---- a_super_assigned_name_is_not_the_base_function
+# `t <<- t[-drop]` updates a binding the function keeps (a Reference Class field, say), so the
+# read of `t` is that binding, not base `t`.
+trim <- function(drop) {
+  t <<- t[-drop]
+  NULL
+}
+#++++
+trim: <T: numeric> fn(drop: T) -> NULL
+140..144 warning[unused] `trim` is assigned but never used.

@@ -1,6 +1,7 @@
 //! What differs between operating systems, behind one interface: CPU times, file modes, links,
-//! globbing, processes, dynamic libraries, `errno` and character set conversion. Callers stay
-//! free of `cfg`; each function has a Unix and a Windows implementation of the same contract.
+//! globbing, processes, dynamic libraries, socket polling, `errno` and character set
+//! conversion. Callers stay free of `cfg`; each function has a Unix and a Windows
+//! implementation of the same contract.
 //!
 //! On Windows, R's C library conventions come from mingw-w64, which is the toolchain Rtools
 //! builds packages with, and the conversion behind `iconv` is ry's own (`PortableIconv`), since
@@ -31,8 +32,16 @@ pub struct SystemName {
     pub version: String,
     pub nodename: String,
     pub machine: String,
+    pub login: String,
     pub user: String,
+    pub effective_user: String,
 }
+
+/// A socket's operating system handle, which `poll_sockets` waits on.
+#[cfg(unix)]
+pub type SocketHandle = std::os::fd::RawFd;
+#[cfg(windows)]
+pub type SocketHandle = std::os::windows::io::RawSocket;
 
 /// Why a conversion step stopped before using up its input, as `iconv(3)` reports through
 /// `errno`.
@@ -96,7 +105,7 @@ mod imp {
     #[cfg(target_os = "macos")]
     use libc::__error as errno_location;
     use {
-        super::{CpuTimes, GlobMatches, IconvStop, SystemName},
+        super::{CpuTimes, GlobMatches, IconvStop, SocketHandle, SystemName},
         std::{
             ffi::{CStr, CString, c_char, c_void},
             fs::Metadata,
@@ -105,6 +114,50 @@ mod imp {
             path::Path,
         },
     };
+
+    pub fn stream_handle(stream: &std::net::TcpStream) -> SocketHandle {
+        std::os::fd::AsRawFd::as_raw_fd(stream)
+    }
+
+    pub fn listener_handle(listener: &std::net::TcpListener) -> SocketHandle {
+        std::os::fd::AsRawFd::as_raw_fd(listener)
+    }
+
+    pub fn poll_sockets(
+        sockets: &[(SocketHandle, bool)],
+        timeout_milliseconds: i32,
+    ) -> io::Result<Vec<bool>> {
+        let mut descriptors: Vec<libc::pollfd> = sockets
+            .iter()
+            .map(|&(fd, write)| libc::pollfd {
+                fd,
+                events: if write { libc::POLLOUT } else { libc::POLLIN },
+                revents: 0,
+            })
+            .collect();
+        loop {
+            // SAFETY: the array holds `descriptors.len()` initialized entries.
+            let status = unsafe {
+                libc::poll(
+                    descriptors.as_mut_ptr(),
+                    descriptors.len() as libc::nfds_t,
+                    timeout_milliseconds,
+                )
+            };
+            if status >= 0 {
+                break;
+            }
+            let failure = io::Error::last_os_error();
+            if failure.kind() != io::ErrorKind::Interrupted {
+                return Err(failure);
+            }
+        }
+        // A hang-up or error counts as ready: the next read reports the end or the error.
+        Ok(descriptors
+            .iter()
+            .map(|descriptor| descriptor.revents != 0)
+            .collect())
+    }
 
     pub fn cpu_times() -> CpuTimes {
         let times = |who: libc::c_int| {
@@ -158,7 +211,33 @@ mod imp {
             version: field(&name.version),
             nodename: field(&name.nodename),
             machine: field(&name.machine),
-            user: std::env::var("USER").unwrap_or_else(|_| "unknown".into()),
+            // GNU R reads the login name from the terminal session and the two user names from
+            // the password database, so a process without a controlling terminal still knows
+            // its user.
+            // SAFETY: `getlogin` and `getpwuid` return null or a C string that stays valid
+            // until the next call, which is copied before then.
+            login: unsafe { c_string(libc::getlogin()) },
+            user: unsafe { account(libc::getuid()) },
+            effective_user: unsafe { account(libc::geteuid()) },
+        }
+    }
+
+    unsafe fn c_string(raw: *const c_char) -> String {
+        if raw.is_null() {
+            "unknown".into()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(raw) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    unsafe fn account(uid: libc::uid_t) -> String {
+        let entry = unsafe { libc::getpwuid(uid) };
+        if entry.is_null() {
+            "unknown".into()
+        } else {
+            unsafe { c_string((*entry).pw_name) }
         }
     }
 
@@ -500,7 +579,7 @@ mod imp {
 mod imp {
     pub use super::PortableIconv as Iconv;
     use {
-        super::{CpuTimes, GlobMatches, SystemName, windows_executable},
+        super::{CpuTimes, GlobMatches, SocketHandle, SystemName, windows_executable},
         std::{
             ffi::{CStr, c_void},
             fs::Metadata,
@@ -535,6 +614,51 @@ mod imp {
     unsafe extern "C" {
         /// The C runtime's per-thread `errno`.
         fn _errno() -> *mut i32;
+    }
+
+    pub fn stream_handle(stream: &std::net::TcpStream) -> SocketHandle {
+        std::os::windows::io::AsRawSocket::as_raw_socket(stream)
+    }
+
+    pub fn listener_handle(listener: &std::net::TcpListener) -> SocketHandle {
+        std::os::windows::io::AsRawSocket::as_raw_socket(listener)
+    }
+
+    pub fn poll_sockets(
+        sockets: &[(SocketHandle, bool)],
+        timeout_milliseconds: i32,
+    ) -> io::Result<Vec<bool>> {
+        use windows_sys::Win32::Networking::WinSock::{
+            POLLRDNORM, POLLWRNORM, WSAGetLastError, WSAPOLLFD, WSAPoll,
+        };
+        // WSAPoll rejects an empty set, where poll(2) would only wait.
+        if sockets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut descriptors: Vec<WSAPOLLFD> = sockets
+            .iter()
+            .map(|&(socket, write)| WSAPOLLFD {
+                fd: socket as usize,
+                events: if write { POLLWRNORM } else { POLLRDNORM },
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: the array holds `descriptors.len()` initialized entries.
+        let status = unsafe {
+            WSAPoll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as u32,
+                timeout_milliseconds,
+            )
+        };
+        if status < 0 {
+            // SAFETY: reads the calling thread's last Winsock error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(descriptors
+            .iter()
+            .map(|descriptor| descriptor.revents != 0)
+            .collect())
     }
 
     pub fn cpu_times() -> CpuTimes {
@@ -594,6 +718,7 @@ mod imp {
     }
 
     pub fn system_name() -> SystemName {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
         let machine = match std::env::consts::ARCH {
             "x86_64" => "x86-64",
             other => other,
@@ -604,7 +729,9 @@ mod imp {
             version: String::new(),
             nodename: std::env::var("COMPUTERNAME").unwrap_or_default(),
             machine: machine.into(),
-            user: std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into()),
+            login: user.clone(),
+            effective_user: user.clone(),
+            user,
         }
     }
 

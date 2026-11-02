@@ -1,0 +1,14 @@
+[stdout]
+| [1] TRUE
+| [1] "cannot close 'message' sink connection"
+| [1] "to stderr"
+| [1] 2
+| [1] "diverted"
+| [1] "buffered"
+[messages]
+- a message
+[warnings]
+[errors]
+[value]
+character
+| "buffered"

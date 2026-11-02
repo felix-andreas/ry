@@ -180,6 +180,11 @@ pub unsafe fn unif_index(n: f64) -> R<f64> {
     Ok(next_index(rng(), n))
 }
 
+/// `R_sample_kind`: GNU R's `Sampletype` code of the current sampling method.
+pub fn sample_kind() -> i32 {
+    rng().sample_kind as i32
+}
+
 fn rng() -> &'static mut Rng {
     &mut interp().random
 }

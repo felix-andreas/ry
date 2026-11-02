@@ -27,6 +27,7 @@ map2_dbl : fn(.x: Any, .y: Any, .f: Any, ...: Any, [.progress]: logical | charac
 map2_chr : <T, U> fn(.x: list[T] | T[], .y: list[U] | U[], .f: fn(T, U) -> character, ...: Any, [.progress]: logical | character) -> character[]
 map2_chr : fn(.x: Any, .y: Any, .f: Any, ...: Any, [.progress]: logical | character) -> character[]
 walk : <T, X> fn(.x: X, .f: fn(T) -> Any, ...: Any, [.progress]: logical | character) -> X
+walk : <X> fn(.x: X, .f: Any, ...: Any, [.progress]: logical | character) -> X
 
 # Filtering keeps the shape of `.x`.
 keep : <T> fn(.x: T[], .p: fn(T) -> logical, ...: Any) -> T[]
@@ -39,6 +40,7 @@ discard : <T> fn(.x: list[T], .p: fn(T) -> logical, ...: Any) -> list[T]
 discard : fn(.x: Any, .p: Any, ...: Any) -> Any
 
 reduce : <T, A> fn(.x: list[T] | T[], .f: fn(A, T) -> A, ...: Any, [.init]: A, [.dir]: character) -> A
+reduce : fn(.x: Any, .f: Any, ...: Any, [.init]: Any, [.dir]: character) -> Any
 
 # Adverbs wrap a function and only build the wrapper, so they are pure.
 # `possibly()` returns `otherwise` where `.f` fails; one candidate per arity
@@ -47,5 +49,7 @@ possibly : @pure <A, R, O> fn(.f: fn(A) -> R, [otherwise]: O, [quiet]: logical) 
 possibly : @pure <A, B, R, O> fn(.f: fn(A, B) -> R, [otherwise]: O, [quiet]: logical) -> fn(A, B) -> R | O
 possibly : @pure <A, B, C, R, O> fn(.f: fn(A, B, C) -> R, [otherwise]: O, [quiet]: logical) -> fn(A, B, C) -> R | O
 possibly : @pure <R, O> fn(.f: fn(...: Any) -> R, [otherwise]: O, [quiet]: logical) -> fn(...: Any) -> R | O
+possibly : @pure fn(.f: Any, [otherwise]: Any, [quiet]: logical) -> fn(...: Any) -> Any
 safely : @pure <A, R, O> fn(.f: fn(A) -> R, [otherwise]: O, [quiet]: logical) -> fn(A) -> list{result: R | O, error: Any}
 safely : @pure <R, O> fn(.f: fn(...: Any) -> R, [otherwise]: O, [quiet]: logical) -> fn(...: Any) -> list{result: R | O, error: Any}
+safely : @pure fn(.f: Any, [otherwise]: Any, [quiet]: logical) -> fn(...: Any) -> list{result: Any, error: Any}

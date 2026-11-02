@@ -8,7 +8,7 @@ and why. Built so far are the object model and collector in `crates/heap`, the C
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
 `crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
-`crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
+`crates/table`. Not built are compiled-to-compiled calls of general (non-scalar) functions, ry's own base R (base R's R
 code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
 runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
@@ -567,7 +567,13 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
   The call goes through tier 0 instead when a calling handler is established, because a handler
   could run R code in between. A call of a small closure defined in the same body, which computes a scalar
-  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
+  such a computation, branches, locals and calls of itself or other such closures included, is
+  compiled once per argument type to a native function on unboxed values with no frame
+  (`crates/jit/src/native.rs`), so a recursive scalar function runs entirely in machine code. It
+  counts the expression-depth limit down itself, and anything that would warn or raise returns a
+  failure status before anything visible happens, so tier 0 reruns the call. A typed closure's
+  checks are decided when its native function compiles. Function bindings are speculated
   against one global binding epoch, which the heap bumps whenever a watched binding changes or a
   watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
@@ -984,8 +990,10 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
-   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   The interpreter runs. 149 of the 150 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
+   (`oracle compare --engine ry`), and 148 of 150 under the JIT (`--engine ry-jit`, which also
+   differs on `environments__hidden_function_bindings`). The
+   remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
    different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
    exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
@@ -997,6 +1005,12 @@ Each step ends with something real running, and each one is a large, whole chang
    ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
    `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
    GNU R pixel for pixel.
+
+   At the full benchmark size (about 308,000 lines per code base), ry's test suites match GNU R on
+   every test of all three code bases. With the JIT off, finbench's suite takes 1.13x GNU R's time;
+   with it on, finbench, dsbench and biobench take 1.30x, 1.35x and 1.21x, so the JIT currently costs
+   cold code about 15% (`.agents/memory/backlog.md`, "Open: the benchmark packages under ry's
+   runtime", has the levers).
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -1004,9 +1018,11 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 
-   The C API is done, with evaluation behind a hook the interpreter installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
-   names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
-   and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
+   The C API is done, with evaluation behind a hook the interpreter installs
+   (`libr::eval::Evaluator`). `libR` declares and exports all 985 function and variable names that
+   GNU R's public headers declare, which covers the 444 the closure uses (the rest of the 792 are
+   types, macros and enum constants in the headers). `crates/libr/tests/test_headers.rs` checks the
+   list in `tests/headers/r_api_names.txt` against ry's headers and the exports. `libR` implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
    are declared in headers and come from the system libraries. Against the corpus library (GNU R
    4.3.3 binaries, `tests/test_corpus_binaries.rs`), 192 of the closure's 199 non-base compiled
    packages load and register under ry. Of the other seven, six evaluate R code while loading (S7,
@@ -1018,8 +1034,11 @@ Each step ends with something real running, and each one is a large, whole chang
    also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
    on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
    packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
-   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
-   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   Magick++. Two package-test rates are tracked, both counting only the packages whose
+   tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
+   ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
+   (`.corpus/ry-library`, `oracle packages --installed`), the last measured rate was 90 of 165
+   (54.5%), from an older interpreter. The rest fail on interpreter gaps, and the classes are listed in
    `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
@@ -1032,7 +1051,8 @@ Each step ends with something real running, and each one is a large, whole chang
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
    runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
-   helpers to it is next.
+   helpers to it is next. On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
+   faster than data.table on every one (section 7 has the table).
 
 9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
    `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
@@ -1040,8 +1060,9 @@ Each step ends with something real running, and each one is a large, whole chang
    cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
    the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
    Windows builds `R.dll` and `ry.exe` for `x86_64-pc-windows-gnullvm` (the UCRT), and `ry run`
-   runs base R and Rtools-built packages under Wine; what is verified and what is open is in
-   section 11.
+   runs base R and Rtools-built packages under Wine. `rcmd` also follows Rtools' conventions for
+   `R CMD INSTALL` on Windows, verified only by installing from a Linux host, and the session reports
+   a UTF-8 locale as `.utf8`, as GNU R does. What is verified and what is open is in section 11.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would

@@ -103,7 +103,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
-    internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
+    internal("curlVersion", 0, |_| unsafe { curl_version() }),
     internal("curlGetHeaders", 5, do_curl_get_headers),
     internal("curlDownload", 6, do_curl_download),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
@@ -243,8 +243,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| Ok(call.arg(0))),
-    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
+    builtin("enc2native", 1, character_unchanged),
+    builtin("enc2utf8", 1, character_unchanged),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -299,7 +299,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindtextdomain", 2, |_| Ok(nil())),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| Ok(call.arg(0))),
+    internal("enc2native", 1, character_unchanged),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -2628,16 +2628,15 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let name = crate::platform::system_name();
-    let user = name.user;
     let values_list = [
         name.sysname,
         name.release,
         name.version,
         name.nodename,
         name.machine,
-        user.clone(),
-        user.clone(),
-        user,
+        name.login,
+        name.user,
+        name.effective_user,
     ];
     let result = string_vector(&values_list)?;
     let names = string_vector(&[
@@ -2885,6 +2884,30 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// `libcurlVersion()`'s internal. ry's transfers do not use libcurl, so the version is the
+/// libcurl release whose behavior they follow, which keeps version checks in packages
+/// passing, and the attributes describe what ry really uses: rustls, no SSH, and the
+/// protocols `url()` and `download.file()` handle.
+unsafe fn curl_version() -> R<Sexp> {
+    let version = scalar_string("8.5.0")?;
+    values::set_attr(
+        version,
+        values::install("ssl_version")?,
+        scalar_string("rustls")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("libssh_version")?,
+        scalar_string("")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("protocols")?,
+        string_vector(&["file", "http", "https"])?,
+    )?;
+    Ok(version)
+}
+
 /// `curlDownload(url, destfile, quiet, mode, cacheOK, headers)`: fetches each URL into its
 /// destination file. A single URL reports its progress the way GNU R's libcurl method does and
 /// errors when the transfer fails; several URLs only announce themselves and warn per failure.
@@ -3127,6 +3150,16 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
     interp().visible = false;
     scalar_integer(status.code().unwrap_or(127))
+}
+
+/// `enc2utf8` and `enc2native`: every string ry holds is already UTF-8, so only the type check
+/// remains.
+unsafe fn character_unchanged(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if value.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    Ok(value)
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {

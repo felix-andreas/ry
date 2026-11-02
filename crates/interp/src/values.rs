@@ -227,6 +227,8 @@ pub struct Globals {
     /// The implicit class vectors S3 dispatch builds for unclassed objects, by dimension shape
     /// and type, so that dispatching on a plain vector allocates no class vector.
     pub implicit_classes: rustc_hash::FxHashMap<(u8, SexpType), Sexp>,
+    /// S4 definitions a package loader holds back until a lookup needs them.
+    pub deferred_definitions: Vec<crate::methods::DeferredDefinitions>,
 }
 
 impl Globals {
@@ -239,6 +241,7 @@ impl Globals {
             keep: Vec::new(),
             s4_extends: rustc_hash::FxHashMap::default(),
             implicit_classes: rustc_hash::FxHashMap::default(),
+            deferred_definitions: Vec::new(),
         }
     }
 
@@ -262,6 +265,9 @@ impl Globals {
         }
         for &classes in self.implicit_classes.values() {
             marker.mark(classes);
+        }
+        for definitions in &self.deferred_definitions {
+            marker.mark(definitions.force);
         }
     }
 }
@@ -1134,7 +1140,12 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Closure => {
+            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
+            // The copy captures the same frame, so a move must count it as it counts the original.
+            crate::moves::created_closure(copy)?;
+            copy
+        }
         SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;

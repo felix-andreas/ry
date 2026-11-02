@@ -31,10 +31,68 @@ This page is the exact behavior.
   If any has a strict-mode error, it prints the errors and exits with status 1 without loading
   anything. The `R/` files are checked together, so a name one file defines resolves in the others.
   A later `load_all()` in the same session, and the load a console makes, do not check.
+  A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
+  so loading it again without changing its files, configuration, stubs, data files or the ry
+  binary skips the check.
+
+### S4 definitions
+
+On ry's runtime, a fresh load holds back a package's S4 definitions and runs them the first time
+anything needs one, so a session that never touches its classes never pays for registering them. The
+package behaves as if they had run in place: each name they bind (a class generator, a generic, the
+`.__C__` and `.__T__` metadata) is a promise that runs them, and so is looking up one of their classes
+or generics by name, as `new()`, `is()`, `getClass()` and method dispatch do. When a statement needs
+one during the load itself, the held-back definitions placed before that statement run then, and the
+rest run in their own places.
+
+A load holds them back only when all of these hold, and otherwise runs every one of them in place:
+
+- Every S4 registration in the package is `setClass()` (alone or as `Gen <- setClass(...)`),
+  `setGeneric()` with a function literal as its definition, `setMethod()` or `setReplaceMethod()` with
+  a literal signature, or `setValidity()`. Any other one, such as `setRefClass()` or
+  `setClassUnion()`, keeps them all in place.
+- Every method is for a generic the package itself defines, and every validity method for one of its
+  own classes. A method on another package's generic, such as `show`, has to be registered before
+  that generic dispatches, and nothing marks the moment it does.
+- Every name the definitions read is written once, by a statement placed before them, so running them
+  later reads the same values.
+- Every name the definitions bind is written by them alone.
+- No generic they define already exists as a function the namespace can see.
+
+`options(ry.load.lazy_s4 = FALSE)` turns this off. The load's summary counts the definitions it held
+back, as in `Loaded shapes: 1 definition bound lazily, 1 top-level statement run, 6 S4 definitions held
+back until first use, in 5 ms.` A reload that changes one of them, or a name they bind, runs them all
+first.
+
+When the held-back definitions run after the load, ry saves what they bound (the classes, generics
+and method tables) to `$XDG_CACHE_HOME/ry/s4` (`~/.cache/ry/s4` by default), and a later process
+restores them instead of running them, much as GNU R restores an installed package's S4 metadata. On
+the 326,000-line bench package, this cuts the first S4 use from about 330 ms to about 100 ms. A saved
+entry is used only when all of these match the process that saved it:
+
+- the text of every held-back definition, the package's name and version, and the build of ry;
+- the R version, and the version of every package the namespace imports.
+
+The definitions are saved only when they read nothing but the names they bind themselves and the
+`methods` and base functions that build S4 objects, such as `setClass()`, `representation()`, `c()`
+and `function`, so no other code in the package can change what they produce. A definition that
+reads a package constant, as in `prototype(side = ZERO)`, still runs in every process. Nothing is
+saved when running them signalled a message or a warning, so a later process shows it again. The
+directory is safe to delete.
+
+### Source references
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
 into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an
 interactive session.
+
+## The load-index cache
+
+A load reads its analysis of the package from a cache when an earlier process analyzed exactly the
+same sources, so a cold start parses nothing until code runs. The cache lives in
+`$XDG_CACHE_HOME/ry/load-index` (`~/.cache/ry/load-index` by default), holds one entry per package
+root, and is safe to delete. An entry is used only for the same `DESCRIPTION`, `NAMESPACE` and `R/`
+texts, the same strict setting, and the same build of ry.
 
 ## A reload
 

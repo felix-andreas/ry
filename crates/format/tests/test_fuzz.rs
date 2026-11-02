@@ -1,7 +1,7 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
 use {
-    format::{Config, check_format_invariants as check_invariants, format},
+    format::{Config, check_format_invariants, check_range_format_invariants, format},
     std::panic::catch_unwind,
     syntax::testing::{
         SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes,
@@ -161,6 +161,14 @@ const REGRESSIONS: &[&str] = &[
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
 ];
 
+/// Whole-file and range formatting share every generated input: a range
+/// edit is a slice of the whole-file layout, so a bug in either shows up as a
+/// broken range invariant.
+fn check_invariants(input: &str) {
+    check_format_invariants(input);
+    check_range_format_invariants(input);
+}
+
 fn iterations() -> usize {
     fuzz_iterations(1500)
 }
@@ -187,7 +195,7 @@ fn fuzz_regressions_hold_invariants() {
 fn fixture_sources_hold_invariants() {
     let sources = fixture_case_sources();
     for (_, source) in &sources {
-        check_invariants(source);
+        check_format_invariants(source);
     }
     assert!(
         sources.len() > 100,
@@ -205,7 +213,7 @@ fn program_corpus_holds_invariants() {
         sources.len()
     );
     for (id, source) in &sources {
-        catch_unwind(|| check_invariants(source))
+        catch_unwind(|| check_format_invariants(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a format invariant"));
     }
 }
@@ -269,4 +277,83 @@ fn run_seed_mutations(budget: usize) {
     for _ in 0..budget {
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     }
+}
+
+/// The whole-file invariants over every R file under `RY_FORMAT_DIR`, for
+/// sweeping a real code base: `RY_FORMAT_DIR=path cargo test --release -p
+/// format --test test_fuzz format_directory -- --ignored --nocapture`. Real
+/// code should never refuse, so a refusal is reported like a broken invariant.
+#[test]
+#[ignore = "needs RY_FORMAT_DIR"]
+fn format_directory() {
+    let Some(root) = std::env::var_os("RY_FORMAT_DIR") else {
+        panic!("set RY_FORMAT_DIR to the directory to sweep");
+    };
+    let mut files = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(root)];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "R" || extension == "r")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
+    std::panic::set_hook(Box::new(|_| {}));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = files.get(index) else { break };
+                    let Ok(bytes) = std::fs::read(path) else {
+                        continue;
+                    };
+                    let source = String::from_utf8_lossy(&bytes);
+                    let problem = match catch_unwind(|| check_format_invariants(&source)) {
+                        Err(payload) => Some(
+                            payload
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .unwrap_or_else(|| "panic".to_owned()),
+                        ),
+                        Ok(()) => format(&source, Config::default())
+                            .err()
+                            .map(|error| format!("refused: {error}")),
+                    };
+                    if let Some(problem) = problem {
+                        let problem: String = problem.chars().take(400).collect();
+                        failures
+                            .lock()
+                            .expect("no worker panics while holding the lock")
+                            .push(format!("{}: {problem}", path.display()));
+                    }
+                }
+            });
+        }
+    });
+    drop(std::panic::take_hook());
+    let mut failures = failures.into_inner().expect("the workers are done");
+    failures.sort();
+    for failure in &failures {
+        println!("{failure}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} files broke an invariant or refused",
+        failures.len(),
+        files.len()
+    );
 }

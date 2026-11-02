@@ -47,8 +47,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   if (plan$full) {
     state <- .ry_new_package(plan, root)
+  } else if (.ry_reaches_deferred_s4(state, plan)) {
+    .ry_force_s4(state)
   }
   state$export_all <- export_all
+  state$namespace_spec <- plan$namespace
   # Exports are resynced by scanning every name in the namespace, which a reload that only
   # rebinds existing names cannot change.
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
@@ -67,7 +70,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   .ry_commit(root)
   if (!quiet) {
     elapsed <- proc.time()[["elapsed"]] - started
-    message(.ry_summary(plan, elapsed))
+    held <- if (is.null(state$s4_deferred)) 0L else length(state$s4_deferred$run)
+    message(.ry_summary(plan, elapsed, held))
   }
   invisible(state$ns)
 }
@@ -129,6 +133,10 @@ View <- function(x, title) {
 
 .ry_new_package <- function(plan, root) {
   name <- plan$package
+  previous <- .ry_packages[[root]]
+  if (!is.null(previous)) {
+    .ry_drop_deferred_s4(previous)
+  }
   .ry_teardown(name)
   for (package in plan$depends) {
     if (!(paste0("package:", package) %in% search())) {
@@ -206,10 +214,19 @@ View <- function(x, title) {
     .ry_bind_lazily(state, plan, keep)
   }
   .ry_phase("bind lazily")
+  if (plan$full && !is.null(plan$deferred_s4) && .ry_may_defer_s4(state, plan$deferred_s4)) {
+    .ry_defer_s4(state, plan$deferred_s4)
+  }
   if (length(plan$run_path)) {
     previous <- options(topLevelEnvironment = ns)
     on.exit(options(previous), add = TRUE)
     for (i in seq_along(plan$run_path)) {
+      # Code that runs at load may reach a deferred class or generic, which runs the
+      # definitions placed before it, and the rest then run here in their places.
+      if (!is.null(state$s4_deferred) && i %in% state$s4_deferred$run) {
+        next
+      }
+      state$s4_cursor <- i
       withCallingHandlers(
         .ry_run(state, plan, i, keep),
         error = function(error) {
@@ -218,6 +235,7 @@ View <- function(x, title) {
       )
     }
   }
+  state$s4_cursor <- NULL
   .ry_phase("run")
   if (!identical(plan$sysdata, "keep")) {
     if (length(state$sysdata)) {
@@ -230,7 +248,7 @@ View <- function(x, title) {
     }
   }
   if (isNamespaceLoaded("methods") && (plan$full || isTRUE(plan$registers_s4)) &&
-      .ry_has_s4_metadata(ns)) {
+      .ry_has_s4_metadata(ns, state$s4_deferred$names)) {
     methods::cacheMetaData(ns, TRUE, ns)
   }
   .ry_phase("S4 caches")
@@ -262,6 +280,156 @@ View <- function(x, title) {
   if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
     get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
   }
+}
+
+# A fresh load may hold back the package's S4 definitions (`plan$deferred_s4`, which the
+# loader's `DeferredS4` documents) until code first reaches one of them: each name they bind is
+# a promise that runs them all, and so is looking up one of their classes or generics by name.
+.ry_defer_s4 <- function(state, deferred) {
+  state$s4_deferred <- deferred
+  force <- function() .ry_force_s4(state)
+  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, deferred$generics, force))
+  for (name in deferred$names) {
+    .ry_s4_placeholder(state, name)
+  }
+}
+
+.ry_s4_placeholder <- function(state, name) {
+  delayedAssign(name, {
+    .ry_force_s4(state)
+    get(name, envir = state$ns, inherits = FALSE)
+  }, assign.env = state$ns)
+}
+
+# Runs the held-back definitions. During the load that deferred them, only those placed before
+# the statement now running run here, and that statement's loop runs the rest in their places.
+.ry_force_s4 <- function(state) {
+  deferred <- state$s4_deferred
+  if (is.null(deferred)) {
+    return(invisible())
+  }
+  state$s4_deferred <- NULL
+  ns <- state$ns
+  rm(list = deferred$names[deferred$names %in% names(ns)], envir = ns)
+  # The attached package environment shares the placeholder bindings, and the methods package
+  # searches it too, so a copy left there would make the definitions read their own placeholder.
+  if (!is.null(state$package_env)) {
+    environment <- state$package_env
+    rm(list = deferred$names[deferred$names %in% names(environment)], envir = environment)
+  }
+  held <- .Internal(ryLoaderDeferred(state$root))
+  loading <- !is.null(state$s4_cursor)
+  previous <- options(topLevelEnvironment = ns)
+  on.exit({
+    options(previous)
+    .Internal(ryLoaderUndefer(state$root))
+  }, add = TRUE)
+  # Only a run of all the definitions at once is the same in every process, so only that one
+  # is saved or restored.
+  cache <- if (!loading && !is.null(deferred$cache_key)) {
+    .ry_s4_cache(ns, deferred$cache_key, held$cache)
+  }
+  if (!.ry_restore_s4(ns, cache)) {
+    before <- names(ns)
+    signalled <- FALSE
+    withCallingHandlers(
+      for (k in seq_along(held$position)) {
+        if (loading && held$position[[k]] >= state$s4_cursor) {
+          break
+        }
+        withCallingHandlers(
+          .Internal(ryLoaderRunDeferred(state$root, ns, k)),
+          error = function(error) {
+            message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
+          }
+        )
+      },
+      message = function(condition) signalled <<- TRUE,
+      warning = function(condition) signalled <<- TRUE
+    )
+    # A message or warning must show again in the next process, so a run that signalled one
+    # is not saved.
+    if (!is.null(cache) && !signalled) {
+      .ry_save_s4(ns, cache, setdiff(names(ns), before))
+    }
+  }
+  if (!loading) {
+    methods::cacheMetaData(ns, TRUE, ns)
+    .ry_sync_exports(ns, state$namespace_spec, state$export_all)
+    if (!is.null(state$package_env)) {
+      .ry_sync_package_env(state)
+    }
+  }
+  invisible()
+}
+
+# Where the held-back definitions' bindings are saved, and what must match for a later process
+# to restore them: the definitions' own text (`key`), the version of R, which fixes the methods
+# package, and the versions of the packages the namespace imports, whose classes and generics
+# the definitions may extend.
+.ry_s4_cache <- function(ns, key, path) {
+  if (is.null(path)) {
+    return(NULL)
+  }
+  imports <- setdiff(unique(names(getNamespaceImports(ns))), "base")
+  versions <- vapply(imports, function(package) {
+    as.character(getNamespaceVersion(asNamespace(package)))
+  }, "")
+  list(path = path, key = key, r = R.version.string, imports = versions)
+}
+
+# Binds what an earlier process saved for exactly these definitions, which then need not run,
+# and reports whether it did. A saved file that is missing, stale or unreadable means running
+# them, as it does on the first load.
+.ry_restore_s4 <- function(ns, cache) {
+  if (is.null(cache) || !file.exists(cache$path)) {
+    return(FALSE)
+  }
+  saved <- tryCatch(readRDS(cache$path), error = function(error) NULL)
+  if (!identical(saved[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
+    return(FALSE)
+  }
+  list2env(saved$values, envir = ns)
+  TRUE
+}
+
+# Saves the bindings the held-back definitions made, replacing the file atomically so that a
+# concurrent load reads either the old file or the new one. Failing to save only costs the
+# next process the run, so a failure is reported as a warning and the load goes on.
+.ry_save_s4 <- function(ns, cache, names) {
+  saved <- c(cache[c("key", "r", "imports")], list(values = mget(names, envir = ns)))
+  directory <- dirname(cache$path)
+  temporary <- paste0(cache$path, ".", Sys.getpid())
+  tryCatch({
+    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(saved, temporary)
+    file.rename(temporary, cache$path)
+  }, error = function(error) {
+    unlink(temporary)
+    warning(sprintf("could not save the S4 metadata cache: %s", conditionMessage(error)),
+      call. = FALSE)
+  })
+  invisible()
+}
+
+# A reload that reruns or undoes an S4 registration, or rebinds a name the held-back
+# definitions bind, applies to them as already run.
+.ry_reaches_deferred_s4 <- function(state, plan) {
+  deferred <- state$s4_deferred
+  !is.null(deferred) && (isTRUE(plan$registers_s4) || length(plan$unregister) > 0L ||
+    any(c(plan$remove, plan$bind_name) %in% deferred$names))
+}
+
+# A fresh load replaces the namespace, so what the old one held back is never needed: running
+# it would only register classes that the teardown removes again.
+.ry_drop_deferred_s4 <- function(state) {
+  deferred <- state$s4_deferred
+  if (is.null(deferred)) {
+    return(invisible())
+  }
+  state$s4_deferred <- NULL
+  .Internal(ryLoaderUndefer(state$root))
+  rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
 }
 
 .ry_import <- function(ns, name, imports) {
@@ -304,8 +472,9 @@ View <- function(x, title) {
   invisible()
 }
 
-.ry_has_s4_metadata <- function(ns) {
+.ry_has_s4_metadata <- function(ns, except = character()) {
   names <- names(ns)
+  names <- names[!(names %in% except)]
   any(startsWith(names, ".__C__")) || any(startsWith(names, ".__T__")) ||
     any(startsWith(names, ".__A__"))
 }
@@ -493,14 +662,19 @@ View <- function(x, title) {
   }
 }
 
-.ry_summary <- function(plan, elapsed) {
+.ry_summary <- function(plan, elapsed, held = 0L) {
   count <- function(n, singular, plural) sprintf("%d %s", n, if (n == 1L) singular else plural)
   timing <- sprintf("in %.0f ms", elapsed * 1000)
   if (plan$full) {
-    return(sprintf("Loaded %s: %s bound lazily, %s run, %s.", plan$package,
-                   count(length(plan$bind_name), "definition", "definitions"),
-                   count(length(plan$run_path), "top-level statement", "top-level statements"),
-                   timing))
+    parts <- c(
+      sprintf("%s bound lazily", count(length(plan$bind_name), "definition", "definitions")),
+      sprintf("%s run", count(length(plan$run_path) - held, "top-level statement",
+                              "top-level statements")),
+      if (held > 0L) {
+        sprintf("%s held back until first use", count(held, "S4 definition", "S4 definitions"))
+      }
+    )
+    return(sprintf("Loaded %s: %s, %s.", plan$package, paste(parts, collapse = ", "), timing))
   }
   parts <- c(
     if (length(plan$bind_name)) count(length(plan$bind_name), "definition rebound", "definitions rebound"),

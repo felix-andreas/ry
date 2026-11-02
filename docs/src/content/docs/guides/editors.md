@@ -30,7 +30,9 @@ You get:
   from a name to its argument, call, statement and block
 - semantic highlighting of parameters, called functions and package namespaces, which an R grammar
   cannot tell apart, with functions from packages and base R marked as library functions
-- formatting with the same rules as `ry fmt`
+- formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
+  (a line break lays out the line you finished, and `}` the block it closes, when your editor
+  formats on type)
 - code lenses: "Run file" above a script, "Run test" and "Debug test" above each testthat
   `test_that()` block, and a reference count above each function
 
