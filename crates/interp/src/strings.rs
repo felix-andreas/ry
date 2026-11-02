@@ -1705,7 +1705,18 @@ unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
                 _ => char::from_u32(point as u32).map(String::from),
             })
             .collect();
-        return string_vector_na(&texts);
+        let result = alloc(SexpType::String, texts.len())?;
+        crate::heap().root(result);
+        for (index, text) in texts.iter().enumerate() {
+            match text {
+                Some(text) => {
+                    let charsxp = values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?;
+                    values::set_elt(result, index, charsxp);
+                }
+                None => values::set_elt(result, index, na_string()),
+            }
+        }
+        return Ok(result);
     }
     let mut text = String::with_capacity(points.len());
     let mut index = 0;
@@ -1731,7 +1742,9 @@ unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
             None => return values::scalar_string_charsxp(na_string()),
         }
     }
-    scalar_string(&text)
+    // The code points are the text, so one in the range that stands in for a byte elsewhere
+    // (`values::escape_invalid_bytes`) stays that character rather than turning into the byte.
+    values::scalar_string_charsxp(values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?)
 }
 
 unsafe fn do_char_to_raw(call: &Call<'_>) -> R<Sexp> {
