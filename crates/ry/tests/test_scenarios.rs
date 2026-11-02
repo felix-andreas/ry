@@ -1557,13 +1557,20 @@ impl DebugSession {
 /// Kills `child` and every process it started, such as the R session a runtime runs in, which
 /// would otherwise keep the output pipes open.
 fn kill_group(child: &mut Child) -> Result<(), String> {
-    let status = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .status()
-        .map_err(|error| format!("running kill: {error}"))?;
-    if !status.success() {
-        return Err(format!("kill failed: {status}"));
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .status()
+            .map_err(|error| format!("running kill: {error}"))?;
+        if !status.success() {
+            return Err(format!("kill failed: {status}"));
+        }
     }
+    #[cfg(not(unix))]
+    child
+        .kill()
+        .map_err(|error| format!("killing ry: {error}"))?;
     child
         .wait()
         .map_err(|error| format!("waiting for ry: {error}"))?;

@@ -6330,7 +6330,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## A splice reparse refuses a prefix with an unclosed delimiter
 
-- **Shape.** `reparse::try_splice` (`crates/syntax/src/reparse.rs`) falls back to a full parse when the old tree reports an unclosed delimiter or unterminated string before the edit.
+- **Shape.** `reparse::try_splice` (`crates/syntax/src/reparse.rs`) falls back to a full parse when the old tree reports an unclosed delimiter or unterminated string before the edit, or a missing closer (an error whose message says "to close", as for a `[[` closed by a single `]`, which never says "unclosed"). The closer phrase also matches other recoveries, such as a type argument list's `>`; that only costs a full parse.
 - **Why.** Recovery ends such a group early, so a closer the edit adds anywhere after it closes the group in a full parse and reshapes the tree up to it. Files with such an error are already broken, so the fallback costs little.
 
 ## Every seeded harness rotates through `FUZZ_SEED`
