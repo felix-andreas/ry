@@ -6,7 +6,7 @@ use {
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
-        conditions,
+        conditions, interp,
         long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
@@ -308,10 +308,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("xtfrm", 1, |call| unsafe {
         // GNU R's `xtfrm.default` ranks a raw vector, and `rank` refuses a bare one.
-        if call.arg(0).kind() == SexpType::Raw && !call.arg(0).is_object() {
+        let x = call.arg(0);
+        if x.kind() == SexpType::Raw && !x.is_object() {
             return Err(error("raw vectors cannot be sorted"));
         }
-        Ok(call.arg(0))
+        if matches!(x.kind(), SexpType::Integer | SexpType::Real) && !x.is_object() {
+            return Ok(x);
+        }
+        // Without a method, GNU R falls back to the closure `xtfrm.default`, which ranks
+        // anything that is not numeric, so character and logical vectors sort by rank.
+        let quoted = values::call(symbols().quote, &[x])?;
+        let fallback = values::call(values::install("xtfrm.default")?, &[quoted])?;
+        crate::eval::eval(fallback, values::base_namespace())
     })
     .generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
@@ -1839,6 +1847,11 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
+    // GNU R answers a comparison of two plain scalars with its shared `TRUE`, `FALSE` or `NA`,
+    // and packages compare against those addresses (data.table's `setattr` does).
+    if count == 1 && result.attrib() == nil() {
+        return values::scalar_logical(values::ints(result)[0]);
+    }
     Ok(result)
 }
 
@@ -2169,7 +2182,28 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Integer | SexpType::Logical | SexpType::Real => {
+        SexpType::Real => {
+            let result = values::alloc_uninit(SexpType::Real, count)?;
+            let source = values::reals(operand);
+            let target = values::reals_mut(result);
+            // The common functions get their own loop, so the function is not re-chosen for
+            // every element and the loop has no call left to keep it from being vectorized.
+            let produced_nan = match function {
+                Math::Floor => map_reals(source, target, f64::floor),
+                Math::Ceiling => map_reals(source, target, f64::ceil),
+                Math::Trunc => map_reals(source, target, f64::trunc),
+                Math::Abs => map_reals(source, target, f64::abs),
+                Math::Sqrt => map_reals(source, target, f64::sqrt),
+                Math::Exp => map_reals(source, target, f64::exp),
+                _ => map_reals(source, target, |x| math_value(function, x)),
+            };
+            values::copy_most_attributes(operand, result, true)?;
+            if produced_nan {
+                conditions::warning_call(call.call, "NaNs produced")?;
+            }
+            Ok(result)
+        }
+        SexpType::Integer | SexpType::Logical => {
             let result = alloc(SexpType::Real, count)?;
             let mut produced_nan = false;
             for index in 0..count {
@@ -2193,6 +2227,18 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
         SexpType::Complex => complex_math(call, function, operand),
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
+}
+
+/// Writes `function` of each element of `source` into `target`, keeping NA as NA, and reports
+/// whether a NaN came out of a value that was not NaN.
+fn map_reals(source: &[f64], target: &mut [f64], function: impl Fn(f64) -> f64) -> bool {
+    let mut produced_nan = false;
+    for (slot, &x) in target.iter_mut().zip(source) {
+        let value = if is_na_real(x) { NA_REAL } else { function(x) };
+        produced_nan |= value.is_nan() & !x.is_nan();
+        *slot = value;
+    }
+    produced_nan
 }
 
 unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp> {
@@ -2424,9 +2470,24 @@ fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
+    // GNU R counts the arguments before matching them, and blames the calling closure for a
+    // wrong count or a lone argument that is not `x`.
+    if call.is_empty() || call.len() > 2 {
+        let name = if significant { "signif" } else { "round" };
+        return Err(error(format!(
+            "{} arguments passed to '{name}' which requires 1 or 2 arguments",
+            call.len()
+        )));
+    }
+    let missing_operand = "argument \"x\" is missing, with no default";
+    if let [only] = call.args
+        && only.tag != nil()
+        && values::symbol_name(only.tag) != "x"
+    {
+        return Err(error(missing_operand));
+    }
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0])
-        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0]).ok_or_else(|| call.error(missing_operand))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),
@@ -2588,7 +2649,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             SexpType::Integer | SexpType::Logical,
             Cumulative::Sum | Cumulative::Max | Cumulative::Min,
         ) => {
-            let result = alloc(SexpType::Integer, count)?;
+            // Every slot is written below, so the result skips zeroing, which costs as much as the
+            // loop on a long vector.
+            let result = values::alloc_uninit(SexpType::Integer, count)?;
             let mut accumulator: Option<i64> = None;
             let mut overflow = false;
             for index in 0..count {
@@ -2621,7 +2684,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Sum) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let out = values::reals_mut(result);
             long_double::running_sums(values::reals(operand), out);
             // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
@@ -2636,7 +2699,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Max | Cumulative::Min) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let data = values::reals(operand);
             let out = values::reals_mut(result);
             let mut accumulator = if kind == Cumulative::Max {
@@ -2644,15 +2707,16 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 f64::INFINITY
             };
-            // From the first NaN on every result is NaN, and from the first NA on it is NA. The
-            // comparisons are GNU R's, which keep the new element on a tie, so a signed zero
-            // follows it on every target.
-            for (&value, out) in data.iter().zip(out.iter_mut()) {
-                accumulator = if is_na_real(value) || is_na_real(accumulator) {
-                    NA_REAL
-                } else if value.is_nan() || accumulator.is_nan() {
-                    f64::NAN
-                } else if kind == Cumulative::Max {
+            // The comparisons are GNU R's, which keep the new element on a tie, so a signed zero
+            // follows it on every target. The loop only tests for NaN, and the first one hands
+            // over to the tail below.
+            let mut first_nan = data.len();
+            for (index, (&value, out)) in data.iter().zip(out.iter_mut()).enumerate() {
+                if value.is_nan() {
+                    first_nan = index;
+                    break;
+                }
+                accumulator = if kind == Cumulative::Max {
                     if accumulator > value {
                         accumulator
                     } else {
@@ -2664,6 +2728,12 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                     value
                 };
                 *out = accumulator;
+            }
+            // From the first NaN on every result is NaN, and from the first NA on it is NA.
+            let mut seen_na = false;
+            for (&value, out) in data[first_nan..].iter().zip(&mut out[first_nan..]) {
+                seen_na |= is_na_real(value);
+                *out = if seen_na { NA_REAL } else { f64::NAN };
             }
             result
         }
@@ -3124,6 +3194,20 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
                 ),
             )?;
         }
+        if matches!(item.kind(), SexpType::Logical | SexpType::Integer) {
+            // One pass over the slice, without converting each element through `logical_at`;
+            // any nonzero integer counts as TRUE.
+            let wanted = |value: i32| if is_all { value == 0 } else { value != 0 };
+            let values = values::ints(item);
+            if values
+                .iter()
+                .any(|&value| value != NA_LOGICAL && wanted(value))
+            {
+                return scalar_bool(!is_all);
+            }
+            saw_na |= values.contains(&NA_LOGICAL);
+            continue;
+        }
         for index in 0..length(item) {
             let value = logical_at(item, index);
             if value == NA_LOGICAL {
@@ -3210,6 +3294,14 @@ enum NaTest {
     Infinite,
 }
 
+/// Writes `test` of each element of `source` into `target` as a logical, choosing the test once
+/// for the whole loop.
+fn map_flags<T: Copy>(source: &[T], target: &mut [i32], test: impl Fn(T) -> bool) {
+    for (slot, &value) in target.iter_mut().zip(source) {
+        *slot = test(value) as i32;
+    }
+}
+
 unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     // GNU R tests a pairlist's elements like a list's, but drops the tags.
@@ -3226,24 +3318,24 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
     let result = alloc(SexpType::Logical, count)?;
     match operand.kind() {
         SexpType::Logical | SexpType::Integer => {
-            for index in 0..count {
-                let value = values::ints(operand)[index];
-                values::ints_mut(result)[index] = match test {
-                    NaTest::Na => (value == NA_INTEGER) as i32,
-                    NaTest::NaN | NaTest::Infinite => 0,
-                    NaTest::Finite => (value != NA_INTEGER) as i32,
-                };
+            let target = values::ints_mut(result);
+            let source = values::ints(operand);
+            match test {
+                NaTest::Na => map_flags(source, target, |value| value == NA_INTEGER),
+                NaTest::NaN | NaTest::Infinite => target.fill(0),
+                NaTest::Finite => map_flags(source, target, |value| value != NA_INTEGER),
             }
         }
         SexpType::Real => {
-            for index in 0..count {
-                let value = values::reals(operand)[index];
-                values::ints_mut(result)[index] = match test {
-                    NaTest::Na => value.is_nan() as i32,
-                    NaTest::NaN => (value.is_nan() && !is_na_real(value)) as i32,
-                    NaTest::Finite => value.is_finite() as i32,
-                    NaTest::Infinite => value.is_infinite() as i32,
-                };
+            let target = values::ints_mut(result);
+            let source = values::reals(operand);
+            match test {
+                NaTest::Na => map_flags(source, target, f64::is_nan),
+                NaTest::NaN => {
+                    map_flags(source, target, |value| value.is_nan() && !is_na_real(value))
+                }
+                NaTest::Finite => map_flags(source, target, f64::is_finite),
+                NaTest::Infinite => map_flags(source, target, f64::is_infinite),
             }
         }
         SexpType::Complex => {
@@ -3378,11 +3470,12 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     if length(from) == 0 || length(to) == 0 {
         return Err(call.error("argument of length 0"));
     }
-    // GNU R reads the variable on every call, so a script can switch the check on and off.
-    let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
-        .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
     for operand in [from, to] {
         if length(operand) > 1 {
+            // GNU R reads the variable on every such call, so a script can switch the check on
+            // and off; reading it only here keeps the common scalar call free of the lookup.
+            let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
+                .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
             if strict {
                 return Err(call.error("numerical expression has length > 1"));
             }
@@ -3450,6 +3543,10 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
+        let increment = if start <= end { 1 } else { -1 };
+        if let Some(sequence) = compact_intseq(count, start as i32, increment)? {
+            return Ok(sequence);
+        }
         let result = alloc(SexpType::Integer, count)?;
         let start = start as i64;
         let output = values::ints_mut(result);
@@ -3472,6 +3569,32 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     Ok(result)
 }
 
+/// Sequences at least this long are compact ALTREP objects, as GNU R makes every `1:n`, so
+/// `seq_len(2^31 - 1)` costs nothing until its elements are read. Shorter ones stay ordinary
+/// vectors, which the evaluator's hot loops read without an indirection.
+const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
+
+/// A compact integer sequence when `count` reaches [`COMPACT_SEQUENCE_MIN`] and the host
+/// provides ALTREP classes.
+unsafe fn compact_intseq(count: usize, first: i32, increment: i32) -> R<Option<Sexp>> {
+    if count < COMPACT_SEQUENCE_MIN {
+        return Ok(None);
+    }
+    (interp().hooks.compact_intseq)(count, first, increment)
+}
+
+/// `1, 2, ..., count` as integers.
+unsafe fn one_to(count: usize) -> R<Sexp> {
+    if let Some(sequence) = compact_intseq(count, 1, 1)? {
+        return Ok(sequence);
+    }
+    let result = alloc(SexpType::Integer, count)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result)
+}
+
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3485,11 +3608,7 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
     let count = count as usize;
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
@@ -3499,11 +3618,7 @@ unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
     } else {
         length(object)
     };
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 /// `seq.int(from, to, by, length.out, along.with, ...)`.
@@ -3745,6 +3860,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         }
         return Ok(nil());
     }
+    if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
+        return Err(call.error(format!(
+            "attempt to replicate an object of type '{}'",
+            crate::coerce::type_name(object)
+        )));
+    }
     if count == 0 && length_out.is_none() {
         return values::duplicate(object);
     }
@@ -3835,6 +3956,11 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
         if repeat.is_nan() || repeat < 0.0 {
             return Err(call.error("invalid 'times' value"));
         }
+        if let Some(total) = count.checked_mul(repeat as usize)
+            && let Some(result) = repeat_plain(object, total)?
+        {
+            return keep_factor(object, result);
+        }
         for _ in 0..repeat as usize {
             indices.extend(0..count);
         }
@@ -3850,6 +3976,29 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     keep_factor(object, crate::subset::select_elements(object, &indices)?)
 }
 
+/// The elements of a logical, integer or double `object` recycled to `total`, copied a whole
+/// run at a time; `None` for an empty object or any other type.
+unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
+    fn fill<T: Copy>(target: &mut [T], source: &[T]) {
+        for chunk in target.chunks_mut(source.len()) {
+            chunk.copy_from_slice(&source[..chunk.len()]);
+        }
+    }
+    let kind = object.kind();
+    if length(object) == 0
+        || !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
+    {
+        return Ok(None);
+    }
+    let result = values::alloc_uninit(kind, total)?;
+    if kind == SexpType::Real {
+        fill(values::reals_mut(result), values::reals(object));
+    } else {
+        fill(values::ints_mut(result), values::ints(object));
+    }
+    Ok(Some(result))
+}
+
 unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     if let Some(value) = rep_classed(call, "length.out", true)? {
         return Ok(value);
@@ -3863,6 +4012,11 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid 'length.out' value"));
     }
     let count = length(object);
+    if count > 0
+        && let Some(result) = repeat_plain(object, out as usize)?
+    {
+        return keep_factor(object, result);
+    }
     let indices: Vec<usize> = (0..out as usize)
         .map(|position| {
             if count == 0 {

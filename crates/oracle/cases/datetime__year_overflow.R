@@ -1,0 +1,21 @@
+str(unclass(as.POSIXlt(as.Date(c(8e11, NA)))))
+str(unclass(as.POSIXlt(as.Date(7e11))))
+print(as.Date(c(7e11, NA)))
+print(format(as.POSIXlt(as.Date(c(7e11, 8e11)))))
+print(as.POSIXct(as.Date(8e11)))
+print(as.numeric(as.POSIXct(as.POSIXlt(as.Date(8e11)))))
+str(unclass(as.POSIXlt(.POSIXct(c(6.912e16, -6.912e16, 1), tz = "UTC"))))
+str(unclass(as.POSIXlt(.POSIXct(6.912e16, tz = "EST5EDT"))))
+print(.POSIXct(6.912e16, tz = "UTC"))
+print(as.Date(c(7e11, 8e11, -7e11, -8e11)))
+x <- seq(as.Date("2022-09-01"), by = "weeks", length = 10)
+names(x) <- paste("week", 1:10)
+x
+xl <- as.POSIXlt(x, tz = "UTC")
+fmt <- c("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S %Z")
+x2 <- xl[1:5]
+x2$year <- xl$year[1:3]
+print(x2)
+print(balancePOSIXlt(x2))
+print(strftime(x2, fmt))
+print(strftime(x2, rep(fmt, length = 10)))

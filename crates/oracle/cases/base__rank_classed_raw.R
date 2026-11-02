@@ -1,0 +1,5 @@
+int8 <- function(x) structure(x, class = c("int8", oldClass(x)))
+`[.int8` <- function(x, ...) structure(NextMethod("["), class = class(x))
+r <- int8(as.raw(c(5, 1, 3, 3)))
+rank(r)
+order(r)

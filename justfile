@@ -127,6 +127,26 @@ repl-e2e:
 docs:
     cd docs && bun dev
 
+# Build the docs site from this checkout and upload it to Cloudflare Pages as BRANCH: `main` is the
+# production deploy (while main is the Pages project's production branch), any other name a preview.
+# Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_PAGES_PROJECT.
+docs-deploy $branch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    missing=""
+    for variable in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT; do
+    	if [ -z "${!variable:-}" ]; then missing="$missing $variable"; fi
+    done
+    if [ -n "$missing" ]; then
+    	echo "error: docs-deploy needs these environment variables:$missing (contributing/releasing.md, \"Deploying the docs site\")" >&2
+    	exit 1
+    fi
+    commit=$(git rev-parse HEAD)
+    cd docs
+    bun install --frozen-lockfile
+    bun run build
+    bunx wrangler@4.151.3 pages deploy dist --project-name "$CLOUDFLARE_PAGES_PROJECT" --branch "$branch" --commit-hash "$commit"
+
 vsce *args:
     @bun --cwd=editors/code run vsce -- {{ args }}
 
@@ -142,10 +162,13 @@ build *args:
 zigbuild $target *args:
     cargo zigbuild --target {{ target }} {{ args }}
 
-build-platform-vsix target vscode-target binary-name dir kind:
+# Package the VS Code extension for one platform from its unpacked archive in DIR/ry-TARGET. The
+# extension bundles everything but LICENSE (`ry`, the runtime and `ry-rcmd`), because the bundled
+# `ry` looks for its runtime beside itself.
+build-platform-vsix target vscode-target dir kind:
     rm -rf editors/code/bin
     mkdir -p editors/code/bin
-    cp {{ dir }}/ry-{{ target }}/{{ binary-name }} editors/code/bin
+    find {{ dir }}/ry-{{ target }} -maxdepth 1 -type f ! -name LICENSE -exec cp {} editors/code/bin/ \;
     just build-extension {{ kind }} --target {{ vscode-target }} --out ../../{{ dir }}/ry-{{ vscode-target }}.vsix
 
 build-extension $kind *args:
@@ -169,11 +192,12 @@ bump-version $version:
     vscode_version="${cli_version%%-*}"
     sed -i "s/\"version\": \"[a-zA-Z0-9._-]*\"/\"version\": \"$vscode_version\"/" editors/code/package.json
 
-    # The Zed extension ships no binary, so editors/zed/extension.toml is bumped by hand on
-    # its own version line.
+    # The Zed extension takes the same suffix-free version, so one release names one version in
+    # every channel.
+    sed -i "s/^version = \"[a-zA-Z0-9._-]*\"/version = \"$vscode_version\"/" editors/zed/extension.toml editors/zed/Cargo.toml
 
     cargo check # updates Cargo.lock
-    git add Cargo.toml Cargo.lock editors/code/package.json
+    git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml
     git commit -m "chore: release {{ version }}"
 
 # Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) embedded in it,
@@ -236,6 +260,78 @@ release-dry-run version="0.0.0-dry-run":
     else
     	echo "note: nix is not installed, so the nix package was not built"
     fi
+
+# Fail unless VERSION is a valid release version and Cargo.toml, the VS Code extension and the Zed
+# extension all carry it (the extensions without its -alpha/-beta suffix). The `::error::` prefix
+# makes GitHub Actions show the message as an annotation.
+release-check $version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    workspace=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+    extension=$(sed -n 's/^[[:space:]]*"version": "\(.*\)",$/\1/p' editors/code/package.json | head -n 1)
+    zed=$(sed -n 's/^version = "\(.*\)"/\1/p' editors/zed/extension.toml)
+    if [ "$workspace" != "$version" ] || [ "$extension" != "${version%%-*}" ] || [ "$zed" != "${version%%-*}" ]; then
+    	echo "::error::releasing $version, but Cargo.toml is at $workspace, the VS Code extension at $extension and the Zed extension at $zed; run \`just bump-version $version\` first"
+    	exit 1
+    fi
+    just release-kind "$version" >/dev/null
+
+# Unpack the archives in release/VERSION and package the VS Code extension from them: one `.vsix`
+# per platform, bundling that archive's binaries, plus `ry.vsix` without a binary for every other
+# platform. A platform whose archive is missing is skipped with a note, so this runs locally on one
+# machine's archive; the release workflow always has all three.
+release-assets $version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="release/$version"
+    kind=$(just release-kind "$version")
+    (cd editors/code && bun install --frozen-lockfile)
+    # The universal extension goes first, before build-platform-vsix fills editors/code/bin.
+    rm -rf editors/code/bin
+    just build-extension "$kind" --out "../../$dir/ry.vsix"
+    for platform in x86_64-unknown-linux-gnu:linux-x64 aarch64-apple-darwin:darwin-arm64 x86_64-pc-windows-gnullvm:win32-x64; do
+    	target=${platform%%:*}
+    	unpacked="$dir/ry-$target"
+    	if [ -f "$unpacked.tar.gz" ]; then
+    		rm -rf "$unpacked" && mkdir -p "$unpacked" && tar -xzf "$unpacked.tar.gz" -C "$unpacked"
+    	elif [ -f "$unpacked.zip" ]; then
+    		rm -rf "$unpacked" && mkdir -p "$unpacked" && unzip -q "$unpacked.zip" -d "$unpacked"
+    	else
+    		echo "note: $dir has no archive for $target, so its extension was not packaged" >&2
+    		continue
+    	fi
+    	just build-platform-vsix "$target" "${platform#*:}" "$dir" "$kind"
+    done
+    rm -rf editors/code/bin
+
+# Publish release/VERSION: create the GitHub release with every archive and `.vsix` (or refresh the
+# assets of one a failed run left behind), then publish each `.vsix` to the VS Code Marketplace.
+# Needs `gh` signed in (GH_TOKEN in CI) and, outside CI, a VSCE_PAT.
+release-publish $version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="release/$version"
+    kind=$(just release-kind "$version")
+    assets=("$dir"/ry-*.tar.gz "$dir"/ry-*.zip "$dir"/*.vsix)
+    if gh release view "$version" >/dev/null 2>&1; then
+    	gh release upload "$version" --clobber "${assets[@]}"
+    else
+    	prerelease=""
+    	if [ "$kind" = pre-release ]; then prerelease="--prerelease"; fi
+    	gh release create "$version" $prerelease --target "${GITHUB_SHA:-$(git rev-parse HEAD)}" --title "ry $version" \
+    		--notes "See the [news page](https://ry-lang.org/news/) for what changed." "${assets[@]}"
+    fi
+    # Without a VSCE_PAT, vsce publishes with trusted publishing (`--oidc`), which needs vsce 4.1 and
+    # a policy for the release workflow on the publisher's Marketplace page. Packaging stays on the
+    # locked vsce, because 4.1 rejects bun's node_modules layout when it lists dependencies, and
+    # publishing a finished .vsix lists none. `--skip-duplicate` lets a rerun finish a partly
+    # published release.
+    options=(--skip-duplicate)
+    if [ "$kind" = pre-release ]; then options+=(--pre-release); fi
+    if [ -z "${VSCE_PAT:-}" ]; then options+=(--oidc); fi
+    for vsix in "$dir"/ry-*.vsix "$dir"/ry.vsix; do
+    	npx --yes @vscode/vsce@4.1.0 publish "${options[@]}" --packagePath "$vsix"
+    done
 
 # Clone r-lib repos to test formatting against.
 rlib-clone:

@@ -2,7 +2,7 @@
 //! scales the mutation budget.
 
 use {
-    ide::testing::check_ide_invariants as sweep,
+    ide::testing::{check_ide_invariants as sweep, check_refactor_invariants},
     syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed},
 };
 
@@ -60,5 +60,33 @@ fn fuzz_deep() {
             text.push_str(SEEDS[rng.below(SEEDS.len())]);
         }
         sweep(&text);
+    }
+}
+
+const REFACTOR_SEEDS: &[&str] = &[
+    "f <- function(a, b) {\n  total <- sum(a * b, na.rm = TRUE)\n  total / length(a)\n}\n",
+    "summarise <- function(values, weights) {\n  scaled <- values * weights\n  total <- sum(scaled)\n  total / length(values)\n}\n",
+    "#: fn(price: double, [rate]: double) -> double\ndiscount <- function(price, rate = 0.1) {\n  price * (1 - rate)\n}\n",
+    "discount <- function(price: double, rate: double = 0.1) -> double price * (1 - rate)\n",
+    "#: <T> fn(x: T) -> T\nidentity2 <- function(x) x\ncount: integer <- 0L\n",
+    "f <- function(xs) {\n  limit <- 10\n  out <- c()\n  for (x in xs) if (x > limit) out <- c(out, x)\n  out\n}\n",
+    "g <- function(x) {\n  if (x < 0) return(NA)\n  y <- sqrt(x)\n  z <- y + 1\n  y * z\n}\n",
+    "make <- function() {\n  total <- 0\n  add <- function(n) total <<- total + n\n  add\n}\n",
+    "rate <- 0.05\ngrow <- function(x, years) x * (1 + rate)^years\nprint(grow(100, 2))\n",
+    "h <- function(df) {\n  n <- nrow(df)\n  m <- quote(a + b)\n  ok <- is.null(df) || n == 0\n  df |> head(n)\n}\n",
+];
+
+#[test]
+fn refactor_seeds_keep_code_valid() {
+    for seed in REFACTOR_SEEDS {
+        check_refactor_invariants(seed);
+    }
+}
+
+#[test]
+fn refactor_seed_mutations_keep_code_valid() {
+    let mut rng = SplitMix64(0x0EF0_C7A1);
+    for _ in 0..fuzz_iterations(40) {
+        check_refactor_invariants(&mutate_seed(&mut rng, REFACTOR_SEEDS, 8));
     }
 }

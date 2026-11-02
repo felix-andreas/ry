@@ -61,6 +61,7 @@ pub mod native;
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
+pub mod plotmath;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -134,6 +135,12 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
+    /// A compact ALTREP integer sequence of the length, first element and increment (1 or
+    /// -1), or `None` when the host has no ALTREP classes.
+    pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
+    /// `as.character` of an integer or double vector without attributes as a vector that
+    /// converts each element when it is read, or `None` when the host has no such class.
+    pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -251,6 +258,7 @@ pub struct Interp {
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
+    pub method_cache: dispatch::MethodCache,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -365,6 +373,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
+        method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
@@ -389,6 +398,8 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        compact_intseq: |_, _, _| Ok(None),
+        defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),

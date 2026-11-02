@@ -1,3 +1,4 @@
+# oracle: requires ragg
 # Recording and replaying grid and base drawing through the engine's display list, checked by
 # capturing the pixels on a ragg device before and after.
 library(grid)

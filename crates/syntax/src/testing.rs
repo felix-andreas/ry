@@ -232,6 +232,11 @@ pub fn check_parse_invariants(input: &str) {
         if let Some(inner) = window.root().descendants().nth(1) {
             let nested = Arc::new(window.subtree(inner));
             check_navigation(&SyntaxNode::new_root(nested.clone()), nested.text());
+            let detached = nested.detach();
+            assert!(
+                detached == *nested && detached.same_parents(&nested),
+                "a detached window differs from its source for input {input:?}"
+            );
         }
     }
 

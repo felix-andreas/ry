@@ -31,7 +31,7 @@ instead.
 
 **Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has one archive
 per platform: `ry-x86_64-unknown-linux-gnu.tar.gz`,
-`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-msvc.zip`. Name the tag in the URL,
+`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL,
 because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
 points at 0.1.1. On a Mac:
 
@@ -106,7 +106,7 @@ that directory cannot hold a library (it is read-only, or mounted `noexec`), set
 to another directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in
 `deps/`, or in `../lib/ry/` takes precedence over the built-in one, which is how a development
 build and a distribution's package find theirs. The Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
-`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
+`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `x86_64-pc-windows-gnu` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
 it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 

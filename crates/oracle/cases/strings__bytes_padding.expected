@@ -1,0 +1,28 @@
+[stdout]
+| [1] "abc"      "\\xff\\xfe" "d"       
+| [1] abc      \\xff\\xfe d       
+|          a          b 
+| "\\xff\\xfe"       "zz" 
+| [1] "       abc" "\\xff\\xfe" "         d"
+| [1] "abc       " "\\xff\\xfe" "d         "
+| [1] "abc       " "\\xff\\xfe" "d         "
+| [1] 10  8 10
+|      [,1]  [,2]       [,3]
+| [1,] "abc" "\\xff\\xfe" "d" 
+| [1] "\\xe9t\\xe9"   "long string"
+|            v
+| 1        abc
+| 2 \\xff\\xfe
+| 3          d
+| [1] "unknown" "unknown" "unknown"
+| [1] 10  8 10
+| [1] "a\\b" "x   "
+| [1] "a\\b" "x"   
+| [1] q"\\xff     abcdefghij
+| [1] abc      \\xff\\xfe d       
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| structure(c("abc", "\\xff\\xfe", "d"), class = "noquote")

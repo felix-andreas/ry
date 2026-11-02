@@ -374,6 +374,13 @@ impl Parser<'_> {
                 Some(WHITESPACE | NEWLINE | ANNOTATION_MARKER | COMMENT)
             )
         {
+            // `#` after an annotation starts a plain comment, so a second `#:` on the line would
+            // be read as prose and its type silently dropped.
+            if self.at(COMMENT) && self.token_str(self.pos).starts_with("#:") {
+                self.error_here(
+                    "a second `#:` annotation on this line is read as a comment. Put each annotation on its own `#:` line",
+                );
+            }
             self.bump();
         }
     }
