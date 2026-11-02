@@ -206,6 +206,12 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// Sizes the resolution cache up front, for a table about to check `expressions`
+    /// expressions: grown from empty, it rehashes several times in every item check.
+    pub fn reserve_resolutions(&mut self, expressions: usize) {
+        self.resolve_cache.get_mut().1.reserve(expressions);
+    }
+
     /// Also expands aliases. Self-referential bindings and aliases cut to
     /// `Unknown` instead of expanding forever.
     pub fn resolve(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {

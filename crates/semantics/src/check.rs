@@ -635,6 +635,7 @@ fn check_item_in<'db>(
     record_strict_origins: bool,
 ) -> ItemCheck<'db> {
     let mut table = InferenceTable::default();
+    table.reserve_resolutions(module.expression_count());
     if let Some(globals) = globals {
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
@@ -1272,7 +1273,7 @@ struct JoinedColumn<'db> {
 /// re-running inference.
 #[derive(Clone)]
 struct CallArgument<'db> {
-    name: Option<String>,
+    name: Option<Symbol>,
     name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`).
     ty: Option<Ty<'db>>,
@@ -2431,12 +2432,12 @@ impl<'db> Checker<'db, '_> {
                     validated_namespace_name(self.db, self.library, *internal, package, name);
                 let reaches_project = namespace_reaches_project(self.db, package);
                 let name = *name;
-                match validated.as_ref().and_then(|name| {
+                match validated.and_then(|name| {
                     let globals = self.globals?;
                     if reaches_project {
-                        globals.namespace_scheme(Symbol::new(name))
+                        globals.namespace_scheme(name)
                     } else {
-                        globals.library_candidates(name)?.last().cloned()
+                        globals.library_candidates(&name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -5770,11 +5771,11 @@ impl<'db> Checker<'db, '_> {
         };
         let class = name.text(self.db);
         ["-", "Arith", "Ops"].iter().any(|prefix| {
-            let method = format!("{prefix}.{class}");
+            let method = method_symbol(prefix, class);
             globals
-                .overloads(Symbol::new(&method), false)
+                .overloads(method, false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(Symbol::new(&method), false).is_some()
+                || globals.scheme(method, false).is_some()
         })
     }
 
@@ -5790,11 +5791,11 @@ impl<'db> Checker<'db, '_> {
             return false;
         };
         ["!", "Ops"].iter().any(|prefix| {
-            let method = format!("{prefix}.{class}");
+            let method = method_symbol(prefix, class);
             globals
-                .overloads(Symbol::new(&method), false)
+                .overloads(method, false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(Symbol::new(&method), false).is_some()
+                || globals.scheme(method, false).is_some()
         })
     }
 
@@ -6365,16 +6366,16 @@ impl<'db> Checker<'db, '_> {
         let mut declared_any = false;
         for (class_index, class) in classes.iter().enumerate() {
             for method in [
-                format!("{spelling}.{class}"),
-                format!("{group}.{class}"),
-                format!("Ops.{class}"),
+                method_symbol(spelling, class),
+                method_symbol(group, class),
+                method_symbol("Ops", class),
             ] {
                 let Some(candidates) = globals
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(Symbol::new(&method), false)
+                            .scheme(method, false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -7606,7 +7607,7 @@ impl<'db> Checker<'db, '_> {
                         id,
                         range,
                         callee,
-                        name.to_string(),
+                        name,
                         &candidates,
                         &call_arguments,
                     );
@@ -9345,13 +9346,13 @@ impl<'db> Checker<'db, '_> {
         let TyKind::Named(name, _) = nominal.kind(self.db) else {
             return None;
         };
-        let method = format!("c.{}", name.text(self.db));
+        let method = method_symbol("c", name.text(self.db));
         self.globals?
-            .scheme(Symbol::new(&method), false)
+            .scheme(method, false)
             .map(|_| nominal)
             .or_else(|| {
                 self.globals?
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .filter(|candidates| !candidates.is_empty())
                     .map(|_| nominal)
             })
@@ -9811,7 +9812,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee) {
                     return None;
                 }
-                name.to_string()
+                *name
             }
             // Namespace access cannot be shadowed by a local binding.
             ExpressionKind::Namespace {
@@ -9842,10 +9843,9 @@ impl<'db> Checker<'db, '_> {
             }
             _ => return None,
         };
-        let schemes = self.globals?.overloads(
-            Symbol::new(&name),
-            self.naming.deferred_non_locals.contains(&callee),
-        )?;
+        let schemes = self
+            .globals?
+            .overloads(name, self.naming.deferred_non_locals.contains(&callee))?;
         if schemes.len() < 2 {
             return None;
         }
@@ -9883,13 +9883,13 @@ impl<'db> Checker<'db, '_> {
             .into_iter()
             .flatten()
             .find_map(|generic| {
-                let method = format!("{generic}.{class}");
+                let method = method_symbol(generic, class);
                 globals
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(Symbol::new(&method), false)
+                            .scheme(method, false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -9922,7 +9922,7 @@ impl<'db> Checker<'db, '_> {
         id: ExprId,
         range: TextRange,
         callee: ExprId,
-        name: String,
+        name: Symbol,
         schemes: &[TypeScheme<'db>],
         call_arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
@@ -10170,7 +10170,7 @@ impl<'db> Checker<'db, '_> {
             None => TypeError {
                 range,
                 kind: TypeErrorKind::NoMatchingOverload {
-                    name,
+                    name: name.to_string(),
                     candidates: schemes.len(),
                     first: candidate_errors.first().cloned().map(Box::new),
                 },
@@ -10316,15 +10316,15 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         callees: &[Ty<'db>],
     ) -> Vec<CallArgument<'db>> {
-        let deferred: Vec<bool> = arguments
-            .iter()
-            .map(|argument| {
+        let deferred = BumpVec::from_iter_in(
+            arguments.iter().map(|argument| {
                 !callees.is_empty()
                     && argument
                         .value
                         .is_some_and(|value| self.needs_parameter_hints(value))
-            })
-            .collect();
+            }),
+            self.arena,
+        );
         let mut call_arguments: Vec<CallArgument<'db>> = arguments
             .iter()
             .zip(&deferred)
@@ -10384,8 +10384,7 @@ impl<'db> Checker<'db, '_> {
             name: self
                 .module
                 .argument_name(argument)
-                .filter(|_| !forwards_dots)
-                .map(|name| name.to_string()),
+                .filter(|_| !forwards_dots),
             name_range: self.module.argument_name_range(argument),
             ty,
             range: argument_range,
@@ -12049,8 +12048,8 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
-        let method = format!("{operator}.{class}");
-        let scheme = self.globals?.scheme(Symbol::new(&method), false)?;
+        let method = method_symbol(operator, class);
+        let scheme = self.globals?.scheme(method, false)?;
         let instantiated = self.instantiate(&scheme);
         match self
             .table
@@ -13067,7 +13066,7 @@ impl<'db> Checker<'db, '_> {
                 call,
                 range,
                 callback.function,
-                callback.name.clone(),
+                Symbol::new(&callback.name),
                 callback.schemes,
                 &call_arguments,
             );
@@ -14330,6 +14329,22 @@ impl<'db> Checker<'db, '_> {
     }
 }
 
+/// The S3 method `generic.class`, spelled in a per-thread buffer: operator, subset and
+/// dispatch checks probe several of these per expression, and a fresh string for each probe
+/// was one of the checker's largest allocation sources.
+fn method_symbol(generic: &str, class: &str) -> Symbol {
+    thread_local! {
+        static SPELLING: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    SPELLING.with_borrow_mut(|spelling| {
+        spelling.clear();
+        spelling.push_str(generic);
+        spelling.push('.');
+        spelling.push_str(class);
+        Symbol::new(spelling)
+    })
+}
+
 /// The one member of a union `select` accepts; `None` when none or several do.
 fn unique_member<'db, T>(
     db: &'db dyn Db,
@@ -15052,8 +15067,8 @@ fn validated_namespace_name(
     internal: bool,
     package: &Option<Symbol>,
     name: &Option<Symbol>,
-) -> Option<String> {
-    let name = name.as_ref()?.to_string();
+) -> Option<Symbol> {
+    let name = (*name)?;
     let Some(package) = package else {
         return Some(name);
     };
@@ -15065,7 +15080,9 @@ fn validated_namespace_name(
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || library.is_some_and(|library| library.exports(package.as_str(), &name)) {
+            if internal
+                || library.is_some_and(|library| library.exports(package.as_str(), name.as_str()))
+            {
                 Some(name)
             } else {
                 None
