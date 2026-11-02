@@ -370,6 +370,43 @@ fn native_functions_agree_across_tiers() {
 }
 
 #[test]
+fn run_time_binding_shadows_cached_global_function() {
+    // Once compiled code has cached the global `g`, a `g` bound in the activation's own frame at
+    // run time, in ways the compiler cannot see, must shadow it.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function() \"global\"");
+        run("setter <- function() assign(\"g\", function() \"local\", envir = parent.frame())");
+        let definitions = [
+            "via_parent <- function(set) { if (set) setter(); g() }",
+            "via_default <- function(set, x = if (set) (g <- function() \"local\")) { x; g() }",
+            "via_qualified <- function(set) { if (set) base::assign(\"g\", function() \"local\"); g() }",
+            "gen <- function(x, set) { if (set) g <- function() \"local\"; UseMethod(\"gen\") }\ngen.default <- function(x, set) g()",
+        ];
+        let calls = ["via_parent", "via_default", "via_qualified", "gen"];
+        let mut outcomes = Vec::new();
+        for (definition, name) in definitions.iter().zip(calls) {
+            run(definition);
+            let call = |set: &str| {
+                if name == "gen" {
+                    format!("gen(1, {set})")
+                } else {
+                    format!("{name}({set})")
+                }
+            };
+            for _ in 0..3 {
+                run(&call("FALSE"));
+            }
+            outcomes.push((name, run(&call("TRUE"))));
+        }
+        jit::install_mode(Mode::Off);
+        for (name, outcome) in outcomes {
+            assert_eq!(outcome, "\"local\"", "{name}");
+        }
+    });
+}
+
+#[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
     with_interpreter(|| unsafe {
