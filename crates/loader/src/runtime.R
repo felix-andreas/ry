@@ -42,6 +42,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   # sourcing the helpers again.
   resync <- !identical(state$export_all, export_all) || (!plan$full && !is.null(helpers))
   if (!plan$full && plan$noop && current && !resync) {
+    state$changed <- character()
     .ry_commit(root)
     if (!quiet && report_noop) {
       message(sprintf("%s is up to date.", plan$package))
@@ -58,11 +59,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   # Exports are resynced by scanning every name in the namespace, which a reload that only
   # rebinds existing names cannot change.
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
-  # A statement that fails leaves the namespace partly updated, so the attached package
-  # environment follows it either way rather than mixing two versions.
   if (!plan$full) {
     .ry_refuse_missing_s3(state, plan)
   }
+  # A statement that fails leaves the namespace partly updated, so the attached package
+  # environment follows it either way rather than mixing two versions.
   applied <- FALSE
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
@@ -70,6 +71,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_source_helpers(state, helpers)
   }
   applied <- TRUE
+  # The names this load rebound or removed, which `ry test` reruns the tests of first. `NULL`
+  # when the load ran code, which may have changed anything.
+  state$changed <- if (plan$full) NULL else plan$touched
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {

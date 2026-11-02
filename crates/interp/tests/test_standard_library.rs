@@ -1012,6 +1012,10 @@ const ERRORS: &[(&str, &str)] = &[
         "`end` must be a whole number, not `NA`",
     ),
     (
+        "List.range(-2147483647L, 2147483647L)",
+        "the list would have 4294967295 elements, more than the limit of 2147483647",
+    ),
+    (
         "List.keep_if(xs, function(x) NA)",
         "`predicate` must return `TRUE` or `FALSE`, not `NA`",
     ),

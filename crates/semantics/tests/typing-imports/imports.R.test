@@ -434,6 +434,52 @@ total: Any
 integer[]
 safe_log: fn(...: Any) -> list{result: Any, error: Any}
 
+#---- arithmetic_on_an_untyped_parameter_may_be_a_matrix
+#namespace import(quadprog)
+qp <- function(sigma) {
+  n <- nrow(sigma)
+  solve.QP(Dmat = 2 * sigma, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
+}
+#++++
+qp: <T: numeric> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
+
+#---- arithmetic_on_a_known_number_is_still_not_a_matrix
+#namespace import(quadprog)
+qp <- function(n) solve.QP(Dmat = 2 * 3, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
+#++++
+qp: Unknown
+62..67 error[type-mismatch] expected `matrix`, found `double`
+
+#---- an_untyped_value_plus_a_period_may_be_a_date
+#namespace import(lubridate)
+business_days <- function(start, days = 45L) {
+  candidates <- start + days(seq_len(days * 2L))
+  candidates[!wday(candidates) %in% c(1L, 7L)]
+}
+#++++
+business_days: <T, U: numeric> fn(start: T, [days]: U) -> Unknown
+
+#---- a_string_plus_a_period_is_still_an_error
+#namespace import(lubridate)
+later <- function() "2024-01-01" + days(1L)
+#++++
+later: Unknown
+49..72 error[type-mismatch] `+` is not defined between `character` and `Period`
+
+#---- a_sum_of_untyped_arithmetic_is_not_a_difftime
+#namespace import(quadprog)
+v <- function(w, mu) sum(w * mu) - qnorm(0.5)
+#++++
+v: fn(w: Unknown, mu: Unknown) -> Unknown
+
+#---- date_minus_untyped_arithmetic_is_still_a_date
+f <- function(x) {
+  d <- as.Date("2020-01-01") - 2 * x
+  d < as.Date("2021-01-01")
+}
+#++++
+f: <T: numeric> fn(x: T) -> logical
+
 #---- polars_members_are_typed
 library(polars)
 frame <- as_polars_df(data.frame(x = c(1, 2)))

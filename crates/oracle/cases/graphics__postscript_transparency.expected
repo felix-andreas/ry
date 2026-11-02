@@ -1,0 +1,18 @@
+[stdout]
+| List of 7
+|  $ patterns       : logi NA
+|  $ clippingPaths  : logi NA
+|  $ masks          : logi NA
+|  $ compositing    : logi NA
+|  $ transformations: logi NA
+|  $ paths          : logi NA
+|  $ glyphs         : logi FALSE
+| [1] 2
+[messages]
+[warnings]
+- semi-transparency is not supported on this device: reported only once per page (in plot.xy(xy, type, ...))
+- semi-transparency is not supported on this device: reported only once per page (in grid.Call.graphics(C_rect, x$x, x$y, x$width, x$height, resolveHJust(x$just, )
+[errors]
+[value]
+integer
+| 2L

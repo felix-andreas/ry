@@ -8,8 +8,8 @@ use {
     heap::Heap,
     interp::{
         distributions::{
-            Deviates, SessionDeviates, rbeta, rbinom, rchisq, rexp, rgamma, rgeom, rhyper,
-            rnbinom, rpois, rsignrank, runif, rweibull,
+            Deviates, SessionDeviates, rbeta, rbinom, rchisq, rexp, rgamma, rgeom, rhyper, rnbinom,
+            rpois, rsignrank, runif, rweibull,
         },
         rmath::*,
     },
