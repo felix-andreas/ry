@@ -65,8 +65,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
   read bundled files at load time (`.onLoad`) fail until this exists.
-- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` sources them itself,
-  but `load_all()` followed by interactive use of a helper does not see it.
+- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
+  sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
+- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
+  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
+  or `src/` does not trigger a rerun.
 - **Importers of a development package keep stale copies** of its changed bindings; only one
   development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a

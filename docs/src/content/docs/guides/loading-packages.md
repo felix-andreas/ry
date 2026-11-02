@@ -73,10 +73,14 @@ ry test --watch                  # rerun after every save
 
 With `--watch`, a save reloads only the definitions you changed and runs first the test files that
 can see the change: the files you edited, and the files that call a changed function directly or
-through other functions. The rest of the suite follows. On the 300,000-line finbench package, the
-first test result arrives about 2 s after you start `ry test`, against about 62 s for
-`devtools::test()`, which loads the whole package first; after an edit, the affected file's result
-arrives within about 1.5 s, where `devtools::test()` reloads for about 68 s.
+through other functions. The rest of the suite follows.
+
+On finbench, a generated package of 308,000 lines and 502 test files, one test file's results
+arrive 1.9 to 2.1 s after you start `ry test --filter`, where `devtools::test(filter =)` takes 62 s,
+nearly all of it spent loading the package. After you save an edit, `--watch` shows the affected
+file's results 0.7 to 1.5 s later, where running `devtools::test()` again takes 68 s. In a
+`--watch` of the whole suite, the one affected file reran 1.2 s after the save, ahead of the other
+501.
 
 ## Controlling reloads
 
