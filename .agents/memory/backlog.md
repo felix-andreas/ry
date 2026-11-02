@@ -2304,9 +2304,29 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
-    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
-    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
-    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates.
+    `nlminb` now runs PORT's drivers (`crates/interp/src/stats_port_minimizer.rs`); rerun these
+    tests to see what is left.
+  - `nlminb` PORT divergences from GNU R (netlib sources: <https://netlib.org/port/>, the `drmn*`,
+    `dg7q*`, `dd7d*`, `dl7*`, `ds7*`, `ds3grd` files; never GNU R's `portsrc.f`). Every routine
+    of the six drivers is translated. Bit for bit with GNU R: unbounded runs with finite
+    differences, a gradient, or a Hessian; bounded runs with a Hessian; the bounded 4-variable
+    quadratic in all three modes; the nlme-like likelihood with and without `scale` and bounds;
+    `trace`; `iter.max`/`eval.max`; starts on an active bound; control errors and code 18
+    (`stats__nlminb_port_paths`). Still diverging: Rosenbrock from (-1.2, 1) in the box
+    [-2, 0.5] x [-2, 2] with finite differences (`DRMNFB`, 21 vs 23 iterations) and with a
+    gradient (`DRMNGB`, 19 vs 22), and a run whose objective returns NaN or Inf partway
+    (`walled` in `nlminb(c(0, 3), ...)`, 14 vs 24 iterations). Suspects: `DRMNGB`'s bound
+    bookkeeping (`DS7BQN`, `DD7DGB`, the `G0` aliasing, `DV7IPR` permutations) and `DRMNG`'s
+    restore path after a failed evaluation (`TOOBIG`, statements 190-200). Compare evaluated
+    points with `sprintf("%a")` against Rscript to find the first differing step.
+    A bounded run (finite differences or gradient) that ends with no free variable reports
+    X-convergence (3) where GNU R reports 5 unless the objective is 0 there:
+    `nlminb(1, function(x) sum((x-3)^2), lower=0, upper=2)`. `DD7DGB` leaves `NRED` unset in
+    that case and ry uses NaN; keeping the previous `nreduc` fixes `lower = upper` starts but
+    breaks the zero-objective start pinned in `stats__nlminb_port_paths`. Also minor:
+    a gradient that returns a list errors on ry and works in GNU R, and a non-numeric
+    objective misses GNU R's "NAs introduced by coercion" warning (`stats_port.rs`, `Objective`).
   - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
     700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2

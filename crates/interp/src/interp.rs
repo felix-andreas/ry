@@ -83,6 +83,7 @@ pub mod stats_models;
 pub mod stats_nlm;
 pub mod stats_optimize;
 pub mod stats_port;
+pub mod stats_port_minimizer;
 pub mod stats_spline;
 pub mod stats_tests;
 pub mod strings;
