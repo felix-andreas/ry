@@ -5,6 +5,8 @@
 //! checks that the recording is current. A bounded property pass checks the sorting, interval
 //! and decomposition routines against reference implementations.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

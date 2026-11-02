@@ -472,33 +472,25 @@ fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
         .iter()
         .filter_map(|name| std::env::var(name).ok())
-        .find(|candidate| writable_directory(candidate))
-        .unwrap_or_else(|| "/tmp".to_owned());
-    let template = std::ffi::CString::new(format!("{root}/RtmpXXXXXX"))
+        .find(|candidate| {
+            !candidate.is_empty() && crate::platform::writable_directory(candidate.as_ref())
+        })
+        .unwrap_or_else(|| {
+            // Windows has no `/tmp`; its own temporary directory comes from the same variables
+            // and then the user's profile.
+            if cfg!(windows) {
+                std::env::temp_dir().to_string_lossy().into_owned()
+            } else {
+                "/tmp".to_owned()
+            }
+        });
+    let separator = std::path::MAIN_SEPARATOR;
+    let path = crate::platform::make_temp_dir(&format!("{root}{separator}RtmpXXXXXX"))
         .map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
-    let mut bytes = template.into_bytes_with_nul();
-    // SAFETY: `bytes` is a NUL-terminated template that mkdtemp rewrites in place.
-    let created = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
-    if created.is_null() {
-        return Err("cannot create 'R_TempDir'".to_owned());
-    }
-    bytes.pop();
-    let path = String::from_utf8(bytes).map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
     Ok(SessionTemp {
         path,
         owner: std::process::id(),
     })
-}
-
-fn writable_directory(path: &str) -> bool {
-    if path.is_empty() || !std::path::Path::new(path).is_dir() {
-        return false;
-    }
-    let Ok(path) = std::ffi::CString::new(path) else {
-        return false;
-    };
-    // SAFETY: `path` is NUL-terminated.
-    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// `tempdir(check)`: with `check`, a session directory something deleted is created again at
@@ -506,17 +498,11 @@ fn writable_directory(path: &str) -> bool {
 /// fresh name instead; keeping the name is safe only because the directory is created
 /// private and a directory that already exists must belong to this user.
 unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = session_temp_dir().map_err(|message| call.error(message))?;
-    if values::as_logical_scalar(call.arg(0)) == 1 {
-        let usable = match std::fs::symlink_metadata(path) {
-            // SAFETY: geteuid has no preconditions.
-            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
-            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
-        };
-        if !usable {
-            return Err(call.error("cannot create 'R_TempDir'"));
-        }
+    if values::as_logical_scalar(call.arg(0)) == 1
+        && !crate::platform::ensure_private_dir(path.as_ref())
+    {
+        return Err(call.error("cannot create 'R_TempDir'"));
     }
     scalar_string(path)
 }

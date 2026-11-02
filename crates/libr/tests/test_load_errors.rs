@@ -6,11 +6,12 @@
 //! GNU R's `tcltk.so` is compiled against GNU R's internal object layout, so ry refuses it as a
 //! GNU R built without Tcl/Tk would, before the loader ever opens it.
 
+#[cfg(unix)]
 mod harness;
 
-use harness::*;
-
+#[cfg(unix)]
 fn main() {
+    use harness::*;
     let r = r();
     let failing = build_package("initerror", Headers::Ry);
     let path = r.string(&failing.to_string_lossy());
@@ -33,3 +34,7 @@ fn main() {
     r.load(&build_package("rytest", Headers::Ry));
     println!("test_load_errors: ok");
 }
+
+/// The test exercises `dlopen`, which Windows does not have.
+#[cfg(not(unix))]
+fn main() {}

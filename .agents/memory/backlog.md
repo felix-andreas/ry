@@ -2270,6 +2270,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
+- **Windows `parallel` is unverified.** GNU R for Windows registers routines of its own there
+  (probably `ncpus`, behind `detectCores()`), which `WINDOWS_ROUTINES` in `builtin_libraries.rs`
+  lacks, so the namespace may not load. Check against a Windows R home's `parallel` and add them.
 - **`Tailcall` does not reuse the caller's frame** (`do_tailcall` in `crates/interp/src/eval.rs`), so
   a deep tail-recursive loop written with it still grows the stack. GNU R 4.6 replaces the frame.
 - **R 4.4 and 4.5 are supported by reading GNU R's sources, not by running them.** Install both and

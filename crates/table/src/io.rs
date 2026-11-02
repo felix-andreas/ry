@@ -21,7 +21,7 @@ use {
         Error, Result, Table,
         factor::{self, Interner},
     },
-    memmap2::{Mmap, UncheckedAdvice},
+    memmap2::Mmap,
     polars::prelude::{
         BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
         Field, Float64Chunked, Float64Type, Int32Chunked, Int32Type, IntoColumn, NullValues,
@@ -75,12 +75,47 @@ fn read_file(path: &Path, options: &ReadOptions, slice_bytes: usize) -> Result<(
     // the file meanwhile is undefined behavior, the same trade every memory-mapped reader,
     // including `fread`, makes for not copying the file.
     let map = unsafe { Mmap::map(&file)? };
+    // A parsed slice's pages are dropped, so a large file is never resident all at once.
     read_bytes(&map, options, slice_bytes, &|range: Range<usize>| {
-        // A parsed slice's pages are dropped, so a large file is never resident all at once.
-        // SAFETY: the map is a read-only file mapping and the parsed columns own their data, so
-        // a later read of the range faults the file's bytes back in rather than seeing zeros.
-        unsafe { map.unchecked_advise_range(UncheckedAdvice::DontNeed, range.start, range.len()) }
+        release_pages(&map, range)
     })
+}
+
+/// Drops the pages behind `range` of a read-only file mapping from memory. The parsed columns
+/// own their data, so a later read of the range faults the file's bytes back in rather than
+/// seeing zeros.
+#[cfg(unix)]
+fn release_pages(map: &Mmap, range: Range<usize>) -> std::io::Result<()> {
+    use memmap2::UncheckedAdvice;
+    // SAFETY: `MADV_DONTNEED` on a read-only file mapping discards only clean pages, which the
+    // file backs.
+    unsafe { map.unchecked_advise_range(UncheckedAdvice::DontNeed, range.start, range.len()) }
+}
+
+/// Windows has no `madvise`. Unlocking pages that were never locked takes them out of the
+/// working set instead, which Windows reports as a failure with `ERROR_NOT_LOCKED`.
+#[cfg(windows)]
+fn release_pages(map: &Mmap, range: Range<usize>) -> std::io::Result<()> {
+    use {
+        std::io::{Error, ErrorKind},
+        windows_sys::Win32::{Foundation::ERROR_NOT_LOCKED, System::Memory::VirtualUnlock},
+    };
+    let bytes = map
+        .get(range)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "range outside the mapped file"))?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    // SAFETY: the pointer and length describe bytes of the live mapping.
+    if unsafe { VirtualUnlock(bytes.as_ptr().cast(), bytes.len()) } != 0 {
+        return Ok(());
+    }
+    let error = Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_NOT_LOCKED as i32) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 /// The columns and their types a file reads as, from its sniffed layout, without parsing it.

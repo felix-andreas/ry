@@ -20,8 +20,10 @@
 //! debug adapter through [`Browse`], a transport that turns typed commands into requests. An
 //! editor that attaches during that prompt takes the stopped program over.
 
+#[cfg(unix)]
+use crate::debugger::{Adapter, Request, response};
 use {
-    crate::debugger::{Adapter, Request, Transport, response},
+    crate::debugger::Transport,
     serde_json::{Value, json},
     std::{
         collections::VecDeque,
@@ -144,6 +146,7 @@ pub unsafe fn show(object: heap::object::Sexp, title: &str) -> Result<(), String
 }
 
 /// Requests any connection may send, answered with R code allowed to run.
+#[cfg(unix)]
 unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
     match request.command.as_str() {
         "ryGlobals" => {

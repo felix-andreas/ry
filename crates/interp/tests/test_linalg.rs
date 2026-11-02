@@ -652,11 +652,18 @@ unsafe fn evaluate(text: &str) -> Result<Sexp, String> {
     }
 }
 
+#[cfg(unix)]
 fn system_lapack_present() -> bool {
     [c"libblas.so.3", c"liblapack.so.3"].iter().all(|name| {
         // SAFETY: probing for a library has no preconditions; the handle stays open for the test.
         unsafe { !libc::dlopen(name.as_ptr(), libc::RTLD_NOW).is_null() }
     })
+}
+
+/// The shared reference BLAS and LAPACK this probes for are Unix libraries.
+#[cfg(not(unix))]
+fn system_lapack_present() -> bool {
+    false
 }
 
 /// Reruns this test in a child process whose loader finds Debian's reference BLAS and LAPACK
