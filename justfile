@@ -127,6 +127,18 @@ repl-e2e:
 docs:
     cd docs && bun dev
 
+# Deploy the docs site: start a Cloudflare Pages build of main as it is now, through the deploy hook
+# URL in CLOUDFLARE_DEPLOY_HOOK, and print Cloudflare's response, which names the deployment.
+docs-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${CLOUDFLARE_DEPLOY_HOOK:-}" ]; then
+    	echo "error: CLOUDFLARE_DEPLOY_HOOK is not set; it is the Pages project's deploy hook URL (contributing/releasing.md, \"Deploying the docs site\")" >&2
+    	exit 1
+    fi
+    curl -fsS -X POST "$CLOUDFLARE_DEPLOY_HOOK"
+    echo
+
 vsce *args:
     @bun --cwd=editors/code run vsce -- {{ args }}
 

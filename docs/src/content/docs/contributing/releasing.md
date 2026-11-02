@@ -31,10 +31,29 @@ command from the repository root, then commits and pushes:
 git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
 ```
 
-`.github/pending/workflows/release.yml` becomes the release workflow, and
+`.github/pending/workflows/release.yml` becomes the release workflow,
+`.github/pending/workflows/docs.yml` the docs deploy workflow, and
 `.github/pending/workflows/ci.yml` replaces the live CI workflow. CI runs only when started by hand
 (from the Actions tab, on any ref), not on pushes or pull requests. The orchestrating agent starts it
 on main at its hourly check when main has new commits.
+
+## Deploying the docs site
+
+The docs site at https://ry-lang.org deploys only when someone asks for it. Cloudflare Pages builds
+it through its GitHub connection, with production branch main and automatic deploys off, and a
+deploy hook starts each build. The hook always builds the latest commit of main, so a deploy
+publishes main as it is at that moment.
+
+To deploy, open **Actions**, then **Docs**, then **Run workflow**. From a checkout,
+`CLOUDFLARE_DEPLOY_HOOK=<hook URL> just docs-deploy` does the same and prints Cloudflare's response,
+which names the new deployment.
+
+The workflow reads the hook URL from the repository secret `CLOUDFLARE_DEPLOY_HOOK`. To create it,
+open the docs project in the Cloudflare dashboard under **Workers & Pages**, go to **Settings**, then
+**Builds**, then **Deploy hooks**, and select **Add**. Give it any name and the branch `main`, then
+paste the URL it shows under the repository's **Settings**, **Secrets and variables**, **Actions**,
+as a new repository secret named `CLOUDFLARE_DEPLOY_HOOK`. Anyone with the URL can start a build,
+so keep it secret.
 
 ## Credentials
 

@@ -1,0 +1,28 @@
+# Staged here because the agents' token cannot write .github/workflows. Activate it, together with
+# the workflows beside it, from the repository root:
+#
+#   git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
+#
+# Deploys the docs site (https://ry-lang.org) when started by hand from the Actions tab: a Cloudflare
+# Pages deploy hook (`just docs-deploy`) builds main as it is at that moment, and Cloudflare's
+# automatic deploys are off. Setting up the CLOUDFLARE_DEPLOY_HOOK secret is described in
+# docs/src/content/docs/contributing/releasing.md.
+name: Docs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: start the Cloudflare Pages build
+        env:
+          CLOUDFLARE_DEPLOY_HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        run: just docs-deploy
