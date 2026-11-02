@@ -610,8 +610,11 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     if object.is_array() {
         return crate::arrays::subset(object, indices, call);
     }
-    // String and list elements read through the class's `Elt` method in `select_elements`.
-    let object = if matches!(object.kind(), SexpType::String | SexpType::List) {
+    // String and list elements read through the class's `Elt` method in `select_elements`; the
+    // matrix and array paths read the data directly, so a vector with dimensions materializes.
+    let object = if matches!(object.kind(), SexpType::String | SexpType::List)
+        && values::dims(object).is_none()
+    {
         object
     } else {
         values::materialize(object)?

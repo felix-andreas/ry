@@ -73,7 +73,7 @@ pub(crate) struct StringTable {
     /// otherwise a string's address over 8 in the low [`ADDRESS_BITS`] with the low
     /// [`TAG_BITS`] of its hash above.
     slots: Vec<u64>,
-    /// Live entries, and removed ones still marked by a tombstone.
+    /// Live entries; `tombstones` counts the removed ones still marking a probe path.
     len: usize,
     tombstones: usize,
     /// Strings interned since the last collection that are too long for the small-object
@@ -82,13 +82,13 @@ pub(crate) struct StringTable {
 }
 
 /// Objects are 8-byte aligned (a short string takes a 40-byte slot) and user-space addresses fit
-/// in 47 bits on every supported platform, so an address over 8 takes 44 bits and leaves 20 for
-/// the tag.
-const ADDRESS_BITS: u32 = 44;
+/// in 48 bits on every supported platform, so an address over 8 takes 45 bits and leaves 19 for
+/// the tag. 47 bits would not do: on aarch64 Linux `mmap` places mappings just below 2^48.
+const ADDRESS_BITS: u32 = 45;
 const ADDRESS_MASK: u64 = (1 << ADDRESS_BITS) - 1;
 const TAG_BITS: u32 = 64 - ADDRESS_BITS;
 const EMPTY: u64 = 0;
-/// No string lives at the top of the address space, so this slot names none.
+/// No string lives in the last eight bytes of the address space, so this slot names none.
 const TOMBSTONE: u64 = ADDRESS_MASK;
 const INITIAL_SLOTS: usize = 1 << 12;
 

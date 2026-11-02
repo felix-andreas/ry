@@ -615,8 +615,6 @@ pub unsafe fn coerce_atomic(
     Ok(result)
 }
 
-/// The caller stores the string at once into a vector it keeps rooted, so the string skips the
-/// root handle `values::mkchar` would push for it.
 /// Writes `as.character` of the integer or double vector `numbers` into the string vector
 /// `result`, of the same length, formatting doubles under scientific-notation penalty `scipen`.
 pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
@@ -668,6 +666,8 @@ pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<S
     }
 }
 
+/// The caller stores the string at once into a vector it keeps rooted, so the string skips the
+/// root handle `values::mkchar` would push for it.
 unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
     let mut cursor = &mut buffer[..];
     // Eleven bytes hold every `i32`, so the write cannot run out of room.

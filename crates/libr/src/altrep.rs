@@ -1859,7 +1859,11 @@ pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
     // A deferred string keeps its converted elements in an ordinary vector, so that vector is
     // the materialized form, and reading the strings again costs no further copy.
     if object.tag() == builtins()?.deferred_string.pointer {
-        return deferred_expand(object);
+        let strings = deferred_expand(object)?;
+        // The deferred vector keeps the storage, so a caller that writes into the result must
+        // copy it even though nothing else counts as a reference.
+        strings.mark_not_mutable();
+        return Ok(strings);
     }
     let kind = object.kind();
     let count = length(object)?;

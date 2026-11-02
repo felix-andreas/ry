@@ -269,9 +269,19 @@ fn main() -> ExitCode {
 /// the script then runs in `libR` without returning to it. The pages are file-backed and
 /// unmodified, so dropping them loses nothing: the few the runtime's callbacks into the
 /// executable touch, and the check of a strict package the script loads, fault back in from the
-/// file.
+/// file. Under a debugger the pages may hold breakpoints written into private copies, which
+/// dropping would erase, so a traced process keeps them.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 fn release_executable_code() {
+    let traced = fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("TracerPid:"))
+            .is_some_and(|pid| pid.trim() != "0")
+    });
+    if traced {
+        return;
+    }
     unsafe extern "C" fn release(
         info: *mut libc::dl_phdr_info,
         _size: libc::size_t,
@@ -327,12 +337,14 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     }
     let flags = runtime_flags(preflight.config());
     drop(preflight);
-    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-    release_executable_code();
     match runtime {
-        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
-            repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
-        })),
+        Runtime::Ry => {
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            release_executable_code();
+            runtime_exit(checking_loads().and_then(|()| {
+                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+            }))
+        }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],

@@ -984,7 +984,7 @@ unsafe fn format_numbers(
             return Ok(None);
         }
         let text = if trim { text.trim_start() } else { &text };
-        values::set_elt(result, index, values::mkchar(&pad(text, min_width, true))?);
+        values::set_mkchar(result, index, &pad(text, min_width, true))?;
     }
     Ok(Some(result))
 }
