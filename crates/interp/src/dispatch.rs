@@ -553,8 +553,9 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let env = call.env;
     let state = interp();
     // The NextMethod closure's frame is `env`; the method frame is the one it was called from.
+    // Errors name the `NextMethod(...)` closure call, as GNU R's do.
     let Some(own) = state.frames.iter().rposition(|frame| frame.env == env) else {
-        return Err(call.error("NextMethod called from outside a method dispatch"));
+        return Err(error("'NextMethod' called from outside a function"));
     };
     let method_env = state.frames[own].sys_parent;
     let Some(position) = state
@@ -562,12 +563,15 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .rposition(|frame| frame.env == method_env)
     else {
-        return Err(call.error("NextMethod called from outside a method dispatch"));
+        return Err(error("'NextMethod' called from outside a function"));
     };
     let (frame_call, function, promargs, sys_parent) = {
         let frame = &interp().frames[position];
         (frame.call, frame.function, frame.promargs, frame.sys_parent)
     };
+    if frame_call.car().kind() != SexpType::Symbol {
+        return Err(error("'NextMethod' called from an anonymous function"));
+    }
     let symbols = symbols();
     let read = |symbol: Sexp| -> R<Sexp> {
         let value = eval::find_var_in_frame(symbol, method_env)?;
@@ -584,23 +588,23 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     if generic == unbound() {
         generic = call.arg(0);
     }
-    if generic == missing_arg() || generic == nil() {
-        let head = frame_call.car();
-        if head.kind() == SexpType::Symbol {
-            generic = scalar_string(&symbol_name(head))?;
-        } else {
-            return Err(call.error("generic function not specified"));
-        }
-    }
-    if generic.kind() != SexpType::String || length(generic) != 1 {
-        return Err(call.error("invalid generic argument to 'NextMethod'"));
-    }
-    let generic_name = char_str(generic.element(0)).into_owned();
+    // Outside a dispatch, the classes come from the object's own class attribute, so a method
+    // called directly on an unclassed object has nothing to resume from.
     let mut classes = read(symbols.dot_class)?;
     if classes == unbound() {
         let object = dispatch_object(function, method_env)?;
-        classes = implicit_class(object)?;
+        classes = get_attr(object, symbols.class);
+        if classes == nil() {
+            return Err(error("object not specified"));
+        }
     }
+    if generic == missing_arg() || generic == nil() {
+        return Err(error("generic function not specified"));
+    }
+    if generic.kind() != SexpType::String || length(generic) != 1 {
+        return Err(error("invalid generic argument to 'NextMethod'"));
+    }
+    let generic_name = char_str(generic.element(0)).into_owned();
     let group = read(symbols.dot_group)?;
     let group_name = if group != unbound() && group.kind() == SexpType::String && length(group) == 1
     {
@@ -685,7 +689,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
                 match function {
                     Some(function) => (function, generic_symbol, class_names.len()),
                     None => {
-                        return Err(call.error(format!("no more methods for '{generic_name}'")));
+                        return Err(error("no method to invoke"));
                     }
                 }
             }

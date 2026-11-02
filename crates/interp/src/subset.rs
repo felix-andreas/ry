@@ -2825,11 +2825,16 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&value| value as i64)
         .product();
-    if values::ints(dims)
+    // The first offending extent names the problem.
+    if let Some(&bad) = values::ints(dims)
         .iter()
-        .any(|&value| value == NA_INTEGER || value < 0)
+        .find(|&&value| value == NA_INTEGER || value < 0)
     {
-        return Err(call.error("the dims contain missing or negative values"));
+        return Err(call.error(if bad == NA_INTEGER {
+            "the dims contain missing values"
+        } else {
+            "the dims contain negative values"
+        }));
     }
     if product != length(object) as i64 {
         return Err(call.error(format!(

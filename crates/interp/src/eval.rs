@@ -2108,6 +2108,9 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     if !values::is_string_scalar(selector) && length(selector) != 1 {
         return Err(call.error("EXPR must be a length 1 vector"));
     }
+    if alternatives.is_empty() {
+        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
+    }
     if selector.kind() == SexpType::String {
         let text = values::string_at(selector, 0);
         let missing = missing_arg();

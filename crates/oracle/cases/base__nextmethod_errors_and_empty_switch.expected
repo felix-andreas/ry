@@ -1,0 +1,11 @@
+[stdout]
+[messages]
+[warnings]
+- 'switch' with no alternatives (in switch("A"))
+- 'switch' with no alternatives (in switch(1))
+- 'switch' with no alternatives (in switch(3L))
+- 'switch' with no alternatives (in switch("A"))
+- 'switch' with no alternatives (in switch(2))
+[errors]
+- object not specified (in NextMethod("print"))
+[value]
