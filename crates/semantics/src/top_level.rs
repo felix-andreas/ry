@@ -32,6 +32,10 @@ pub enum TopLevel {
     Definition,
     /// `name <- value` where evaluating `value` has no effect, so it may be bound lazily.
     Constant,
+    /// `name <- R6Class(...)` whose arguments have no effect. The generator depends on nothing
+    /// but those arguments and the namespace it is created in, so unlike a constant, whose
+    /// pure functions may still read options or the locale, it may be bound lazily in any file.
+    Generator,
     /// The statement has an effect, found at `range` (item-relative).
     Effect { range: TextRange, effect: Effect },
 }
@@ -335,6 +339,22 @@ impl Classifier<'_> {
                 target,
                 value,
             } if self.binds_name(*target) => self.binding(*value),
+            ExpressionKind::Call { callee, arguments }
+                if self.callee_name(*callee).is_some_and(|(package, name)| {
+                    name == "R6Class" && package.is_none_or(|package| package == "R6")
+                }) =>
+            {
+                let pure = self.module[arguments].iter().all(|argument| {
+                    argument
+                        .value
+                        .is_none_or(|value| self.effect(value, &mut None).is_none())
+                });
+                if pure {
+                    TopLevel::Generator
+                } else {
+                    TopLevel::Definition
+                }
+            }
             ExpressionKind::Call { callee, .. } if self.declares(*callee) => TopLevel::Definition,
             _ => self.effect(value, &mut None).unwrap_or(TopLevel::Constant),
         }

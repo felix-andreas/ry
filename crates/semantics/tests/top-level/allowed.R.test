@@ -30,7 +30,7 @@ definition: .onLoad <- function(libname, pkgname) {
 definition: setClass("Account", representation(balance = "numeric"))
 definition: setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
 definition: setMethod("deposit", "Account", function(account, amount) account)
-definition: Stack <- R6::R6Class("Stack", public = list(items = list()))
+generator: Stack <- R6::R6Class("Stack", public = list(items = list()))
 definition: if (getRversion() >= "2.15.1") utils::globalVariables(c("amount", "balance"))
 
 #---- constants_that_call_only_pure_functions
