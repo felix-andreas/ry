@@ -310,9 +310,22 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
             return Err(error("invalid substring arguments"));
         }
         let mut memo = values::StringMemo::default();
+        // Recycling by counters rather than `index % len` keeps two divisions out of every
+        // element, which on short strings cost as much as the extraction.
+        let (mut start_at, mut stop_at) = (0, 0);
         for index in 0..count {
-            let start = starts[index % starts.len()];
-            let stop = stops[index % stops.len()];
+            let start = starts[start_at];
+            let stop = stops[stop_at];
+            start_at = if start_at + 1 == starts.len() {
+                0
+            } else {
+                start_at + 1
+            };
+            stop_at = if stop_at + 1 == stops.len() {
+                0
+            } else {
+                stop_at + 1
+            };
             let charsxp = x.element(index);
             if charsxp == na_string() || start == NA_INTEGER || stop == NA_INTEGER {
                 set_elt(result, index, na_string());
@@ -448,6 +461,8 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     let count = length(x);
     let result = alloc(SexpType::List, count)?;
     let mut pieces: Vec<(usize, usize)> = Vec::new();
+    // Pieces repeat (a code or a suffix of each id), so ASCII ones go through the call's memo.
+    let mut memo = values::StringMemo::default();
     for index in 0..count {
         let Some(text) = subject_at(x, index, use_bytes) else {
             set_elt(result, index, values::scalar_string_charsxp(na_string())?);
@@ -479,10 +494,13 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
         for (position, &(start, end)) in pieces.iter().enumerate() {
             // With `useBytes`, the text carries a stand-in character for each byte past ASCII,
             // which `regex_result` turns back into the byte.
+            let piece = &text.as_bytes()[start..end];
             let charsxp = if use_bytes {
                 regex_result(&text[start..end], forced_bytes)?
+            } else if piece.is_ascii() {
+                memo.mk_char(piece)?
             } else {
-                heap.mk_char(&text.as_bytes()[start..end], Encoding::Utf8)?
+                heap.mk_char(piece, Encoding::Utf8)?
             };
             heap.set_element(vector, position, charsxp);
         }
