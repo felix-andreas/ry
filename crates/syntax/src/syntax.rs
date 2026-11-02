@@ -551,6 +551,7 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     }
 }
 
+/// Whether [`walk_green`] reports a token of this kind; every other token only advances the offset.
 pub fn is_walked_token(kind: SyntaxKind) -> bool {
     matches!(
         kind,

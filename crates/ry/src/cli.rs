@@ -1183,11 +1183,10 @@ fn render_project_findings(
 ) -> Vec<(String, usize)> {
     let files = &analysis.files;
     let sources: Vec<&str> = files.iter().map(|file| analysis.source(file)).collect();
-    let positions: FxHashMap<SourceFile, usize> = files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| (file.file, index))
-        .collect();
+    let mut positions: FxHashMap<SourceFile, usize> = FxHashMap::default();
+    for (index, file) in files.iter().enumerate() {
+        positions.entry(file.file).or_insert(index);
+    }
     let resolve_note = |related: &RelatedLocation| {
         let &index = positions.get(&related.file)?;
         Some(RelatedNote {

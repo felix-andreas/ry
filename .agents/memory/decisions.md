@@ -5143,6 +5143,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     lookup rejects by length and first byte.
   - `ry check` reads sources and renders findings in parallel and prints them in path order, and it
     hashes sources for the cache key only when the cache is read or written.
+  - `TypeDefinitions::of`, `read_context` and `SalsaGlobals::new` fetch the stub library, the
+    project files and the file kind up front instead of on first use. That records a few
+    dependencies a lookup answered file-locally used to skip, so an edit to those inputs
+    re-runs slightly more; all three change rarely (a stub or project-layout edit), and one
+    fetch per check is cheaper than one per lookup.
 - **Impact.** Callgrind on the finance bench (`ry check --no-cache`) went from 24.60 G to
   22.6-22.8 G instructions across runs, with byte-identical diagnostics. In interleaved runs the
   one-core median fell from 4.7 to 4.3 s and the 4-core median from about 1.6 to 1.48 s. The 1 s

@@ -34,7 +34,7 @@ use {
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    std::{collections::BTreeSet, mem, ops::Range},
+    std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
         paired_comment_definition,
@@ -623,6 +623,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
+        let context = OnceCell::new();
         for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
@@ -633,7 +634,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             let NonLocalRead::Unresolved { suggestion } = classify_non_local_read(
                 db,
-                &read_context(db, file),
+                context.get_or_init(|| read_context(db, file)),
                 item_index,
                 &check,
                 naming,
