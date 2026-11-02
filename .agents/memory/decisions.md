@@ -3201,6 +3201,15 @@ first lines R had already read, leaving R mid-command.
   error "non-finite value supplied by 'nlm'" instead of a call at a non-finite point. Where GNU R
   reads past a later attribute that is too short or missing, ry errors or uses zeros.
   `stats__uncmin_quadpack.R` pins the iterates at full precision and the call protocol.
+  Methods 2 (double dogleg) and 3 (More-Hebdon hook) match GNU R bit for bit, which took these
+  departures from the textbook, all found by tracing every evaluation in `%a`: the trust-region
+  update retries with a doubled radius only for a Newton step whose decrease the model predicted
+  to within a tenth; after the switch to central differences an analytic gradient builds the
+  Hessian from gradient calls; the hook's mu update uses the derivative at mu = 0 (`phip0`); both
+  `phip0` and `phip` square `sqrt(dot)` instead of using the dot product; and the unfactored
+  secant update sums its two corrections before adding them to H. The libR case
+  `optif9_trust_region` compares at tolerance zero, so it assumes reference-BLAS rounding in the
+  GNU R that recorded it (GNU R's `ddot_` and `dnrm2_` come from the system BLAS).
 - **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
   documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
   (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and

@@ -569,7 +569,6 @@ struct HookState {
     dltp: f64,
     phi: f64,
     phip0: f64,
-    phip: f64,
 }
 
 /// The stopping tolerances.
@@ -1199,25 +1198,11 @@ unsafe fn trust_region_update(
         }
     }
     let predicted = slope + predicted / 2.0;
-    if let Ok(mut debug) = std::fs::OpenOptions::new().append(true).open("/tmp/claude-0/-home-user-ry/05f36392-06b4-560e-9355-f87e5eff3d37/scratchpad/op/tregup.log") {
-        use std::io::Write;
-        let mut upper = 0.0;
-        let mut full = 0.0;
-        for i in 0..n {
-            let mut term = 0.0;
-            for j in i..n {
-                term += a.get(i, j) * sc[j];
-            }
-            upper += term * term;
-            for j in 0..n {
-                let h = if i == j { udiag.get(i).copied().unwrap_or(f64::NAN) } else if i < j { a.get(i, j) } else { a.get(j, i) };
-                full += sc[i] * h * sc[j];
-            }
-        }
-        writeln!(debug, "TREGUP m{method} iretcd={} change={change:e} slope={slope:e} pred={predicted:e} upper={:e} full={:e} newton={newton_taken} dlt={:e} stepmx={stepmx:e}", attempt.iretcd, slope + upper / 2.0, if udiag.is_empty() { f64::NAN } else { slope + full / 2.0 }, *dlt).ok();
-    }
+    // Dennis and Schnabel also retry with a doubled radius when the decrease beats the linear
+    // prediction. GNU R retries only a Newton step whose decrease the quadratic model predicted
+    // to within a tenth, and the points its callers see follow that rule.
     if attempt.iretcd != 2
-        && ((predicted - change).abs() <= change.abs() * 0.1 || change <= slope)
+        && (predicted - change).abs() <= change.abs() * 0.1
         && newton_taken
         && *dlt <= stepmx * 0.99
     {
@@ -1431,8 +1416,10 @@ fn hook_step(
         hook.amu = 0.0;
         return true;
     }
+    // The derivative in this update is the one at mu = 0, not at the previous step, as GNU R
+    // computes it.
     if hook.amu > 0.0 {
-        hook.amu -= (hook.phi + hook.dltp) * (hook.dltp - *dlt + hook.phi) / (*dlt * hook.phip);
+        hook.amu -= (hook.phi + hook.dltp) * (hook.dltp - *dlt + hook.phi) / (*dlt * hook.phip0);
     }
     hook.phi = newton_length - *dlt;
     if *first {
@@ -1440,8 +1427,10 @@ fn hook_step(
             work[i] = sx[i] * sx[i] * p[i];
         }
         solve_lower(a, work);
-        let length = norm(work);
-        hook.phip0 = -(length * length) / newton_length;
+        // Squaring a square root rather than using the dot product directly matches GNU R's
+        // rounding, to which the More-Hebdon iteration is sensitive.
+        let length = dot(work, work).sqrt();
+        hook.phip0 = -length * length / newton_length;
         *first = false;
     }
     let mut amu_low = -hook.phi / hook.phip0;
@@ -1472,9 +1461,8 @@ fn hook_step(
             work[i] = sx[i] * sx[i] * sc[i];
         }
         solve_lower(a, work);
-        let length = norm(work);
-        let phip = -(length * length) / step_length;
-        hook.phip = phip;
+        let length = dot(work, work).sqrt();
+        let phip = -length * length / step_length;
         // Dennis and Schnabel stop when the bracket on mu is empty; GNU R's UNCMIN tests the
         // opposite, so it accepts the first step whenever the bracket is not empty, and its
         // callers see those steps.
@@ -1670,9 +1658,15 @@ fn secant_unfactored(
     if skip {
         return;
     }
+    // GNU R sums the two corrections before adding them to H, and that rounding shows in the
+    // points its callers see.
     for j in 0..n {
         for i in j..n {
-            a.set(i, j, a.get(i, j) + y[i] * y[j] / den1 - t[i] * t[j] / den2);
+            a.set(
+                i,
+                j,
+                a.get(i, j) + (y[i] * y[j] / den1 - t[i] * t[j] / den2),
+            );
         }
     }
 }

@@ -801,6 +801,52 @@ static void case_optif9(void)
     put_all(step, 4);
 }
 
+static void uncmin_rosenbrock(int n, double *x, double *f, void *state)
+{
+    *f = rosenbrock(n, x, state);
+}
+
+static void uncmin_rosenbrock_gradient(int n, double *x, double *g, void *state)
+{
+    rosenbrock_gradient(n, x, g, state);
+}
+
+static void uncmin_rosenbrock_hessian(int nr, int n, double *x, double *h, void *state)
+{
+    h[0] = 1200 * x[0] * x[0] - 400 * x[1] + 2;
+    h[1] = -400 * x[0];
+    h[nr + 1] = 200;
+}
+
+/* The trust-region strategies on Rosenbrock's valley, whose steps are rejected, shrunk and
+ * retried, so the exact iterate, iteration count and evaluation count show whether the double
+ * dogleg (method 2) and the More-Hebdon step (method 3) took GNU R's path. */
+static void case_optif9_trust_region(void)
+{
+    /* iagflg, iexp, iahflg */
+    int settings[][3] = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 1}};
+    double starts[][2] = {{-1.2, 1}, {-3, -2}}, radii[] = {-1, 0.5};
+    for (int method = 2; method <= 3; method++)
+        for (int start = 0; start < 2; start++)
+            for (int c = 0; c < 5; c++)
+                for (int r = 0; r < 2; r++) {
+                    int msg = 9, itrmcd = 0, itncnt = 0;
+                    double x[2] = {starts[start][0], starts[start][1]}, typsiz[2] = {1, 1};
+                    double xpls[2] = {0}, fpls = 0, gpls[2] = {0}, a[4] = {0}, wrk[18];
+                    evaluations = 0;
+                    optif9(2, 2, x, uncmin_rosenbrock, uncmin_rosenbrock_gradient,
+                           uncmin_rosenbrock_hessian, NULL, typsiz, 1.0, method, settings[c][1],
+                           &msg, 12, 150, settings[c][0], settings[c][2], radii[r], 1e-6, 1000,
+                           1e-6, xpls, &fpls, gpls, &itrmcd, a, wrk, &itncnt);
+                    put_all(xpls, 2);
+                    put(fpls);
+                    put_all(gpls, 2);
+                    put_int(itrmcd);
+                    put_int(itncnt);
+                    put_int(evaluations);
+                }
+}
+
 /* ---- quadrature ---- */
 
 static void gaussian(double *x, int n, void *ex)
@@ -943,6 +989,7 @@ static const struct {
     {"optim_traces", case_optim_traces},
     {"max_col_ties", case_max_col_ties},
     {"optif9", case_optif9},
+    {"optif9_trust_region", case_optif9_trust_region},
     {"quadrature", case_quadrature},
     {"strings", case_strings},
     {"print", case_print},

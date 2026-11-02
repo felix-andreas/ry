@@ -81,11 +81,13 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 
 /// How closely a case must agree with GNU R. Direct algorithms follow GNU R's operation order,
 /// so they agree to rounding; the iterative ones compound rounding differences over their
-/// iterations, except `lbfgsb`, which follows GNU R's floating-point path bit for bit. GNU R's LINPACK routines also call the system BLAS for `dnrm2` and friends,
-/// whose rounding depends on the BLAS build, so even the direct ones agree only to rounding.
+/// iterations, except `lbfgsb` and the trust-region `optif9` methods, which follow GNU R's
+/// floating-point path bit for bit. GNU R's LINPACK routines also call the system BLAS for
+/// `dnrm2` and friends, whose rounding depends on the BLAS build, so even the direct ones agree
+/// only to rounding.
 fn tolerance(case: &str) -> f64 {
     match case {
-        "lbfgsb" => 0.0,
+        "lbfgsb" | "optif9_trust_region" => 0.0,
         "optif9" | "quadrature" => 1e-6,
         _ => 1e-10,
     }
