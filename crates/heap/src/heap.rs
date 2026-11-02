@@ -119,7 +119,7 @@ pub struct Heap {
     report_threshold: usize,
     /// The file `RY_GC_LOG` names, which receives one line per collection: its kind, its
     /// elapsed time in nanoseconds and the bytes of small objects and large vectors it found
-    /// young. Measuring pause distributions over a whole test suite needs every pause, which
+    /// young and the old generation's bytes after it. Measuring pause distributions over a whole test suite needs every pause, which
     /// `gc.time()`'s totals cannot give.
     pause_log: Option<std::fs::File>,
 }

@@ -276,13 +276,14 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
             // sorts last, or first when decreasing, as the reversed comparison put it.
             let source = values::materialize(x)?;
             let ranks = Column::Ranks(string_ranks(source, collate));
-            if let Some(keys) = sort_keys(&ranks, decreasing, !decreasing) {
-                drop(ranks);
-                let mut order = vec![0u32; length(x)];
-                radix_order(&[keys], &mut order);
-                for (index, &row) in order.iter().enumerate() {
-                    values::set_elt(result, index, source.element(row as usize));
-                }
+            let Some(keys) = sort_keys(&ranks, decreasing, !decreasing) else {
+                unreachable!("string ranks always have radix keys");
+            };
+            drop(ranks);
+            let mut order = vec![0u32; length(x)];
+            radix_order(&[keys], &mut order);
+            for (index, &row) in order.iter().enumerate() {
+                values::set_elt(result, index, source.element(row as usize));
             }
         }
         _ => {}
