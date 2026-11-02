@@ -363,3 +363,21 @@ added <- function(a, b) `+`(a, b)
 total: fn(xs: double[]) -> double
 scaled: fn(m: matrix, s: double[]) -> matrix
 added: fn(a: double, b: double) -> double
+
+#==== strict_top_level_loop_variable
+#---- a_later_statement_reads_the_loop_variable_type
+#~~~~ scripts/run.R
+values <- c(1, 2, 3)
+for (value in values) {}
+last_value <- value
+for (index in 1:3) {}
+last_index <- index
+print(c(last_value, last_index))
+#++++
+== scripts/run.R
+values: double[]
+NULL
+last_value: double | NULL
+NULL
+last_index: integer
+double[]

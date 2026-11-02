@@ -1911,9 +1911,11 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
     };
     naming
         .bindings
-        .values()
-        .filter(|binding| binding.kind == naming::BindingKind::TopLevel)
-        .map(|binding| binding.name)
+        .iter()
+        .filter(|(slot, binding)| {
+            binding.kind == naming::BindingKind::TopLevel || naming.loop_bound_slots.contains(*slot)
+        })
+        .map(|(_, binding)| binding.name)
         .collect()
 }
 

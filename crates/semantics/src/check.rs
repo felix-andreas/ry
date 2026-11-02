@@ -897,7 +897,7 @@ fn check_item_in<'db>(
     errors.dedup();
     let mut top_level_bindings = Vec::new();
     for (&id, info) in &naming.bindings {
-        if info.kind != BindingKind::TopLevel {
+        if info.kind != BindingKind::TopLevel && !naming.loop_bound_slots.contains(&id) {
             continue;
         }
         let Some(entry) = context.environment.get(id) else {

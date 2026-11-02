@@ -73,6 +73,9 @@ pub struct ItemNaming {
     pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: SortedSet<BindingId>,
+    /// The variables of top-level `for` loops. They stay bound in the global environment like
+    /// a top-level assignment, so the item exports their type.
+    pub loop_bound_slots: SortedSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
@@ -138,6 +141,7 @@ struct NamingDraft {
     unused_parameters: Vec<UnusedAssignment>,
     used_top_level_names: BTreeSet<Symbol>,
     captured_slots: BTreeSet<BindingId>,
+    loop_bound_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
@@ -165,6 +169,7 @@ impl NamingDraft {
             unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
             captured_slots: self.captured_slots.into(),
+            loop_bound_slots: self.loop_bound_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
@@ -752,10 +757,12 @@ impl Context<'_> {
                         name: variable,
                         range,
                     } = self.module[variable];
+                    // A top-level loop leaves its variable bound in the global environment, so
+                    // later statements read the type it exports.
                     let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
-                    // A top-level loop leaves its variable bound in the global environment.
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(variable);
+                        self.naming.loop_bound_slots.insert(slot);
                     }
                     self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
