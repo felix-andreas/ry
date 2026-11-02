@@ -14,8 +14,9 @@ You get:
 
 - diagnostics as you type, the same ones `ry check` reports
 - hover with the inferred type of any expression, parameter or loop variable
-- completion, including the fields of a list such as `person$` and the argument names a call
-  still accepts (`second = `), with your own names ranked ahead of keywords and the library
+- completion, including the fields of a list such as `person$`, the members of `pkg::`, and the
+  argument names a call still accepts (`second = `), also for R6 methods and untyped package
+  functions; names you use often in the project rank ahead of keywords and the rest of the library
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
@@ -24,12 +25,16 @@ You get:
   write, or a member of an R6 class read through `self$` or `private$`
 - navigation into installed packages that have no stub: go-to-definition opens the package's R
   code, read from your R library, and hover shows its help page
-- signature help with each parameter's type and default, and inlay hints for assignments, loop
-  variables, and parameter names in calls with two or more positional arguments
-  (`grow(principal = 100, years = 2)`)
+- signature help with each parameter's type and default, also for an untyped function from an
+  installed package and for a method of an R6 class called through `self$` or an instance
+- inlay hints for assignments, loop variables, the inferred types of a function's parameters and
+  result (`function<T>(x: T) -> T`), and parameter names in calls with two or more positional
+  arguments (`grow(principal = 100, years = 2)`)
 - quick fixes for misspelled names, arguments, fields and columns, and for the lints that have one
   obvious rewrite (`T` to `TRUE`, `=` to `<-`, a trailing comma), and an "Apply all safe fixes"
   action your editor can run on save; [Fixes](/reference/diagnostic-codes#fixes) lists them all
+- for a name no attached package defines but an installed one exports, a fix that qualifies it as
+  `pkg::name` and, in a script, one that adds `library(pkg)` after your other `library` calls
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
   functions and sections under the function that defines them, plus workspace symbol search
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
