@@ -22,7 +22,7 @@ use {
         path::PathBuf,
         rc::Rc,
     },
-    syntax::testing::{Entropy, SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
 
 #[test]
