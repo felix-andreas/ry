@@ -599,8 +599,9 @@ unsafe fn print_matrix_rows(
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
     // GNU R sizes numbered labels by the digits of one past the last row, so nine rows already
-    // reserve two digits and no rows reserve one.
-    let numbered_width = if numbered_rows {
+    // reserve two digits and no rows reserve one. A matrix without rows reserves that width
+    // even when it has (empty) row names.
+    let numbered_width = if numbered_rows || rows == 0 {
         format!("[{},]", rows + 1).len()
     } else {
         0
@@ -679,7 +680,8 @@ unsafe fn print_matrix_rows(
     while start < cols {
         let mut end = start;
         let mut used = row_label_width;
-        while end < cols && (end == start || used + widths[end] + options.gap <= options.width) {
+        // GNU R starts a new block once a line would reach the full width, not only exceed it.
+        while end < cols && (end == start || used + widths[end] + options.gap < options.width) {
             used += widths[end] + options.gap;
             end += 1;
         }
@@ -860,15 +862,25 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         } else {
             None
         };
-        match name {
-            Some(name) if !name.is_empty() => {
-                if deparse::is_syntactic(&name) {
-                    tag.push_str(&format!("${name}"));
-                } else {
-                    tag.push_str(&format!("$`{name}`"));
+        // GNU R's tag holds 256 bytes: a name that would overflow it becomes `$...`, and
+        // nothing more is added once it is past that length.
+        const TAG_LIMIT: usize = 256;
+        if saved <= TAG_LIMIT {
+            match name {
+                Some(name) if !name.is_empty() => {
+                    let piece = if deparse::is_syntactic(&name) {
+                        format!("${name}")
+                    } else {
+                        format!("$`{name}`")
+                    };
+                    if saved + piece.len() <= TAG_LIMIT {
+                        tag.push_str(&piece);
+                    } else {
+                        tag.push_str("$...");
+                    }
                 }
+                Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
             }
-            Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
         }
         out(&format!("{tag}\n"));
         if element.is_object() {

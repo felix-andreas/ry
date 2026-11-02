@@ -2424,9 +2424,24 @@ fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
+    // GNU R counts the arguments before matching them, and blames the calling closure for a
+    // wrong count or a lone argument that is not `x`.
+    if call.is_empty() || call.len() > 2 {
+        let name = if significant { "signif" } else { "round" };
+        return Err(error(format!(
+            "{} arguments passed to '{name}' which requires 1 or 2 arguments",
+            call.len()
+        )));
+    }
+    let missing_operand = "argument \"x\" is missing, with no default";
+    if let [only] = call.args
+        && only.tag != nil()
+        && values::symbol_name(only.tag) != "x"
+    {
+        return Err(error(missing_operand));
+    }
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0])
-        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let operand = present(matched[0]).ok_or_else(|| call.error(missing_operand))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),
@@ -2588,7 +2603,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             SexpType::Integer | SexpType::Logical,
             Cumulative::Sum | Cumulative::Max | Cumulative::Min,
         ) => {
-            let result = alloc(SexpType::Integer, count)?;
+            // Every slot is written below, so the result skips zeroing, which costs as much as the
+            // loop on a long vector.
+            let result = values::alloc_uninit(SexpType::Integer, count)?;
             let mut accumulator: Option<i64> = None;
             let mut overflow = false;
             for index in 0..count {
@@ -2621,7 +2638,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Sum) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let out = values::reals_mut(result);
             long_double::running_sums(values::reals(operand), out);
             // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
@@ -2636,7 +2653,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             result
         }
         (SexpType::Real, Cumulative::Max | Cumulative::Min) => {
-            let result = alloc(SexpType::Real, count)?;
+            let result = values::alloc_uninit(SexpType::Real, count)?;
             let data = values::reals(operand);
             let out = values::reals_mut(result);
             let mut accumulator = if kind == Cumulative::Max {
@@ -2644,15 +2661,16 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 f64::INFINITY
             };
-            // From the first NaN on every result is NaN, and from the first NA on it is NA. The
-            // comparisons are GNU R's, which keep the new element on a tie, so a signed zero
-            // follows it on every target.
-            for (&value, out) in data.iter().zip(out.iter_mut()) {
-                accumulator = if is_na_real(value) || is_na_real(accumulator) {
-                    NA_REAL
-                } else if value.is_nan() || accumulator.is_nan() {
-                    f64::NAN
-                } else if kind == Cumulative::Max {
+            // The comparisons are GNU R's, which keep the new element on a tie, so a signed zero
+            // follows it on every target. The loop only tests for NaN, and the first one hands
+            // over to the tail below.
+            let mut first_nan = data.len();
+            for (index, (&value, out)) in data.iter().zip(out.iter_mut()).enumerate() {
+                if value.is_nan() {
+                    first_nan = index;
+                    break;
+                }
+                accumulator = if kind == Cumulative::Max {
                     if accumulator > value {
                         accumulator
                     } else {
@@ -2664,6 +2682,12 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                     value
                 };
                 *out = accumulator;
+            }
+            // From the first NaN on every result is NaN, and from the first NA on it is NA.
+            let mut seen_na = false;
+            for (&value, out) in data[first_nan..].iter().zip(&mut out[first_nan..]) {
+                seen_na |= is_na_real(value);
+                *out = if seen_na { NA_REAL } else { f64::NAN };
             }
             result
         }
