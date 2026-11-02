@@ -4142,6 +4142,8 @@ check` releases its trees once, and memoized records are compact" below).
     raises the capacity to one, touches every tree on one thread, calls
     `trigger_lru_eviction`, and lowers it again. The CLI calls it after the syntax pass and hands
     each file tree to the naming worker that names that file, which frees it.
+    Superseded: a cold check now holds one tree per worker and memoizes none ("A cold check
+    holds one parse tree per worker").
   - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` decides a
     file's mode for the check (the loader's `load_index::file_is_strict` reads the package
     default). The checker records strict origins only when it is true.
@@ -6160,3 +6162,43 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+# Decision record: a cold check holds one parse tree per worker
+
+- **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released
+  them all at once (`release_trees`, a serial LRU eviction of about 56 ms on finance). Per-item
+  `item_syntax` memos and the `file_item_annotations` memo pinned windows of those trees, the item
+  check stored editor-only per-expression facts nobody reads in a CLI run, and `sourced_definition`
+  interned a query key for every name read even in files that source nothing.
+- **Weakness.** Every tree was live at the end of the syntax pass (128 MiB of the heap), so the
+  peak was 383-407 MiB of RSS on the benchmark code bases. The release was serial work, and the
+  per-item memos and edges were bookkeeping a run that never edits cannot use.
+- **Target shape.**
+  - `semantics::with_held_tree` parses a file and parks the tree in a thread-local slot that
+    `parse` serves while the file's syntax-pass work runs; the tracked query is `parse_memo`, which
+    only an incremental host calls. The tree is freed when the worker moves on.
+  - On a one-shot host `item_syntax` and `item_annotation_syntax` compute their value without a
+    memo; on other hosts they go through `item_syntax_memo` and `item_annotation_syntax_memo`, the
+    firewalls `test_incremental.rs` pins.
+  - `file_item_annotations` stores detached subtrees (`syntax::Tree::detach`), so an annotation
+    memo never pins its file's tree on any host.
+  - A one-shot item check leaves the editor-only facts (expression and pattern types, literal
+    expectations, loop variables, selected overloads, callee targets) empty. `match_findings`
+    reads types straight from the inference table, so exhaustiveness does not need them.
+  - `sourced_definition` returns early for a file that sources nothing; the tracked part is
+    `sourced_name_definition`.
+  - `item_frame_binders` is a `SortedMap` instead of a hash table, and `TypeScheme::binders` is a
+    `ThinVec`, because one of each lives per item for the whole run.
+  - mimalloc's purge delay is 10 ms instead of a second (`crates/ry/src/main.rs`), so the trees
+    freed during the run return to the OS before the peak, which is late in the check.
+- **Correctness.** JSON findings are byte-identical against main on all three benchmark code bases.
+- **Performance.** Interleaved runs against main (4 cores, `--no-cache --output json`): peak RSS
+  383-407 MiB to 304-306 MiB on finance, 374-390 to 305-306 on data science, 384-398 to 298-299 on
+  biostatistics; wall time about 1.35-1.6 s to 1.18-1.36 s on a busy machine. The heap peak under
+  the system allocator went from 305 to 261 MiB before the frame-binder and scheme cuts; what remains is real data (HIR kinds and
+  ranges about 54 MiB, salsa edges about 29 MiB, source text 14 MiB, the naming and check memos).
+  Instruction counts barely moved (23.4 G to 23.0 G), so the wall gain is less contention and less
+  serial work.
+- **Incremental.** The server path keeps every memo and firewall; only the tracked names changed
+  (`parse_memo`, `item_syntax_memo`, `item_annotation_syntax_memo`), and `test_incremental.rs`
+  pins the first two under those names.

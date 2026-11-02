@@ -161,18 +161,18 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident in the server, and `ry check` releases them once
+### Syntax trees stay resident in the server, and `ry check` holds one at a time
 
 The server keeps every syntax tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
-has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
-off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
-zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
-to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
-never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
-check's wall time when the capacities stayed set). The released file trees come back to the
-caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
-all cores. A tree read after the release still works, by reparsing that file.
+valid. `ry check` reads each tree in its first pass only, so it never memoizes one. Each worker of
+the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
+parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
+tree is freed when the worker moves on. In a one-shot database `item_syntax` and
+`item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
+tree alive past the syntax pass and buys nothing in a run that never edits. A tree read after the
+syntax pass still works, by reparsing that file. Annotation memos (`file_item_annotations`) store
+detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
+annotation never keeps the whole file's tree alive.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -368,7 +368,7 @@ items that read its name. `crates/semantics/tests/test_incremental.rs` pins thes
 
 `ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
 cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape and drops the per-expression facts only editor features read.
 A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
 answers each name with a hash probe, instead of interning a name and going through `package_name`
 or `test_name`. A frame binder that `item_frame_binders` does not list comes from the file's
@@ -377,7 +377,7 @@ binders, read once per reader, instead of a `frame_binder` memo per item and nam
 instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. The language server and a cached `ry check` keep the firewalls.
+per-item answer. The item check of a one-shot host leaves out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, because only editor features read them. The language server and a cached `ry check` keep the firewalls and the editor facts.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

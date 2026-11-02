@@ -3094,8 +3094,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
     callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
     build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
+    editor-only check facts, and purges freed memory after 10 ms (`decisions.md`, "A cold check
+    holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
+    300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
+    1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
   - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut. It is also
+    the next memory cut: salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
+  - `collect_used_tokens` slices every token through `token_ref` (about 318 M instructions on
+    finance); skipping trivia before slicing is a cheap CPU cut.
   - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
