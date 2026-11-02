@@ -33,7 +33,7 @@ just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
 just release-dry-run                # package and smoke-test this machine's release archive
-just docs-deploy                    # deploy the docs site from main (needs CLOUDFLARE_DEPLOY_HOOK)
+just docs-deploy <branch>           # build the docs site and deploy it (main is production)
 ```
 
 The simulators, fuzzers and long oracle runs have their own recipes, which

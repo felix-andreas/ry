@@ -3,26 +3,46 @@
 #
 #   git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
 #
-# Deploys the docs site (https://ry-lang.org) when started by hand from the Actions tab: a Cloudflare
-# Pages deploy hook (`just docs-deploy`) builds main as it is at that moment, and Cloudflare's
-# automatic deploys are off. Setting up the CLOUDFLARE_DEPLOY_HOOK secret is described in
-# docs/src/content/docs/contributing/releasing.md.
+# Deploys the docs site when started by hand from the Actions tab, since Cloudflare's automatic
+# deploys are off. Deploying `main` updates https://ry-lang.org; any other branch gets a preview. The
+# secrets and the project variable are described in docs/src/content/docs/contributing/releasing.md.
 name: Docs
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy: main is production, any other branch a preview"
+        required: true
+        default: main
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.branch }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
-    name: deploy
+    name: deploy ${{ inputs.branch }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
       - uses: extractions/setup-just@v2
-      - name: start the Cloudflare Pages build
+      - uses: oven-sh/setup-bun@v2
+      # Astro needs Node 22.23.4 or newer, which the runner's preinstalled Node may not be.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: build and deploy
         env:
-          CLOUDFLARE_DEPLOY_HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
-        run: just docs-deploy
+          # The branch goes through the environment, never into the script text, so its name cannot
+          # inject shell commands.
+          BRANCH: ${{ inputs.branch }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+        run: just docs-deploy "$BRANCH"

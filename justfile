@@ -127,17 +127,25 @@ repl-e2e:
 docs:
     cd docs && bun dev
 
-# Deploy the docs site: start a Cloudflare Pages build of main as it is now, through the deploy hook
-# URL in CLOUDFLARE_DEPLOY_HOOK, and print Cloudflare's response, which names the deployment.
-docs-deploy:
+# Build the docs site from this checkout and upload it to Cloudflare Pages as BRANCH: `main` is the
+# production deploy (while main is the Pages project's production branch), any other name a preview.
+# Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_PAGES_PROJECT.
+docs-deploy $branch:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -z "${CLOUDFLARE_DEPLOY_HOOK:-}" ]; then
-    	echo "error: CLOUDFLARE_DEPLOY_HOOK is not set; it is the Pages project's deploy hook URL (contributing/releasing.md, \"Deploying the docs site\")" >&2
+    missing=""
+    for variable in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT; do
+    	if [ -z "${!variable:-}" ]; then missing="$missing $variable"; fi
+    done
+    if [ -n "$missing" ]; then
+    	echo "error: docs-deploy needs these environment variables:$missing (contributing/releasing.md, \"Deploying the docs site\")" >&2
     	exit 1
     fi
-    curl -fsS -X POST "$CLOUDFLARE_DEPLOY_HOOK"
-    echo
+    commit=$(git rev-parse HEAD)
+    cd docs
+    bun install --frozen-lockfile
+    bun run build
+    bunx wrangler@4.151.3 pages deploy dist --project-name "$CLOUDFLARE_PAGES_PROJECT" --branch "$branch" --commit-hash "$commit"
 
 vsce *args:
     @bun --cwd=editors/code run vsce -- {{ args }}

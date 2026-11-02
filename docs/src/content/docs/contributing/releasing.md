@@ -39,21 +39,29 @@ on main at its hourly check when main has new commits.
 
 ## Deploying the docs site
 
-The docs site at https://ry-lang.org deploys only when someone asks for it. Cloudflare Pages builds
-it through its GitHub connection, with production branch main and automatic deploys off, and a
-deploy hook starts each build. The hook always builds the latest commit of main, so a deploy
-publishes main as it is at that moment.
+The docs site at https://ry-lang.org deploys only when someone asks for it, because the Cloudflare
+Pages project's automatic deploys are off. To deploy, open **Actions**, then **Docs**, then **Run
+workflow**, and enter a branch:
 
-To deploy, open **Actions**, then **Docs**, then **Run workflow**. From a checkout,
-`CLOUDFLARE_DEPLOY_HOOK=<hook URL> just docs-deploy` does the same and prints Cloudflare's response,
-which names the new deployment.
+- `main` is a production deploy, which updates https://ry-lang.org.
+- Any other branch is a preview, served at that branch's alias on the project's `pages.dev` domain
+  (`<branch>.<project>.pages.dev`), while the live site stays as it is.
 
-The workflow reads the hook URL from the repository secret `CLOUDFLARE_DEPLOY_HOOK`. To create it,
-open the docs project in the Cloudflare dashboard under **Workers & Pages**, go to **Settings**, then
-**Builds**, then **Deploy hooks**, and select **Add**. Give it any name and the branch `main`, then
-paste the URL it shows under the repository's **Settings**, **Secrets and variables**, **Actions**,
-as a new repository secret named `CLOUDFLARE_DEPLOY_HOOK`. Anyone with the URL can start a build,
-so keep it secret.
+The workflow checks out the branch and runs `just docs-deploy BRANCH`, which builds `docs/` and
+uploads the result with `wrangler pages deploy`. The recipe runs the same way from a checkout, with
+the three variables below set in the environment; it fails, naming the missing ones, if any is
+unset. It deploys whatever the checkout holds and labels the upload with its `HEAD` commit.
+
+The workflow needs two repository secrets and one repository variable, all under the repository's
+**Settings**, **Secrets and variables**, **Actions**:
+
+- Secret `CLOUDFLARE_API_TOKEN`: a Cloudflare API token with the account permission **Cloudflare
+  Pages: Edit**, created in the Cloudflare dashboard under **My Profile**, then **API Tokens**.
+- Secret `CLOUDFLARE_ACCOUNT_ID`: the account ID shown on the account's overview page.
+- Variable `CLOUDFLARE_PAGES_PROJECT`: the name of the Pages project behind ry-lang.org.
+
+`main` is a production deploy only while it is the Pages project's production branch, so keep it
+set there.
 
 ## Credentials
 
