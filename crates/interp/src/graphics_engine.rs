@@ -1058,7 +1058,7 @@ pub const LINE_TYPES: [(&str, c_int); 7] = [
     ("dotted", 0x31),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
-    ("twodash", 0x2262),
+    ("twodash", 0x2622),
 ];
 
 /// The line end and join names with their engine codes. A number picks from the first two

@@ -356,7 +356,7 @@ const LINE_TYPES: [(&str, u32); 7] = [
     ("dotted", LTY_DOTTED),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
-    ("twodash", 0x2262),
+    ("twodash", 0x2622),
 ];
 
 impl Pars {
@@ -5188,6 +5188,10 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
     with_inline_pars(call, 16, |device| {
         let pars = device.pars.clone();
         let horizontal = side % 2 == 1;
+        // `xaxt = "n"` or `yaxt = "n"`, set globally or inline, suppresses the whole axis.
+        if (if horizontal { pars.xaxt } else { pars.yaxt }) == 'n' {
+            return Ok(());
+        }
         let [x_axis, y_axis] = user_axes(device);
         let axis = if horizontal { x_axis } else { y_axis };
         let usr = if horizontal {
@@ -5310,12 +5314,8 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
         } else {
             label_font
         };
-        let label_colour = text_colour_at(col, 0, pars.col_axis, pars.bg)?;
-        let label_colour = if col == nil() || length(col) == 0 {
-            pars.col_axis
-        } else {
-            label_colour
-        };
+        // GNU R's `C_axis` draws labels in `col.axis`; `col` colours only the line and ticks.
+        let label_colour = pars.col_axis;
         // A label that would come within `gap.axis` widths of "m" of the last one drawn is
         // left out.
         let gap = if gap_axis.is_finite() {
@@ -5462,44 +5462,54 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
         let region = region_rect(device, if outer { 7 } else { 17 });
         let along_x = lerp([region.x0, region.x1], pars.adj);
         let along_y = lerp([region.y0, region.y1], pars.adj);
-        if let Some(lines) = main {
+        if let Some(label) = main {
             let cex = pars.cex_main * pars.cex;
-            if line.is_finite() {
-                push_margin_text(
-                    device,
-                    clip,
-                    3,
-                    line,
-                    outer,
-                    along_x,
-                    &lines,
-                    0,
-                    pars.adj,
-                    0.0,
-                    cex,
-                    pars.font_main,
-                    pars.col_main,
-                )?;
+            // GNU R sets a main title's lines from line `line` of the top margin, bottom
+            // aligned, or centres them on the margin's middle line when `line` is not given.
+            let (position, yadj) = if line.is_finite() {
+                (line, 0.0)
             } else {
-                // The main title is centred on the middle line of the top margin.
                 let margin = if outer {
                     device.outer_inches()[2]
                 } else {
                     device.margin_inches()[2]
                 };
-                let anchor = [along_x, region.y1 + margin / 2.0];
-                push_label(
-                    device,
-                    clip,
-                    anchor,
-                    &lines,
-                    0.0,
-                    pars.adj,
-                    0.5,
-                    cex,
-                    pars.font_main,
-                    pars.col_main,
-                )?;
+                (margin / 2.0 / (device.pars.mex * device.line_inches()), 0.5)
+            };
+            match &label {
+                Label::Math(_) => {
+                    let anchor = [along_x, margin_line(device, 3, position, outer)];
+                    push_label(
+                        device,
+                        clip,
+                        anchor,
+                        &label,
+                        0.0,
+                        pars.adj,
+                        0.5,
+                        cex,
+                        pars.font_main,
+                        pars.col_main,
+                    )?;
+                }
+                Label::Lines(lines) => {
+                    let first = 0.5 * (lines.len() as f64 - 1.0) + position;
+                    for (index, text) in lines.iter().enumerate() {
+                        let anchor = [along_x, margin_line(device, 3, first - index as f64, outer)];
+                        push_text(
+                            device,
+                            clip,
+                            anchor,
+                            std::slice::from_ref(text),
+                            0.0,
+                            pars.adj,
+                            yadj,
+                            cex,
+                            pars.font_main,
+                            pars.col_main,
+                        )?;
+                    }
+                }
             }
         }
         if let Some(lines) = sub {
