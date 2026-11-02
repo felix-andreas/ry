@@ -16,6 +16,7 @@ use {
         coerce::coerce_vector,
         eval,
         stats::{real_matrix, real_values},
+        stats_lbfgsb::{self as lbfgsb, Bound, Settings},
         unwind::R,
         values::{self, length, nil, symbols},
     },
@@ -591,33 +592,41 @@ pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
                 .zip(&problem.par_scale)
                 .map(|(bound, scale)| bound / scale)
                 .collect();
-            let memory = control_integer(control_list, "lmm");
-            let factor = control_real(control_list, "factr");
-            let projected_tolerance = control_real(control_list, "pgtol");
+            if !start.is_empty() && control.report <= 0 {
+                return Err(call.error("REPORT must be > 0 (method = \"L-BFGS-B\")"));
+            }
             problem.bounds = Some((lower.clone(), upper.clone()));
-            let settings = crate::stats_lbfgsb::Settings {
-                memory: memory.max(1) as usize,
-                factor,
-                projected_tolerance,
+            let bounds: Vec<Bound> = lower
+                .iter()
+                .zip(&upper)
+                .map(|(&lower, &upper)| Bound::from_limits(lower, upper))
+                .collect();
+            let settings = Settings {
+                memory: control_integer(control_list, "lmm"),
+                factr: control_real(control_list, "factr"),
+                pgtol: control_real(control_list, "pgtol"),
                 max_iterations: control.max_iterations,
                 trace: control.trace,
-                report: control.report.max(1),
+                report: control.report,
             };
-            let outcome = crate::stats_lbfgsb::minimize(
-                &mut problem_adapter(&mut problem),
-                &start,
+            let mut solution = start.clone();
+            let outcome = lbfgsb::minimize(
+                &mut ProblemObjective {
+                    problem: &mut problem,
+                },
+                &mut solution,
                 &lower,
                 &upper,
+                &bounds,
                 &settings,
             )?;
-            let message = values::scalar_string(&outcome.message)?;
             (
-                outcome.solution,
+                solution,
                 outcome.value,
-                outcome.function_count as i32,
-                outcome.gradient_count as i32,
+                outcome.function_count,
+                outcome.gradient_count,
                 outcome.fail,
-                message,
+                values::scalar_string(outcome.message)?,
             )
         }
         "SANN" => {
@@ -666,28 +675,19 @@ pub unsafe fn optim(call: &NativeCall<'_>) -> R<Sexp> {
     ])
 }
 
-/// The objective and gradient as the L-BFGS-B driver sees them.
-pub(crate) trait Objective {
-    unsafe fn value(&mut self, x: &[f64]) -> R<f64>;
-    unsafe fn gradient(&mut self, x: &[f64]) -> R<Vec<f64>>;
-}
-
 struct ProblemObjective<'p, 'a> {
     problem: &'p mut Problem<'a>,
 }
 
-impl Objective for ProblemObjective<'_, '_> {
+impl lbfgsb::Objective for ProblemObjective<'_, '_> {
     unsafe fn value(&mut self, x: &[f64]) -> R<f64> {
         self.problem.value(x)
     }
 
-    unsafe fn gradient(&mut self, x: &[f64]) -> R<Vec<f64>> {
-        self.problem.gradient(x)
+    unsafe fn gradient(&mut self, x: &[f64], gradient: &mut [f64]) -> R<()> {
+        gradient.copy_from_slice(&self.problem.gradient(x)?);
+        Ok(())
     }
-}
-
-fn problem_adapter<'p, 'a>(problem: &'p mut Problem<'a>) -> ProblemObjective<'p, 'a> {
-    ProblemObjective { problem }
 }
 
 /// `optimhess(par, fn, gr, control)`: the Hessian at `par`, by central differences of the

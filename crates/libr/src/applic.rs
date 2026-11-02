@@ -26,6 +26,7 @@ use {
         utils::format_real_vector,
     },
     heap::object::NA_INTEGER,
+    interp::stats_lbfgsb::{self as lbfgsb, Bound, Settings, minimize},
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -3744,15 +3745,9 @@ pub unsafe extern "C" fn fdhess(
     })
 }
 
-// L-BFGS-B (Byrd, Lu, Nocedal and Zhu, "A limited memory algorithm for bound constrained
-// optimization", SIAM J. Sci. Comput. 16, 1995), in the formulation of its version 2.3, which
-// optim() uses: a generalized Cauchy point along the projected steepest descent path, direct
-// primal subspace minimization over the free variables, truncation at the bounds, and the
-// More-Thuente line search.
-
-/// Limited-memory BFGS minimization within the bounds `l` and `u`. `msg` receives the
-/// termination message (at most 59 characters); `fail` is 0 on convergence, 1 when `maxit`
-/// iterations were reached, 51 for a warning and 52 for an error.
+/// Limited-memory BFGS minimization within the bounds `l` and `u`, with `nbd` saying which
+/// bounds each variable has. `msg` receives the termination message (at most 59 characters);
+/// `fail` is 0 on convergence, 1 when `maxit` iterations were reached and 52 for an error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lbfgsb(
     n: c_int,
@@ -3777,63 +3772,84 @@ pub unsafe extern "C" fn lbfgsb(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, fmingr, ex)?;
-        if n == 0 {
-            *fncount = 1;
-            *grcount = 0;
-            *fmin = objective.value(&mut [])?;
-            set_message(msg, "NOTHING TO DO");
-            *fail = 0;
-            return Ok(());
-        }
-        if report <= 0 {
+        if n > 0 && report <= 0 {
             return Err(error("REPORT must be > 0 (method = \"L-BFGS-B\")"));
         }
-        let detail = match trace {
-            2 => 0,
-            3 => report,
-            4 => 99,
-            5 => 100,
-            6 => 101,
-            _ => -1,
-        };
         let size = n.max(0);
-        let bounds = Bounds {
-            lower: vector(l, size),
-            upper: vector(u, size),
-            kind: if nbd.is_null() || size == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(nbd, size as usize)
-            },
+        let lower = vector(l, size);
+        let upper = vector(u, size);
+        let kinds: &[c_int] = if nbd.is_null() || size == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(nbd, size as usize)
         };
-        let x = vector(x, size);
-        let settings = LbfgsbSettings {
+        let mut bounds = Vec::with_capacity(kinds.len());
+        for &kind in kinds {
+            bounds.push(match kind {
+                0 => Bound::None,
+                1 => Bound::Lower,
+                2 => Bound::Both,
+                3 => Bound::Upper,
+                _ => {
+                    // The reference code reports an invalid kind unless a later variable has
+                    // infeasible bounds, whose message then wins.
+                    let infeasible = kinds
+                        .iter()
+                        .zip(lower.iter().zip(upper.iter()))
+                        .any(|(&kind, (lower, upper))| kind == 2 && lower > upper);
+                    let message = if infeasible {
+                        "ERROR: NO FEASIBLE SOLUTION"
+                    } else {
+                        "ERROR: INVALID NBD"
+                    };
+                    *fail = 52;
+                    *fncount = 0;
+                    *grcount = 0;
+                    set_message(msg, message);
+                    return Ok(());
+                }
+            });
+        }
+        let settings = Settings {
             memory: m,
             factr,
             pgtol,
-            maxit,
+            max_iterations: maxit,
             trace,
             report,
-            detail,
         };
-        let outcome = minimize_bounded(&objective, x, &bounds, settings)?;
+        let mut adapter = CallbackObjective { objective };
+        let outcome = minimize(
+            &mut adapter,
+            vector(x, size),
+            lower,
+            upper,
+            &bounds,
+            &settings,
+        )?;
         *fail = outcome.fail;
         *fmin = outcome.value;
-        *fncount = outcome.evaluations;
-        *grcount = outcome.evaluations;
-        if trace != 0 {
-            if outcome.iterations < maxit && outcome.fail == 0 {
-                print(&format!("final  value {:.6} \nconverged\n", outcome.value));
-            } else {
-                print(&format!(
-                    "stopped after {} iterations\n",
-                    outcome.iterations
-                ));
-            }
-        }
-        set_message(msg, &outcome.message);
+        *fncount = outcome.function_count;
+        *grcount = outcome.gradient_count;
+        set_message(msg, outcome.message);
         Ok(())
     })
+}
+
+/// The C callbacks as the shared L-BFGS-B core evaluates them. The callbacks take mutable
+/// parameter pointers, so each evaluation hands them a copy.
+struct CallbackObjective {
+    objective: Objective,
+}
+
+impl lbfgsb::Objective for CallbackObjective {
+    unsafe fn value(&mut self, x: &[f64]) -> ApiResult<f64> {
+        self.objective.value(&mut x.to_vec())
+    }
+
+    unsafe fn gradient(&mut self, x: &[f64], gradient: &mut [f64]) -> ApiResult<()> {
+        self.objective.gradient(&mut x.to_vec(), gradient)
+    }
 }
 
 unsafe fn set_message(msg: *mut c_char, text: &str) {
@@ -3843,885 +3859,4 @@ unsafe fn set_message(msg: *mut c_char, text: &str) {
     let bytes = &text.as_bytes()[..text.len().min(59)];
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), msg as *mut u8, bytes.len());
     *msg.add(bytes.len()) = 0;
-}
-
-struct Bounds<'a> {
-    lower: &'a [f64],
-    upper: &'a [f64],
-    /// 0 unbounded, 1 lower only, 2 both, 3 upper only.
-    kind: &'a [c_int],
-}
-
-impl Bounds<'_> {
-    fn has_lower(&self, i: usize) -> bool {
-        matches!(self.kind[i], 1 | 2)
-    }
-
-    fn has_upper(&self, i: usize) -> bool {
-        matches!(self.kind[i], 2 | 3)
-    }
-
-    /// The infinity norm of the gradient projected onto the feasible box.
-    fn projected_gradient_norm(&self, x: &[f64], g: &[f64]) -> f64 {
-        let mut norm = 0.0f64;
-        for i in 0..x.len() {
-            let mut component = g[i];
-            if self.kind[i] != 0 {
-                if component < 0.0 {
-                    if self.has_upper(i) {
-                        component = component.max(x[i] - self.upper[i]);
-                    }
-                } else if self.has_lower(i) {
-                    component = component.min(x[i] - self.lower[i]);
-                }
-            }
-            norm = norm.max(component.abs());
-        }
-        norm
-    }
-}
-
-#[derive(Clone, Copy)]
-struct LbfgsbSettings {
-    memory: c_int,
-    factr: f64,
-    pgtol: f64,
-    maxit: c_int,
-    trace: c_int,
-    report: c_int,
-    detail: c_int,
-}
-
-struct LbfgsbOutcome {
-    value: f64,
-    fail: c_int,
-    evaluations: c_int,
-    iterations: c_int,
-    message: String,
-}
-
-/// The limited memory: the last `m` steps `s` and gradient changes `y`, oldest first, with
-/// `theta` and the middle matrix `M` of the compact representation `B = theta I - W M W'`,
-/// `W = [Y, theta S]`.
-struct Memory {
-    capacity: usize,
-    s: Vec<Vec<f64>>,
-    y: Vec<Vec<f64>>,
-    theta: f64,
-    middle: Vec<Vec<f64>>,
-}
-
-impl Memory {
-    fn new(capacity: usize) -> Memory {
-        Memory {
-            capacity,
-            s: Vec::new(),
-            y: Vec::new(),
-            theta: 1.0,
-            middle: Vec::new(),
-        }
-    }
-
-    fn columns(&self) -> usize {
-        self.s.len()
-    }
-
-    fn reset(&mut self) {
-        self.s.clear();
-        self.y.clear();
-        self.theta = 1.0;
-        self.middle.clear();
-    }
-
-    fn push(&mut self, s: Vec<f64>, y: Vec<f64>, theta: f64) {
-        if self.s.len() == self.capacity {
-            self.s.remove(0);
-            self.y.remove(0);
-        }
-        self.s.push(s);
-        self.y.push(y);
-        self.theta = theta;
-        let k = self.s.len();
-        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
-        let mut matrix = vec![vec![0.0; 2 * k]; 2 * k];
-        for i in 0..k {
-            matrix[i][i] = -dot(&self.s[i], &self.y[i]);
-            for j in 0..k {
-                if i > j {
-                    // L, the strictly lower part of S'Y, and its transpose.
-                    let value = dot(&self.s[i], &self.y[j]);
-                    matrix[k + i][j] = value;
-                    matrix[j][k + i] = value;
-                }
-                matrix[k + i][k + j] = theta * dot(&self.s[i], &self.s[j]);
-            }
-        }
-        self.middle = invert(matrix).unwrap_or_default();
-        if self.middle.is_empty() {
-            self.reset();
-        }
-    }
-
-    /// Row `i` of `W`.
-    fn row(&self, i: usize) -> Vec<f64> {
-        let k = self.columns();
-        let mut row = vec![0.0; 2 * k];
-        for j in 0..k {
-            row[j] = self.y[j][i];
-            row[k + j] = self.theta * self.s[j][i];
-        }
-        row
-    }
-
-    fn times_middle(&self, v: &[f64]) -> Vec<f64> {
-        self.middle
-            .iter()
-            .map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum())
-            .collect()
-    }
-}
-
-/// Gauss-Jordan inversion with partial pivoting; `None` when the matrix is singular.
-fn invert(mut matrix: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
-    let size = matrix.len();
-    let mut inverse: Vec<Vec<f64>> = (0..size)
-        .map(|i| (0..size).map(|j| (i == j) as u8 as f64).collect())
-        .collect();
-    for column in 0..size {
-        let pivot = (column..size).max_by(|&a, &b| {
-            matrix[a][column]
-                .abs()
-                .partial_cmp(&matrix[b][column].abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-        if matrix[pivot][column] == 0.0 || !matrix[pivot][column].is_finite() {
-            return None;
-        }
-        matrix.swap(column, pivot);
-        inverse.swap(column, pivot);
-        let scale = matrix[column][column];
-        for j in 0..size {
-            matrix[column][j] /= scale;
-            inverse[column][j] /= scale;
-        }
-        for row in 0..size {
-            if row != column {
-                let factor = matrix[row][column];
-                if factor != 0.0 {
-                    for j in 0..size {
-                        matrix[row][j] -= factor * matrix[column][j];
-                        inverse[row][j] -= factor * inverse[column][j];
-                    }
-                }
-            }
-        }
-    }
-    Some(inverse)
-}
-
-unsafe fn minimize_bounded(
-    objective: &Objective,
-    x: &mut [f64],
-    bounds: &Bounds,
-    settings: LbfgsbSettings,
-) -> ApiResult<LbfgsbOutcome> {
-    let n = x.len();
-    let epsilon = f64::EPSILON;
-    let mut outcome = LbfgsbOutcome {
-        value: f64::NAN,
-        fail: 52,
-        evaluations: 0,
-        iterations: 0,
-        message: String::new(),
-    };
-    // errclb: arguments the algorithm cannot run with.
-    let invalid = if settings.memory <= 0 {
-        Some("ERROR: M .LE. 0")
-    } else if settings.factr < 0.0 {
-        Some("ERROR: FACTR .LT. 0")
-    } else if bounds.kind.iter().any(|kind| !(0..=3).contains(kind)) {
-        Some("ERROR: INVALID NBD")
-    } else if (0..n).any(|i| bounds.kind[i] == 2 && bounds.lower[i] > bounds.upper[i]) {
-        Some("ERROR: NO FEASIBLE SOLUTION")
-    } else {
-        None
-    };
-    if let Some(message) = invalid {
-        outcome.message = message.into();
-        return Ok(outcome);
-    }
-    let constrained = bounds.kind.iter().any(|&kind| kind != 0);
-    let boxed = bounds.kind.iter().all(|&kind| kind == 2);
-    for i in 0..n {
-        if bounds.has_lower(i) {
-            x[i] = x[i].max(bounds.lower[i]);
-        }
-        if bounds.has_upper(i) {
-            x[i] = x[i].min(bounds.upper[i]);
-        }
-    }
-    if settings.detail >= 0 {
-        print(&format!(
-            "N = {n}, M = {} machine precision = {}\n",
-            settings.memory,
-            format_g(epsilon)
-        ));
-    }
-    let tolerance = settings.factr * epsilon;
-    let mut memory = Memory::new(settings.memory as usize);
-    let mut g = vec![0.0; n];
-    let evaluate = |x: &mut [f64], g: &mut [f64]| -> ApiResult<f64> {
-        let value = objective.value(x)?;
-        if !value.is_finite() {
-            return Err(error("L-BFGS-B needs finite values of 'fn'"));
-        }
-        objective.gradient(x, g)?;
-        Ok(value)
-    };
-    let mut f = evaluate(x, &mut g)?;
-    let mut evaluations: c_int = 1;
-    let mut iterations: c_int = 0;
-    let finish =
-        |outcome: &mut LbfgsbOutcome, f: f64, evaluations, iterations, fail, message: &str| {
-            outcome.value = f;
-            outcome.evaluations = evaluations;
-            outcome.iterations = iterations;
-            outcome.fail = fail;
-            outcome.message = message.into();
-        };
-    let mut projected = bounds.projected_gradient_norm(x, &g);
-    if projected <= settings.pgtol {
-        finish(
-            &mut outcome,
-            f,
-            evaluations,
-            iterations,
-            0,
-            "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
-        );
-        return Ok(outcome);
-    }
-    loop {
-        // The generalized Cauchy point z and the coefficients c of its W'(z - x) term.
-        let (mut z, c) = if !constrained && memory.columns() > 0 {
-            (x.to_vec(), vec![0.0; 2 * memory.columns()])
-        } else {
-            cauchy_point(x, &g, bounds, &memory)
-        };
-        let free: Vec<usize> = (0..n)
-            .filter(|&i| {
-                !(bounds.has_lower(i) && z[i] <= bounds.lower[i])
-                    && !(bounds.has_upper(i) && z[i] >= bounds.upper[i])
-            })
-            .collect();
-        if !free.is_empty() && memory.columns() > 0 {
-            subspace_minimization(x, &g, bounds, &memory, &free, &c, &mut z);
-        }
-        let d: Vec<f64> = (0..n).map(|i| z[i] - x[i]).collect();
-
-        // The line search along d.
-        let d_norm = dnrm2(n as isize, d.as_ptr());
-        let mut step_max = 1e10;
-        if constrained {
-            if iterations == 0 {
-                step_max = 1.0;
-            } else {
-                for i in 0..n {
-                    let direction = d[i];
-                    if bounds.kind[i] == 0 {
-                        continue;
-                    }
-                    if direction < 0.0 && bounds.has_lower(i) {
-                        let room = bounds.lower[i] - x[i];
-                        if room >= 0.0 {
-                            step_max = 0.0;
-                        } else if direction * step_max < room {
-                            step_max = room / direction;
-                        }
-                    } else if direction > 0.0 && bounds.has_upper(i) {
-                        let room = bounds.upper[i] - x[i];
-                        if room <= 0.0 {
-                            step_max = 0.0;
-                        } else if direction * step_max > room {
-                            step_max = room / direction;
-                        }
-                    }
-                }
-            }
-        }
-        let mut step = if iterations == 0 && !boxed {
-            (1.0 / d_norm).min(step_max)
-        } else {
-            1.0
-        };
-        let start = x.to_vec();
-        let start_gradient = g.clone();
-        let f_old = f;
-        let mut trials = 0;
-        let mut search = MoreThuente::new(1e-3, 0.9, 0.1, 0.0, step_max);
-        let mut gd_old = 0.0;
-        let mut gd;
-        let mut failed = false;
-        loop {
-            gd = ddot(n as isize, g.as_ptr(), d.as_ptr());
-            if trials == 0 {
-                gd_old = gd;
-                if gd >= 0.0 {
-                    failed = true;
-                    break;
-                }
-            }
-            let status = search.step(f, gd, &mut step);
-            if status != SearchStatus::Evaluate {
-                break;
-            }
-            trials += 1;
-            evaluations += 1;
-            if trials > 20 {
-                evaluations -= 1;
-                failed = true;
-                break;
-            }
-            if step == 1.0 {
-                x.copy_from_slice(&z);
-            } else {
-                for i in 0..n {
-                    x[i] = step * d[i] + start[i];
-                }
-            }
-            f = evaluate(x, &mut g)?;
-        }
-        if failed {
-            x.copy_from_slice(&start);
-            g.copy_from_slice(&start_gradient);
-            f = f_old;
-            if memory.columns() == 0 {
-                finish(
-                    &mut outcome,
-                    f,
-                    evaluations,
-                    iterations,
-                    52,
-                    "ERROR: ABNORMAL_TERMINATION_IN_LNSRCH",
-                );
-                return Ok(outcome);
-            }
-            memory.reset();
-            continue;
-        }
-        iterations += 1;
-        projected = bounds.projected_gradient_norm(x, &g);
-        if settings.trace == 1 && iterations % settings.report == 0 {
-            print(&format!("iter {iterations:4} value {f:.6}\n"));
-        }
-        if settings.detail > 0 && iterations % settings.detail == 0 {
-            print(&format!(
-                "At iterate {iterations:5}  f = {}  |proj g|=  {}\n",
-                format_g(f),
-                format_g(projected)
-            ));
-        }
-        if iterations > settings.maxit {
-            finish(&mut outcome, f, evaluations, iterations, 1, "NEW_X");
-            return Ok(outcome);
-        }
-        if projected <= settings.pgtol {
-            finish(
-                &mut outcome,
-                f,
-                evaluations,
-                iterations,
-                0,
-                "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
-            );
-            return Ok(outcome);
-        }
-        let scale = f_old.abs().max(f.abs()).max(1.0);
-        if f_old - f <= tolerance * scale {
-            finish(
-                &mut outcome,
-                f,
-                evaluations,
-                iterations,
-                0,
-                "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH",
-            );
-            return Ok(outcome);
-        }
-        // Update the memory unless the curvature condition fails.
-        let s: Vec<f64> = (0..n).map(|i| x[i] - start[i]).collect();
-        let y: Vec<f64> = (0..n).map(|i| g[i] - start_gradient[i]).collect();
-        let rr = ddot(n as isize, y.as_ptr(), y.as_ptr());
-        let (dr, threshold) = if step == 1.0 {
-            (gd - gd_old, -gd_old)
-        } else {
-            ((gd - gd_old) * step, -gd_old * step)
-        };
-        if dr > epsilon * threshold {
-            memory.push(s, y, rr / dr);
-        }
-    }
-}
-
-/// The generalized Cauchy point: the first local minimizer of the quadratic model along the
-/// projected steepest descent path `x(t) = P(x - t g)`, found by walking its breakpoints.
-/// Returns the point and `c = W'(z - x)`.
-fn cauchy_point(x: &[f64], g: &[f64], bounds: &Bounds, memory: &Memory) -> (Vec<f64>, Vec<f64>) {
-    let n = x.len();
-    let k2 = 2 * memory.columns();
-    let theta = memory.theta;
-    let mut z = x.to_vec();
-    let mut d = vec![0.0; n];
-    let mut breakpoints: Vec<(f64, usize)> = Vec::new();
-    for i in 0..n {
-        let fixed = bounds.kind[i] == 2 && bounds.lower[i] == bounds.upper[i];
-        let breakpoint = if g[i] < 0.0 && bounds.has_upper(i) {
-            (x[i] - bounds.upper[i]) / g[i]
-        } else if g[i] > 0.0 && bounds.has_lower(i) {
-            (x[i] - bounds.lower[i]) / g[i]
-        } else {
-            f64::INFINITY
-        };
-        if fixed || breakpoint <= 0.0 {
-            continue;
-        }
-        d[i] = -g[i];
-        if breakpoint.is_finite() {
-            breakpoints.push((breakpoint, i));
-        }
-    }
-    breakpoints.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut c = vec![0.0; k2];
-    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
-    let mut p = vec![0.0; k2];
-    if k2 > 0 {
-        for i in 0..n {
-            if d[i] != 0.0 {
-                let row = memory.row(i);
-                for j in 0..k2 {
-                    p[j] += row[j] * d[i];
-                }
-            }
-        }
-    }
-    let mut fp = -dot(&d, &d);
-    if fp == 0.0 {
-        return (z, c);
-    }
-    let initial_curvature = -theta * fp;
-    let mut fpp = initial_curvature
-        - if k2 > 0 {
-            dot(&p, &memory.times_middle(&p))
-        } else {
-            0.0
-        };
-    let curvature = |fpp: f64| fpp.max(f64::EPSILON * initial_curvature);
-    let mut dt_min = -fp / curvature(fpp);
-    let mut t_old = 0.0;
-    for &(t, b) in &breakpoints {
-        let dt = t - t_old;
-        if dt_min < dt {
-            break;
-        }
-        z[b] = if d[b] > 0.0 {
-            bounds.upper[b]
-        } else {
-            bounds.lower[b]
-        };
-        let zb = z[b] - x[b];
-        let gb = g[b];
-        for j in 0..k2 {
-            c[j] += dt * p[j];
-        }
-        if k2 > 0 {
-            let row = memory.row(b);
-            let mrow = memory.times_middle(&row);
-            fp += dt * fpp + gb * gb + theta * gb * zb - gb * dot(&mrow, &c);
-            fpp -= theta * gb * gb + 2.0 * gb * dot(&mrow, &p) + gb * gb * dot(&mrow, &row);
-            for j in 0..k2 {
-                p[j] += gb * row[j];
-            }
-        } else {
-            fp += dt * fpp + gb * gb + theta * gb * zb;
-            fpp -= theta * gb * gb;
-        }
-        d[b] = 0.0;
-        dt_min = -fp / curvature(fpp);
-        t_old = t;
-    }
-    let dt_min = dt_min.max(0.0);
-    t_old += dt_min;
-    for i in 0..n {
-        if d[i] != 0.0 {
-            z[i] = x[i] + t_old * d[i];
-        }
-    }
-    for j in 0..k2 {
-        c[j] += dt_min * p[j];
-    }
-    (z, c)
-}
-
-/// Minimizes the quadratic model over the free variables from the Cauchy point by the direct
-/// primal method, then backtracks onto the box.
-fn subspace_minimization(
-    x: &[f64],
-    g: &[f64],
-    bounds: &Bounds,
-    memory: &Memory,
-    free: &[usize],
-    c: &[f64],
-    z: &mut [f64],
-) {
-    let k2 = 2 * memory.columns();
-    let theta = memory.theta;
-    let mc = memory.times_middle(c);
-    let rows: Vec<Vec<f64>> = free.iter().map(|&i| memory.row(i)).collect();
-    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
-    let reduced: Vec<f64> = free
-        .iter()
-        .zip(&rows)
-        .map(|(&i, row)| -(g[i] + theta * (z[i] - x[i]) - dot(row, &mc)))
-        .collect();
-    let mut v = vec![0.0; k2];
-    let mut gram = vec![vec![0.0; k2]; k2];
-    for (row, &r) in rows.iter().zip(&reduced) {
-        for a in 0..k2 {
-            v[a] += row[a] * r;
-            for b in 0..k2 {
-                gram[a][b] += row[a] * row[b];
-            }
-        }
-    }
-    let v = memory.times_middle(&v);
-    // N = I - (1/theta) M W'ZZ'W
-    let mut system = vec![vec![0.0; k2]; k2];
-    for a in 0..k2 {
-        for b in 0..k2 {
-            let product: f64 = (0..k2).map(|j| memory.middle[a][j] * gram[j][b]).sum();
-            system[a][b] = (a == b) as u8 as f64 - product / theta;
-        }
-    }
-    let Some(system_inverse) = invert(system) else {
-        return;
-    };
-    let solved: Vec<f64> = system_inverse.iter().map(|row| dot(row, &v)).collect();
-    let mut direction: Vec<f64> = reduced
-        .iter()
-        .zip(&rows)
-        .map(|(&r, row)| r / theta + dot(row, &solved) / (theta * theta))
-        .collect();
-    let mut alpha = 1.0f64;
-    let mut blocking = None;
-    for (position, &k) in free.iter().enumerate() {
-        let dk = direction[position];
-        if bounds.kind[k] == 0 {
-            continue;
-        }
-        let mut limit = alpha;
-        if dk < 0.0 && bounds.has_lower(k) {
-            let room = bounds.lower[k] - z[k];
-            if room >= 0.0 {
-                limit = 0.0;
-            } else if dk * alpha < room {
-                limit = room / dk;
-            }
-        } else if dk > 0.0 && bounds.has_upper(k) {
-            let room = bounds.upper[k] - z[k];
-            if room <= 0.0 {
-                limit = 0.0;
-            } else if dk * alpha > room {
-                limit = room / dk;
-            }
-        }
-        if limit < alpha {
-            alpha = limit;
-            blocking = Some(position);
-        }
-    }
-    if alpha < 1.0
-        && let Some(position) = blocking
-    {
-        let k = free[position];
-        if direction[position] > 0.0 {
-            z[k] = bounds.upper[k];
-            direction[position] = 0.0;
-        } else if direction[position] < 0.0 {
-            z[k] = bounds.lower[k];
-            direction[position] = 0.0;
-        }
-    }
-    for (position, &k) in free.iter().enumerate() {
-        z[k] += alpha * direction[position];
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum SearchStatus {
-    Evaluate,
-    Converged,
-    Warning,
-}
-
-/// The More-Thuente line search (MINPACK-2 `dcsrch`/`dcstep`) as a state machine: each call
-/// takes the function value and directional derivative at the current step and either asks
-/// for another evaluation at the updated step or stops.
-struct MoreThuente {
-    ftol: f64,
-    gtol: f64,
-    xtol: f64,
-    step_min: f64,
-    step_max: f64,
-    started: bool,
-    bracketed: bool,
-    stage: u8,
-    f_initial: f64,
-    g_initial: f64,
-    g_test: f64,
-    width: f64,
-    width_previous: f64,
-    stx: f64,
-    fx: f64,
-    gx: f64,
-    sty: f64,
-    fy: f64,
-    gy: f64,
-    interval_min: f64,
-    interval_max: f64,
-}
-
-impl MoreThuente {
-    fn new(ftol: f64, gtol: f64, xtol: f64, step_min: f64, step_max: f64) -> MoreThuente {
-        MoreThuente {
-            ftol,
-            gtol,
-            xtol,
-            step_min,
-            step_max,
-            started: false,
-            bracketed: false,
-            stage: 1,
-            f_initial: 0.0,
-            g_initial: 0.0,
-            g_test: 0.0,
-            width: 0.0,
-            width_previous: 0.0,
-            stx: 0.0,
-            fx: 0.0,
-            gx: 0.0,
-            sty: 0.0,
-            fy: 0.0,
-            gy: 0.0,
-            interval_min: 0.0,
-            interval_max: 0.0,
-        }
-    }
-
-    fn step(&mut self, f: f64, g: f64, step: &mut f64) -> SearchStatus {
-        const EXTRAPOLATE_LOW: f64 = 1.1;
-        const EXTRAPOLATE_HIGH: f64 = 4.0;
-        if !self.started {
-            if *step < self.step_min || *step > self.step_max || g >= 0.0 {
-                return SearchStatus::Warning;
-            }
-            self.started = true;
-            self.f_initial = f;
-            self.g_initial = g;
-            self.g_test = self.ftol * g;
-            self.width = self.step_max - self.step_min;
-            self.width_previous = self.width / 0.5;
-            self.fx = f;
-            self.gx = g;
-            self.fy = f;
-            self.gy = g;
-            self.interval_max = *step + EXTRAPOLATE_HIGH * *step;
-            return SearchStatus::Evaluate;
-        }
-        let f_test = self.f_initial + *step * self.g_test;
-        if self.stage == 1 && f <= f_test && g >= 0.0 {
-            self.stage = 2;
-        }
-        let mut status = None;
-        if self.bracketed && (*step <= self.interval_min || *step >= self.interval_max) {
-            status = Some(SearchStatus::Warning);
-        }
-        if self.bracketed && self.interval_max - self.interval_min <= self.xtol * self.interval_max
-        {
-            status = Some(SearchStatus::Warning);
-        }
-        if *step == self.step_max && f <= f_test && g <= self.g_test {
-            status = Some(SearchStatus::Warning);
-        }
-        if *step == self.step_min && (f > f_test || g >= self.g_test) {
-            status = Some(SearchStatus::Warning);
-        }
-        if f <= f_test && g.abs() <= self.gtol * (-self.g_initial) {
-            status = Some(SearchStatus::Converged);
-        }
-        if let Some(status) = status {
-            return status;
-        }
-        if self.stage == 1 && f <= self.fx && f > f_test {
-            // Use the modified function until the sufficient decrease condition is reached.
-            let mut fxm = self.fx - self.stx * self.g_test;
-            let mut fym = self.fy - self.sty * self.g_test;
-            let mut gxm = self.gx - self.g_test;
-            let mut gym = self.gy - self.g_test;
-            let fm = f - *step * self.g_test;
-            let gm = g - self.g_test;
-            self.take_step(&mut fxm, &mut gxm, &mut fym, &mut gym, step, fm, gm);
-            self.fx = fxm + self.stx * self.g_test;
-            self.fy = fym + self.sty * self.g_test;
-            self.gx = gxm + self.g_test;
-            self.gy = gym + self.g_test;
-        } else {
-            let (mut fx, mut gx, mut fy, mut gy) = (self.fx, self.gx, self.fy, self.gy);
-            self.take_step(&mut fx, &mut gx, &mut fy, &mut gy, step, f, g);
-            (self.fx, self.gx, self.fy, self.gy) = (fx, gx, fy, gy);
-        }
-        if self.bracketed {
-            if (self.sty - self.stx).abs() >= 0.66 * self.width_previous {
-                *step = self.stx + 0.5 * (self.sty - self.stx);
-            }
-            self.width_previous = self.width;
-            self.width = (self.sty - self.stx).abs();
-            self.interval_min = self.stx.min(self.sty);
-            self.interval_max = self.stx.max(self.sty);
-        } else {
-            self.interval_min = *step + EXTRAPOLATE_LOW * (*step - self.stx);
-            self.interval_max = *step + EXTRAPOLATE_HIGH * (*step - self.stx);
-        }
-        *step = step.max(self.step_min).min(self.step_max);
-        if (self.bracketed && (*step <= self.interval_min || *step >= self.interval_max))
-            || (self.bracketed
-                && self.interval_max - self.interval_min <= self.xtol * self.interval_max)
-        {
-            *step = self.stx;
-        }
-        SearchStatus::Evaluate
-    }
-
-    /// `dcstep`: a safeguarded cubic or quadratic step that updates the interval of
-    /// uncertainty `[stx, sty]`.
-    #[allow(clippy::too_many_arguments)]
-    fn take_step(
-        &mut self,
-        fx: &mut f64,
-        dx: &mut f64,
-        fy: &mut f64,
-        dy: &mut f64,
-        stp: &mut f64,
-        fp: f64,
-        dp: f64,
-    ) {
-        let (stx, sty) = (self.stx, self.sty);
-        let (low, high) = (self.interval_min, self.interval_max);
-        let sign = dp * (*dx / dx.abs());
-        let stpf;
-        if fp > *fx {
-            let theta = 3.0 * (*fx - fp) / (*stp - stx) + *dx + dp;
-            let s = theta.abs().max(dx.abs()).max(dp.abs());
-            let mut gamma = s * ((theta / s).powi(2) - (*dx / s) * (dp / s)).sqrt();
-            if *stp < stx {
-                gamma = -gamma;
-            }
-            let p = (gamma - *dx) + theta;
-            let q = ((gamma - *dx) + gamma) + dp;
-            let r = p / q;
-            let stpc = stx + r * (*stp - stx);
-            let stpq = stx + ((*dx / ((*fx - fp) / (*stp - stx) + *dx)) / 2.0) * (*stp - stx);
-            stpf = if (stpc - stx).abs() < (stpq - stx).abs() {
-                stpc
-            } else {
-                stpc + (stpq - stpc) / 2.0
-            };
-            self.bracketed = true;
-        } else if sign < 0.0 {
-            let theta = 3.0 * (*fx - fp) / (*stp - stx) + *dx + dp;
-            let s = theta.abs().max(dx.abs()).max(dp.abs());
-            let mut gamma = s * ((theta / s).powi(2) - (*dx / s) * (dp / s)).sqrt();
-            if *stp > stx {
-                gamma = -gamma;
-            }
-            let p = (gamma - dp) + theta;
-            let q = ((gamma - dp) + gamma) + *dx;
-            let r = p / q;
-            let stpc = *stp + r * (stx - *stp);
-            let stpq = *stp + (dp / (dp - *dx)) * (stx - *stp);
-            stpf = if (stpc - *stp).abs() > (stpq - *stp).abs() {
-                stpc
-            } else {
-                stpq
-            };
-            self.bracketed = true;
-        } else if dp.abs() < dx.abs() {
-            let theta = 3.0 * (*fx - fp) / (*stp - stx) + *dx + dp;
-            let s = theta.abs().max(dx.abs()).max(dp.abs());
-            let mut gamma = s * ((theta / s).powi(2) - (*dx / s) * (dp / s)).max(0.0).sqrt();
-            if *stp > stx {
-                gamma = -gamma;
-            }
-            let p = (gamma - dp) + theta;
-            let q = (gamma + (*dx - dp)) + gamma;
-            let r = p / q;
-            let stpc = if r < 0.0 && gamma != 0.0 {
-                *stp + r * (stx - *stp)
-            } else if *stp > stx {
-                high
-            } else {
-                low
-            };
-            let stpq = *stp + (dp / (dp - *dx)) * (stx - *stp);
-            if self.bracketed {
-                let mut candidate = if (stpc - *stp).abs() < (stpq - *stp).abs() {
-                    stpc
-                } else {
-                    stpq
-                };
-                candidate = if *stp > stx {
-                    candidate.min(*stp + 0.66 * (sty - *stp))
-                } else {
-                    candidate.max(*stp + 0.66 * (sty - *stp))
-                };
-                stpf = candidate;
-            } else {
-                let candidate = if (stpc - *stp).abs() > (stpq - *stp).abs() {
-                    stpc
-                } else {
-                    stpq
-                };
-                stpf = candidate.min(high).max(low);
-            }
-        } else if self.bracketed {
-            let theta = 3.0 * (fp - *fy) / (sty - *stp) + *dy + dp;
-            let s = theta.abs().max(dy.abs()).max(dp.abs());
-            let mut gamma = s * ((theta / s).powi(2) - (*dy / s) * (dp / s)).sqrt();
-            if *stp > sty {
-                gamma = -gamma;
-            }
-            let p = (gamma - dp) + theta;
-            let q = ((gamma - dp) + gamma) + *dy;
-            let r = p / q;
-            stpf = *stp + r * (sty - *stp);
-        } else if *stp > stx {
-            stpf = high;
-        } else {
-            stpf = low;
-        }
-        if fp > *fx {
-            self.sty = *stp;
-            *fy = fp;
-            *dy = dp;
-        } else {
-            if sign < 0.0 {
-                self.sty = stx;
-                *fy = *fx;
-                *dy = *dx;
-            }
-            self.stx = *stp;
-            *fx = fp;
-            *dx = dp;
-        }
-        *stp = stpf;
-    }
 }

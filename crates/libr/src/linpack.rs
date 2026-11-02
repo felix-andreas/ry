@@ -1519,42 +1519,67 @@ pub unsafe extern "C" fn dsvdc_(
     }
 }
 
-/// PORT's `d1mach`: 1 the smallest positive normal double, 2 the largest, 3 the smallest
-/// relative spacing, 4 the largest relative spacing (machine epsilon), 5 `log10(2)`.
+/// The PORT library's machine constant `d1mach(i)` (Fox, Hall and Schryer, "Framework for a
+/// portable library", ACM TOMS 4, 1978) for IEEE 754 binary64, whose base is `B = 2`, with
+/// `T = 53` digits and exponents from `EMIN = -1021` to `EMAX = 1024`:
+///
+/// 1. `B^(EMIN - 1)`, the smallest positive normal magnitude;
+/// 2. `B^EMAX (1 - B^-T)`, the largest finite magnitude;
+/// 3. `B^-T`, the smallest relative spacing;
+/// 4. `B^(1 - T)`, the largest relative spacing;
+/// 5. `log10(B)`.
+///
+/// Any other index gives 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn d1mach_(which: *const c_int) -> f64 {
-    match *which {
-        1 => f64::MIN_POSITIVE,
-        2 => f64::MAX,
-        3 => f64::EPSILON / 2.0,
-        4 => f64::EPSILON,
-        5 => std::f64::consts::LOG10_2,
-        _ => 0.0,
-    }
+    const CONSTANTS: [f64; 5] = [
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::EPSILON / 2.0,
+        f64::EPSILON,
+        std::f64::consts::LOG10_2,
+    ];
+    port_constant(*which, &CONSTANTS).unwrap_or(0.0)
 }
 
-/// PORT's `i1mach`: I/O units, integer and floating-point parameters of the machine.
+/// PORT's integer machine constant `i1mach(i)`, from the same paper:
+///
+/// 1. to 4. the Fortran units for standard input (5), standard output (6), punched output
+///    (none, 0) and error messages (0);
+/// 5. and 6. the bits and characters in an integer storage unit;
+/// 7. to 9. the integer base `A`, its digit count `S` and the largest integer `A^S - 1`;
+/// 10. the floating-point base `B`;
+/// 11. to 13. single precision's digits `T`, `EMIN` and `EMAX`;
+/// 14. to 16. the same for double precision.
+///
+/// Any other index gives 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn i1mach_(which: *const c_int) -> c_int {
-    match *which {
-        1 => 5,
-        2 => 6,
-        3 => 0,
-        4 => 0,
-        5 => c_int::BITS as c_int,
-        6 => std::mem::size_of::<c_int>() as c_int,
-        7 => 2,
-        8 => c_int::BITS as c_int - 1,
-        9 => c_int::MAX,
-        10 => f64::RADIX as c_int,
-        11 => f32::MANTISSA_DIGITS as c_int,
-        12 => f32::MIN_EXP,
-        13 => f32::MAX_EXP,
-        14 => f64::MANTISSA_DIGITS as c_int,
-        15 => f64::MIN_EXP,
-        16 => f64::MAX_EXP,
-        _ => 0,
-    }
+    const CONSTANTS: [c_int; 16] = [
+        5,
+        6,
+        0,
+        0,
+        c_int::BITS as c_int,
+        std::mem::size_of::<c_int>() as c_int,
+        2,
+        c_int::BITS as c_int - 1,
+        c_int::MAX,
+        f64::RADIX as c_int,
+        f32::MANTISSA_DIGITS as c_int,
+        f32::MIN_EXP,
+        f32::MAX_EXP,
+        f64::MANTISSA_DIGITS as c_int,
+        f64::MIN_EXP,
+        f64::MAX_EXP,
+    ];
+    port_constant(*which, &CONSTANTS).unwrap_or(0)
+}
+
+/// The 1-based entry `index` of a PORT constant table.
+fn port_constant<T: Copy>(index: c_int, constants: &[T]) -> Option<T> {
+    let position = usize::try_from(index).ok()?.checked_sub(1)?;
+    constants.get(position).copied()
 }
 
 #[cfg(test)]
