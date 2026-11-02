@@ -907,24 +907,20 @@ wants the generated arms shrunk across the board. This one measures per-arm cost
 and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
 644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
 
-### CI runs 171 of the workspace's 712 tests, and its second job runs none
+### The live CI runs 171 of the workspace's tests
 
-The root `Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`.
-`cargo test --all-targets --all-features -- --list` therefore reports 171 tests, all in `crates/ry`,
-against the workspace's 712. Every fuzz arm lives in another crate. The second job runs
-`-- --ignored`, which lists no tests for the same reason, so it is a full release build with
-`lto = true` followed by an empty test run, on every push, under a 45-minute timeout.
+The live workflow tests only `crates/ry` (`default-members`). Its staged replacement in
+`.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
+ignored suite, so a human moving it into place closes this (`decisions.md`, "CI runs `just gate`
+against GNU R 4.3.3").
 
-### `ide::fuzz_deep` makes a workspace-wide CI run time out
+### `ide::fuzz_deep` cannot be shortened
 
 `ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
 lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
-concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms. Five
-thousand sweeps is 55.4 minutes on 4 cores, against the job's 45-minute timeout on a 2-to-4 vCPU
-runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes.
-
-Fix the floor and raise the timeout with measured headroom. Both come before the human moves
-`.github/pending-ci.yml` into place.
+concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms, so five
+thousand sweeps take 55.4 minutes on 4 cores. CI no longer runs ignored suites, so this blocks a
+future scheduled deep-fuzz job, not the CI move.
 
 ### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
 
@@ -1049,9 +1045,8 @@ An agent can land all of these today: completion sampling, the release profile i
 syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
 type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-arm cleanup.
 
-A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
-scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
-corpus cache, and an OSS-Fuzz submission.
+A human is required for three things: moving the staged workflows in `.github/pending/` into place,
+which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
 
 ## Open: robustness harnesses
 
@@ -1946,9 +1941,9 @@ tagging fences `r` for Zed if that proves distant.
   0.80 s even in the throttled container. And same-query blocking is negligible, at 53 blocks per
   5,657 executions, while the interface graph is wide, with ggplot2 at 1,198 items and depth 22, so
   no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
-- **CI gates only the product crate.** The widened whole-workspace workflow is staged in
-  `.github/pending-ci.yml`, and a human must `git mv` it into `.github/workflows/`, because an
-  automated token lacks workflow scope. Until then the workspace battery runs locally per change.
+- **CI gates only the product crate.** The whole-workspace workflow is staged in
+  `.github/pending/workflows/ci.yml`, and a human must move it into `.github/workflows/`, because
+  an automated token lacks workflow scope. Until then the workspace battery runs locally per change.
   Authoritative performance numbers need the CI runner.
 
 ## Open: website and docs

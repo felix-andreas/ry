@@ -5,7 +5,7 @@ description: Release announcements and project news
 
 ## ry 0.4.0-beta, the first release that runs R
 
-*Not released yet: this entry is prepared for the beta.*
+*Released in November 2026 as a pre-release.*
 
 Version 0.4.0-beta adds ry's own R runtime beside the checker, plus the language features that only
 that runtime runs.
@@ -132,10 +132,10 @@ that runtime runs.
   reloads, the debugger's message framing, CSV reading and rendered graphics files. The bugs they
   found are fixed, and an unclosed quote in a CSV file is now an error.
 
-Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
-aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have
-not been run on a real Mac or Windows machine yet (Windows only under Wine), so treat them as
-experimental.
+Each release archive now holds `ry`, ry's runtime library and `ry-rcmd` side by side, for Linux
+(x86_64), macOS (Apple silicon) and Windows (x86_64), and so does each platform's VS Code extension.
+The macOS and Windows runtimes have not been run on a real Mac or Windows machine before this
+release's smoke test (Windows only under Wine), so treat them as experimental.
 
 ## ry 0.3.0, a complete rewrite
 
