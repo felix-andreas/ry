@@ -922,7 +922,16 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
                 let mut keep = vec![true; height];
                 for value in numbers {
                     let position = (-value) as usize;
-                    if position >= 1 && position <= height {
+                    if position > height {
+                        return Err(error_in(
+                            call,
+                            format!(
+                                "row {} is out of range for a DataFrame of {height} rows",
+                                format_position(value)
+                            ),
+                        ));
+                    }
+                    if position >= 1 {
                         keep[position - 1] = false;
                     }
                 }

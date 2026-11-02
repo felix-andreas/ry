@@ -834,8 +834,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("is.logical", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Logical)
     }),
+    // A factor is stored as integers, but GNU R does not count it as an integer vector.
     builtin("is.integer", 1, |call| unsafe {
-        scalar_bool(call.arg(0).kind() == SexpType::Integer)
+        let x = call.arg(0);
+        scalar_bool(x.kind() == SexpType::Integer && !values::inherits(x, "factor"))
     }),
     builtin("is.double", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Real)

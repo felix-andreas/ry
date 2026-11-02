@@ -53,6 +53,8 @@ use {
 /// they are only called once a data.table exists.
 const HELPERS: &str = r#"
 .datatable_caller <- function(env) {
+  # data.table rounds the last bytes of doubles when it groups and joins, unless rounding is off.
+  if (data.table::getNumericRounding() != 0L) return(0L)
   ns <- topenv(env)
   if (!isNamespace(ns)) return(1L)
   if (getNamespaceName(ns) == "data.table") return(2L)
@@ -170,11 +172,21 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
+    // A table without columns has no height of its own: data.table's `:=` takes it from the
+    // first column it adds.
+    if columns.is_empty() {
+        return Ok(None);
+    }
     let schema = Schema::new(
         columns
             .iter()
             .map(|column| (column.name.clone(), column.kind)),
     );
+    // data.table rejects grouping a table that has a column named like one of its special
+    // symbols, and rejects `by` together with `keyby`; both are errors only it words.
+    if grouping_conflicts(call, &columns) {
+        return Ok(None);
+    }
     let mut parts = frame::parse_parts(call, env, true)?;
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
@@ -197,6 +209,14 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         .as_ref()
         .and_then(Piece::expression)
         .is_some_and(|j| is_call(j, ":="));
+    // data.table evaluates a grouped `j` once on an empty table, which can warn.
+    if grouped && height == 0 {
+        return Ok(None);
+    }
+    // `keyby` with `:=` sets the key on `x` afterwards, or is an error when `i` is given.
+    if assigning && parts.keyed {
+        return Ok(None);
+    }
     // Inside data.table, only grouped aggregations are worth the engine (`dcast` aggregates this
     // way). Its internal row and column picks are vector copies its C does faster.
     if internal && (!grouped || assigning || parts.each_i) {
@@ -287,6 +307,45 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     };
     interp().visible = true;
     Ok(Some(value))
+}
+
+unsafe fn grouping_conflicts(call: Sexp, columns: &[SubjectColumn]) -> bool {
+    const SPECIAL: [&str; 7] = [".N", ".I", ".SD", ".BY", ".GRP", ".NGRP", ".EACHI"];
+    let mut by = None;
+    let mut keyby = None;
+    for (tag, value) in values::pairlist_items(call.cdr().cdr()) {
+        if tag.kind() != SexpType::Symbol {
+            continue;
+        }
+        match values::symbol_name(tag).as_ref() {
+            "by" => by = Some(value),
+            "keyby" => keyby = Some(value),
+            _ => {}
+        }
+    }
+    if by.is_some() && keyby.is_some() {
+        return true;
+    }
+    let Some(grouping) = by.or(keyby) else {
+        return false;
+    };
+    // `by = "a,b"` names two columns in data.table.
+    columns
+        .iter()
+        .any(|column| SPECIAL.contains(&column.name.as_str()))
+        || mentions_comma(grouping)
+}
+
+unsafe fn mentions_comma(expression: Sexp) -> bool {
+    match expression.kind() {
+        SexpType::String => (0..values::length(expression)).any(|index| {
+            values::string_at(expression, index).is_some_and(|text| text.contains(','))
+        }),
+        SexpType::Language => values::pairlist_items(expression.cdr())
+            .into_iter()
+            .any(|(_, argument)| mentions_comma(argument)),
+        _ => false,
+    }
 }
 
 /// Whether data.table answers `x[i]` through an index on the compared columns, which it creates

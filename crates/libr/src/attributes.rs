@@ -41,6 +41,17 @@ pub unsafe fn get_attrib(object: Sexp, name: Sexp) -> ApiResult<Sexp> {
     {
         return pairlist_names(object);
     }
+    // A one-dimensional array keeps its names as its only dimnames, as GNU R's
+    // `getAttrib` reports them; `tapply` results are such arrays.
+    if name == R_NamesSymbol.get() {
+        let dim = raw_attribute(object, R_DimSymbol.get());
+        if dim.kind() == SexpType::Integer && dim.length() == 1 {
+            let dimnames = raw_attribute(object, R_DimNamesSymbol.get());
+            if dimnames.kind() == SexpType::List && dimnames.length() >= 1 {
+                return crate::vectors::sexp_elt(dimnames, 0);
+            }
+        }
+    }
     let value = raw_attribute(object, name);
     if name == R_RowNamesSymbol.get()
         && value.kind() == SexpType::Integer
@@ -103,11 +114,16 @@ unsafe fn pairlist_names(list: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
     let nil = runtime.nil();
-    if object == nil {
-        return Err(error("attempt to set an attribute on NULL"));
-    }
     if object.kind() == SexpType::Char {
         return Err(error("cannot set attribute on a CHARSXP"));
+    }
+    // R checks for removal before it rejects NULL, so removing an attribute from NULL is a
+    // no-op; data.table relies on this when it unlocks a `NULL` result of `j`.
+    if value == nil && object == nil {
+        return Ok(nil);
+    }
+    if object == nil {
+        return Err(error("attempt to set an attribute on NULL"));
     }
     let name = attribute_symbol(name)?;
     runtime.heap.root(name);

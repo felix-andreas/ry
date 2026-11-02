@@ -3124,15 +3124,14 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
     let attributes = call.arg(1);
-    if object == nil() {
-        if attributes == nil() {
-            return Ok(nil());
-        }
-        return Err(call.error("attempt to set an attribute on NULL"));
-    }
-    let object = modifiable(object)?;
+    // GNU R gives NULL its new attributes by making it an empty list, which is what
+    // `structure(NULL, ...)` returns after its deprecation warning.
+    let object = match call.arg(0) {
+        object if object == nil() && attributes == nil() => return Ok(nil()),
+        object if object == nil() => values::alloc(SexpType::List, 0)?,
+        object => modifiable(object)?,
+    };
     let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {

@@ -311,6 +311,9 @@ pub enum Warning {
     MeltCoerced { to: ColumnType },
     /// `dcast` had no aggregate, but some cell got several values, so it counts them instead.
     CastCounted,
+    /// `min` or `max` with `na.rm = TRUE`, written as a column of `j`, found a group with no
+    /// values left, which gets `NA`. Base R and data.table warn there too.
+    NoValues { column: PlSmallStr },
 }
 
 impl fmt::Display for Warning {
@@ -339,6 +342,11 @@ impl fmt::Display for Warning {
                 formatter,
                 "the measure columns have different types, so the value column holds {}",
                 holds(*to)
+            ),
+            Warning::NoValues { column } => write!(
+                formatter,
+                "a group of `{column}` has no values left after removing `NA`s, so its minimum or \
+                 maximum is `NA`"
             ),
             Warning::CastCounted => formatter.write_str(
                 "some cells get several values and no aggregate was given, so each cell counts \
@@ -436,10 +444,24 @@ fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
     let query = bind_group_columns(query);
     let sums = grouped_integer_sums(&table.schema(), table.key(), &query)?;
+    let extremes = dropped_extremes(&query);
     let mut warnings = Vec::new();
     let output = run(table, query, kernels, &mut warnings)?;
     let schema = match &output {
-        Output::Table(result) => result.schema(),
+        Output::Table(result) => {
+            warnings.extend(
+                extremes
+                    .into_iter()
+                    .filter(|column| {
+                        result
+                            .frame()
+                            .column(column)
+                            .is_ok_and(|values| values.null_count() > 0)
+                    })
+                    .map(|column| Warning::NoValues { column }),
+            );
+            result.schema()
+        }
         Output::Updated => table.schema(),
         Output::Vector(_) => return Ok(Executed { output, warnings }),
     };
@@ -510,6 +532,28 @@ fn grouped_integer_sums(
         }
     }
     Ok(sums)
+}
+
+/// The columns of `j` that are a `min` or `max` with `na.rm = TRUE`, whose `NA` result means a
+/// group had no values left.
+fn dropped_extremes(query: &Query) -> Vec<PlSmallStr> {
+    let Select::Columns(columns) = &query.select else {
+        return Vec::new();
+    };
+    columns
+        .iter()
+        .filter(|(_, expr)| {
+            matches!(
+                expr,
+                Expr::Aggregate {
+                    function: Aggregate::Min | Aggregate::Max,
+                    na_rm: true,
+                    ..
+                }
+            )
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// data.table evaluates `j` once per group with each grouping column bound to the group's single
@@ -2998,7 +3042,7 @@ impl Lowering<'_> {
                     }
                     Aggregate::Mean => {
                         let value = value.cast(DataType::Float64);
-                        value.clone().cum_sum(false).last() / len().cast(DataType::Float64)
+                        value.clone().cum_sum(false).last() / value.len().cast(DataType::Float64)
                     }
                     // R's `min` and `max` are `NaN` when an input is, where Polars skips it.
                     Aggregate::Min if kind == ColumnType::Double => value.nan_min(),
@@ -3010,7 +3054,9 @@ impl Lowering<'_> {
                     Aggregate::Median => value.cast(DataType::Float64).median(),
                     Aggregate::Sd => value.cast(DataType::Float64).std(1),
                     Aggregate::Var => value.cast(DataType::Float64).var(1),
-                    Aggregate::Length => len().cast(DataType::Int32),
+                    // The length of the argument, not of the group: a grouping column bound to
+                    // its group's value has length one.
+                    Aggregate::Length => value.len().cast(DataType::Int32),
                 };
                 let propagates = !na_rm
                     && !matches!(

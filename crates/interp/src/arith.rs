@@ -308,10 +308,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("xtfrm", 1, |call| unsafe {
         // GNU R's `xtfrm.default` ranks a raw vector, and `rank` refuses a bare one.
-        if call.arg(0).kind() == SexpType::Raw && !call.arg(0).is_object() {
+        let x = call.arg(0);
+        if x.kind() == SexpType::Raw && !x.is_object() {
             return Err(error("raw vectors cannot be sorted"));
         }
-        Ok(call.arg(0))
+        if matches!(x.kind(), SexpType::Integer | SexpType::Real) && !x.is_object() {
+            return Ok(x);
+        }
+        // Without a method, GNU R falls back to the closure `xtfrm.default`, which ranks
+        // anything that is not numeric, so character and logical vectors sort by rank.
+        let quoted = values::call(symbols().quote, &[x])?;
+        let fallback = values::call(values::install("xtfrm.default")?, &[quoted])?;
+        crate::eval::eval(fallback, values::base_namespace())
     })
     .generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),

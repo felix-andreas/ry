@@ -79,9 +79,19 @@ unsafe extern "C" {
 /// which is the handle scope that makes ry forgive a forgotten `PROTECT` on a temporary.
 pub trait Handout: Copy {
     fn hand_out(self, _runtime: &mut Runtime) {}
+
+    /// The object the result is, if it is one, so it can be kept alive while warnings are
+    /// signalled.
+    fn as_sexp(self) -> Option<Sexp> {
+        None
+    }
 }
 
 impl Handout for Sexp {
+    fn as_sexp(self) -> Option<Sexp> {
+        Some(self)
+    }
+
     fn hand_out(self, runtime: &mut Runtime) {
         if runtime.native_depth == 0 {
             return;
@@ -99,7 +109,11 @@ impl Handout for Sexp {
 #[derive(Clone, Copy)]
 pub struct Reachable(pub Sexp);
 
-impl Handout for Reachable {}
+impl Handout for Reachable {
+    fn as_sexp(self) -> Option<Sexp> {
+        Some(self.0)
+    }
+}
 
 /// A result ry builds as a view of something GNU R stores in the argument, such as `FRAME`'s
 /// pairlist. Code that is correct under GNU R walks it unprotected for as long as the argument
@@ -108,6 +122,10 @@ impl Handout for Reachable {}
 pub struct Pinned(pub Sexp);
 
 impl Handout for Pinned {
+    fn as_sexp(self) -> Option<Sexp> {
+        Some(self.0)
+    }
+
     fn hand_out(self, runtime: &mut Runtime) {
         if runtime.native_depth > 0 {
             runtime.heap.root(self.0);
@@ -149,10 +167,20 @@ pub unsafe fn enter<T: Handout>(body: impl FnOnce() -> ApiResult<T>) -> T {
     runtime.heap.release_handles(mark);
     match result {
         Ok(Ok(value)) => {
+            if let Err(unwind) = signal_api_warnings(value.as_sexp()) {
+                raise(unwind);
+            }
+            let runtime = self::runtime();
             value.hand_out(runtime);
             value
         }
-        Ok(Err(unwind)) => raise(unwind),
+        Ok(Err(unwind)) => {
+            // A warning raised before the error is signalled first, as in GNU R.
+            match signal_api_warnings(None) {
+                Err(handled) => raise(handled),
+                Ok(()) => raise(unwind),
+            }
+        }
         Err(payload) => {
             let unwind = error(format!("internal error in ry: {}", panic_message(&payload)));
             drop(payload);
@@ -408,17 +436,43 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     }
 }
 
-/// Defers a warning without a call to the end of the top-level call, as the interpreter's own
-/// warnings are, so there is one list of pending warnings.
+/// Raises a warning from inside an API function, such as `coerceVector`'s "NAs introduced by
+/// coercion". GNU R signals it as a condition there and then, so calling handlers and
+/// `tryCatch(warning = )` see it. A handler may leave through a jump, which must not cross the
+/// Rust frames of the API function, so the warning waits until the outermost [`enter`] has
+/// returned from its body and is signalled from there.
 pub fn warn(message: impl Into<String>) {
     if !interp::is_installed() {
         return;
     }
-    let warnings = &mut interp::interp().warnings;
-    // GNU R keeps at most 50 deferred warnings.
-    if warnings.len() < 50 {
-        warnings.push((runtime().nil(), message.into()));
+    // SAFETY: the runtime is single-threaded, and nothing holds the list across a call.
+    unsafe { (*API_WARNINGS.as_ptr()).push(message.into()) };
+}
+
+static API_WARNINGS: Global<Vec<String>> = Global::new(Vec::new());
+
+/// Signals the warnings API functions raised, once no API function is still running. The
+/// result of the call stays rooted, because a handler runs R code.
+unsafe fn signal_api_warnings(result: Option<Sexp>) -> Result<(), Unwind> {
+    let runtime = runtime();
+    if runtime.api_depth != 0 || (*API_WARNINGS.as_ptr()).is_empty() {
+        return Ok(());
     }
+    let messages = std::mem::take(&mut *API_WARNINGS.as_ptr());
+    let mark = runtime.heap.handle_mark();
+    if let Some(value) = result {
+        runtime.heap.root(value);
+    }
+    let unbound = runtime.heap.known().unbound;
+    let mut signalled = Ok(());
+    for message in messages {
+        signalled = interp::conditions::warning_call(unbound, message);
+        if signalled.is_err() {
+            break;
+        }
+    }
+    runtime.heap.release_handles(mark);
+    signalled
 }
 
 /// Prints an unwind the way R's top level does and records it for `R_curErrorBuf`.
