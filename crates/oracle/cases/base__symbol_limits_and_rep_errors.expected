@@ -1,0 +1,24 @@
+[stdout]
+| [1] "variable names are limited to 10000 bytes"
+| [1] "invalid 'path' argument"
+| [1] "attempt to replicate an object of type 'closure'"
+| [1] "attempt to replicate non-vector"
+| [1] "attempt to replicate an object of type 'environment'"
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] "a"
+| 
+| [[3]]
+| [1] 1
+| 
+| [[4]]
+| [1] "a"
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(1, "a", 1, "a")

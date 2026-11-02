@@ -2622,8 +2622,8 @@ enum Matcher {
     /// starts where the leftmost-first match does, and `longest` (which reports every match end)
     /// searched anchored at that start finds where the longest one ends.
     ///
-    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`),
-    /// and its capture groups come from `first` searched over exactly that span.
+    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`), or
+    /// with groups the leftmost-first match, whose capture groups come from `first`.
     Automaton {
         regex: Rc<Regex>,
         first: meta::Regex,
@@ -2731,14 +2731,20 @@ impl Matcher {
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
             Matcher::Automaton {
+                regex,
                 first,
                 longest,
                 shortest,
-                ..
             } => {
                 let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
                 };
+                // TRE matches a minimal pattern with groups on its tagged matcher, which follows
+                // the leftmost-first rule: `x(.+?)(a+)` takes `xaaa` of `xaaay`, where the same
+                // pattern without groups takes `xaa`.
+                if *shortest && regex.captures_len() > 1 {
+                    return Ok(Some((found.start(), found.end())));
+                }
                 let anchored = Input::new(text)
                     .range(found.start()..)
                     .anchored(Anchored::Yes)
@@ -2898,9 +2904,10 @@ fn perl_matching_error(failure: pcre2::Error) -> crate::unwind::Unwind {
 pub(crate) struct Translation {
     pub(crate) pattern: String,
     pub(crate) problem: Option<&'static str>,
-    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`). TRE then ends a match at the
-    /// first end it reaches, so the whole match is the shortest one at the leftmost start, and
-    /// even a greedy `.*` in such a pattern matches as little as it can.
+    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`). Without groups TRE then ends a
+    /// match at the first end it reaches, so the whole match is the shortest one at the leftmost
+    /// start, and even a greedy `.*` in such a pattern matches as little as it can. With groups
+    /// it follows the leftmost-first rule instead.
     minimal: bool,
 }
 
@@ -2926,6 +2933,23 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         let character = chars[index];
         let start = output.len();
         match character {
+            // TRE reads `\Q...\E` as literal text, each character its own atom, so a quantifier
+            // after `\E` repeats the last one.
+            '\\' if chars.get(index + 1) == Some(&'Q') => {
+                index += 2;
+                atom = None;
+                while index < chars.len() {
+                    if chars[index] == '\\' && chars.get(index + 1) == Some(&'E') {
+                        index += 2;
+                        break;
+                    }
+                    atom = Some(output.len());
+                    output.push_str(&regex::escape(chars[index].encode_utf8(&mut [0; 4])));
+                    index += 1;
+                }
+                quantified = false;
+                continue;
+            }
             '\\' => {
                 index = translate_escape(&chars, index, &mut output, &mut problem);
                 atom = Some(start);

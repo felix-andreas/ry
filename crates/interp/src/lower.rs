@@ -688,6 +688,22 @@ unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
         );
     }
     let placeholder = install("_").ok()?;
+    if extraction_placeholder_cell(value, placeholder).is_some() {
+        let mut level = value;
+        while level != placeholder && level.kind() == SexpType::Language {
+            let arguments = level.cdr();
+            if mentions(arguments.cdr(), placeholder) {
+                return failure(
+                    "pipe placeholder may only appear once".to_owned(),
+                    "tooManyPlaceholders",
+                    ConditionValue::Null,
+                    true,
+                );
+            }
+            level = arguments.car();
+        }
+        return None;
+    }
     let head = value.car();
     if mentions(head, placeholder) {
         return failure(
@@ -742,6 +758,29 @@ const SYNTACTIC_FUNCTIONS: &[&str] = &[
     "/", "^", "%%", "%/%", "%*%", ":", "::", ":::", "?", "~", "==", "!=", "<", ">", "<=", ">=",
     "&", "|", "&&", "||", "!", "<-", "<<-", "=", "$", "[", "[[", "@", "$<-", "[<-", "[[<-", "@<-",
 ];
+
+/// The argument cell holding the placeholder that heads a chain of extractions, as in
+/// `x |> _$coef[[2]]`: each call in the chain is `[`, `[[`, `$` or `@`, and the innermost one
+/// extracts from `_`.
+unsafe fn extraction_placeholder_cell(value: Sexp, placeholder: Sexp) -> Option<Sexp> {
+    if value.kind() != SexpType::Language {
+        return None;
+    }
+    let head = value.car();
+    if head.kind() != SexpType::Symbol
+        || !matches!(&*values::symbol_name(head), "[" | "[[" | "$" | "@")
+    {
+        return None;
+    }
+    let arguments = value.cdr();
+    if arguments.kind() != SexpType::Pairlist {
+        return None;
+    }
+    if arguments.car() == placeholder {
+        return Some(arguments);
+    }
+    extraction_placeholder_cell(arguments.car(), placeholder)
+}
 
 unsafe fn mentions(value: Sexp, symbol: Sexp) -> bool {
     if value == symbol {
@@ -1219,8 +1258,9 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     }
 }
 
-/// `lhs |> f(args)` is `f(lhs, args)`, and `lhs |> f(x, y = _)` is `f(x, y = lhs)`, where
-/// `placeholder` names the argument that holds the placeholder.
+/// `lhs |> f(args)` is `f(lhs, args)`, `lhs |> f(x, y = _)` is `f(x, y = lhs)`, where
+/// `placeholder` names the argument that holds the placeholder, and `lhs |> _$a[[1]]` is
+/// `lhs$a[[1]]`.
 unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
     if right.kind() != SexpType::Language {
         return Err(error("The pipe operator requires a function call as RHS"));
@@ -1230,6 +1270,10 @@ unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
         return Err(error(
             "function 'function' not supported in RHS call of a pipe",
         ));
+    }
+    if let Some(cell) = extraction_placeholder_cell(right, install("_")?) {
+        crate::heap().set_car(cell, left);
+        return Ok(right);
     }
     if let Some(tag) = placeholder {
         let mut argument = right.cdr();
@@ -1298,12 +1342,34 @@ fn has_stray_placeholder(node: &SyntaxNode) -> bool {
                 && significant_tokens(expression)
                     .iter()
                     .any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
-                && expression_children(expression)
-                    .get(1)
-                    .is_some_and(|right| placeholder_argument(right).is_some())
+                && expression_children(expression).get(1).is_some_and(|right| {
+                    placeholder_argument(right).is_some()
+                        || extraction_chain_heads_with_placeholder(right)
+                })
         })
         .count();
     placeholders > consumed
+}
+
+/// Whether `node` is a chain of extractions whose innermost object is the placeholder.
+fn extraction_chain_heads_with_placeholder(node: &SyntaxNode) -> bool {
+    let mut node = node.clone();
+    while matches!(
+        node.kind(),
+        SyntaxKind::SUBSET_EXPR
+            | SyntaxKind::SUBSET2_EXPR
+            | SyntaxKind::DOLLAR_EXPR
+            | SyntaxKind::AT_EXPR
+    ) {
+        let Some(object) = expression_children(&node).into_iter().next() else {
+            return false;
+        };
+        if is_bare_placeholder(&object) {
+            return true;
+        }
+        node = object;
+    }
+    false
 }
 
 fn child_of_kind(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
