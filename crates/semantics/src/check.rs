@@ -35,11 +35,15 @@ use {
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
-    rustc_hash::{FxHashMap, FxHashSet},
+    hashbrown::{HashMap, HashSet},
+    rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet},
     std::{
+        alloc::{AllocError, Allocator, Layout},
         borrow::Cow,
+        cell::RefCell,
         mem,
         ops::Range,
+        ptr::NonNull,
         rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
     },
@@ -625,36 +629,75 @@ pub fn check_item_with_annotation<'db>(
     record_strict_origins: bool,
 ) -> ItemCheck<'db> {
     CHECK_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    // A check can fetch another item's scheme and so run a nested check on the same thread,
+    // which takes its own arena from the top of the stack.
+    let mut arena = CHECK_ARENAS.with_borrow_mut(Vec::pop).unwrap_or_default();
+    let check = check_item_in(
+        &arena,
+        db,
+        module,
+        naming,
+        annotation,
+        expression_annotations,
+        globals,
+        record_strict_origins,
+    );
+    arena.reset();
+    CHECK_ARENAS.with_borrow_mut(|arenas| arenas.push(arena));
+    check
+}
+
+thread_local! {
+    /// Reset arenas kept for the next check on this thread, so a check's working state costs
+    /// no allocator calls once the thread has warmed up.
+    static CHECK_ARENAS: RefCell<Vec<Bump>> = const { RefCell::new(Vec::new()) };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_item_in<'db>(
+    arena: &Bump,
+    db: &'db dyn Db,
+    module: &Module,
+    naming: &ItemNaming,
+    annotation: Option<&Annotation<'db>>,
+    expression_annotations: &[(ExprId, Annotation<'db>)],
+    globals: Option<&dyn GlobalEnv<'db>>,
+    record_strict_origins: bool,
+) -> ItemCheck<'db> {
     let mut table = InferenceTable::default();
+    table.reserve_resolutions(module.expression_count());
     if let Some(globals) = globals {
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
     }
-    let arena = Bump::new();
     let mut context = Checker {
         db,
         module,
         naming,
         globals,
-        arena: &arena,
+        arena,
         library: stubs(db),
         table,
         frame_level: 0,
         discarded_if: None,
-        parameter_hints: FxHashMap::default(),
-        hinted_parameters: FxHashSet::default(),
-        expression_annotations: expression_annotations.iter().cloned().collect(),
+        parameter_hints: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        expression_annotations: {
+            let mut annotations = HashMap::with_hasher_in(FxBuildHasher, Arena(arena));
+            annotations.extend(expression_annotations.iter().cloned());
+            annotations
+        },
         environment: Environment::default(),
         scheme_arena: Vec::new(),
         recorded: RecordedTypes(vec![None; module.expression_count()]),
-        recorded_patterns: FxHashMap::default(),
-        recorded_expectations: FxHashMap::default(),
-        recorded_loop_variables: FxHashMap::default(),
-        selected_overloads: FxHashMap::default(),
-        callee_targets: FxHashMap::default(),
-        masked_reads: FxHashSet::default(),
+        recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        recorded_loop_variables: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        selected_overloads: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        callee_targets: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        masked_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         column_scopes: Vec::new(),
-        column_misses: FxHashMap::default(),
+        column_misses: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         query_depth: 0,
         errors: Vec::new(),
         record_strict_origins,
@@ -664,19 +707,19 @@ pub fn check_item_with_annotation<'db>(
         call_first_var: 0,
         return_frames: Vec::new(),
         pending_enclosing_writes: Vec::new(),
-        forward_captured: FxHashSet::default(),
-        capture_joins: FxHashMap::default(),
+        forward_captured: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        capture_joins: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         capture_repass_needed: false,
-        superassign_seeds: FxHashMap::default(),
-        pre_materialized: FxHashMap::default(),
-        no_default_formals: FxHashSet::default(),
-        defaulted_formals: FxHashSet::default(),
-        non_local_slots: FxHashMap::default(),
-        string_values: FxHashMap::default(),
+        superassign_seeds: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        pre_materialized: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        no_default_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        defaulted_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        string_values: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         value_read_slots: None,
-        computed_slots: FxHashSet::default(),
-        lookup_slots: FxHashSet::default(),
-        valued_slots: FxHashSet::default(),
+        computed_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        lookup_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        valued_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
@@ -1059,6 +1102,27 @@ impl<'db> Environment<'db> {
     }
 }
 
+/// A map whose table lives in the check's arena: the working maps grow and rehash many times
+/// per item, and the arena frees every superseded table in one step when the check ends.
+type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
+type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
+
+/// The check's bump arena as a std allocator, whose frees are no-ops because the arena is reset
+/// when the check ends. It implements std's trait rather than relying on bumpalo's
+/// `allocator-api2` one, because the workspace's JIT turns on hashbrown's `nightly` feature,
+/// which switches every hashbrown map in the build to std's trait.
+#[derive(Clone, Copy)]
+struct Arena<'a>(&'a Bump);
+
+unsafe impl Allocator for Arena<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let pointer = self.0.try_alloc_layout(layout).map_err(|_| AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(pointer, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, _pointer: NonNull<u8>, _layout: Layout) {}
+}
+
 struct Checker<'db, 'a> {
     db: &'db dyn Db,
     module: &'a Module,
@@ -1079,23 +1143,23 @@ struct Checker<'db, 'a> {
     discarded_if: Option<ExprId>,
     /// Parameter types an unannotated function literal takes from the function type its call
     /// argument position expects, by formal position; `None` leaves a formal to inference.
-    parameter_hints: FxHashMap<ExprId, Vec<Option<Ty<'db>>>>,
+    parameter_hints: ArenaMap<'a, ExprId, Vec<Option<Ty<'db>>>>,
     /// The ranges of the formals that took their type from a call's expected function type, so
     /// only findings on those say the call supplied the type.
-    hinted_parameters: FxHashSet<TextRange>,
-    expression_annotations: FxHashMap<ExprId, Annotation<'db>>,
+    hinted_parameters: ArenaSet<'a, TextRange>,
+    expression_annotations: ArenaMap<'a, ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: RecordedTypes<'db>,
-    recorded_patterns: FxHashMap<PatId, Ty<'db>>,
-    recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
-    recorded_loop_variables: FxHashMap<ExprId, Ty<'db>>,
-    selected_overloads: FxHashMap<ExprId, usize>,
-    callee_targets: FxHashMap<ExprId, CalleeTarget>,
-    masked_reads: FxHashSet<ExprId>,
+    recorded_patterns: ArenaMap<'a, PatId, Ty<'db>>,
+    recorded_expectations: ArenaMap<'a, ExprId, Ty<'db>>,
+    recorded_loop_variables: ArenaMap<'a, ExprId, Ty<'db>>,
+    selected_overloads: ArenaMap<'a, ExprId, usize>,
+    callee_targets: ArenaMap<'a, ExprId, CalleeTarget>,
+    masked_reads: ArenaSet<'a, ExprId>,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
     column_scopes: Vec<ColumnScope<'db>>,
-    column_misses: FxHashMap<ExprId, ColumnMiss>,
+    column_misses: ArenaMap<'a, ExprId, ColumnMiss>,
     /// Frame queries being inferred. data.table syntax makes naming resolve a whole
     /// bracket quietly, but inside a frame query ry knows the columns, so a quiet read
     /// that is no column still reads its global.
@@ -1120,43 +1184,43 @@ struct Checker<'db, 'a> {
     /// so the join survives at the definition site.
     pending_enclosing_writes: Vec<(BindingId, Ty<'db>)>,
     /// Slots a closure read before any write reached them (the letrec shape).
-    forward_captured: FxHashSet<BindingId>,
+    forward_captured: ArenaSet<'a, BindingId>,
     /// Variable-erased join of every write to a captured slot, surviving rollbacks;
     /// forward-capture reads resolve here instead of the empty definition-point entry.
-    capture_joins: FxHashMap<BindingId, Ty<'db>>,
+    capture_joins: ArenaMap<'a, BindingId, Ty<'db>>,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
     /// enclosing type on entry, and whether the body's first write has bound it yet.
-    superassign_seeds: FxHashMap<BindingId, (Ty<'db>, bool)>,
+    superassign_seeds: ArenaMap<'a, BindingId, (Ty<'db>, bool)>,
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
-    pre_materialized: FxHashMap<BindingId, Ty<'db>>,
-    no_default_formals: FxHashSet<BindingId>,
+    pre_materialized: ArenaMap<'a, BindingId, Ty<'db>>,
+    no_default_formals: ArenaSet<'a, BindingId>,
     /// Unannotated formals with a default; a condition on one does not pin its type.
-    defaulted_formals: FxHashSet<BindingId>,
+    defaulted_formals: ArenaSet<'a, BindingId>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
-    non_local_slots: FxHashMap<Symbol, BindingId>,
+    non_local_slots: ArenaMap<'a, Symbol, BindingId>,
     next_non_local_slot: u32,
     /// The write of a binding whose only write is literal strings (`"a"` or `c("a", "b")`),
     /// compared by site so a re-pass over the same write keeps it. `None` once a second write
     /// site, or a write of anything else, appears. Queries read it for column names given through a variable
     /// (`.SDcols = cols`, `(cols) := ...`).
-    string_values: FxHashMap<BindingId, Option<StringWrite>>,
+    string_values: ArenaMap<'a, BindingId, Option<StringWrite>>,
     /// Slots read somewhere other than as a call head, built on first need.
-    value_read_slots: Option<FxHashSet<BindingId>>,
+    value_read_slots: Option<ArenaSet<'a, BindingId>>,
     /// Slots whose type the code inferred rather than a declaration stated: those an
     /// unannotated assignment in the body has written so far, and undeclared formals, whose
     /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
     /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
-    computed_slots: FxHashSet<BindingId>,
+    computed_slots: ArenaSet<'a, BindingId>,
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
-    lookup_slots: FxHashSet<BindingId>,
+    lookup_slots: ArenaSet<'a, BindingId>,
     /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
     /// is a path the code takes rather than a placeholder.
-    valued_slots: FxHashSet<BindingId>,
+    valued_slots: ArenaSet<'a, BindingId>,
     /// The item's `<<-` target names, sorted.
     super_assigned: Vec<Symbol>,
 }
@@ -1255,7 +1319,7 @@ struct JoinedColumn<'db> {
 /// re-running inference.
 #[derive(Clone)]
 struct CallArgument<'db> {
-    name: Option<String>,
+    name: Option<Symbol>,
     name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`).
     ty: Option<Ty<'db>>,
@@ -2425,12 +2489,12 @@ impl<'db> Checker<'db, '_> {
                     validated_namespace_name(self.db, self.library, *internal, package, name);
                 let reaches_project = namespace_reaches_project(self.db, package);
                 let name = *name;
-                match validated.as_ref().and_then(|name| {
+                match validated.and_then(|name| {
                     let globals = self.globals?;
                     if reaches_project {
-                        globals.namespace_scheme(Symbol::new(name))
+                        globals.namespace_scheme(name)
                     } else {
-                        globals.library_candidates(name)?.last().cloned()
+                        globals.library_candidates(&name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -5216,7 +5280,7 @@ impl<'db> Checker<'db, '_> {
             .iter()
             .map(|(name, constraint)| (*name, *constraint))
             .collect();
-        let substitution = binders
+        let substitution: Vec<_> = binders
             .into_iter()
             .map(|(name, constraint)| (name, self.fresh(constraint)))
             .collect();
@@ -5817,11 +5881,11 @@ impl<'db> Checker<'db, '_> {
         };
         let class = name.text(self.db);
         ["-", "Arith", "Ops"].iter().any(|prefix| {
-            let method = format!("{prefix}.{class}");
+            let method = method_symbol(prefix, class);
             globals
-                .overloads(Symbol::new(&method), false)
+                .overloads(method, false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(Symbol::new(&method), false).is_some()
+                || globals.scheme(method, false).is_some()
         })
     }
 
@@ -5837,11 +5901,11 @@ impl<'db> Checker<'db, '_> {
             return false;
         };
         ["!", "Ops"].iter().any(|prefix| {
-            let method = format!("{prefix}.{class}");
+            let method = method_symbol(prefix, class);
             globals
-                .overloads(Symbol::new(&method), false)
+                .overloads(method, false)
                 .is_some_and(|candidates| !candidates.is_empty())
-                || globals.scheme(Symbol::new(&method), false).is_some()
+                || globals.scheme(method, false).is_some()
         })
     }
 
@@ -6412,16 +6476,16 @@ impl<'db> Checker<'db, '_> {
         let mut declared_any = false;
         for (class_index, class) in classes.iter().enumerate() {
             for method in [
-                format!("{spelling}.{class}"),
-                format!("{group}.{class}"),
-                format!("Ops.{class}"),
+                method_symbol(spelling, class),
+                method_symbol(group, class),
+                method_symbol("Ops", class),
             ] {
                 let Some(candidates) = globals
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(Symbol::new(&method), false)
+                            .scheme(method, false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -7584,7 +7648,10 @@ impl<'db> Checker<'db, '_> {
     /// the first run is fully discarded (environment, unification, diagnostics, `<<-` writes).
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
-        let saved_seeds = mem::take(&mut self.superassign_seeds);
+        let saved_seeds = mem::replace(
+            &mut self.superassign_seeds,
+            HashMap::with_hasher_in(FxBuildHasher, Arena(self.arena)),
+        );
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
         let errors_mark = self.errors.len();
@@ -7794,7 +7861,7 @@ impl<'db> Checker<'db, '_> {
                         id,
                         range,
                         callee,
-                        name.to_string(),
+                        name,
                         &candidates,
                         &call_arguments,
                     );
@@ -8207,14 +8274,18 @@ impl<'db> Checker<'db, '_> {
 
     fn read_as_value(&mut self, slot: BindingId) -> bool {
         let naming = self.naming;
+        let arena = self.arena;
         self.value_read_slots
             .get_or_insert_with(|| {
-                naming
-                    .resolutions
-                    .iter()
-                    .filter(|(read, _)| !naming.callee_fallbacks.contains_key(read))
-                    .map(|(_, slot)| *slot)
-                    .collect()
+                let mut slots = HashSet::with_hasher_in(FxBuildHasher, Arena(arena));
+                slots.extend(
+                    naming
+                        .resolutions
+                        .iter()
+                        .filter(|(read, _)| !naming.callee_fallbacks.contains_key(read))
+                        .map(|(_, slot)| *slot),
+                );
+                slots
             })
             .contains(&slot)
     }
@@ -9693,13 +9764,13 @@ impl<'db> Checker<'db, '_> {
         let TyKind::Named(name, _) = nominal.kind(self.db) else {
             return None;
         };
-        let method = format!("c.{}", name.text(self.db));
+        let method = method_symbol("c", name.text(self.db));
         self.globals?
-            .scheme(Symbol::new(&method), false)
+            .scheme(method, false)
             .map(|_| nominal)
             .or_else(|| {
                 self.globals?
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .filter(|candidates| !candidates.is_empty())
                     .map(|_| nominal)
             })
@@ -10159,7 +10230,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee) {
                     return None;
                 }
-                name.to_string()
+                *name
             }
             // Namespace access cannot be shadowed by a local binding.
             ExpressionKind::Namespace {
@@ -10190,10 +10261,9 @@ impl<'db> Checker<'db, '_> {
             }
             _ => return None,
         };
-        let schemes = self.globals?.overloads(
-            Symbol::new(&name),
-            self.naming.deferred_non_locals.contains(&callee),
-        )?;
+        let schemes = self
+            .globals?
+            .overloads(name, self.naming.deferred_non_locals.contains(&callee))?;
         if schemes.len() < 2 {
             return None;
         }
@@ -10231,13 +10301,13 @@ impl<'db> Checker<'db, '_> {
             .into_iter()
             .flatten()
             .find_map(|generic| {
-                let method = format!("{generic}.{class}");
+                let method = method_symbol(generic, class);
                 globals
-                    .overloads(Symbol::new(&method), false)
+                    .overloads(method, false)
                     .map(Cow::Borrowed)
                     .or_else(|| {
                         globals
-                            .scheme(Symbol::new(&method), false)
+                            .scheme(method, false)
                             .map(|scheme| Cow::Owned(vec![scheme]))
                     })
                     .filter(|candidates| !candidates.is_empty())
@@ -10270,7 +10340,7 @@ impl<'db> Checker<'db, '_> {
         id: ExprId,
         range: TextRange,
         callee: ExprId,
-        name: String,
+        name: Symbol,
         schemes: &[TypeScheme<'db>],
         call_arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
@@ -10518,7 +10588,7 @@ impl<'db> Checker<'db, '_> {
             None => TypeError {
                 range,
                 kind: TypeErrorKind::NoMatchingOverload {
-                    name,
+                    name: name.to_string(),
                     candidates: schemes.len(),
                     first: candidate_errors.first().cloned().map(Box::new),
                 },
@@ -10664,15 +10734,15 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         callees: &[Ty<'db>],
     ) -> Vec<CallArgument<'db>> {
-        let deferred: Vec<bool> = arguments
-            .iter()
-            .map(|argument| {
+        let deferred = BumpVec::from_iter_in(
+            arguments.iter().map(|argument| {
                 !callees.is_empty()
                     && argument
                         .value
                         .is_some_and(|value| self.needs_parameter_hints(value))
-            })
-            .collect();
+            }),
+            self.arena,
+        );
         let mut call_arguments: Vec<CallArgument<'db>> = arguments
             .iter()
             .map(|argument| self.call_argument(range, argument, None))
@@ -10758,8 +10828,7 @@ impl<'db> Checker<'db, '_> {
             name: self
                 .module
                 .argument_name(argument)
-                .filter(|_| !forwards_dots)
-                .map(|name| name.to_string()),
+                .filter(|_| !forwards_dots),
             name_range: self.module.argument_name_range(argument),
             ty,
             range: argument_range,
@@ -12549,8 +12618,8 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
-        let method = format!("{operator}.{class}");
-        let scheme = self.globals?.scheme(Symbol::new(&method), false)?;
+        let method = method_symbol(operator, class);
+        let scheme = self.globals?.scheme(method, false)?;
         let instantiated = self.instantiate(&scheme);
         match self
             .table
@@ -13567,7 +13636,7 @@ impl<'db> Checker<'db, '_> {
                 call,
                 range,
                 callback.function,
-                callback.name.clone(),
+                Symbol::new(&callback.name),
                 callback.schemes,
                 &call_arguments,
             );
@@ -14942,13 +15011,29 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn instantiate(&mut self, scheme: &TypeScheme<'db>) -> Ty<'db> {
-        let mut substitution: FxHashMap<Name<'db>, Ty<'db>> = FxHashMap::default();
+        let mut substitution = BumpVec::with_capacity_in(scheme.binders.len(), self.arena);
         for (name, constraint) in &scheme.binders {
             let fresh = self.fresh(*constraint);
-            substitution.insert(*name, fresh);
+            substitution.push((*name, fresh));
         }
         substitute_rigid(self.db, scheme.body, &substitution)
     }
+}
+
+/// The S3 method `generic.class`, spelled in a per-thread buffer: operator, subset and
+/// dispatch checks probe several of these per expression, and a fresh string for each probe
+/// was one of the checker's largest allocation sources.
+fn method_symbol(generic: &str, class: &str) -> Symbol {
+    thread_local! {
+        static SPELLING: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    SPELLING.with_borrow_mut(|spelling| {
+        spelling.clear();
+        spelling.push_str(generic);
+        spelling.push('.');
+        spelling.push_str(class);
+        Symbol::new(spelling)
+    })
 }
 
 /// The one member of a union `select` accepts; `None` when none or several do.
@@ -15691,8 +15776,8 @@ fn validated_namespace_name(
     internal: bool,
     package: &Option<Symbol>,
     name: &Option<Symbol>,
-) -> Option<String> {
-    let name = name.as_ref()?.to_string();
+) -> Option<Symbol> {
+    let name = (*name)?;
     let Some(package) = package else {
         return Some(name);
     };
@@ -15704,7 +15789,9 @@ fn validated_namespace_name(
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || library.is_some_and(|library| library.exports(package.as_str(), &name)) {
+            if internal
+                || library.is_some_and(|library| library.exports(package.as_str(), name.as_str()))
+            {
                 Some(name)
             } else {
                 None
