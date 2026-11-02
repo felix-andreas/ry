@@ -474,7 +474,7 @@ drain: <T> fn(items: T) -> T
 
 #==== branch_unification
 #---- unknown_branch_propagates
-u <- 1L ~ 2L
+u <- 1L %undeclared% 2L
 if (TRUE) 1L else u
 #++++
 u: Unknown

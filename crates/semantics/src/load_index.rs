@@ -63,6 +63,27 @@ pub struct ItemLoad {
     /// calling the function it defines, reads, found without name resolution.
     pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
+    pub s4: Option<S4Definition>,
+}
+
+/// A top-level S4 definition in the shape a loader may defer until the class or generic it
+/// defines is first used: the call is bare (or binds a class generator), and every name and
+/// class in it is a string literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum S4Definition {
+    /// `setClass("Name", ...)`.
+    Class { class: String },
+    /// `setGeneric("name", function(...) standardGeneric("name"))`. Without its own
+    /// definition, `setGeneric` wraps an existing function and says so, which cannot wait.
+    Generic { generic: String },
+    /// `setMethod("generic", signature, ...)` or `setReplaceMethod`, whose generic is named as
+    /// R stores it (`name<-` for a replacement).
+    Method {
+        generic: String,
+        signature: Vec<String>,
+    },
+    /// `setValidity("Class", ...)`.
+    Validity { class: String },
 }
 
 /// A class or method an item registers as a side effect, which a reload must undo when the
@@ -100,6 +121,7 @@ fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
             function: false,
             mentions: Vec::new(),
             registrations: Vec::new(),
+            s4: None,
         };
     };
     let definition = binding_definition(node);
@@ -119,6 +141,7 @@ fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
         binding: definition.map(|(name, _)| name),
         mentions,
         registrations: registrations(node),
+        s4: s4_definition(node),
     }
 }
 
@@ -318,6 +341,7 @@ pub struct IndexedItem {
     /// writes can only land while `.onLoad`, or something it calls, runs.
     pub load_writes: Vec<String>,
     pub registrations: Vec<Registration>,
+    pub s4: Option<S4Definition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +480,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 mentions: load.mentions,
                 load_writes,
                 registrations: load.registrations,
+                s4: load.s4,
             }
         })
         .collect();
@@ -808,6 +833,71 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
         _ => None,
     };
     registration.into_iter().collect()
+}
+
+/// The [`S4Definition`] `node` is, if it has that shape.
+fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
+    let (call, generator) = match binding_definition(node) {
+        Some((_, value)) => (value, true),
+        None => (node.clone(), false),
+    };
+    let Call {
+        callee, arguments, ..
+    } = call_parts(&call)?;
+    let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
+        arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some(name))
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .filter(|argument| argument.name.is_none())
+                    .nth(position)
+            })
+            .map(|argument| &argument.value)
+    };
+    let string_argument =
+        |position: usize, name: &str| argument(position, name).and_then(string_literal);
+    if generator && callee != "setClass" {
+        return None;
+    }
+    match callee.as_str() {
+        "setClass" => Some(S4Definition::Class {
+            class: string_argument(0, "Class")?,
+        }),
+        "setGeneric" => {
+            let generic = string_argument(0, "name")?;
+            (argument(1, "def")?.kind() == SyntaxKind::FUNCTION_DEF)
+                .then_some(S4Definition::Generic { generic })
+        }
+        "setMethod" | "setReplaceMethod" => {
+            let generic = string_argument(0, "f")?;
+            let signature = argument(1, "signature")?;
+            let signature = match string_literal(signature) {
+                Some(class) => vec![class],
+                None => {
+                    let call = call_parts(signature)?;
+                    if !matches!(call.callee.as_str(), "signature" | "c") {
+                        return None;
+                    }
+                    call.arguments
+                        .iter()
+                        .map(|argument| string_literal(&argument.value))
+                        .collect::<Option<Vec<String>>>()?
+                }
+            };
+            let generic = if callee == "setReplaceMethod" {
+                format!("{generic}<-")
+            } else {
+                generic
+            };
+            Some(S4Definition::Method { generic, signature })
+        }
+        "setValidity" => Some(S4Definition::Validity {
+            class: string_argument(0, "Class")?,
+        }),
+        _ => None,
+    }
 }
 
 /// The text R evaluates for `node`: inline annotations erased, with their line breaks kept so

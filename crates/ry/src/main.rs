@@ -56,8 +56,7 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    let experimental_features =
-        cli::parse_experimental_flags(cli.experimental_features.as_deref().unwrap_or_default());
+    cli::check_experimental_features(cli.experimental_features.as_deref().unwrap_or_default());
 
     if let Some(session) = cli.command.session(env::var("RY_RUNTIME").ok().as_deref()) {
         // Embedded R assumes it owns the thread it initializes on, so sessions stay on `main`.
@@ -96,27 +95,39 @@ fn main() -> ExitCode {
             min_severity,
             fix,
             unsafe_fixes,
+            no_cache,
         } => {
             let fix = match (fix, unsafe_fixes) {
                 (false, _) => cli::FixMode::Off,
                 (true, false) => cli::FixMode::Safe,
                 (true, true) => cli::FixMode::All,
             };
-            exit_code(cli::check(files.as_deref(), output, min_severity, fix))
+            let cache = match no_cache {
+                true => ry::check_cache::CacheUse::Off,
+                false => ry::check_cache::CacheUse::ReadWrite,
+            };
+            exit_code(cli::check(
+                files.as_deref(),
+                output,
+                min_severity,
+                fix,
+                cache,
+            ))
         }
         Command::Fmt {
             files,
             check,
             diff,
+            range,
             verbose,
-        } => exit_code(cli::fmt(files.as_deref(), check, diff, verbose)),
+        } => exit_code(cli::fmt(files.as_deref(), check, diff, range, verbose)),
         Command::Server {
             stdio: _,
             verbose: _,
             debug,
         } => {
             let debug = debug || matches!(env::var("RY_DEBUG").as_deref(), Ok("1"));
-            server::run(experimental_features, debug);
+            server::run(debug);
             ExitCode::SUCCESS
         }
         Command::Debug(debug) => match debug {

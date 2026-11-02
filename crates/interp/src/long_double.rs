@@ -390,6 +390,27 @@ pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) ->
     })
 }
 
+/// `total` plus every `(x[i] - x_offset) * (y[i] - y_offset)` in order, rounding after each
+/// operation, as GNU R's covariance loop does. The slices must have the same length.
+pub fn add_products(
+    total: LongDouble,
+    x: &[f64],
+    y: &[f64],
+    x_offset: LongDouble,
+    y_offset: LongDouble,
+) -> LongDouble {
+    assert_eq!(x.len(), y.len(), "covariance columns differ in length");
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let (Some(start), Some(x_offset), Some(y_offset)) =
+        (to_x87(total), to_x87(x_offset), to_x87(y_offset))
+    {
+        return from_x87(x87::add_products(start, x, y, x_offset, y_offset));
+    }
+    x.iter().zip(y).fold(total, |total, (&x, &y)| {
+        total + (LongDouble::from(x) - x_offset) * (LongDouble::from(y) - y_offset)
+    })
+}
+
 /// The x87 extended format's bytes: the 64-bit significand with its explicit integer bit, then
 /// the sign and a 15-bit exponent biased by 16383. `None` when the exponent leaves its range,
 /// which only products and quotients of extreme values reach.
@@ -485,6 +506,50 @@ mod x87 {
                 total = in(reg) total.as_mut_ptr(),
                 data = inout(reg) values.as_ptr() => _,
                 count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    pub fn add_products(
+        mut total: [u8; 10],
+        x: &[f64],
+        y: &[f64],
+        x_offset: [u8; 10],
+        y_offset: [u8; 10],
+    ) -> [u8; 10] {
+        // SAFETY: as in `add_all`; the caller checked that `y` is as long as `x`.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{y_offset}]",
+                "fld tbyte ptr [{x_offset}]",
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{x}]",
+                "fsub st(0), st(2)",
+                "fld qword ptr [{y}]",
+                "fsub st(0), st(4)",
+                "fmulp st(1), st(0)",
+                "faddp st(1), st(0)",
+                "add {x}, 8",
+                "add {y}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                "fstp st(0)",
+                "fstp st(0)",
+                total = in(reg) total.as_mut_ptr(),
+                x_offset = in(reg) x_offset.as_ptr(),
+                y_offset = in(reg) y_offset.as_ptr(),
+                x = inout(reg) x.as_ptr() => _,
+                y = inout(reg) y.as_ptr() => _,
+                count = inout(reg) x.len() => _,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
@@ -677,6 +742,13 @@ mod tests {
                 total + (LongDouble::from(value) - third)
             });
             let fast = add_differences(third, values, third);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let reversed: Vec<f64> = values.iter().rev().copied().collect();
+            let seven = LongDouble::from(0.7);
+            let model = values.iter().zip(&reversed).fold(third, |total, (&x, &y)| {
+                total + (LongDouble::from(x) - third) * (LongDouble::from(y) - seven)
+            });
+            let fast = add_products(third, values, &reversed, third, seven);
             assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
         }
         let pseudo: Vec<f64> = (1..2000u32)
