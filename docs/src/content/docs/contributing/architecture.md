@@ -18,7 +18,7 @@ illegal dependency unrepresentable.
   - The trees are *lossless*: every byte, trivia included, reprints exactly.
   - Parsing is *error-resilient*: every parse yields a tree, and an error stays local to the place
     where the code broke.
-  - Items are *position-independent*: an item's syntax is copied out of the file tree with offsets
+  - Items are *position-independent*: an item's syntax is a window onto the file tree with offsets
     counted from the item's start, so an untouched statement's tree stays equal when something
     elsewhere in the file changes.
 

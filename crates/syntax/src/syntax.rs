@@ -280,7 +280,7 @@ pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSi
     if testing::invariants_enabled() {
         let full = parse(new_text);
         assert!(
-            spliced == full,
+            spliced == full && spliced.tree().same_parents(full.tree()),
             "a splice reparse differs from a full parse\nold text: {:?}\nnew text: {:?}\ndeleted: {deleted:?}\ninserted: {inserted:?}",
             old.text(),
             new_text,

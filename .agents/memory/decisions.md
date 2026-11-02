@@ -5773,7 +5773,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Splice.** `tree::splice` concatenates index runs from the old tree and the reparsed middle,
   rebasing offsets and indices; `enable_invariants()` cross-checks it against a full parse, and
   `syntax::testing` cross-checks every navigation primitive (`token_at_offset`, sibling steps,
-  `next_token`, `child_or_token_at_range`) against a naive reference on every fuzzed tree.
+  `next_token`, `child_or_token_at_range`) against a naive reference on every fuzzed tree, on the
+  root and on nested windows. The splice invariant also compares parents, which equality omits.
 - **What was given up.** Token sharing across files and the node cache. An old tree held by a
   window keeps its whole file's columns alive, which is fine because an edit replaces the item
   trees of that file too.
@@ -5796,8 +5797,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   missing required arguments from the argument targets alone. `match_arguments` uses it for its
   own arity findings, so the two never disagree, and `probe_overload_candidate` runs it before
   instantiating a candidate's scheme and rejects a candidate whose shape cannot fit. A call that
-  forwards `...` or names an unmatched argument gets no shape verdict and falls through to full
-  matching.
+  forwards `...` gets no shape verdict, and neither does one that names an unmatched argument
+  unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
 

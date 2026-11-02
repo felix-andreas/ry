@@ -52,7 +52,8 @@ const NO_PARENT: u32 = u32::MAX;
 
 impl Tree {
     fn from_columns(columns: Columns) -> Tree {
-        let len = u32::try_from(columns.kinds.len()).expect("a syntax tree has fewer than 2^32 elements");
+        let len =
+            u32::try_from(columns.kinds.len()).expect("a syntax tree has fewer than 2^32 elements");
         Tree {
             columns: Arc::new(columns),
             first: 0,
@@ -325,6 +326,15 @@ impl Tree {
             Some(child) => (self.end_offset(child) == start).then_some(child),
             None => (self.start_offset(first) == start).then_some(first),
         }
+    }
+}
+
+impl Tree {
+    /// Whether every element has the same parent in both trees. Equality leaves parents out
+    /// because they follow from kinds and ends, so this checks code that stores them by hand.
+    pub fn same_parents(&self, other: &Tree) -> bool {
+        self.len == other.len
+            && (0..self.len).all(|index| self.parent(index) == other.parent(index))
     }
 }
 

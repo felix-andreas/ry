@@ -11,7 +11,10 @@ use {
         env, fs,
         ops::Range,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     },
 };
 
@@ -218,6 +221,18 @@ pub fn check_parse_invariants(input: &str) {
 
     check_geometry(&parse.syntax_node(), input);
     check_navigation(&parse.syntax_node(), input);
+    // Item trees are windows with a nonzero first index and base offset, which the root never
+    // exercises; a window of a window covers nested rebasing.
+    let tree = parse.tree();
+    for node in tree.root().descendants().skip(1).step_by(7).take(4) {
+        let window = Arc::new(tree.subtree(node));
+        let window_root = SyntaxNode::new_root(window.clone());
+        check_navigation(&window_root, window.text());
+        if let Some(inner) = window.root().descendants().nth(1) {
+            let nested = Arc::new(window.subtree(inner));
+            check_navigation(&SyntaxNode::new_root(nested.clone()), nested.text());
+        }
+    }
 
     // One mistake must not fan out into a storm of errors.
     assert!(
