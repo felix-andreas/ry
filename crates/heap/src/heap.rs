@@ -49,6 +49,8 @@ pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
     space: Space,
+    /// The largest single allocation the heap attempts: the machine's memory plus swap.
+    allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
@@ -353,6 +355,7 @@ impl Heap {
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
         let mut heap = Heap {
+            allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
             young_large: Vec::new(),
@@ -1417,6 +1420,9 @@ impl Heap {
                 (memory, class as u8)
             }
             None => {
+                if size > self.allocation_ceiling {
+                    return Err(HeapError::CannotAllocate { bytes: size });
+                }
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
                 let memory = if zeroed >= size {
@@ -2228,6 +2234,43 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
+
+/// Physical memory plus swap. The allocator reserves address space without committing it, so a
+/// vector far larger than the machine would be handed out and fail only when touched; GNU R gets
+/// its "cannot allocate vector" error from the kernel refusing such a request, and this bound
+/// gives the same answer before asking.
+#[cfg(target_os = "linux")]
+fn memory_ceiling() -> usize {
+    // SAFETY: `sysinfo` only writes the struct it is given.
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        return usize::MAX;
+    }
+    let unit = (info.mem_unit as usize).max(1);
+    (info.totalram as usize)
+        .saturating_add(info.totalswap as usize)
+        .saturating_mul(unit)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn memory_ceiling() -> usize {
+    // SAFETY: `sysconf` has no preconditions.
+    let (pages, page_size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    if pages <= 0 || page_size <= 0 {
+        return usize::MAX;
+    }
+    (pages as usize).saturating_mul(page_size as usize)
+}
+
+#[cfg(not(unix))]
+fn memory_ceiling() -> usize {
+    usize::MAX
+}
 
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;

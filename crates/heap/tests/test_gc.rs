@@ -550,6 +550,21 @@ fn every_byte_position_is_scanned_at_every_length() {
     }
 }
 
+/// The allocator reserves address space lazily, so without a bound a petabyte vector would be
+/// handed out and fail only when touched. GNU R reports it as an allocation failure up front.
+#[test]
+fn a_vector_larger_than_the_machine_is_refused() {
+    let mut heap = Heap::new();
+    unsafe {
+        let length = 1isize << 47;
+        assert!(matches!(
+            heap.alloc_vector(SexpType::Real, length),
+            Err(HeapError::CannotAllocate { .. })
+        ));
+        assert!(heap.alloc_vector(SexpType::Real, 1 << 20).is_ok());
+    }
+}
+
 #[test]
 fn weak_references_follow_ephemeron_rules() {
     let mut heap = Heap::new();

@@ -1842,6 +1842,11 @@ kernels' peak RSS was 1.1 to 1.6 times GNU R's (`format` was the 1.6), and three
   `tools/bench/base/kernels.R` went from 166 MB to 148 MB (GNU R 134 MB) with no slower kernel.
 - **Builtins write into the result vector.** `sample.int` and the random deviates built Rust
   vectors and copied them, holding about 10 MB of scratch at the peak.
+- **A large vector beyond memory plus swap is refused before it is requested.** mimalloc reserves
+  address space without committing it, so `numeric(1e10)` succeeded and would have failed only when
+  touched, where GNU R reports "cannot allocate vector of size 74.5 Gb" because the kernel refuses
+  the request. `Heap` reads physical memory plus swap once (`memory_ceiling`) and returns
+  `CannotAllocate` for a larger single object.
 - **Rejected:** mapping large vector bodies with `mmap` and unmapping them once a collection leaves
   them unused did not lower any peak (rowSums rose from 168 to 173 MB), and
   `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB. The same peaks with glibc
