@@ -75,6 +75,70 @@ pub fn set_order(table: &mut Table, by: &[(&str, bool)]) -> Result<()> {
     Ok(())
 }
 
+/// The rows a data viewer shows, in the order it shows them: the rows where some column's text
+/// contains `search`, ignoring case (an empty `search` keeps every row, and `NA` contains
+/// nothing), sorted by `sort` (a
+/// column and whether it sorts descending) with `NA` first and ties in row order. The table is
+/// not changed, so a viewer can re-sort without copying it.
+pub fn view_rows(table: &Table, search: &str, sort: Option<(&str, bool)>) -> Result<Vec<u32>> {
+    let height = u32::try_from(table.height())
+        .map_err(|_| Error::Query("the table has too many rows to view".into()))?;
+    let mut rows: Vec<u32> = match search.is_empty() {
+        true => (0..height).collect(),
+        false => {
+            let needle = search.to_lowercase();
+            let matches: Vec<Vec<bool>> = THREAD_POOL.install(|| {
+                table
+                    .frame()
+                    .columns()
+                    .par_iter()
+                    .map(|column| {
+                        let text = column.cast(&DataType::String)?;
+                        Ok(text
+                            .str()?
+                            .iter()
+                            .map(|value| {
+                                value.is_some_and(|value| contains_ignoring_case(value, &needle))
+                            })
+                            .collect())
+                    })
+                    .collect::<Result<_>>()
+            })?;
+            (0..height)
+                .filter(|&row| matches.iter().any(|column| column[row as usize]))
+                .collect()
+        }
+    };
+    if let Some((name, descending)) = sort {
+        require(table, name)?;
+        let column = table.frame().column(name)?;
+        let key = gather_column(column, &rows, None, PlSmallStr::from_static("key"))?;
+        let positions = Column::new(PlSmallStr::from_static("row"), &rows);
+        let frame = DataFrame::new(rows.len(), vec![key, positions])?;
+        let sorted = sort_frame(&frame, &[("key", descending)])?;
+        rows = sorted.column("row")?.u32()?.into_no_null_iter().collect();
+    }
+    Ok(rows)
+}
+
+/// The table's rows at `rows`, in that order, as a frame.
+pub fn take_rows(table: &Table, rows: &[u32]) -> Result<DataFrame> {
+    gather_frame(table.frame(), rows)
+}
+
+/// Whether `text` contains `needle`, which is already lower case, ignoring case. ASCII text is
+/// compared in place, so the common case allocates nothing per cell.
+fn contains_ignoring_case(text: &str, needle: &str) -> bool {
+    if text.is_ascii() && needle.is_ascii() {
+        return needle.is_empty()
+            || text
+                .as_bytes()
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    text.to_lowercase().contains(needle)
+}
+
 /// Renames columns in place, as `setnames(x, old, new)` does. A key column keeps its place in
 /// the key under its new name.
 pub fn set_names(table: &mut Table, renames: &[(&str, &str)]) -> Result<()> {

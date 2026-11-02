@@ -3006,8 +3006,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   which waits for a Windows runner to test it on.
 - The `Browse[1]>` prompt always shows depth 1 (GNU R counts nested browsers), and `where` names
   frames by function, not by call as GNU R does.
-- The data viewer has no sorting, filtering or column search; each would be a request the
-  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
+- The data viewer filters by one text over all columns and sorts by one column; per-column
+  filters (a numeric range, a factor level) and multi-column sorts would extend the `ryTable`
+  request the same way.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function

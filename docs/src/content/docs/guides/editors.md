@@ -76,7 +76,11 @@ The VS Code extension runs your code on ry's runtime.
   `Browse[1]>` prompt takes that stop over. Stopping the debug session leaves the console running.
 - **Viewing data**: right-click a data frame, matrix, vector or `DataFrame` in the debugger's
   variables view and choose "View Data", or call `View(x)` in the console. The viewer fetches
-  100 rows at a time, so a large table opens instantly.
+  100 rows at a time, so a large table opens instantly. Click a column header to sort by it
+  (again for descending, a third time for the original order), and type in "Filter rows" to keep
+  the rows where some cell contains the text, ignoring case. Both apply to the whole table in the
+  console, not only to the rows on screen; missing values sort first and match no filter, and each
+  row keeps its original row name or number.
 
 While a console runs in the workspace, hover and completion also use its live values: hovering
 `df` shows its class and size, and `df$` completes the columns of the data frame you actually

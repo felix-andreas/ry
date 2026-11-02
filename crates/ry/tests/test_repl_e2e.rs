@@ -1510,6 +1510,80 @@ fn an_editor_attaches_to_a_running_console() {
         page["body"]["rows"],
         serde_json::json!([["2", "b"], ["3", "c"]])
     );
+    // Sorting and filtering cover the whole object, and rows keep their original names.
+    let table =
+        |client: &mut ConsoleClient, view: &serde_json::Value, arguments: serde_json::Value| {
+            let mut arguments = arguments;
+            arguments["viewId"] = view["body"]["viewId"].clone();
+            let page = client.request("ryTable", arguments);
+            (
+                page["body"]["total"].clone(),
+                page["body"]["rowNames"].clone(),
+                page["body"]["rows"].clone(),
+            )
+        };
+    assert_eq!(
+        table(
+            &mut client,
+            &view,
+            serde_json::json!({ "sort": { "column": 1, "descending": true }, "count": 2 })
+        ),
+        (
+            serde_json::json!(5),
+            serde_json::json!(["5", "4"]),
+            serde_json::json!([["5", "e"], ["4", "d"]])
+        )
+    );
+    assert_eq!(
+        table(&mut client, &view, serde_json::json!({ "filter": "D" })),
+        (
+            serde_json::json!(1),
+            serde_json::json!(["4"]),
+            serde_json::json!([["4", "d"]])
+        )
+    );
+    input
+        .write_all(b"ry_table <- DataFrame(name = c(\"Bo\", \"ana\", NA, \"dan\"), age = c(30, 25, NA, 25))\n")
+        .expect("type a command");
+    let ry_table = (0..100)
+        .find_map(|_| {
+            let view = client.request("ryView", serde_json::json!({ "expression": "ry_table" }));
+            if view["success"] == true {
+                return Some(view);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            None
+        })
+        .expect("ry_table is viewable once defined");
+    assert_eq!(
+        table(
+            &mut client,
+            &ry_table,
+            serde_json::json!({ "sort": { "column": 1 } })
+        ),
+        (
+            serde_json::json!(4),
+            serde_json::json!(["3", "2", "4", "1"]),
+            serde_json::json!([
+                ["NA", "NA"],
+                ["ana", "25.0"],
+                ["dan", "25.0"],
+                ["Bo", "30.0"]
+            ])
+        )
+    );
+    assert_eq!(
+        table(
+            &mut client,
+            &ry_table,
+            serde_json::json!({ "filter": "A", "sort": { "column": 0, "descending": true } })
+        ),
+        (
+            serde_json::json!(2),
+            serde_json::json!(["4", "2"]),
+            serde_json::json!([["dan", "25.0"], ["ana", "25.0"]])
+        )
+    );
     let globals = client.request("ryGlobals", serde_json::json!({}));
     assert!(
         globals["body"]["globals"]
