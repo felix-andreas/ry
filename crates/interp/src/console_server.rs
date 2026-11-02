@@ -368,7 +368,7 @@ mod platform {
         std::{
             collections::{BTreeMap, VecDeque},
             fs,
-            io::{BufRead, BufReader, Write},
+            io::{BufRead, BufReader, Read, Write},
             os::unix::{
                 fs::{DirBuilderExt, MetadataExt, PermissionsExt},
                 net::{UnixListener, UnixStream},
@@ -520,7 +520,14 @@ mod platform {
         let mut length = None;
         loop {
             let mut line = String::new();
-            if reader.read_line(&mut line).ok()? == 0 {
+            // A header line is a name and a number; reading a longer one whole would let a peer
+            // that never sends a line break grow it without bound.
+            let read = reader
+                .by_ref()
+                .take(MAX_HEADER_LINE as u64)
+                .read_line(&mut line)
+                .ok()?;
+            if read == 0 || (read == MAX_HEADER_LINE && !line.ends_with('\n')) {
                 return None;
             }
             let line = line.trim_end();
@@ -536,10 +543,16 @@ mod platform {
         // A message larger than this is not one an editor sends; refusing it bounds the
         // allocation a hostile peer can cause.
         let length = length.filter(|&length| length <= 16 << 20)?;
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).ok()?;
+        // The body grows with the bytes that arrive, not with the length the header claims.
+        let mut body = Vec::new();
+        reader.take(length as u64).read_to_end(&mut body).ok()?;
+        if body.len() < length {
+            return None;
+        }
         serde_json::from_slice(&body).ok()
     }
+
+    const MAX_HEADER_LINE: usize = 1024;
 
     /// The requests one connection may have waiting before its reader stops reading. The peer
     /// then blocks on a full socket buffer, so a client that floods the console slows itself
@@ -734,6 +747,11 @@ mod platform {
         if lock(&DEBUG_CONNECTION).is_some() && interp().debugger.is_none() {
             return;
         }
+        // R code run for one editor's request at the prompt is not the user's command: the
+        // console is idle, and the prompt answers the other requests as soon as it returns.
+        if SERVING_REQUEST.load(Ordering::Relaxed) {
+            return;
+        }
         while let Some(event) = pop(false) {
             match event {
                 Event::Request(connection, message) => busy_request(connection, message),
@@ -781,10 +799,12 @@ mod platform {
             return;
         }
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
-            debug_request(&request, false);
+            // The packages are reloaded before `attach` is answered, so an editor that waits for
+            // the answer finds the console idle again rather than busy with the reload.
             if request.command == "attach" {
                 reload_packages();
             }
+            debug_request(&request, false);
             return;
         }
         if request.command == "rySubscribe" {
@@ -822,15 +842,19 @@ mod platform {
     }
 
     unsafe fn initialize(connection: u64, request: &Request) {
-        let mut owner = lock(&DEBUG_CONNECTION);
+        let owner = lock(&DEBUG_CONNECTION);
         if owner.is_some_and(|owner| owner != connection) {
             let refused = Err("a debugger is already attached to this console".to_owned());
             drop(owner);
             send(connection, response(request, refused));
             return;
         }
-        *owner = Some(connection);
         drop(owner);
+        // An editor that initializes again replaces its adapter. The old adapter's transport
+        // frees the connection as it drops, so it goes before the connection is claimed, or the
+        // new adapter would run on a connection the console no longer counts as the debugger's.
+        interp().debugger = None;
+        *lock(&DEBUG_CONNECTION) = Some(connection);
         let transport = Box::new(ConsoleTransport { connection });
         interp().debugger = Some(Box::new(Adapter::for_console(transport)));
         debug_request(request, false);
