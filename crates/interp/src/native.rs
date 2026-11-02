@@ -12,8 +12,8 @@ use {
     crate::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        graphics_engine, interp, linalg,
-        unwind::{R, error},
+        conditions, graphics_engine, interp, linalg,
+        unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, string_vector, symbols},
     },
     heap::object::{Sexp, SexpType},
@@ -292,7 +292,12 @@ pub unsafe fn foreign_context(call: Sexp, body: impl FnOnce() -> R<Sexp>) -> R<S
     let state = interp();
     let depth = state.foreign_calls.len();
     state.foreign_calls.push((call, state.frames.len()));
-    let result = body();
+    // An error is signaled while the context is still on the stack, so handlers and the
+    // concise traceback see the foreign call as GNU R does (`Calls: f -> .Call`).
+    let result = match body() {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    };
     interp().foreign_calls.truncate(depth);
     result
 }
