@@ -133,7 +133,7 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
             Some(&*Box::leak(Box::new(native)))
         }
         Err(Refusal(why)) => {
-            if std::env::var_os("RY_JIT_LOG").is_some() {
+            if crate::logging() {
                 eprintln!("jit: no native function for {params:?}: {why}");
             }
             None
@@ -239,7 +239,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
             .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
         Ok((module.get_finalized_function(id) as usize, size))
     })?;
-    if std::env::var_os("RY_JIT_LOG").is_some() {
+    if crate::logging() {
         eprintln!(
             "jit: native function for {params:?} -> {guess:?} in {} us, {size} bytes",
             started.elapsed().as_micros()

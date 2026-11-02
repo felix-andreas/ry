@@ -666,7 +666,7 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
-            if std::env::var_os("RY_JIT_LOG").is_some() {
+            if crate::logging() {
                 eprintln!(
                     "jit: deopt at pc {pc} (reason {why}) in {}",
                     crate::describe(machine.code)

@@ -33,6 +33,7 @@ use {
         cell::{Cell, RefCell},
         ffi::c_void,
         panic::resume_unwind,
+        sync::OnceLock,
         time::Instant,
     },
 };
@@ -138,14 +139,14 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
         let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
         match result {
             Ok(compiled) => {
-                if std::env::var_os("RY_JIT_LOG").is_some() {
+                if logging() {
                     eprintln!("jit: the compile above ran at the first call");
                 }
                 counters[profile::TIER_STATE] = 1;
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
-                if std::env::var_os("RY_JIT_LOG").is_some() {
+                if logging() {
                     eprintln!(
                         "jit: not compiling {} at its first call: {reason}",
                         describe(machine.code)
@@ -237,7 +238,7 @@ unsafe fn compiled_for<'a>(
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
-                if std::env::var_os("RY_JIT_LOG").is_some() {
+                if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
                 if reason == analysis::COLD {
@@ -253,6 +254,14 @@ unsafe fn compiled_for<'a>(
             }
         }
     }
+}
+
+/// Whether `RY_JIT_LOG` asks for compile, refusal and deoptimization lines. Read once, because
+/// unwinds through compiled frames deoptimize often enough that an environment lookup each time
+/// shows up in test suites.
+pub(crate) fn logging() -> bool {
+    static LOGGING: OnceLock<bool> = OnceLock::new();
+    *LOGGING.get_or_init(|| std::env::var_os("RY_JIT_LOG").is_some())
 }
 
 pub(crate) unsafe fn describe(code: Sexp) -> String {
@@ -301,7 +310,7 @@ unsafe fn compile_in<'a>(
         }
         let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
-        if std::env::var_os("RY_JIT_LOG").is_some() {
+        if logging() {
             // The instructions left to tier 0 are where compiled code is slow.
             // A builtin call lists its argument types, which say why it was not an intrinsic.
             let steps: Vec<String> = plan
