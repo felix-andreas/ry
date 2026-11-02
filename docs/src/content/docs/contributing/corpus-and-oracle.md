@@ -156,12 +156,12 @@ ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
 On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time (today every case but `stats__lbfgsb` passes under 4.3.3). Four of the
+against 124 of 125 under 4.3.3 at the time (today every case passes under 4.3.3). Four of the
 remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
 calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
-and runs it. `stats__lbfgsb` differs under every version.
+and runs it.
 
 The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
 `verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
@@ -180,10 +180,12 @@ just bench-test .bench/finbench
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
-count (by default one file per 600 lines). `--typed` keeps the templates' `#:` annotations and
-turns on strict mode in the generated `ry.toml`, so the package doubles as a strict-mode dogfood
-corpus; without it the annotations are stripped and the package is plain R. The line target counts
-code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
+count (by default one file per 600 lines). The templates are written with inline annotations.
+`--typed` keeps them and turns on strict mode in the generated `ry.toml`, so the package doubles as
+a strict-mode dogfood corpus and ry's runtime checks and compiles its typed functions. Without it,
+the generator erases the package with `ry debug erase` (so `target/release/ry` must exist, or pass
+`--ry`), which gives plain R. Both runs count the same text toward the line target, so a typed and
+an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger`, data-science `readings` and biostatistics `followup` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared

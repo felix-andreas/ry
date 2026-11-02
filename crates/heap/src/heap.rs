@@ -49,6 +49,8 @@ pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
     space: Space,
+    /// The largest single allocation the heap attempts (`memory_ceiling`).
+    allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
@@ -94,6 +96,11 @@ pub struct Heap {
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
+    /// `Rprofmem()`'s reporter and its threshold in bytes. A vector whose reported size exceeds
+    /// the threshold is passed to the reporter; `usize::MAX` turns reporting off, so the check
+    /// on every allocation is one compare.
+    allocation_reporter: Option<fn(usize) -> bool>,
+    report_threshold: usize,
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -353,6 +360,7 @@ impl Heap {
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
         let mut heap = Heap {
+            allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
             young_large: Vec::new(),
@@ -365,6 +373,8 @@ impl Heap {
             mark_stack: Vec::new(),
             binding_epoch: 0,
             enclosure_epoch: 0,
+            allocation_reporter: None,
+            report_threshold: usize::MAX,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             new_roots: Vec::new(),
@@ -456,7 +466,54 @@ impl Heap {
         let size = object_size(kind, length).ok_or(HeapError::TooLong)?;
         let object = self.allocate_with(kind, size, &[], VECTOR_DATA_OFFSET)?;
         object.set_length_and_capacity(length as isize, length as isize);
+        self.report_allocation(kind, length);
         Ok(object)
+    }
+
+    /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
+    /// bytes to `reporter`, or stops reporting when `reporter` is `None`.
+    pub fn report_allocations(&mut self, reporter: Option<fn(usize) -> bool>, threshold: usize) {
+        self.report_threshold = if reporter.is_some() {
+            threshold
+        } else {
+            usize::MAX
+        };
+        self.allocation_reporter = reporter;
+    }
+
+    /// Replaces the reporting threshold and returns the old one, so a caller can hide its own
+    /// allocations by setting `usize::MAX` and restoring the old threshold afterwards.
+    pub fn swap_report_threshold(&mut self, threshold: usize) -> usize {
+        if self.allocation_reporter.is_none() {
+            return usize::MAX;
+        }
+        std::mem::replace(&mut self.report_threshold, threshold)
+    }
+
+    /// GNU R allocates vectors of up to 128 data bytes from pages of small cells and reports
+    /// only the larger ones, each as its data rounded up to 8 bytes plus a 48-byte header. The
+    /// reporter returns false to stop reporting, because it runs while the heap is borrowed and
+    /// so cannot turn reporting off through the heap itself.
+    #[inline]
+    fn report_allocation(&mut self, kind: SexpType, length: usize) {
+        if self.report_threshold == usize::MAX {
+            return;
+        }
+        let element = match kind {
+            SexpType::Raw => 1,
+            SexpType::Logical | SexpType::Integer => 4,
+            SexpType::Complex => 16,
+            _ => 8,
+        };
+        let data = length.saturating_mul(element).div_ceil(8).saturating_mul(8);
+        let size = data.saturating_add(48);
+        if data > 128
+            && size > self.report_threshold
+            && let Some(reporter) = self.allocation_reporter
+            && !reporter(size)
+        {
+            self.report_allocations(None, 0);
+        }
     }
 
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
@@ -492,6 +549,7 @@ impl Heap {
             }
             _ => {}
         }
+        self.report_allocation(kind, length as usize);
         Ok(object)
     }
 
@@ -606,6 +664,22 @@ impl Heap {
         third: Sexp,
     ) -> HeapResult<Sexp> {
         self.alloc_triple_keeping(kind, first, second, third, None)
+    }
+
+    /// A promise over `expression` in `env` whose attribute slot holds the compiled `code`.
+    /// Setting the slot on the fresh object needs no write barrier, which `set_attrib` would run.
+    pub unsafe fn alloc_compiled_promise(
+        &mut self,
+        unforced: Sexp,
+        expression: Sexp,
+        env: Sexp,
+        code: Sexp,
+    ) -> HeapResult<Sexp> {
+        let promise =
+            self.alloc_triple_keeping(SexpType::Promise, unforced, expression, env, Some(code))?;
+        promise.set_attrib_unbarriered(code);
+        code.increment_refcount();
+        Ok(promise)
     }
 
     /// `alloc_triple` that also keeps `extra` alive across the allocation.
@@ -759,6 +833,30 @@ impl Heap {
         Ok(object)
     }
 
+    /// An immutable record from slots compiled code already split into raw numbers and handles,
+    /// so a number never has to be boxed on its way in. A [`Slot::Real`] must not carry a bit
+    /// pattern [`slot_for`] keeps as a handle, and only the first [`crate::object::UNBOXED_SLOTS`] may be raw.
+    pub unsafe fn alloc_record_slots(&mut self, layout: u32, slots: &[Slot]) -> HeapResult<Sexp> {
+        let size = object_size(SexpType::Record, slots.len()).ok_or(HeapError::TooLong)?;
+        if slots.len() > u32::MAX as usize {
+            return Err(HeapError::TooLong);
+        }
+        let handles: smallvec::SmallVec<[Sexp; 4]> = slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Handle(handle) => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        let object = self.allocate(SexpType::Record, size, &handles)?;
+        for handle in &handles {
+            handle.increment_refcount();
+        }
+        object.init_record(layout, slots);
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
     /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
     /// decides.
     pub unsafe fn set_record_slot(&mut self, record: Sexp, index: usize, value: Sexp) {
@@ -781,16 +879,28 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        let (any_nul, ascii) = scan_nul_and_ascii(bytes);
-        if any_nul {
+        let scan = strings::scan(bytes);
+        if scan.any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
-        let hash = strings::hash(bytes, bits & gp::ENCODING);
-        if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
-            return Ok(found);
+        let bits = if scan.ascii {
+            gp::ASCII
+        } else {
+            encoding.gp_bits()
+        };
+        let hash = strings::hash(&scan, bits & gp::ENCODING);
+        match self.strings.find(hash, bytes, bits & gp::ENCODING) {
+            Some(found) => Ok(found),
+            None => self.intern_new(bytes, bits, hash),
         }
+    }
+
+    /// Allocates and interns a string the table does not hold. It is kept out of line so that
+    /// re-interning an existing string, the common case, runs without its register pressure.
+    #[cold]
+    #[inline(never)]
+    unsafe fn intern_new(&mut self, bytes: &[u8], bits: u16, hash: u32) -> HeapResult<Sexp> {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
@@ -1247,10 +1357,12 @@ impl Heap {
         self.roots.handles.push(object);
     }
 
+    #[inline]
     pub fn handle_mark(&self) -> usize {
         self.roots.handles.len()
     }
 
+    #[inline]
     pub fn release_handles(&mut self, mark: usize) {
         self.roots.handles.truncate(mark);
     }
@@ -1381,6 +1493,9 @@ impl Heap {
                 (memory, class as u8)
             }
             None => {
+                if size > self.allocation_ceiling {
+                    return Err(HeapError::CannotAllocate { bytes: size });
+                }
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
                 let memory = if zeroed >= size {
@@ -1554,7 +1669,7 @@ impl Heap {
 
     #[inline]
     unsafe fn mark(&mut self, object: Sexp) {
-        if self.space.mark(object) {
+        if self.space.mark(object) && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
         }
     }
@@ -2028,14 +2143,35 @@ impl WellKnown {
     }
 }
 
+/// Whether tracing `object` would mark nothing: a CHARSXP or an atomic vector (logical, integer,
+/// double, complex or raw) that has no attributes and is not ALTREP.
+/// Such an object is marked without a trip through the mark stack, which a string vector with a
+/// million distinct elements would otherwise grow by a million entries, and the stack keeps its
+/// capacity for the rest of the session.
+#[inline]
+unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
+    matches!(
+        object.kind(),
+        SexpType::Char
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+    ) && !object.is_altrep()
+        && object.attrib() == nil
+}
+
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
             // A larger nursery collects less often but touches more fresh memory before its
             // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
-            // GNU R's initial vector heap trigger, `R_VSIZE`.
-            young_large_limit: 64 * 1024 * 1024,
+            // Counts only large vectors allocated since the last collection, unlike GNU R's
+            // 64 MB `R_VSIZE`, which also counts live data. A 64 MB budget let dead temporaries
+            // of vectorized kernels pile up to about 50 MB above GNU R's peak at a million rows.
+            young_large_limit: 16 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: match gc_stress_requested() {
@@ -2129,7 +2265,11 @@ impl RootStack {
         self.entries.push(object);
     }
 
+    #[inline]
     fn truncate(&mut self, length: usize) {
+        if length >= self.entries.len() {
+            return;
+        }
         self.entries.truncate(length);
         self.scanned = self.scanned.min(self.entries.len());
     }
@@ -2172,30 +2312,36 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
+/// Physical memory plus swap on Linux, where the allocator reserves address space without
+/// committing it, so a vector far larger than the machine would be handed out and fail only when
+/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
+/// refusing such a request, and this bound gives the same answer before asking. With
+/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
+/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
+#[cfg(target_os = "linux")]
+fn memory_ceiling() -> usize {
+    let always_overcommit =
+        std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1");
+    if always_overcommit {
+        return usize::MAX;
+    }
+    // SAFETY: `sysinfo` only writes the struct it is given.
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        return usize::MAX;
+    }
+    let unit = (info.mem_unit as usize).max(1);
+    (info.totalram as usize)
+        .saturating_add(info.totalswap as usize)
+        .saturating_mul(unit)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_ceiling() -> usize {
+    usize::MAX
+}
+
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
-}
-
-/// Whether `bytes` holds a NUL byte, and whether it is all ASCII, in one pass of eight bytes at a
-/// time. Most strings are a few bytes long, where `memchr`'s setup costs more than the scan.
-fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGHS: u64 = 0x8080_8080_8080_8080;
-    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        let word = u64::from_le_bytes(word);
-        // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
-        zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
-        high_bits |= word;
-    }
-    let mut tail_nul = false;
-    for &byte in chunks.remainder() {
-        tail_nul |= byte == 0;
-        high_bits |= u64::from(byte);
-    }
-    (tail_nul || zero_bits != 0, high_bits & HIGHS == 0)
 }

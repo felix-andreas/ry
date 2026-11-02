@@ -27,7 +27,7 @@ segments : Any
 arrows : Any
 rect : Any
 polygon : Any
-text : Any
+text : fn(...: Any) -> NULL
 mtext : Any
 title : Any
 legend : Any

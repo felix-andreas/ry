@@ -82,6 +82,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
+        run_exit_finalizers: || unsafe {
+            crate::boundary::run_pending_finalizers();
+            crate::extptr::R_RunExitFinalizers();
+        },
         run_task_callbacks: |expression, value, succeeded, visible| unsafe {
             run_task_callbacks(expression, value, succeeded, visible)
         },
@@ -1279,6 +1283,7 @@ pub unsafe extern "C" fn ry_run(
             Err(failure) => {
                 let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
                 crate::boundary::write_console(message.as_bytes(), true);
+                finish_script_session();
                 return 2;
             }
         };
@@ -1321,8 +1326,6 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
 
 unsafe fn finish_script_session() {
     interp::session::finish();
-    crate::boundary::run_pending_finalizers();
-    crate::extptr::R_RunExitFinalizers();
     use std::io::Write;
     drop(std::io::stdout().flush());
 }
@@ -1569,7 +1572,6 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     );
     interp::console_server::finish();
     interp::session::finish();
-    crate::boundary::run_pending_finalizers();
     0
 }
 
@@ -1592,6 +1594,17 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
     loader::ry_runtime::set_verdict(verdict);
+}
+
+/// Makes the package loader ask `check` before a load of a strict package runs anything (see
+/// `loader::ry_runtime::set_check`). Every command that runs ry's runtime calls it once, before
+/// [`ry_run`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_loader_set_check(
+    strict_config: loader::ry_runtime::Check,
+    check: loader::ry_runtime::Check,
+) {
+    loader::ry_runtime::set_check(strict_config, check);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

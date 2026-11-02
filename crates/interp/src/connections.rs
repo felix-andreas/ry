@@ -1184,6 +1184,20 @@ unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_url(call: &Call<'_>) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
+    let method = values::require_string(call.arg(4), "method")?;
+    if method == "internal" && !description.starts_with("file://") {
+        let scheme = description.split_once("://").map(|(scheme, _)| scheme);
+        return Err(error(match scheme {
+            Some("http" | "ftp") => {
+                "the 'internal' method of url() is defunct for http:// and ftp:// URLs".to_owned()
+            }
+            Some("https") => {
+                "https:// URLs are not supported by the \"internal\" method".to_owned()
+            }
+            Some("ftps") => "ftps:// URLs are not supported by this method".to_owned(),
+            _ => "URL scheme unsupported by this method".to_owned(),
+        }));
+    }
     let headers = header_lines(call.arg(5));
     url_connection(&description, &open, headers)
 }

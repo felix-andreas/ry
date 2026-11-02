@@ -601,7 +601,9 @@ impl Writer<'_, '_> {
                 SexpType::Closure => true,
                 _ => false,
             };
-            let has_attr = kind != SexpType::Char && object.attrib() != self.known.nil;
+            // A promise's attribute slot holds its compiled code, which is no part of the R object.
+            let has_attr = !matches!(kind, SexpType::Char | SexpType::Promise)
+                && object.attrib() != self.known.nil;
             let mut levels = object.gp();
             if kind == SexpType::Char {
                 levels &= !CHARSXP_SESSION_BITS;

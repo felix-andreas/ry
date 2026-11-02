@@ -282,6 +282,9 @@ pub struct PackageIndex {
     /// Which names are lazy and where their definitions are. An edit inside a function body
     /// leaves it equal, so the analysis hands back the same `Arc`.
     pub bindings: Arc<PackageBindings>,
+    /// Strict mode covers some file, through the project's configuration or a file's own
+    /// `# typing: strict` comment, so a host checks the package before it runs any of it.
+    pub strict: bool,
 }
 
 /// The package's top-level names and how they load.
@@ -517,6 +520,11 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         })
         .collect();
     let bindings = package_bindings(db, sources);
+    let strict = *sources.strict(db)
+        || sources
+            .files(db)
+            .iter()
+            .any(|file| *file_typing_mode(db, file.file) == Some(TypingMode::Strict));
     Arc::new(PackageIndex {
         package: description_field(description, "Package").unwrap_or_default(),
         version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
@@ -524,6 +532,7 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         namespace: namespace_spec(db, sources).clone(),
         bindings,
         files,
+        strict,
     })
 }
 

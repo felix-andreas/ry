@@ -184,6 +184,11 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             }),
             ret: ret.unwrap_or_else(|| unknown(db)),
             inferred: false,
+            flag_return: None,
+            quoted: Vec::new(),
+            default_reads: Vec::new(),
+            missing_tested: Vec::new(),
+            condition_only: Vec::new(),
         };
         annotation.declared = Some(TypeScheme {
             binders: forall,
@@ -314,6 +319,11 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 variadic,
                 ret,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         ),
     });
@@ -511,6 +521,11 @@ pub fn merge_annotations<'db>(
                     variadic,
                     ret,
                     inferred: false,
+                    flag_return: None,
+                    quoted: Vec::new(),
+                    default_reads: Vec::new(),
+                    missing_tested: Vec::new(),
+                    condition_only: Vec::new(),
                 }),
             ),
         }),
@@ -1655,6 +1670,11 @@ impl<'db> Lowering<'db> {
                 variadic,
                 ret,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         )
     }

@@ -134,6 +134,8 @@ pub struct Hooks {
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
+    /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
+    pub run_exit_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
     /// succeeded, and whether the value was visible.
     pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
@@ -380,6 +382,7 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
+        run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))

@@ -696,8 +696,9 @@ The rules the implementation settled:
   `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
   pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
-  copies other development packages hold of a changed binding is not implemented; a session loads
-  one development package at a time without that cascade.
+  copies other development packages hold is done after every load: each loaded development package
+  whose `NAMESPACE` imports from the reloaded one runs its import directives again
+  (`.ry_update_importers` in `runtime.R`), which costs one pass over those directives.
 - **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
   Statements in a changed file are matched to the file's old statements by content, in order, so an
   inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it
@@ -813,59 +814,79 @@ generates the data on first use), and `--groupby-only` limits a run to the group
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
-same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
-driven from Rust, without R.
+same checksums. Each cell is the faster of two runs, in seconds, and the last row is each engine's
+peak resident memory over the whole run. The last column is the same engine driven from Rust,
+without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
-| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
-| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
-| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
-| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
-| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
-| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
-| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
-| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
-| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
-| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
-| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
-| keyed rolling join | 0.127 | 0.115 | 0.083 |
-| total | 25.91 | 6.27 | 9.16 |
+| groupby q1: `sum(v1)` by `id1` | 0.172 | 0.034 | 0.026 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.204 | 0.035 | 0.024 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.252 | 0.105 | 0.112 |
+| groupby q4: three means by `id4` | 0.391 | 0.145 | 0.125 |
+| groupby q5: three sums by `id6` | 0.376 | 0.126 | 0.126 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.637 | 0.151 | 0.158 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.727 | 0.068 | 0.065 |
+| groupby q8: the two largest `v3` by `id6` | 0.753 | 0.291 | 0.241 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.871 | 0.081 | 0.081 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.998 | 0.671 | 0.558 |
+| `:=` on a whole column, 100 times | 5.432 | 0.301 | 0.296 |
+| `:=` on 1% of rows, 100 times | 3.722 | 0.915 | 0.872 |
+| `:=` adding a column, 100 times | 5.865 | 1.074 | 0.770 |
+| join q1: small, on `id1` | 0.340 | 0.129 | 0.102 |
+| join q2: medium, on `id2` | 0.469 | 0.142 | 0.113 |
+| join q3: medium, left, on `id2` | 0.623 | 0.149 | 0.138 |
+| join q4: medium, on factor `id5` | 0.446 | 0.135 | 0.113 |
+| join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
+| keyed rolling join | 0.137 | 0.100 | 0.109 |
+| total | 27.01 | 5.54 | 4.86 |
+| peak memory (GB) | 6.9 | 8.0 | 7.6 |
 <!-- /bench-table:1e7 -->
 
-At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
-that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
-out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
-at 6.4 GB, and both grow with the row count.
+At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
+group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
+machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At 1e8
+rows the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
 
 <!-- bench-table:5e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
-| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
-| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
-| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
-| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
-| total | 29.84 | 11.83 | 15.97 |
+| groupby q1: `sum(v1)` by `id1` | 0.790 | 0.183 | 0.177 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.031 | 0.166 | 0.149 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.389 | 0.600 | 0.730 |
+| groupby q4: three means by `id4` | 1.746 | 0.681 | 0.661 |
+| groupby q5: three sums by `id6` | 1.502 | 0.809 | 0.665 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.072 | 0.891 | 0.812 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 4.898 | 0.556 | 0.410 |
+| groupby q8: the two largest `v3` by `id6` | 3.757 | 1.768 | 1.538 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.298 | 0.324 | 0.316 |
+| groupby q10: `sum(v3)`, count by all six ids | 12.993 | 4.396 | 4.288 |
+| total | 34.48 | 10.37 | 9.75 |
+| peak memory (GB) | 6.6 | 7.3 | 7.4 |
 <!-- /bench-table:5e7 -->
 
+<!-- bench-table:1e8 -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.990 | 0.293 | 0.301 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.906 | 2.519 | 1.573 |
+| groupby q4: three means by `id4` | 3.602 | 1.214 | 1.168 |
+| groupby q5: three sums by `id6` | 2.741 | 1.836 | 1.539 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.343 | 1.533 | 1.617 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 11.334 | 1.188 | 1.163 |
+| groupby q8: the two largest `v3` by `id6` | 7.691 | 4.108 | 3.491 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 4.513 | 0.708 | 0.536 |
+| groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
+| total | 69.22 | 22.42 | 20.81 |
+| peak memory (GB) | 13.7 | 13.4 | 12.6 |
+<!-- /bench-table:1e8 -->
+
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
-in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
-allocation-heavy questions, because the allocator returns large blocks to the OS between queries
-(`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
+in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
+same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
+calls around it.
 
 `tools/bench/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the
@@ -1015,10 +1036,9 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. Every oracle case in `crates/oracle/cases` but one matches GNU R 4.3.3
-   (`oracle compare --engine ry`). The exception, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
-   exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
+   The interpreter runs. Every oracle case in `crates/oracle/cases` matches GNU R 4.3.3
+   (`oracle compare --engine ry`). Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
+   exit status and 27 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
    `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.

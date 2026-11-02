@@ -2850,7 +2850,10 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
     builder
         .utf(true)
         .caseless(ignore_case)
-        .jit_if_available(true);
+        .jit_if_available(true)
+        // GNU R's default `R_PCRE_JIT_STACK_MAXSIZE`, 64 MB; PCRE2's own 32 KB fails on a
+        // long subject such as 5,000 repeats of `(a|b)+`.
+        .max_jit_stack_size(Some(64 * 1024 * 1024));
     match builder.build(pattern) {
         Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
         Err(failure) => {

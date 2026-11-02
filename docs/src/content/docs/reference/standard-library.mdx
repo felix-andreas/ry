@@ -605,6 +605,9 @@ fn(start: integer, end: integer) -> list[integer]
 The integers from `start` up to and including `end`, or an empty list when `end` is smaller. Unlike
 R's `:`, it never counts down.
 
+Both `List.range` and `List.repeat` stop with an error when the list would hold more than
+2,147,483,647 elements, the longest vector an R integer index reaches.
+
 ```r ry run runtime=ry dput
 List.range(2L, 5L)
 #> list(2L, 3L, 4L, 5L)
@@ -2957,6 +2960,20 @@ Dict.empty()
 #> Dict.empty()
 ```
 
+#### `Dict.with_capacity`
+
+```
+<K: key, V> fn(capacity: integer) -> Dict<K, V>
+```
+
+An empty dictionary with room for `capacity` entries, so inserting that many never grows it. The
+room is rounded up to a power of two.
+
+```r ry run runtime=ry dput
+Dict.capacity(Dict.insert(Dict.with_capacity(64L), "a", 1L))
+#> 64L
+```
+
 #### `Dict.single`
 
 ```
@@ -3236,9 +3253,9 @@ Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
 <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
 ```
 
-The dictionary with room for `spare` more entries. An empty dictionary reserves nothing.
+The dictionary with room for `spare` more entries.
 
-```r
+```r ry run runtime=ry dput
 Dict.reserve(Dict.single("a", 1L), 1000L)
 #> Dict.from_list(list(("a", 1L)))
 ```
@@ -3263,7 +3280,8 @@ Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
 <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 ```
 
-The dictionary with no room beyond its entries.
+The dictionary with no room beyond its entries. An empty dictionary keeps its smallest index,
+which has room for 4.
 
 ```r ry run runtime=ry dput
 Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L)))
@@ -3298,6 +3316,20 @@ A set with no elements.
 ```r ry run runtime=ry dput
 Set.empty()
 #> Set.empty()
+```
+
+#### `Set.with_capacity`
+
+```
+<T: key> fn(capacity: integer) -> Set<T>
+```
+
+An empty set with room for `capacity` elements, so inserting that many never grows it. The room
+is rounded up to a power of two.
+
+```r ry run runtime=ry dput
+Set.capacity(Set.insert(Set.with_capacity(64L), "a"))
+#> 64L
 ```
 
 #### `Set.single`
@@ -3527,9 +3559,9 @@ Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
 ```
 
-The set with room for `spare` more elements. An empty set reserves nothing.
+The set with room for `spare` more elements.
 
-```r
+```r ry run runtime=ry dput
 Set.reserve(Set.single("a"), 1000L)
 #> Set.from_list(list("a"))
 ```
@@ -3553,7 +3585,8 @@ Set.capacity(Set.reserve(Set.single("a"), 9L))
 <T: key> fn(set: Set<T>) -> Set<T>
 ```
 
-The set with no room beyond its elements.
+The set with no room beyond its elements. An empty set keeps its smallest index, which has room
+for 4.
 
 ```r ry run runtime=ry dput
 Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))
