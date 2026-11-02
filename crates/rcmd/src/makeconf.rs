@@ -12,10 +12,35 @@ use std::collections::{BTreeMap, BTreeSet};
 /// the point of assignment, and the result is stored with each `$` doubled, so expanding it
 /// later yields that text unchanged. `R_HOME` is `home` whatever the makefile assigns,
 /// because R passes it on make's command line, which overrides the file.
-pub fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
-    let mut variables = BTreeMap::from([("R_HOME".to_owned(), escape_make(home))]);
-    // The names assigned with `:=`, whose appended text `+=` also expands at once.
-    let mut simple = BTreeSet::from(["R_HOME".to_owned()]);
+///
+/// An `include`, `-include` or `sinclude` line reads each file it names, after expanding the
+/// line, through `read`, and its assignments take effect at that point, as in make. A file
+/// `read` cannot supply is skipped; make stops on one that `include` names.
+pub fn make_assignments(
+    text: &str,
+    home: &str,
+    read: &mut dyn FnMut(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    let mut makefile = Makefile {
+        variables: BTreeMap::from([("R_HOME".to_owned(), escape_make(home))]),
+        simple: BTreeSet::from(["R_HOME".to_owned()]),
+        read,
+    };
+    assign(&mut makefile, text, 0);
+    makefile.variables
+}
+
+/// make has no limit on nested includes, but a file that includes itself never ends there.
+const INCLUDE_DEPTH: usize = 32;
+
+struct Makefile<'a> {
+    variables: BTreeMap<String, String>,
+    /// The names assigned with `:=`, whose appended text `+=` also expands at once.
+    simple: BTreeSet<String>,
+    read: &'a mut dyn FnMut(&str) -> Option<String>,
+}
+
+fn assign(makefile: &mut Makefile, text: &str, depth: usize) {
     let mut logical = String::new();
     for line in text.lines() {
         // make joins a continuation and the whitespace around it into one space.
@@ -36,6 +61,21 @@ pub fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
         if statement.starts_with(['\t', '#']) {
             continue;
         }
+        if let Some(files) = ["include", "-include", "sinclude"]
+            .iter()
+            .find_map(|keyword| statement.trim_start().strip_prefix(keyword))
+            .filter(|rest| rest.starts_with([' ', '\t']) && !rest.contains('='))
+        {
+            let files = expand_make(files.split('#').next().unwrap_or(""), &makefile.variables);
+            if depth < INCLUDE_DEPTH {
+                for name in files.split_whitespace() {
+                    if let Some(included) = (makefile.read)(name) {
+                        assign(makefile, &included, depth + 1);
+                    }
+                }
+            }
+            continue;
+        }
         let Some((name, value)) = statement.split_once('=') else {
             continue;
         };
@@ -54,10 +94,13 @@ pub fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
         if name.is_empty() || name.contains(char::is_whitespace) || name == "R_HOME" {
             continue;
         }
+        let Makefile {
+            variables, simple, ..
+        } = &mut *makefile;
         match operator {
             Some('+') => {
                 let value = match simple.contains(name) {
-                    true => escape_make(&expand_make(value, &variables)),
+                    true => escape_make(&expand_make(value, variables)),
                     false => value.to_owned(),
                 };
                 let entry: &mut String = variables.entry(name.to_owned()).or_default();
@@ -76,7 +119,7 @@ pub fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
                     .or_insert_with(|| value.to_owned());
             }
             Some(':') => {
-                let value = escape_make(&expand_make(value, &variables));
+                let value = escape_make(&expand_make(value, variables));
                 variables.insert(name.to_owned(), value);
                 simple.insert(name.to_owned());
             }
@@ -86,7 +129,6 @@ pub fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
             }
         }
     }
-    variables
 }
 
 /// Expands the variable references in `value` as make does: `$(NAME)`, `${NAME}`, a
