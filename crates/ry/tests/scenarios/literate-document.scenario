@@ -1,0 +1,53 @@
+# An analyst edits an R Markdown report: its chunks are analysed together as one script, prose
+# stays out of the way, and formatting touches only the code.
+
+file ry.toml
+| [check]
+| typing = true
+file report.Rmd
+| ---
+| title: "Sales — Q3"
+| ---
+|
+| Prose with `inline code`, ünïcode, and plain words.
+|
+| ```{r setup}
+| rate <- 0.25
+| scale<-function(values) values * rate
+| ```
+|
+| The rate — ünïcode first — is `r round(rate, 2)`, between the chunks.
+|
+| ```{r}
+| totals <- scale(c(10, 20))
+| print(totals + "units")
+| ```
+
+open report.Rmd
+
+# A finding in the second chunk sits on its own line of the document.
+expect diagnostics report.Rmd "found `character`"
+expect hover report.Rmd "totals <- scale" "double"
+expect definition report.Rmd "scale(c(10" report.Rmd "scale<-function"
+expect completion report.Rmd after "print(tot" totals
+expect no diagnostic report.Rmd "prose"
+
+# Formatting rewrites the first chunk and leaves the prose, with its double spaces, alone.
+format report.Rmd
+expect buffer report.Rmd "scale <- function(values) values * rate"
+expect buffer report.Rmd "Prose with `inline code`, ünïcode"
+expect hover report.Rmd "rate, 2)" "double"
+
+# Renaming a name defined in one chunk reaches the other chunk and the inline code, past the
+# multibyte prose.
+expect lens report.Rmd "scale <- function" "1 reference"
+rename report.Rmd "rate <- 0.25" fee
+expect buffer report.Rmd "values * fee"
+expect buffer report.Rmd "`r round(fee, 2)`"
+
+# Fixing the error clears it.
+replace report.Rmd "totals + \"units\"" "totals"
+expect diagnostics report.Rmd none
+
+run ry fmt --check report.Rmd
+expect exit 1

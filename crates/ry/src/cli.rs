@@ -21,8 +21,9 @@ use {
             derive_from_syntax, project_fold_shares,
         },
         metadata::{
-            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            OS_TYPE, PackageMetadata, attached_union, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -1125,28 +1126,45 @@ pub(crate) fn read_project_stubs(
         .collect()
 }
 
-/// Package documents first (in `Collate` order when declared, then by path), then
-/// scripts. The server, `check`, and the stats agree on it, so the last-writer-wins
-/// symbol index selects the same winners everywhere.
+/// Package documents first, then scripts. Package files follow a load's order
+/// (`loader::collate_code_files`): the `Collate` field's files, then the rest with those of `R/`
+/// before those of a subdirectory, each by path. A load never runs the other operating system's
+/// subdirectory (`R/windows/` on Unix), so its files come first, where every loaded definition
+/// of the same name overrides them. The server, `check`, and the stats agree on this order, so
+/// the last-writer-wins symbol index selects the same winners everywhere, and the winner is the
+/// definition a load leaves bound.
 pub(crate) fn project_order<'a>(
     root: &'a Path,
     collate: &'a [String],
-) -> impl Fn(&Path) -> (bool, usize, String) + 'a {
+) -> impl Fn(&Path) -> (bool, bool, usize, bool, String) + 'a {
     let r_path = root.join("R");
+    let other_os = if OS_TYPE == "unix" { "windows" } else { "unix" };
     let collate_rank: HashMap<&str, usize> = collate
         .iter()
         .enumerate()
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
     move |path| {
-        let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+        // A `Collate` entry is a path relative to `R/`, such as `unix/a.R`.
+        let relative = path
+            .strip_prefix(&r_path)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        let rank = relative
+            .as_deref()
+            .and_then(|relative| collate_rank.get(relative))
             .copied()
             .unwrap_or(usize::MAX);
+        let in_other_os = relative
+            .as_deref()
+            .is_some_and(|relative| relative.starts_with(&format!("{other_os}/")));
         (
-            !path.starts_with(&r_path),
+            relative.is_none(),
+            !in_other_os,
             rank,
+            relative
+                .as_deref()
+                .is_some_and(|relative| relative.contains('/')),
             path.strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()
@@ -1867,22 +1885,15 @@ pub fn fmt(
     let paths_with_config = files
         .iter()
         .map(|file| {
-            let config = config::Config::discover(file).map_err(|err| {
+            let mut config = config::Config::discover(file).map_err(|err| {
                 report(&err);
                 CommandError
             })?;
+            // lintr's settings only concern lints, so formatting never warns about them.
+            config.lintr_problems.clear();
             warn_config(&config);
-            // `[check] exclude` scopes analysis, not formatting. Literate documents are never
-            // formatted: most of an `.Rmd` is prose.
-            let paths: Vec<PathBuf> = collect_r_files(file, None)?
-                .into_iter()
-                .filter(|path| {
-                    !path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(is_literate_extension)
-                })
-                .collect();
+            // `[check] exclude` scopes analysis, not formatting.
+            let paths: Vec<PathBuf> = collect_r_files(file, None)?;
             Ok((paths, config.format))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1892,6 +1903,12 @@ pub fn fmt(
         .collect();
     if range.is_some() && jobs.len() != 1 {
         error("`--range` formats part of one file, so pass exactly one file");
+        return Err(CommandError);
+    }
+    if range.is_some() && jobs.iter().any(|(path, _)| is_literate_path(path)) {
+        error(
+            "`--range` formats part of an R file; an `.Rmd`, `.qmd` or `.Rnw` formats whole chunks",
+        );
         return Err(CommandError);
     }
 
@@ -1982,8 +1999,7 @@ pub fn fmt(
         }
     }
 
-    // Not a usage error: a pre-commit hook may pass only a literate document, which
-    // fmt deliberately skips.
+    // Not a usage error: a pre-commit hook may pass only files of other kinds.
     if n_files == 0 {
         info("0 files formatted");
         return Ok(Outcome::Clean);
@@ -2058,6 +2074,12 @@ enum FormatResult {
     },
 }
 
+fn is_literate_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_literate_extension)
+}
+
 fn format_file(
     path: &Path,
     config: format::Config,
@@ -2080,6 +2102,8 @@ fn format_file(
             format::format_range(&initial, config, selection)
                 .map(|edits| format::apply_edits(&initial, &edits))
         }
+        // A literate document formats chunk by chunk, so its prose is never touched.
+        None if is_literate_path(path) => format::format_literate(&initial, config),
         None => format::format(&initial, config),
     };
     let elapsed = start.elapsed();

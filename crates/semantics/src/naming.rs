@@ -199,6 +199,7 @@ pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String
         emit: true,
         quiet_depth: 0,
         deferred_depth: 0,
+        in_defaults: false,
         quoted_depth: 0,
         bracket_depth: 0,
         naming: NamingDraft::default(),
@@ -268,6 +269,9 @@ struct Context<'a> {
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
+    /// Resolving a function's parameter defaults. R evaluates a default lazily in the
+    /// function's own frame, so a name the body assigns is visible to it.
+    in_defaults: bool,
     /// Inside a quoting form (`quote`, `substitute`, `bquote`, `expression`): assignments bind
     /// nothing, but reads are still walked because `eval` may run the expression later.
     quoted_depth: u32,
@@ -657,12 +661,15 @@ impl Context<'_> {
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);
+                let saved_in_defaults = mem::replace(&mut self.in_defaults, true);
                 for parameter in &module[parameters] {
                     if let Some(default) = parameter.default {
                         self.resolve(default);
                     }
                 }
+                self.in_defaults = false;
                 self.resolve(*body);
+                self.in_defaults = saved_in_defaults;
                 self.scopes.pop();
                 self.flow = saved_flow;
             }
@@ -1007,9 +1014,20 @@ impl Context<'_> {
             .rev()
             .find_map(|(depth, scope)| {
                 let &slot = scope.slots.get(&name)?;
-                (self.flow.contains_key(&slot) || depth < function_depth).then_some((depth, slot))
+                let own_frame_default = self.in_defaults && depth == function_depth;
+                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_default)
+                    .then_some((depth, slot))
             })?;
+        // A default forced after the body assigned the name reads it like a closure would:
+        // the read comes before every write, and any of them may be the one it observes.
+        let forward = !self.flow.contains_key(&slot) && depth == function_depth;
+        if forward {
+            self.deferred_depth += 1;
+        }
         let maybe_undefined = self.mark_slot_reached(name, depth, slot, function_depth);
+        if forward {
+            self.deferred_depth -= 1;
+        }
         Some((slot, maybe_undefined))
     }
 
@@ -1035,6 +1053,9 @@ impl Context<'_> {
         for reach in self.flow.get(&slot).into_iter().flatten() {
             match reach {
                 Reach::Assignment(index) => self.writes[*index as usize].used = true,
+                // A closure's flow starts empty, so an enclosing slot that one path writes with
+                // `<<-` reads the enclosing frame's value on the other paths, not nothing.
+                Reach::Unassigned if depth < function_depth => {}
                 Reach::Unassigned => maybe_undefined = true,
                 Reach::Implicit => {}
             }

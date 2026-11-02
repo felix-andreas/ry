@@ -22,7 +22,8 @@
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) and the seventh the optimizing tier's compiled code, `NULL` until it exists.
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
-//!   from and the binding cell it found.
+//!   from and the binding cell it found. The list holds them weakly, because closures that share
+//!   a body share its code, and a strong cache would keep the last caller's environment alive.
 //!
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
@@ -606,6 +607,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         heap.set_element(constants, FIRST_CONSTANT + index, *constant);
     }
     let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
+    heap.mark_weak_pairs(caches);
     let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
     Ok(Some(code))
 }
@@ -1844,6 +1846,11 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
         match step(machine, &decoded, &mut pc) {
             Ok(Some(value)) => return Ok(value),
             Ok(None) => {
+                // Between instructions every live value sits in a register, so what an
+                // instruction rooted is released at once. Otherwise an object only a finished
+                // call held would stay alive until the body returns, past a later `gc()` and
+                // the finalizer GNU R runs there.
+                crate::heap().release_handles(machine.mark);
                 if pc < at
                     && let Some(tier) = interp().bytecode.tier
                 {
@@ -2141,7 +2148,6 @@ unsafe fn step(
         Op::Jump => {
             let target = operand(0);
             if target < at {
-                crate::heap().release_handles(machine.mark);
                 crate::unwind::poll_interrupt()?;
             }
             *pc = target;
@@ -2242,7 +2248,6 @@ unsafe fn step(
             for register in operand(1)..operand(2) {
                 set(register, nil());
             }
-            crate::heap().release_handles(machine.mark);
         }
         Op::LogicLeft => {
             let call = constants.element(operand(2));

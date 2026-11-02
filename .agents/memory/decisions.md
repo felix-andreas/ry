@@ -1817,12 +1817,41 @@ interned symbol, the weak-reference list, and any `RootSource` an interpreter or
 function that allocates while it holds a handle that nothing else roots must root it first, and collection stress is what
 exposes a miss.
 
-**The handle scope roots what the API hands out, not every allocation.** While a native call is on
-the stack, every handle an API function returns to native code is pushed to the handle stack, and
-the native call's return truncates it. Rooting results rather than allocations matters for
-`Rf_eval` called from native code: the evaluator's own temporaries stay collectable, and only the
-value native code receives is kept. The cost is that a native loop that allocates and drops many
-temporaries keeps them until it returns, which GNU R would have collected.
+**The handle scope roots what the API hands out, not every allocation, and only recently.** While a
+native call is on the stack, a handle an API function returns to native code goes to the heap's
+handouts stack (`Heap::hand_out`), which the native call truncates on return. Rooting results
+rather than allocations matters for `Rf_eval` called from native code: the evaluator's own
+temporaries stay collectable, and only the value native code receives is kept.
+- Previously every handout stayed rooted until the call returned, so a native loop that allocated
+  and dropped temporaries kept all of them, which GNU R would have collected. A call now keeps only
+  its most recent `HANDOUT_WINDOW` (1,024) to twice that; once it holds twice the window, the older
+  half is dropped in one `drain`, so the cost per handout stays constant and memory stays bounded.
+  The invariant this relies on: ry allocates on behalf of native code only where GNU R does, so
+  code correct under GNU R, which protects what it keeps across an allocation, never needs an
+  older handout. Two kinds of result break that and must not enter the window: a view ry builds
+  of something GNU R stores in the argument (`FRAME`'s pairlist) is `Pinned` to the call's handle
+  stack, and a field read is `Reachable` and takes no slot at all, which also keeps real
+  temporaries in the window longer.
+- Only the outermost API function hands out (`Runtime::api_depth`). A nested one returns to ry's own
+  code, which the outer function's handle scope covers, and pushing it to the window would let it
+  displace native code's recent handouts.
+- A result reachable through the argument it was read from (`CAR`, `CDR`, `TAG`, the `CADR` family,
+  `ENCLOS`, `R_ParentEnv`, the closure and promise fields, the external pointer and ALTREP fields,
+  `PRINTNAME`) is `Reachable` and takes no handle.
+- A C context saves and restores `api_depth` and the window's base with the `PROTECT` depth, so a
+  jump that leaves an API function without returning through it cannot leave later handouts on
+  the unbounded handle stack.
+- The previous design kept one handle stack for both the Rust side and native code. Handouts got
+  their own stack because the window drops entries from the middle of a call's region, which must
+  never touch handles ry's own code pushed.
+
+**Accessors are inline in `Rinternals.h` and mirrored in libR.** The header reads the kind byte
+(offset 0), the ALTREP flag (offset 2, bit 1), a vector's length (offset 16), its elements
+(offset 32) and a cell's three fields (offsets 16, 24, 32) directly, and calls the exported
+function for anything else. `heap/src/object.rs` pins those offsets with const assertions. The
+exported functions take identical fast paths before `enter`, so binaries built against GNU R's
+headers skip the boundary too. A writable `DATAPTR` into a list or character vector stays out of
+line, because it makes the vector escape.
 
 **Each native call owns a `PROTECT` region.** `UNPROTECT` below the region's base is an error, in GNU
 R's words, rather than silently unprotecting the caller's objects, which GNU R allows. An imbalance
@@ -3500,14 +3529,14 @@ first lines R had already read, leaving R mid-command.
 
 GNU R finalizes an object at the first full `gc()` after its last reference goes, and R6, lgr's buffered appenders and processx all depend on that timing. Four places in ry's runtime held a reference GNU R does not have.
 
-- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`) and releases the activation's handles, as the back edge already did. The AST interpreter's `do_begin` roots only the last value for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0's back edges and the activation's exit.
-- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. A major collection empties every cache it traces (`Heap::trace`, `major_marking`) instead of marking through it; the next lookup refills it. Minor collections still trace them, so the retention lasts at most until the next full collection, which is when GNU R would finalize anyway.
+- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`), and `bytecode::execute_code` releases the activation's handles after every instruction. That is safe because between instructions every live value sits in a register. The AST interpreter's `do_begin` roots only the block's own value on the way out for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0 and the activation's exit. `evaluation__finalizer_run_points` pins the timing, and the bytecode, closure, promise and S3 cases give the same output under `gctorture(TRUE)`.
+- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. The cache list carries the heap flag `WEAK_PAIRS` (`Heap::mark_weak_pairs`): the marker does not trace its elements, and after weak references settle `clear_dead_weak_pairs` sets a pair whose key (the enclosure) or value (the cell) is unmarked to `NULL`, which is a cache miss, releasing the counts the barriered fill took. Minor collections need no special case: an old list that gained a young key is in the remembered set and is traced, and one that did not can only point at old objects. Emptying every cache at each collection was rejected, because each site then pays a full lookup after every collection.
 - **Tier-1 code.** A compiled body embeds its enclosure and the cells its lookups speculated on, and the body outlives any one closure (R6 gives every object's methods the same body). The TIER1 external pointer therefore protects a weak reference keyed on the enclosure, whose value lists what the machine code embeds. While the enclosure lives everything stays reachable; once it dies, `compiled_for` frees the code and clears TIER1, which is safe because a running activation keeps its own enclosure reachable.
 - **Removed binding cells.** A cell can outlive its frame entry while a cache holds it, so `remove_binding` sets the cell's value to the unbound marker and a stale cell reaches nothing.
 - **Dying finalizers.** Marking a dying weak reference's key, value and finalizer can make another weak reference's key reachable after the ephemeron fixpoint ended, and that reference's value and finalizer were then swept while it stayed registered (processx's exit finalizers ran freed closures). `process_weak_refs` now takes every dying reference off the list before marking any of them, then queues and marks them all. What they reach can no longer be a registered reference's key that missed the fixpoint, because every reference still registered has a key the fixpoint already marked, as GNU R's `CheckFinalizers` does.
 - **Visibility of a variable read.** Reading a variable can force a promise, whose expression then decides whether the value prints (`withCallingHandlers(f(), ...)` stays invisible when `f()` is). Compiled code sets the visible flag before the load, not after it, and the analysis treats the flag as unknown after a load that may force.
 - **Expression vectors.** `eval()` of an expression vector (`eval::eval_all`, which is how testthat runs a test file) releases each element's handles before the next element runs, exactly as `{` does, so a `gc()` in one top-level statement of a test file finalizes what an earlier statement dropped (lgr's `AppenderBuffer` flushes on destruction this way).
-- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a cache refill after each major collection. No effect on static analysis.
+- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a handle-stack truncation per instruction. No effect on static analysis.
 
 ## ALTREP elements go through the class methods everywhere
 
@@ -4519,6 +4548,52 @@ check` releases its trees once, and memoized records are compact" below).
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
 
+## `perl = TRUE` runs on PCRE2, linked statically
+
+- **Before.** Both regex dialects were translated into fancy-regex syntax
+  (`strings::translate`, with a Perl branch). PCRE features fancy-regex lacks failed to compile:
+  rcmdcheck's `(?<q>...)\g{q}`, lubridate's quantified lookahead `(?=\D+)?`, possessive and
+  atomic forms, and verbs beyond `(*UCP)`. Error messages were fancy-regex's, not PCRE's.
+- **Options weighed.** Extending the translator or fancy-regex would chase PCRE one construct at
+  a time and never match its backtracking semantics or messages exactly. Linking PCRE2 gives
+  GNU R's own engine for `perl = TRUE`, so behavior and messages are GNU R's by construction.
+- **Chosen.** The `pcre2` crate, compiled as `R_pcre2_prepare` compiles (UTF mode, `CASELESS`
+  for `ignore.case`, JIT when available), in `strings::compile_perl`. A compile failure warns
+  `PCRE pattern compilation error` with PCRE2's message and the rest of the pattern, then errors,
+  as GNU R does. `.cargo/config.toml` sets `PCRE2_SYS_STATIC=1`, so the bundled sources are built
+  and a release binary needs no system PCRE2.
+- **The TRE dialect stays on fancy-regex** behind the translator, which is now Extended-only.
+  Moving it to a real TRE build is the same trade and is open in `backlog.md`.
+
+## Native code sees a compiled closure's body as its expression
+
+- `BODY` and `R_ClosureBody` return the source expression of a compiled body, as `R_ClosureExpr`
+  does. ry's bytecode holds binding cells and type feedback that have no GNU R type, so native
+  code that walks objects (`lobstr::obj_size`) failed on them.
+
+## TRE minimal repetitions over alternatives
+
+- GNU R's TRE, when no submatches are asked for (`regexpr`, `gregexpr`, `grepl`), minimizes the
+  lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has
+  length 4. A pattern with a minimal repetition compiles to `Matcher::Automaton` with
+  `shortest`, and a plain find takes the earliest end among the matches that start leftmost.
+- Submatch queries (`sub`, `regexec`) keep the leftmost-first match of the whole pattern, so
+  `sub("(a).*?Z|(a)(.*?)Y", ...)` takes the first alternative, as TRE does. TRE's submatch
+  results for these patterns are irregular in general (`regexec` can even skip the leftmost
+  match); leftmost-first agrees with it on the shapes the corpus uses.
+- `connections__message_sink_and_flush` pins both.
+
+## The message sink and connection flush points
+
+- `sink(type = "message")` sets the connection table's `message_slot` (GNU R's `R_ErrorCon`).
+  Messages, warnings and writes to `stderr()` go there through `connections::write_message`,
+  which flushes after every write as `REvprintf` does. Closing that connection resets it to 2.
+- GNU R flushes a file connection after `cat`, after each message-sink write, and when an output
+  sink is removed, but not after `writeLines`; ry matches each point, so a second reader of the
+  same file sees exactly what GNU R's would. `connections__message_sink_and_flush` pins it.
+- Native code printing through `Rprintf` and `REprintf` goes through the same table
+  (`libr::boundary::write_console`), so a sink diverts C output too.
+
 ## The C API draws from the interpreter's generator
 
 - **Before.** `libr` kept its own Mersenne Twister for `unif_rand`, `norm_rand`, `exp_rand` and
@@ -4526,8 +4601,10 @@ check` releases its trees once, and memoized records are compact" below).
   two shared only `.Random.seed`, so a package calling `unif_rand` after `RNGkind("Marsaglia-Multicarry")`
   read a seed its copy could not parse (doParallel's stress test failed with "'.Random.seed' is not
   a valid integer vector"), and `R_sample_kind` always answered `Rejection`.
-- **Now.** `libr::arith`'s `Rng` delegates every draw to `interp::random`, and
-  `GetRNGstate`/`PutRNGstate` are the interpreter's `get_rng_state`/`put_rng_state`.
+- **Now.** `unif_rand`, `norm_rand`, `exp_rand` and `R_unif_index` call `interp::random`, the
+  `Rf_r*` deviates are `interp::distributions`' functions drawn through `SessionDeviates`, so no
+  deviate algorithm exists twice, and `GetRNGstate`/`PutRNGstate` are the interpreter's
+  `get_rng_state`/`put_rng_state`.
   `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
   hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
 - **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
@@ -4677,6 +4754,57 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
 
+## `<<-` writes flow forward, and a NULL-initialized cache reads its own first write
+
+- **Previous shape.** A `<<-` write joined the enclosing slot's type in place, so the rest of the
+  writing body read the join (`cache <<- f(); cache` read `NULL | T`), and a closure write beside
+  a reset pinned the callback's return type (memoise's `fun` lost its generic return).
+- **Target shape.** The writing body reads the value it just wrote (`write_target`, Super branch).
+  The enclosing scope still joins every write through `pending_enclosing_writes`, and an
+  undetermined write joins as a union member (`join_closure_write`). On entry to a body that
+  superassigns a slot whose enclosing type has a `NULL` member, the slot reads
+  `existing | seed`, where `seed` is a fresh variable that the body's first write binds
+  (`superassign_seeds`). That models a closure that runs many times: the lazily filled cache
+  `if (is.null(cached)) cached <<- dir("css"); cached` reads `character[]`. Only NULL-initialized
+  slots are seeded, so a counter's `count <<- count + 1L` still reads the concrete count. A seed
+  the body never binds is unified with `Unknown` so it cannot generalize.
+- **Impact.** Clears the bslib cache and memoise reports with no new fixture regressions. The
+  seed is per body and lives in the inference table, so no cross-item state is added.
+
+## The overload probe's unchecked-argument witness is a nominal no candidate declares
+
+- **Previous shape.** An overload probe stands an unchecked argument in as a `Named` type. Its
+  name counted as an undeclared nominal, and undeclared nominals are compatible with everything,
+  so `months(unknown)` picked the `Date | POSIXct` candidate and returned `character`.
+- **Target shape.** The witness has one reserved name, `UNCHECKED_WITNESS` in `infer.rs`, which no
+  source annotation can spell, and `undeclared_nominal` excludes it. Only `Any` and an
+  unconstrained variable accept it, so a call with an unchecked argument picks no class candidate
+  and stays `Unknown`.
+
+## A call on a parameter whose arity the body tests is unchecked, and a later sibling does not force
+
+- A parameter's function type inferred from a call (`handler(src)`) is no declared arity. When
+  the body reads `formals()` of that parameter, a later call with another argument count is
+  unchecked (`arity_tested_by_formals`), because such code picks the call by the callback's arity
+  (evaluate `new_source`). Without the `formals()` read an extra argument stays an error.
+- `collect_formal_uses` runs before the body's locals are typed. A bare formal passed to a local
+  whose first write comes after the call (a sibling defined further down a `local()` block) is not
+  forced (`optional_argument_targets`), because that callee decides what it reads (callr and
+  processx `format_advice(x)`). An earlier-defined local still forces, as before.
+- An inferred `integer` slot accepts a `double` (`fits_inferred_scalar`), since R's
+  integer-taking functions truncate one and a first call's `length(x)` pins the shape only
+  incidentally. A string still fails. Only an unresolved inferred scalar slot is covered: ks
+  `col.fun(n = length(abs.cont) + 1)` still errors, because `col.fun` has a default lambda that the
+  join binds, so `n` is a variable already bound to `integer`.
+- A `NULL` read is a placeholder only when no ordinary write to the slot so far gave a type other
+  than `NULL` (`valued_slots`), so a local narrowed or overwritten to `NULL` is checked. A `<<-`
+  write does not count, because sibling closures read the `NULL` until the defining frame joins
+  the write (pkgbuild's `now`), and a top-level variable read from a function has no local slot,
+  so it stays a placeholder (brew's `.extendedError`).
+- A read before a body's first `<<-` can bind the superassignment seed. A first write that then
+  fails to unify is reported, except for an occurs failure, which is the accumulator
+  `acc <<- c(acc, list(item))` reading itself inside the write.
+
 ## Native scalar functions: frameless calls with checks proven at compile time
 
 - **Previous shape.** A compiled call of a closure that could not be inlined (any body with an
@@ -4738,16 +4866,37 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `return(x <- 1)` and a trailing `x <- 1` are both invisible.
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.
-- `unreachable-code` and `sprintf-arguments` are on by default (each is a bug; a CRAN corpus sweep
-  found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
+- `unreachable-code`, `sprintf-arguments` and `length-test` are on by default (each is a bug; a
+  CRAN corpus sweep found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
   bug, because a callee that collects `...` keeps both on purpose (cli bullets in `c()`, repeated
-  HTML `class` attributes) and a syntax lint cannot see the callee's formals. Moving it to a
-  semantic lint that reads the callee's signature would let it default on.
+  HTML `class` attributes) and a syntax lint cannot see the callee's formals. The semantic
+  version already exists: with `[check] typing = true`, a call that gives a known function's
+  formal twice is a `type-mismatch` (`named_argument_mismatch` in `check.rs`), so no second
+  semantic lint is needed.
 - The other lintr ports (`any-is-na`, `paste-sep`, `lengths`, `literal-coercion`,
   `redundant-equals`, `single-quotes`, `testthat-expectation`, `condition-message`,
   `comparison-negation`, `outer-negation`, `fixed-regex`, `which-grepl`, `length-levels`,
-  `browser-call`, `numeric-leading-zero`) are opt-in taste or speed lints. lintr's whitespace and
+  `browser-call`, `numeric-leading-zero`, `line-length`, `implicit-assignment`, `while-true`,
+  `scalar-in`, `order-subset`, `matrix-apply`, `empty-assignment`, `unnecessary-lambda`,
+  `yoda-test`, `nzchar`, `sample-int`, `unnecessary-concatenation`) are opt-in taste or speed lints. `implicit-assignment` is opt-in because
+  `while ((line <- f()) != "")` is idiomatic R; lintr's `cyclocomp`, `object_length` and
+  `nested_ifelse` were skipped as low value without a fix.
+  `line-length` is the only lintr layout linter ported, because the formatter never splits a
+  line, so nothing else keeps lines short. lintr's whitespace and
   layout linters are not ported, because `ry format` owns layout.
+- `trailing-comma` stays on inside rlang's dynamic dots (`mutate(d, y = 1, )`), where the comma
+  is harmless: it is a warning whose safe fix only removes the comma, and stub `@masked` cannot
+  mark dynamic dots because it also covers data.table verbs, whose `...` is not rlang's.
+- lintr's `# nolint` comments are honored (`apply_suppressions` in `crates/ry/src/diagnostics.rs`),
+  because 15 packages in the CRAN corpus carry them and the mandate is that existing code keeps
+  working. A bare `# nolint` keeps syntax errors, and lintr names map to ry codes in `lintr_codes`;
+  keep that table in step when a lint is ported. A `.lintr` file's `linters` field is read too
+  (`apply_lintr` in `crates/ry/src/config.rs`): it fills only the levels `ry.toml` leaves at
+  `Default`, so `ry.toml` always wins, and an unreadable field is a warning, never an error,
+  because the file is lintr's. Only the `.lintr` at the project root (nearest `ry.toml`,
+  `roughly.toml` or `DESCRIPTION`) applies, so the answer never depends on how a path is spelled.
+  `lint_levels_mut` in `lints.rs` is the one name-to-field table, and
+  a unit test pins it against the struct's fields.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
   opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes
@@ -4873,6 +5022,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
   pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
   no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **Held-back methods for other packages' generics** (`DeferredS4::foreign_generics`). Previously
+  any `setMethod` on a generic the package did not define kept the whole unit eager, and nearly
+  every S4 package defines a `show` method, so on the synthetic finance code base no S4 was held
+  back. Such a method now qualifies when its signature names one of the package's own classes,
+  which means it can only be selected for objects of that class. Three doors are covered: a
+  dispatch (`methods::dispatch_generic` forces before reading the tables), `R_getGeneric` (the
+  name joins the deferred generics), and direct reads of the generic's `.MTable`/`.AllMTable`
+  by `getMethod`/`existsMethod`, which go through `.getGenericFromCache` with no C hook, so those
+  bindings become promises that put the real tables back and force (`.ry_s4_table_placeholder`).
+  Primitives, group generics and functions that are not yet generic stay eager
+  (`.ry_may_defer_s4`): they dispatch without `standardGeneric`, so an object read back from disk
+  could select the wrong method.
 - **The S4 metadata cache** (`DeferredS4::cache_key`, `s4_cache_path` in `loader.rs`;
   `.ry_restore_s4`, `.ry_save_s4` in `runtime.R`). Previously every process ran the held-back
   definitions through the `methods` package (about 330 ms on the bench package, 1.7x GNU R, the gap
@@ -4935,6 +5096,26 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   that frame may have bound the name before the compiler watched it.
 - **Impact.** Correct shadowing at no cost on the hot path; pinned by the oracle case and
   `run_time_binding_shadows_cached_global_function` in `crates/jit/tests/test_tiers.rs`.
+
+## Literate documents keep their offsets, and the server keeps their original text
+
+- **Previous shape.** `check` read `.Rmd`/`.qmd`/`.Rnw` through `syntax::literate`, which blanks prose to spaces byte for byte, but the server and `ry fmt` skipped them.
+- **Analysis.** The engine still sees only the blanked text, so every byte offset is the document's own and no range table exists to drift. The chunks of one document form one script.
+- **Positions.** The server keeps the original text per literate file (`Worker::literate_documents`) and converts LSP positions against it, because a blanked multibyte character has a different UTF-16 width. Each `did_change` applies the edits to the original and converts the whole buffer again; conversion is a linear scan, so per-edit conversion would add a second source of truth for no measurable gain.
+- **Formatting** is per chunk (`format::format_chunks`), returning one edit per changed chunk, so prose, fences and inline code are never rewritten. An indented chunk (inside a list item) is skipped, because re-indenting it would need the list's indentation. Range formatting is off for literate files.
+- **Completion** answers only inside an R region (`syntax::literate::r_regions`), so typing prose shows nothing. Code lenses other than reference counts are dropped, because "Run file" and "Run test" mean nothing for a report.
+- **VS Code** matches literate files by glob, because their language id depends on which extension is installed.
+
+
+## A running console is a debug adapter, a data source, and a live-value source on one socket
+
+- **Previous shape.** The debugger existed only as `ry debug-adapter`, which launches a fresh script; a `ry run` console had no editor connection, so `debug()`, `View()` and the editor's hover knew nothing of the session.
+- **Transport.** `ry run` listens on a Unix socket in `$TMPDIR/ry-<uid>` (0700, owner and mode verified by both ends) and writes `console-<pid>.json` naming its cwd and socket. Discovery is a directory read, so nothing extra runs at start-up beyond one accept thread; a reader thread per connection queues events, and the interpreter thread answers them (`interp::console_server`). Framing is DAP's `Content-Length`, so one parser serves the debugger, the viewer and the language server.
+- **When requests are answered.** At the prompt, input is read on a helper thread while the interpreter thread answers every request. While a command runs, `poll_interrupt` services the queue: debugger requests are answered (pause, breakpoints), anything that would evaluate R is refused as busy, because it would interleave with the user's code. While stopped, the debugger's own receive loop answers other connections inline.
+- **Attach** installs the same `debugger::Adapter` the launch path uses, with `console = true` so disconnect detaches instead of exiting, and reloads the workspace packages with srcrefs so package breakpoints hit. Only one debugger connection at a time.
+- **`debug`/`debugonce`** set closure gp bits and enter `Mode::FunctionEntry`, stopping with reason "function breakpoint". Code typed at the prompt has no file, so its frames get a `sourceReference` the client fetches with `source`.
+- **Data viewer.** `ryView` evaluates an expression (in a frame when stopped, else in the global env) and registers a view that preserves the object; `ryTable` returns one page of formatted rows, at most 1000; `ryRelease` drops it, and at most 32 views live at once. The data never leaves the runtime whole, so a million-row table costs one page. Variables carry `evaluateName` so the editor's "View Data" names the exact value. `View(x)` sends a `ryView` event to connections that sent `rySubscribe`; VS Code subscribes when it opens or attaches to a console.
+- **Live values in the language server** come from `ryGlobals` (names, class, summary, columns, promises unforced) with a 150 ms timeout (`ry::console_link`). Analysis stays the source of truth: the console only adds hover lines and completion items analysis lacks, and the simulator disables the link to stay deterministic.
 
 ## The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder
 

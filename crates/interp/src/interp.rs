@@ -32,6 +32,7 @@ pub mod bytecode;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
+pub mod console_server;
 pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
@@ -86,6 +87,7 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
+pub mod viewer;
 
 pub use crate::unwind::{Jump, RError};
 use {
@@ -164,6 +166,10 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
+    /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
+    /// `sys.calls()` does not, so they live beside the frames rather than among them.
+    pub foreign_calls: Vec<(Sexp, usize)>,
     /// The handler and restart stacks in effect, which every frame saves and restores.
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
@@ -306,6 +312,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
         global_handlers: None,
@@ -452,6 +459,9 @@ impl RootSource for InterpRoots {
                 }
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
+            }
+            for &(call, _) in &interp.foreign_calls {
+                marker.mark(call);
             }
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);

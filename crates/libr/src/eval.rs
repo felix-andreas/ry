@@ -24,7 +24,7 @@ use {
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
-        native::Interface,
+        native::{Interface, foreign_context},
         unwind::park,
     },
     std::{
@@ -78,7 +78,7 @@ unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
-        write_console: |text, is_error| crate::boundary::write_console(text, is_error),
+        write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
@@ -101,6 +101,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
+    interp::register_builtins(crate::inspect::BUILTINS);
     interp::register_builtins(crate::altrep::INTERNALS);
     install_evaluator(&Interpreter);
 }
@@ -571,23 +572,32 @@ impl crate::boundary::Handout for Option<Sexp> {
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
+        foreign_context(call.call, || dot_call(call, RoutineKind::Call))
     }),
     builtin(".External", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
+        foreign_context(call.call, || dot_call(call, RoutineKind::External))
     }),
     // GNU R lets `.External2` keep whatever visibility its native code last evaluated with,
     // which is how magrittr's pipe forwards `invisible()`.
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
+    builtin(".External2", -1, |call| unsafe {
+        foreign_context(call.call, || dot_external2(call))
+    })
+    .keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        })
     }),
-    builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
+    builtin(".C", -1, |call| unsafe {
+        foreign_context(call.call, || dot_c(call, RoutineKind::C))
+    }),
     builtin(".Fortran", -1, |call| unsafe {
-        dot_c(call, RoutineKind::Fortran)
+        foreign_context(call.call, || dot_c(call, RoutineKind::Fortran))
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
@@ -1516,6 +1526,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         interp::session::run_text(startup, "<startup>");
     }
     let mut buffer = vec![0u8; 64 * 1024];
+    interp::console_server::start();
     interp::session::run_console(
         |prompt| {
             use std::io::Write;
@@ -1527,29 +1538,39 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
             }
             // A prompt never holds a NUL, so the empty fallback is unreachable.
             let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-            let mut input = Vec::new();
-            // A line longer than the buffer arrives in several chunks; only the last one ends the
-            // line, and the text is decoded once it is whole, so no character is split.
-            loop {
-                if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-                    return (!input.is_empty())
-                        .then(|| String::from_utf8_lossy(&input).into_owned());
+            let buffer = &mut buffer;
+            // The input is read on a helper thread while the console answers an editor's
+            // requests, which need the interpreter's thread.
+            interp::console_server::read_while_serving(move || {
+                let mut input = Vec::new();
+                // A line longer than the buffer arrives in several chunks; only the last one
+                // ends the line, and the text is decoded once it is whole, so no character is
+                // split.
+                loop {
+                    // SAFETY: `read` is the host's reader, which may run on any thread.
+                    if unsafe { read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) }
+                        == 0
+                    {
+                        return (!input.is_empty())
+                            .then(|| String::from_utf8_lossy(&input).into_owned());
+                    }
+                    let end = buffer
+                        .iter()
+                        .position(|&byte| byte == 0)
+                        .unwrap_or(buffer.len());
+                    input.extend_from_slice(&buffer[..end]);
+                    // A reader may stop one byte short of the contract's limit, so a chunk is
+                    // taken as cut off whenever it comes within two bytes of the buffer's end.
+                    if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                        return Some(String::from_utf8_lossy(&input).into_owned());
+                    }
+                    prompt = std::ffi::CString::default();
                 }
-                let end = buffer
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(buffer.len());
-                input.extend_from_slice(&buffer[..end]);
-                // A reader may stop one byte short of the contract's limit, so a chunk is taken as
-                // cut off whenever it comes within two bytes of the buffer's end.
-                if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                    return Some(String::from_utf8_lossy(&input).into_owned());
-                }
-                prompt = std::ffi::CString::default();
-            }
+            })
         },
         false,
     );
+    interp::console_server::finish();
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0

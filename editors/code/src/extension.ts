@@ -10,8 +10,10 @@ import {
   CancellationToken,
   DebugAdapterDescriptor,
   DebugAdapterExecutable,
+  DebugAdapterNamedPipeServer,
   DebugConfiguration,
   DebugSession,
+  DebugStackFrame,
   DocumentSymbol,
   ExtensionContext,
   MarkdownString,
@@ -35,6 +37,8 @@ import {
   TransportKind,
 } from 'vscode-languageclient/node'
 import * as lsp from 'vscode-languageclient'
+
+import { findConsoles, openViewer, ConsoleConnection, ConsoleEntry } from "./viewer"
 
 const logger = window.createOutputChannel("ry Extension", { log: true })
 const outputChannel = window.createOutputChannel("ry")
@@ -107,6 +111,9 @@ export async function activate({ subscriptions, extension, }: ExtensionContext):
     commands.registerCommand("ry.sendSelection", sendSelection),
     commands.registerCommand("ry.sendFunction", sendFunction),
     commands.registerCommand("ry.sourceFile", sourceFile),
+    commands.registerCommand("ry.attachConsole", attachConsole),
+    commands.registerCommand("ry.viewData", viewData),
+    { dispose: () => consoles.forEach((connection) => connection.dispose()) },
     debug.registerDebugAdapterDescriptorFactory("ry", { createDebugAdapterDescriptor }),
     debug.registerDebugConfigurationProvider("ry", { resolveDebugConfiguration }),
     window.onDidCloseTerminal((closed) => {
@@ -187,7 +194,12 @@ function createClient(): LanguageClient {
   }
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "r" }],
+    // Literate documents are matched by name because their language id depends on which
+    // extension (vscode-R, Quarto, or none) the user has installed.
+    documentSelector: [
+      { scheme: "file", language: "r" },
+      { scheme: "file", pattern: "**/*.{Rmd,rmd,qmd,Rnw,rnw,Snw,snw}" },
+    ],
     outputChannel,
   }
 
@@ -378,6 +390,9 @@ async function showReferences(uri: string, position: lsp.Position, locations: ls
 }
 
 function createDebugAdapterDescriptor(session: DebugSession): DebugAdapterDescriptor {
+  if (session.configuration.request === "attach") {
+    return new DebugAdapterNamedPipeServer(session.configuration.socket)
+  }
   const cwd = session.configuration.cwd ?? session.workspaceFolder?.uri.fsPath
   return new DebugAdapterExecutable(ryExecutable(), ["debug-adapter"], cwd ? { cwd } : {})
 }
@@ -395,7 +410,74 @@ function resolveDebugConfiguration(
     }
     return { type: "ry", request: "launch", name: "Debug R file", program: document.uri.fsPath }
   }
+  if (configuration.request === "attach" && !configuration.socket) {
+    const entry = findConsoles(_folder?.uri.fsPath)[0]
+    if (!entry) {
+      void window.showErrorMessage("No ry console runs in this workspace. Start one with \"ry: Open Console\".")
+      return undefined
+    }
+    subscribe(entry)
+    return { ...configuration, socket: entry.socket }
+  }
   return configuration
+}
+
+// Attaches the debugger to the workspace console, opening one first if none runs.
+async function attachConsole(): Promise<void> {
+  const folder = folderOf(window.activeTextEditor?.document.uri) ?? workspace.workspaceFolders?.[0]
+  let entry: ConsoleEntry | undefined = findConsoles(folder?.uri.fsPath)[0]
+  if (!entry) {
+    openConsole(window.activeTextEditor?.document.uri)
+    entry = await waitForConsole(folder?.uri.fsPath, Date.now() - 1000)
+  }
+  if (!entry) {
+    void window.showErrorMessage("The ry console did not start.")
+    return
+  }
+  subscribe(entry)
+  await debug.startDebugging(folder, { type: "ry", request: "attach", name: "Attach to Console", socket: entry.socket })
+}
+
+// "View Data" in the debugger's variables view: the variable's expression is evaluated in the
+// selected frame, so a local of the stopped function opens, not a global of the same name.
+async function viewData(context: { variable?: { name: string, evaluateName?: string } }): Promise<void> {
+  const session = debug.activeDebugSession
+  const expression = context.variable?.evaluateName ?? context.variable?.name
+  if (!session || !expression) {
+    return
+  }
+  const item = debug.activeStackItem
+  const frameId = item instanceof DebugStackFrame && item.session.id === session.id ? item.frameId : undefined
+  try {
+    const view = await session.customRequest("ryView", { expression, frameId })
+    openViewer({ request: (command, args) => Promise.resolve(session.customRequest(command, args)) }, view)
+  } catch (error) {
+    void window.showErrorMessage(`Cannot view ${expression}: ${(error as Error).message}`)
+  }
+}
+
+// The consoles subscribed to `View()`, by socket.
+const consoles = new Map<string, ConsoleConnection>()
+
+function subscribe(entry: ConsoleEntry): void {
+  if (consoles.has(entry.socket)) {
+    return
+  }
+  const connection = new ConsoleConnection(entry, () => consoles.delete(entry.socket))
+  consoles.set(entry.socket, connection)
+  connection.subscribe().catch(() => connection.dispose())
+}
+
+// Polls for a console in `folder` that announced itself after `since`, for up to ten seconds.
+async function waitForConsole(folder: string | undefined, since: number): Promise<ConsoleEntry | undefined> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const entry = findConsoles(folder).find((entry) => entry.modified >= since)
+    if (entry) {
+      return entry
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return undefined
 }
 
 // The console is `ry run` in a terminal, so it is the same console as on the command line and
@@ -407,6 +489,8 @@ function openConsole(uri: Uri | undefined): Terminal {
     const file = uri?.scheme === "file" ? uri.fsPath : undefined
     const cwd = (file && packageRoot(file)) ?? folderOf(uri)?.uri.fsPath
     consoleTerminal = window.createTerminal({ name: "ry console", shellPath: ryExecutable(), shellArgs: ["run"], cwd })
+    // Subscribing right away makes `View()` in the new console open the data viewer.
+    void waitForConsole(cwd, Date.now() - 1000).then((entry) => entry && subscribe(entry))
   }
   consoleTerminal.show(true)
   return consoleTerminal

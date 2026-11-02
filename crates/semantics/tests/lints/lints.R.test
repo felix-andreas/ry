@@ -297,3 +297,21 @@ sprintf("%s", ...)
 sprintf("%s", x, collapse = "")
 #++++
 clean
+
+#==== length-test
+#---- a_comparison_inside_length_warns
+if (length(x == 0)) stop("empty")
+n <- !length(names(x) > 1L)
+#++++
+4..18 warning[length-test] `length(x == 0)` is the length of the comparison, not a test of the length. Did you mean `length(x) == 0`?
+  unsafe fix 4..18 "length(x) == 0"
+40..61 warning[length-test] `length(names(x) > 1L)` is the length of the comparison, not a test of the length. Did you mean `length(names(x)) > 1L`?
+  unsafe fix 40..61 "(length(names(x)) > 1L)"
+
+#---- comparing_a_length_is_clean
+if (length(x) == 0) stop("empty")
+length(x & y)
+length(x == 0, 1)
+base::length(x == 0)
+#++++
+clean
