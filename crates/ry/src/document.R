@@ -46,14 +46,125 @@ local({
     }
   }
 
-  # Two methods of roxygen2's topic collection take time quadratic in the number of topics,
-  # which is most of a run on a package with thousands of them: `topo_order`, which runs once
-  # per inherited field, builds its graph in lists that grow by copying, and `add` matches the
-  # new topic's file against every name. Each replacement computes exactly what the original
-  # does in linear time, and replaces it only while its body is the one written here, so
-  # another roxygen2 version keeps its own.
-  topic_methods <- list(
-    topo_order = list(
+  # roxygen2's Rd roclet takes time quadratic in the number of topics in several places, which
+  # is most of a run on a package with thousands of them: it grows its named list of topics one
+  # element at a time (each append copies the list), and it finds topics by name, which scans the
+  # list, once per topic in `topo_apply` (fifteen times over for `@inherit`), in `topo_order`
+  # and in `drop_invalid`. Each replacement computes exactly what the original does in linear
+  # time, and replaces it only while the original's body is the one written here, so another
+  # roxygen2 version runs unchanged. None of roxygen2's inherit steps adds or removes topics,
+  # which is what lets `topo_apply` look the topics up in one pass.
+  replacements <- list(
+    list(
+      name = "roclet_process.roclet_rd",
+      original = quote({
+        blocks <- merge_external_r6methods(blocks)
+        topics <- RoxyTopics$new()
+        for (block in blocks) {
+          rd <- block_to_rd(block, base_path, env)
+          topics$add(rd, block)
+        }
+        topics_process_r6_inherit(topics)
+        topics_process_family(topics, env)
+        topics_process_inherit(topics, env)
+        topics$drop_invalid()
+        topics_fix_params_order(topics)
+        topics_add_default_description(topics)
+        topics_add_package_alias(topics)
+        topics$topics
+      }),
+      replacement = function(x, blocks, env, base_path) {
+        blocks <- merge_external_r6methods(blocks)
+        topics <- RoxyTopics$new()
+        # `topics$add` for every block, with the list built in preallocated vectors and each
+        # file found through a hashed index; the first name a file cannot be an index key for
+        # hands the rest of the blocks to `topics$add` itself.
+        collected <- vector("list", length(blocks))
+        files <- character(length(blocks))
+        positions <- new.env(hash = TRUE, parent = emptyenv())
+        count <- 0L
+        indexed <- TRUE
+        for (block in blocks) {
+          rd <- block_to_rd(block, base_path, env)
+          if (!indexed) {
+            topics$add(rd, block)
+            next
+          }
+          if (is.null(rd)) next
+          stopifnot(inherits(rd, "RoxyTopic"))
+          file <- rd$filename
+          if (!is.character(file) || length(file) != 1L || is.na(file) || !nzchar(file)) {
+            topics$topics <- stats::setNames(collected[seq_len(count)], files[seq_len(count)])
+            indexed <- FALSE
+            topics$add(rd, block)
+            next
+          }
+          position <- positions[[file]]
+          if (is.null(position)) {
+            count <- count + 1L
+            collected[[count]] <- rd
+            files[[count]] <- file
+            positions[[file]] <- count
+          } else {
+            collected[[position]]$add(rd, block)
+          }
+        }
+        if (indexed) {
+          topics$topics <- stats::setNames(collected[seq_len(count)], files[seq_len(count)])
+        }
+        topics_process_r6_inherit(topics)
+        topics_process_family(topics, env)
+        topics_process_inherit(topics, env)
+        topics$drop_invalid()
+        topics_fix_params_order(topics)
+        topics_add_default_description(topics)
+        topics_add_package_alias(topics)
+        topics$topics
+      }
+    ),
+    list(
+      method = "topo_apply",
+      original = quote({
+        topics_topo <- self$topo_order(dep)
+        for (topic_name in topics_topo) {
+          topic <- self$get(topic_name)
+          fun(topic, self, ...)
+        }
+        invisible()
+      }),
+      replacement = function(dep, fun, ...) {
+        topics_topo <- self$topo_order(dep)
+        topics <- self$topics
+        positions <- match(topics_topo, names(topics))
+        for (position in positions) {
+          topic <- if (is.na(position)) NULL else topics[[position]]
+          fun(topic, self, ...)
+        }
+        invisible()
+      }
+    ),
+    list(
+      method = "drop_invalid",
+      original = quote({
+        for (topic in names(self$topics)) {
+          if (!self$topics[[topic]]$is_valid()) {
+            warn_roxy_topic(topic, "Skipping; no name and/or title")
+            self$topics[[topic]] <- NULL
+          }
+        }
+        invisible()
+      }),
+      replacement = function() {
+        valid <- vapply(self$topics, function(topic) topic$is_valid(), logical(1L))
+        for (topic in names(self$topics)[!valid]) {
+          warn_roxy_topic(topic, "Skipping; no name and/or title")
+        }
+        if (!all(valid)) self$topics <- self$topics[valid]
+        invisible()
+      }
+    ),
+    list(
+      method = "topo_order",
       original = quote({
         topo <- TopoSort$new()
         for (i in seq_along(self$topics)) {
@@ -134,42 +245,6 @@ local({
         }
         sorted
       }
-    ),
-    add = list(
-      original = quote({
-        if (is.null(topic)) {
-          return()
-        }
-        stopifnot(inherits(topic, "RoxyTopic"))
-        filename <- topic$filename
-        if (filename %in% names(self$topics)) {
-          self$topics[[filename]]$add(topic, block)
-        } else {
-          self$topics[[filename]] <- topic
-        }
-        invisible()
-      }),
-      replacement = function(topic, block) {
-        if (is.null(topic)) {
-          return()
-        }
-        stopifnot(inherits(topic, "RoxyTopic"))
-        filename <- topic$filename
-        # `[[` finds the first topic of that name, as the original's `%in%` does, without
-        # hashing every name; a name `[[` cannot look up takes the original's path.
-        if (!is.character(filename) || length(filename) != 1L || is.na(filename)) {
-          if (filename %in% names(self$topics)) {
-            self$topics[[filename]]$add(topic, block)
-          } else {
-            self$topics[[filename]] <- topic
-          }
-        } else if (!is.null(existing <- self$topics[[filename]])) {
-          existing$add(topic, block)
-        } else {
-          self$topics[[filename]] <- topic
-        }
-        invisible()
-      }
     )
   )
 
@@ -190,17 +265,39 @@ local({
       })
     }
     topics <- roxygen$RoxyTopics
+    methods <- roxygen$.__S3MethodsTable__.
     replaced <- list()
-    for (name in names(topic_methods)) {
-      method <- topics$public_methods[[name]]
-      if (is.function(method) &&
-          identical(deparse(body(method)), deparse(topic_methods[[name]]$original))) {
-        replaced[[name]] <- method
-        topics$set("public", name, topic_methods[[name]]$replacement, overwrite = TRUE)
+    for (replacement in replacements) {
+      expected <- deparse(replacement$original)
+      if (is.null(replacement$method)) {
+        name <- replacement$name
+        current <- roxygen[[name]]
+        if (is.function(current) && identical(deparse(body(current)), expected) &&
+            identical(methods[[name]], current)) {
+          environment(replacement$replacement) <- roxygen
+          unlockBinding(name, roxygen)
+          assign(name, replacement$replacement, envir = roxygen)
+          assign(name, replacement$replacement, envir = methods)
+          replaced[[name]] <- list(original = current, method = FALSE)
+        }
+      } else {
+        name <- replacement$method
+        current <- topics$public_methods[[name]]
+        if (is.function(current) && identical(deparse(body(current)), expected)) {
+          topics$set("public", name, replacement$replacement, overwrite = TRUE)
+          replaced[[name]] <- list(original = current, method = TRUE)
+        }
       }
     }
     on.exit(for (name in names(replaced)) {
-      topics$set("public", name, replaced[[name]], overwrite = TRUE)
+      previous <- replaced[[name]]$original
+      if (replaced[[name]]$method) {
+        topics$set("public", name, previous, overwrite = TRUE)
+      } else {
+        assign(name, previous, envir = roxygen)
+        assign(name, previous, envir = methods)
+        lockBinding(name, roxygen)
+      }
     }, add = TRUE)
     if (nzchar(Sys.getenv("RY_DOCUMENT_DEBUG"))) message("replaced: ", toString(names(replaced)))
     roxygen2::roxygenise(root, roclets, load_code = load_code)

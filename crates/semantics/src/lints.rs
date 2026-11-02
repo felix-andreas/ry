@@ -8,12 +8,13 @@ use {
         stubs::{declaring_namespace, stubs},
     },
     rowan::{Direction, NodeOrToken},
+    std::cell::LazyCell,
     syntax::{
         GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
         is_green_inline_annotation,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, walk_green,
+        node_at, node_text, walk_green,
     },
 };
 
@@ -139,6 +140,8 @@ pub struct LintConfig {
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
     pub object_systems_disabled: bool,
+    /// Off by default: data.table code runs unchanged, and moving it to `DataFrame` is optional.
+    pub data_table: LintLevel,
 }
 
 /// Each lint's config key, which is also its code, with its level, for code that sets levels by
@@ -360,6 +363,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
+                    data_table_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                     call_lints(&red, config, diagnostics);
                 }
                 SyntaxKind::BRACE_EXPR => {
@@ -421,7 +425,7 @@ fn line_length_lint(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Ve
         return;
     };
     let limit = config.max_line_length.unwrap_or(80);
-    let text = root.text().to_string();
+    let text = node_text(root);
     let mut line_start = 0usize;
     for line in text.split_inclusive('\n') {
         let content = line.trim_end_matches(['\n', '\r']);
@@ -693,7 +697,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             .lhs()
             .filter(|target| target.kind() == SyntaxKind::NAME)
     {
-        let name = target.text().to_string();
+        let name = node_text(&target).into_owned();
         if let Some(message) = naming_style_message(&name, style, "Variable") {
             diagnostics.push(Diagnostic::new(
                 significant_range(&target),
@@ -725,11 +729,11 @@ fn object_system_lint(
             let (Some(package), Some(name)) = (names.next(), names.next()) else {
                 return;
             };
-            (Some(package.text().to_string()), name)
+            (Some(node_text(&package).into_owned()), name)
         }
         _ => return,
     };
-    let function = name.text().to_string();
+    let function = node_text(&name);
     let Some((system, defines, home)) = object_system_function(&function) else {
         return;
     };
@@ -763,9 +767,76 @@ fn object_system_lint(
         None => unless_redefined.extend(
             found
                 .into_iter()
-                .map(|diagnostic| (function.clone(), diagnostic)),
+                .map(|diagnostic| (function.to_string(), diagnostic)),
         ),
     }
+}
+
+/// Like `object_system_lint`, only the calls that create a data.table: every other data.table
+/// function needs one first, so these mark where data.table enters the code.
+fn data_table_lint(
+    call: &SyntaxNode,
+    config: &LintConfig,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+    always: &mut Vec<Diagnostic>,
+) {
+    if lint_severity(config.data_table, None).is_none() {
+        return;
+    }
+    let Some(callee) = call.first_child() else {
+        return;
+    };
+    let (qualified, name) = match callee.kind() {
+        SyntaxKind::NAME => (false, callee),
+        SyntaxKind::NAMESPACE_EXPR => {
+            let mut names = callee
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME);
+            let (Some(package), Some(name)) = (names.next(), names.next()) else {
+                return;
+            };
+            if package.text() != "data.table" {
+                return;
+            }
+            (true, name)
+        }
+        _ => return,
+    };
+    let function = name.text().to_string();
+    let Some(equivalent) = data_table_equivalent(&function) else {
+        return;
+    };
+    let mut found = Vec::new();
+    push_lint(
+        &mut found,
+        config.data_table,
+        Severity::Warning,
+        "data-table",
+        name.text_range(),
+        format!(
+            "`{function}` creates a data.table. Its typed equivalent is {equivalent}, see https://ry-lang.org/guides/from-data-table/"
+        ),
+        None,
+    );
+    if qualified {
+        always.extend(found);
+    } else {
+        unless_redefined.extend(
+            found
+                .into_iter()
+                .map(|diagnostic| (function.clone(), diagnostic)),
+        );
+    }
+}
+
+/// The DataFrame call that replaces a data.table constructor.
+fn data_table_equivalent(function: &str) -> Option<&'static str> {
+    Some(match function {
+        "data.table" => "`DataFrame()`",
+        "fread" => "`DataFrame.read_csv()`",
+        "as.data.table" | "setDT" => "`as.DataFrame()`",
+        _ => return None,
+    })
 }
 
 fn trailing_comma_lint(
@@ -984,7 +1055,10 @@ fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
             opted(config.length_levels) || is_enabled(config.length_test, Some(Severity::Warning))
         }
         "browser" => opted(config.browser_call),
-        name => object_system_function(name).is_some(),
+        name => {
+            object_system_function(name).is_some()
+                || (opted(config.data_table) && data_table_equivalent(name).is_some())
+        }
     }
 }
 
@@ -1016,13 +1090,8 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
             let mut children = node.children();
             let name = if named {
                 children.next().map(|name| {
-                    let text = name.text().to_string();
-                    let unquoted = text
-                        .strip_prefix(['`', '"', '\''])
-                        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
-                        .unwrap_or(&text)
-                        .to_owned();
-                    (unquoted, significant_range(&name))
+                    let text = node_text(&name);
+                    (unquoted(&text).to_owned(), significant_range(&name))
                 })
             } else {
                 None
@@ -1033,32 +1102,49 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
         .collect()
 }
 
+fn unquoted(name: &str) -> &str {
+    name.strip_prefix(['`', '"', '\''])
+        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
+        .unwrap_or(name)
+}
+
 /// The name of a bare callee, such as `sprintf` in `sprintf(...)` but not in `base::sprintf(...)`.
 fn bare_callee(call: &SyntaxNode) -> Option<String> {
     call.first_child()
         .filter(|callee| callee.kind() == SyntaxKind::NAME)
-        .map(|callee| callee.text().to_string())
+        .map(|callee| node_text(&callee).into_owned())
 }
 
 fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
     let callee = bare_callee(call);
-    let arguments = call_arguments(call);
-    duplicate_argument_lint(callee.as_deref(), &arguments, config, diagnostics);
+    if repeats_argument_name(call) {
+        duplicate_argument_lint(
+            callee.as_deref(),
+            &call_arguments(call),
+            config,
+            diagnostics,
+        );
+    }
     let Some(callee) = callee else {
         return;
     };
-    let positional: Vec<&SyntaxNode> = arguments
-        .iter()
-        .filter(|argument| argument.name.is_none())
-        .filter_map(|argument| argument.value.as_ref())
-        .collect();
-    let all_positional = positional.len() == arguments.len();
+    // Lazy because the arguments are red nodes, one allocation each, and most callees have
+    // no lint below.
+    let arguments = LazyCell::new(|| call_arguments(call));
+    let positional = LazyCell::new(|| {
+        arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .filter_map(|argument| argument.value.as_ref())
+            .collect::<Vec<&SyntaxNode>>()
+    });
+    let all_positional = LazyCell::new(|| positional.len() == arguments.len());
     match callee.as_str() {
-        "seq" if all_positional && positional.len() == 1 => {
+        "seq" if *all_positional && positional.len() == 1 => {
             length_sequence_lint(call, positional[0], true, config, diagnostics);
         }
         "sprintf" | "gettextf" => sprintf_arguments_lint(&callee, &arguments, config, diagnostics),
-        "any" | "all" if all_positional && positional.len() == 1 => {
+        "any" | "all" if *all_positional && positional.len() == 1 => {
             outer_negation_lint(call, &callee, positional[0], config, diagnostics);
             if callee != "any" {
                 return;
@@ -1087,7 +1173,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 return;
             }
             let expected = if callee == "sapply" { 2 } else { 3 };
-            let counts_lengths = all_positional
+            let counts_lengths = *all_positional
                 && positional.len() == expected
                 && positional[1].kind() == SyntaxKind::NAME
                 && positional[1].text() == "length";
@@ -1110,11 +1196,11 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             }
         }
         "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character"
-            if all_positional && positional.len() == 1 =>
+            if *all_positional && positional.len() == 1 =>
         {
             literal_coercion_lint(call, &callee, positional[0], config, diagnostics);
         }
-        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if all_positional => {
+        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if *all_positional => {
             testthat_expectation_lint(call, &callee, &positional, config, diagnostics);
             if let [expected, actual] = positional[..]
                 && matches!(callee.as_str(), "expect_equal" | "expect_identical")
@@ -1184,7 +1270,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
         "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
             fixed_regex_lint(call, &callee, &arguments, config, diagnostics);
         }
-        "which" if all_positional && positional.len() == 1 => {
+        "which" if *all_positional && positional.len() == 1 => {
             // grep() puts `value` fifth where grepl() has `fixed`, so a fifth positional
             // argument would change meaning in the rewritten call.
             if positional[0].kind() != SyntaxKind::CALL_EXPR
@@ -1217,7 +1303,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 )),
             );
         }
-        "length" if all_positional && positional.len() == 1 => {
+        "length" if *all_positional && positional.len() == 1 => {
             length_test_lint(call, positional[0], config, diagnostics);
             if let Some(("levels", value)) = single_argument_of(positional[0], &["levels"]) {
                 push_lint(
@@ -1254,6 +1340,43 @@ fn opt_in(level: LintLevel) -> LintLevel {
         LintLevel::Default => LintLevel::Off,
         level => level,
     }
+}
+
+/// Whether two named arguments of `call` may share a name, read off the green tree so the
+/// common call builds no red nodes. A name of several tokens answers yes and leaves the
+/// decision to [`duplicate_argument_lint`].
+fn repeats_argument_name(call: &SyntaxNode) -> bool {
+    let green = call.green();
+    let Some(list) = GreenRef::new(&green)
+        .child_nodes()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+    else {
+        return false;
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for argument in list
+        .child_nodes()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+    {
+        if !argument.child_kinds().any(|kind| kind == SyntaxKind::EQ) {
+            continue;
+        }
+        let Some(name) = argument.child_nodes().next() else {
+            continue;
+        };
+        let Some(text) = name.single_token_text() else {
+            return true;
+        };
+        let name = unquoted(text);
+        if name.is_empty() {
+            continue;
+        }
+        if seen.contains(&name) {
+            return true;
+        }
+        seen.push(name);
+    }
+    false
 }
 
 /// A closure stops with "formal argument matched by multiple actual arguments", and `c()` or
@@ -1502,7 +1625,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -1877,12 +2000,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match margin.text().to_string().as_str() {
+    let prefix = match &*node_text(&margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match function.text().to_string().as_str() {
+    let suffix = match &*node_text(&function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -1969,7 +2092,7 @@ fn unnecessary_lambda_lint(
         };
         // These read their argument's expression, not its value, so the wrapper is needed.
         let quoting = matches!(
-            callee.text().to_string().as_str(),
+            &*node_text(&callee),
             "quote"
                 | "bquote"
                 | "substitute"
@@ -2013,7 +2136,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(rhs.text().to_string().as_str(), "0" | "0L") {
+    if !matches!(&*node_text(&rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2056,9 +2179,7 @@ fn sample_int_lint(
     else {
         return;
     };
-    if operator.kind() != SyntaxKind::COLON
-        || !matches!(lhs.text().to_string().as_str(), "1" | "1L")
-    {
+    if operator.kind() != SyntaxKind::COLON || !matches!(&*node_text(&lhs), "1" | "1L") {
         return;
     }
     let Some(list) = call
@@ -2069,7 +2190,7 @@ fn sample_int_lint(
     };
     let list_start = list.text_range().start();
     let first_range = significant_range(value) - list_start;
-    let list_text = list.text().to_string();
+    let list_text = node_text(&list).into_owned();
     let (Some(before), Some(after)) = (
         list_text.get(..usize::from(first_range.start())),
         list_text.get(usize::from(first_range.end())..),
@@ -2476,7 +2597,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {
@@ -2854,7 +2975,7 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
 
 fn significant_text(node: &SyntaxNode) -> String {
     let range = significant_range(node) - node.text_range().start();
-    node.text().to_string()[range].to_owned()
+    node_text(node)[range].to_owned()
 }
 
 fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option<String> {

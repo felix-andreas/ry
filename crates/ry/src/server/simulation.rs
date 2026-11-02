@@ -158,6 +158,7 @@ impl Simulation {
             cancel: cancel.clone(),
             consoles: false,
             executable,
+            installed_packages: false,
         };
         let mut simulation = Simulation {
             state: ServerState { sender, cancel },

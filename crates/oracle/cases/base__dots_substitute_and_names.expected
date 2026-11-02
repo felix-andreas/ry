@@ -1,0 +1,54 @@
+[stdout]
+| [1] ""  "." "/" "a" "/" "/" "a" "/"
+| [1] 3 6
+| [1] 1.0 3.5
+| [1] "pairlist"
+| [[1]]
+| a
+| 
+| [[2]]
+| b + 1
+| 
+| $c
+| d
+| 
+| [1] "language"
+| NULL
+| 3:4 + 1L
+| g(x = ..1, 2)
+| $x
+| [1] 2
+| 
+| [[2]]
+| [1] 2
+| 
+| [1] "names() applied to a non-vector"
+| [1] "names() applied to a non-vector"
+| [1] "names() applied to a non-vector"
+| [1] "no error"
+| [1] "a"
+| [1] "B"
+| [1] "a"
+| [1] 99  3
+| [1] 1.23457
+| [1] 2
+| [1] 20 30 10
+| [1] 6 5
+| List of 2
+|  $ : num 2
+|  $ : num 1
+|   a
+| 1 1
+| 2 2
+| 3 3
+| by_call(1, 2)
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

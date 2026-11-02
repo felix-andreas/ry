@@ -906,6 +906,17 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         let copy = duplicate(value)?;
         heap.root(copy);
         copy
+    } else if name == symbols().row_names
+        && value.kind() == SexpType::Real
+        && length(value) == 2
+        && reals(value)[0].is_nan()
+    {
+        // `.set_row_names(n)` computes `c(NA_integer_, -n)` with a double `n`, so GNU R's
+        // `row_names_gets` stores a double `c(NA, n)` as the integer compact form that
+        // `.row_names_info` and `dim.data.frame` read.
+        let compact = crate::coerce::coerce_vector(value, SexpType::Integer)?;
+        heap.root(compact);
+        compact
     } else {
         value
     };

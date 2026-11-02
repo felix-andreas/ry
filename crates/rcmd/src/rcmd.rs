@@ -1159,6 +1159,9 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "--no-test-load" => options.test_load = false,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
+                        // A single-architecture build has nothing to skip, and every build
+                        // starts from a fresh copy, so there is nothing to clean beforehand.
+                        "--no-multiarch" | "--preclean" => {}
                         "--no-data" | "--no-inst" | "--no-demo" | "--no-exec" | "--no-R" => {
                             options.driver_flags.push(argument.clone());
                         }
@@ -1607,6 +1610,23 @@ fn install_source(
             shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
                 Error::Package(format!("compilation failed for package '{name}'\n{error}"))
             })?;
+        }
+        // GNU R builds a source directory in place, so its shared objects stay in `src`, where
+        // `pkgbuild::compile_dll` and `pkgload::load_all` look for them after a libs-only
+        // install. The build here runs in a copy, so the objects go back to the source tree.
+        let source_src = source.join("src");
+        if !source.starts_with(staging) && source_src.is_dir() {
+            for entry in fs::read_dir(&src).map_err(io_error(&src))? {
+                let path = entry.map_err(io_error(&src))?.path();
+                let Some(file) = path.file_name().filter(|_| {
+                    path.extension()
+                        .is_some_and(|extension| Some(extension) == extension_of(platform))
+                }) else {
+                    continue;
+                };
+                let built = source_src.join(file);
+                fs::copy(&path, &built).map_err(io_error(&built))?;
+            }
         }
         // A package's `src/install.libs.R` installs its own libraries, and runs as R code in
         // the driver; otherwise every shared object `src` holds is installed, as GNU R does.

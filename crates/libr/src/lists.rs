@@ -3,11 +3,14 @@
 
 use {
     crate::{
-        boundary::{ApiResult, Reachable, enter, error},
+        boundary::{ApiResult, Pinned, Reachable, enter, error},
         globals::R_NamesSymbol,
         runtime,
     },
-    heap::object::{Sexp, SexpType, Shape},
+    heap::{
+        Heap,
+        object::{Sexp, SexpType, Shape},
+    },
     std::ffi::c_int,
 };
 
@@ -180,20 +183,26 @@ unsafe fn read_path_slowly(
 }
 
 /// GNU R lays an external pointer out as a cell, with the address in `CAR`, the protected
-/// value in `CDR` and the tag in `TAG`, and older native code reads it that way.
+/// value in `CDR` and the tag in `TAG`, and an environment with its frame in `CAR`, enclosure in
+/// `CDR` and hash table in `TAG`. Native code reads both that way: nanonext walks `CAR(env)`
+/// to look a binding up without the non-API `findVarInFrame`.
 macro_rules! read_cell {
-    ($name:ident, $step:ident, $external:expr) => {
+    ($name:ident, $step:ident, $external:expr, $environment:expr) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
             if is_cell(object.kind()) {
                 return object.$step();
             }
-            enter(|| {
-                if object.kind() == SexpType::ExternalPtr {
+            enter(|| match object.kind() {
+                SexpType::ExternalPtr => {
                     let read: unsafe fn(Sexp) -> Sexp = $external;
-                    return Ok(Reachable(read(object)));
+                    Ok(Pinned(read(object)))
                 }
-                Ok(Reachable(triple(object, stringify!($name))?.$step()))
+                SexpType::Environment => {
+                    let read: unsafe fn(Sexp) -> ApiResult<Sexp> = $environment;
+                    Ok(Pinned(read(object)?))
+                }
+                _ => Ok(Pinned(triple(object, stringify!($name))?.$step())),
             })
             .0
         }
@@ -202,10 +211,20 @@ macro_rules! read_cell {
 
 // The address is handed back to native code as an opaque word and never dereferenced by ry. A
 // null address has no `Sexp` form, so it reads as `R_NilValue`.
-read_cell!(CAR, car, |object| unsafe {
-    Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
-});
-read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
+read_cell!(
+    CAR,
+    car,
+    |object| unsafe {
+        Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
+    },
+    |env| unsafe { crate::legacy::frame_pairlist(env) }
+);
+read_cell!(
+    CDR,
+    cdr,
+    |object| unsafe { object.external_protected() },
+    |env| unsafe { Ok(env.enclosure()) }
+);
 
 /// GNU R leaves a bytecode object's tag unused. ry keeps the inline caches there, and their
 /// environment binding cells are internal objects that native code walking a closure (lobstr's
@@ -217,7 +236,11 @@ pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
     }
     enter(|| match object.kind() {
         SexpType::ExternalPtr => Ok(Reachable(object.external_tag())),
-        SexpType::Bytecode => Ok(Reachable(runtime().nil())),
+        SexpType::Bytecode | SexpType::Environment => Ok(Reachable(runtime().nil())),
+        // In GNU R a vector's header overlaps the cell fields, so `TAG` of a vector reads a
+        // word that is never a symbol. nanonext relies on that: it checks `TAG(x) != tag`
+        // to tell its external pointers from an aio slot that already holds an integer result.
+        _ if object.kind().shape() != Shape::Triple => Ok(Reachable(runtime().nil())),
         _ => Ok(Reachable(triple(object, "TAG")?.tag())),
     })
     .0
@@ -437,8 +460,34 @@ macro_rules! promise_writer {
 }
 
 promise_writer!(SET_PRVALUE, set_car);
-promise_writer!(SET_PRCODE, set_cdr);
-promise_writer!(SET_PRENV, set_tag);
+/// A promise compiled by the bytecode interpreter keeps its code in the attribute slot. That
+/// code was compiled from the promise's expression for its environment's frame, so a new
+/// expression or environment drops it and the promise runs on the AST evaluator.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_PRCODE(object: Sexp, value: Sexp) {
+    set_promise_source(object, value, "SET_PRCODE", Heap::set_cdr);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_PRENV(object: Sexp, value: Sexp) {
+    set_promise_source(object, value, "SET_PRENV", Heap::set_tag);
+}
+
+unsafe fn set_promise_source(
+    object: Sexp,
+    value: Sexp,
+    name: &'static str,
+    setter: unsafe fn(&mut Heap, Sexp, Sexp),
+) {
+    enter(|| {
+        checked_kind(object, SexpType::Promise, name)?;
+        let heap = &mut runtime().heap;
+        setter(heap, object, value);
+        let nil = heap.known().nil;
+        heap.set_attrib(object, nil);
+        Ok(())
+    })
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_mkClosure(formals: Sexp, body: Sexp, env: Sexp) -> Sexp {

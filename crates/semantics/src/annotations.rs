@@ -13,11 +13,12 @@ use {
             native_record, null, scalar, substitute_rigid, union_of, unknown,
         },
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rowan::{Language, NodeOrToken},
+    rustc_hash::FxHashSet,
     std::mem::take,
     syntax::{
-        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
-        matching_nodes,
+        GreenRef, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
+        is_green_inline_annotation, matching_nodes, node_text,
     },
 };
 
@@ -183,6 +184,11 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             }),
             ret: ret.unwrap_or_else(|| unknown(db)),
             inferred: false,
+            flag_return: None,
+            quoted: Vec::new(),
+            default_reads: Vec::new(),
+            missing_tested: Vec::new(),
+            condition_only: Vec::new(),
         };
         annotation.declared = Some(TypeScheme {
             binders: forall,
@@ -313,6 +319,11 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 variadic,
                 ret,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         ),
     });
@@ -416,7 +427,7 @@ pub fn merge_annotations<'db>(
     };
     // Type parameters pair by position, so the comment's types are read in the inline
     // names before slots mix.
-    let renaming: FxHashMap<Name<'db>, Ty<'db>> = comment_scheme
+    let renaming: Vec<_> = comment_scheme
         .binders
         .iter()
         .zip(&inline_scheme.binders)
@@ -510,6 +521,11 @@ pub fn merge_annotations<'db>(
                     variadic,
                     ret,
                     inferred: false,
+                    flag_return: None,
+                    quoted: Vec::new(),
+                    default_reads: Vec::new(),
+                    missing_tested: Vec::new(),
+                    condition_only: Vec::new(),
                 }),
             ),
         }),
@@ -832,20 +848,36 @@ pub enum BlockRefusal {
 pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
     // A refused region has no trustworthy payload: a refused binder, for instance, leaves type
     // parameters unbound, which would be blamed a second time as unknown types.
-    if node
-        .descendants()
-        .any(|descendant| descendant.kind() == SyntaxKind::ERROR)
-    {
+    if node.kind() == SyntaxKind::ERROR {
         return Some(BlockRefusal::Unparsed);
     }
     // Markers come from all descendant tokens, not just direct children: a line continuing a
-    // still-open node puts its marker inside that node.
-    let markers: Vec<TextSize> = node
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::ANNOTATION_MARKER)
-        .map(|token| token.text_range().start())
-        .collect();
+    // still-open node puts its marker inside that node. The walk reads the green tree, because
+    // every annotation block runs this and a red walk builds a node per element.
+    let mut markers: Vec<TextSize> = Vec::new();
+    let green = node.green();
+    let mut stack = vec![(green.children(), node.text_range().start())];
+    while let Some((children, next_start)) = stack.last_mut() {
+        let Some(child) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        let start = *next_start;
+        *next_start += child.text_len();
+        match child {
+            NodeOrToken::Node(child) => {
+                if RLanguage::kind_from_raw(child.kind()) == SyntaxKind::ERROR {
+                    return Some(BlockRefusal::Unparsed);
+                }
+                stack.push((child.children(), start));
+            }
+            NodeOrToken::Token(token) => {
+                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::ANNOTATION_MARKER {
+                    markers.push(start);
+                }
+            }
+        }
+    }
     let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
 
     let mut previous: Option<BlockForm> = None;
@@ -984,16 +1016,22 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
         .and_then(|name| name.text())
 }
 
+/// Read off the green tree, since type lowering asks this of most annotation nodes and red
+/// children are an allocation each.
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| token.kind() == kind)
+    node.green().children().any(|child| {
+        child
+            .into_token()
+            .is_some_and(|token| RLanguage::kind_from_raw(token.kind()) == kind)
+    })
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {
-    node.children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == word)
+    node.green().children().any(|child| {
+        child.into_token().is_some_and(|token| {
+            RLanguage::kind_from_raw(token.kind()) == SyntaxKind::IDENT && token.text() == word
+        })
+    })
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the
@@ -1470,7 +1508,7 @@ impl<'db> Lowering<'db> {
                     self.errors.push((
                         format!(
                             "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
-                            argument.text().to_string().trim()
+                            node_text(&argument).trim()
                         ),
                         argument.text_range(),
                     ));
@@ -1638,6 +1676,11 @@ impl<'db> Lowering<'db> {
                 variadic,
                 ret,
                 inferred: false,
+                flag_return: None,
+                quoted: Vec::new(),
+                default_reads: Vec::new(),
+                missing_tested: Vec::new(),
+                condition_only: Vec::new(),
             }),
         )
     }

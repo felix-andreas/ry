@@ -2850,7 +2850,10 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
     builder
         .utf(true)
         .caseless(ignore_case)
-        .jit_if_available(true);
+        .jit_if_available(true)
+        // GNU R's default `R_PCRE_JIT_STACK_MAXSIZE`, 64 MB; PCRE2's own 32 KB fails on a
+        // long subject such as 5,000 repeats of `(a|b)+`.
+        .max_jit_stack_size(Some(64 * 1024 * 1024));
     match builder.build(pattern) {
         Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
         Err(failure) => {
@@ -2983,13 +2986,9 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 atom = None;
             }
             '*' | '+' | '?' => match atom {
-                // POSIX takes a repetition operator with nothing to repeat literally.
-                None => {
-                    output.push('\\');
-                    output.push(character);
-                    atom = Some(start);
-                    quantified = false;
-                }
+                // TRE drops a repetition operator with nothing to repeat, at the start of the
+                // pattern or right after `(`, `|` or `^`: `grepl("+ab", "xab")` is `TRUE`.
+                None => {}
                 Some(_) => {
                     output.push(character);
                     quantified = true;
@@ -3377,9 +3376,10 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 }
 
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
-/// arguments.
+/// arguments. A classed character vector is already text and is used as it is, which matters
+/// for vctrs, whose `as.character` method refuses a class with no cast to character.
 unsafe fn as_character(value: Sexp, env: Sexp) -> R<Sexp> {
-    if value.is_object() {
+    if value.is_object() && value.kind() != SexpType::String {
         let function = values::install("as.character")?;
         let call = values::call(function, &[eval::quote_value(value)?])?;
         let converted = eval::eval(call, env)?;

@@ -5,6 +5,7 @@ pub mod config;
 pub mod console_link;
 pub mod debug_adapter;
 pub mod diagnostics;
+pub mod installed;
 pub mod load;
 pub mod namespace;
 pub mod position;

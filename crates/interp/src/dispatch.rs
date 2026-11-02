@@ -1105,7 +1105,12 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
 unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env: Sexp) -> R<Sexp> {
     let new_call = renamed_call(call, found.method_name)?;
     // GNU R evaluates the method inside a context of the builtin's own call, which shows in
-    // `sys.calls()`.
+    // `sys.calls()`. That context's environment is a fresh child of the caller's, as in
+    // `DispatchOrEval`, so a promise of the caller (a default such as `drop = nargs() >= 3`
+    // forced inside the method) still finds the caller's own frame for `nargs()` and
+    // `sys.call()`.
+    let context_env = values::new_env(env)?;
+    crate::heap().root(context_env);
     let state = interp();
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
@@ -1113,7 +1118,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     state.frames.push(Frame {
         call,
         function: found.method,
-        env,
+        env: context_env,
         sys_parent: env,
         promargs,
         on_exit: Vec::new(),
@@ -1389,8 +1394,9 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
         return Ok(None);
     }
     let promised = promised_args(call, args)?;
-    if methods != nil() {
-        let arguments = eval::args_pairlist(&promised)?;
+    if methods != nil()
+        && let Some(arguments) = crate::methods::signature_arguments(&promised, generic)?
+    {
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
             // The default method of an internal generic such as `as.vector` stands for the

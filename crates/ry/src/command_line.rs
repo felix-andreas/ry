@@ -238,6 +238,9 @@ pub enum Debug {
     Ast { path: PathBuf },
     /// Analyze a workspace and report where time and memory go
     AnalysisStats { path: Option<PathBuf> },
+    /// Rewrite the given R files in place as the plain R program they mean, with every inline
+    /// annotation removed
+    Erase { paths: Vec<PathBuf> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

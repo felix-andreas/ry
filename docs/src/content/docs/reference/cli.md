@@ -77,6 +77,10 @@ what the rest of the project sees also checks every file, for example one that a
 `<<-`, `assign`, `library`, `setClass` or a `#: @type` declaration. A directory with no `ry.toml`
 or `DESCRIPTION`, such as one holding a single downloaded script, gets no cache.
 
+A run checks only the files it was asked about, so `ry check R` records no findings for the files
+in `tests/`, and a later `ry check` checks those files. The strict check of `ry load` asks about
+`R/` alone in the same way and shares the record.
+
 The output is the same with or without the cache. `--no-cache` checks every file without reading or
 writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
 directory, so the record stays out of version control.
@@ -132,7 +136,10 @@ script with them erased. ry's runtime is under construction: a script that calls
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
 built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and `tiff` devices write their files when
-the device closes or the script ends. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+the device closes or the script ends. They draw gradients, patterns, clipping paths, masks, groups
+and even-odd fills except on `postscript`, which refuses them and drops semi-transparent colours
+with a warning, as GNU R's does. Like GNU R's, `pdf` cannot repeat or reflect a gradient, and warns
+and stops it at its ends instead. knitr and rmarkdown documents with plot chunks render. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
@@ -185,8 +192,9 @@ roclets, such as `rd` or `namespace`; by default the package's own roxygen optio
 
 Two things make it faster than roxygen2 alone, without changing what it writes. The parsed
 documentation blocks of each file are cached in ry's cache directory, so a run
-parses again only the files whose content changed, and the step that orders topics for
-`@inherit` runs in linear time instead of quadratic. A cached block keeps the markdown links it
+parses again only the files whose content changed, and the steps of roxygen2 that take time
+quadratic in the number of topics (collecting them, ordering them for `@inherit`, and finding
+them by name) run in linear time. A cached block keeps the markdown links it
 resolved when it was parsed, so after you install or remove a package a link points at, edit the
 file or delete the cache.
 
@@ -199,8 +207,10 @@ script's status. [Editors](/guides/editors#running-and-debugging) lists the laun
 
 ## debug
 
-`ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
-a workspace and reports where time and memory go. Both are developer aids for working on ry itself.
+`ry debug ast FILE` prints the syntax tree of a file, `ry debug analysis-stats [PATH]` analyzes
+a workspace and reports where time and memory go, and `ry debug erase FILE...` rewrites files in
+place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
+aids for working on ry itself.
 
 ## Exit codes
 
