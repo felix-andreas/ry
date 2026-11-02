@@ -32,7 +32,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    lzma_rust2::{XzOptions, XzReader, XzWriter},
+    lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter},
     std::{
         borrow::Cow,
         ffi::{CStr, CString, c_char, c_int, c_void},
@@ -88,7 +88,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool((*resolve_con(call.arg(0))?.1).canseek != 0)
     }),
     internal("stdin", 0, |_| unsafe { connection_object(0) }),
-    internal("stdout", 0, |_| unsafe { connection_object(1) }),
+    // GNU R's `stdout()` is the connection output currently goes to, so a call inside a `sink`
+    // names the sink, while a `stdout()` kept from before writes past it to the console.
+    internal("stdout", 0, |_| unsafe {
+        connection_object(
+            interp()
+                .connections
+                .sinks
+                .last()
+                .map_or(1, |sink| sink.slot),
+        )
+    }),
     internal("stderr", 0, |_| unsafe { connection_object(2) }),
     internal("readLines", 6, do_read_lines),
     internal("readDCF", 3, do_read_dcf),
@@ -245,6 +255,9 @@ struct Entry {
     con: Rconnection,
     /// Whether `private` holds a ry `Device`. A custom connection's `private` is the package's.
     builtin: bool,
+    /// Whether the connection has diverted messages. GNU R never finalizes such a connection,
+    /// so it stays open after it becomes unreachable.
+    pinned: bool,
 }
 
 struct Sink {
@@ -289,7 +302,11 @@ impl Table {
                 con
             };
             if let Some(slot) = entries.get_mut(index) {
-                *slot = Some(Entry { con, builtin: true });
+                *slot = Some(Entry {
+                    con,
+                    builtin: true,
+                    pinned: false,
+                });
             }
         }
         Table {
@@ -374,7 +391,10 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .and_then(entry)
         .ok_or_else(invalid)?;
     let id = values::get_attr(object, values::install("conn_id")?);
-    if id.kind() == SexpType::ExternalPtr && id.external_address() != entry.con.cast() {
+    // Closing clears the `conn_id` address, so an object kept past `close()` stays invalid even
+    // once a new connection takes its slot. Any other address is accepted, because curl stores
+    // its own handle there, and GNU R never looks at it.
+    if id.kind() == SexpType::ExternalPtr && id.external_address().is_null() {
         return Err(invalid());
     }
     Ok((slot as usize, entry.con))
@@ -594,7 +614,17 @@ pub unsafe fn is_text_mode(file: Sexp) -> R<bool> {
 
 /// Writes text to a connection the way `cat` and `write.table` do.
 pub unsafe fn print(file: Sexp, text: &[u8]) -> R<()> {
-    let con = resolve_con(file)?.1;
+    let (slot, con) = resolve_con(file)?;
+    // Writing to the current sink is ordinary output, which a split sink also shows.
+    if interp()
+        .connections
+        .sinks
+        .last()
+        .is_some_and(|sink| sink.slot == slot)
+    {
+        write_output(text);
+        return Ok(());
+    }
     with_open(con, "wt", || {
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
@@ -673,10 +703,15 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (path, temporary, open) = if description.is_empty() {
-        let open = if open.is_empty() {
-            "w+".to_owned()
-        } else {
-            open
+        let open = match open.as_str() {
+            "" => "w+".to_owned(),
+            "w+" | "w+b" => open,
+            _ => {
+                crate::conditions::warning(
+                    "file(\"\") only supports open = \"w+\" and open = \"w+b\": using the former",
+                )?;
+                "w+".to_owned()
+            }
         };
         (temporary_path(), true, open)
     } else if description == "stdin" {
@@ -697,10 +732,12 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         None
     };
+    // A sniffed file is a compressed file connection from then on, so a later `open(con, "rb")`
+    // reads it decompressed too, as in GNU R.
     let device = Device::File(FileDevice {
         path,
         temporary,
-        encoding: None,
+        encoding: compression,
         text_encoding,
         invalid_input: false,
         raw: raw || description == "stdin",
@@ -1314,7 +1351,11 @@ unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
         id.set_external_address(con.cast());
     }
     if let Some(Some(slot_entry)) = entries().get_mut(slot) {
-        *slot_entry = Entry { con, builtin: true };
+        *slot_entry = Entry {
+            con,
+            builtin: true,
+            pinned: false,
+        };
     }
     if (*inner).isopen != 0 {
         open_con(con)?;
@@ -2014,9 +2055,10 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
                 slot => slot as usize,
             }
         };
-        if entry(slot).is_none() {
+        let Some(diverted) = entries().get_mut(slot).and_then(Option::as_mut) else {
             return Err(error("invalid connection"));
-        }
+        };
+        diverted.pinned = true;
         interp().connections.message_slot = slot;
         return Ok(nil());
     }
@@ -2302,7 +2344,11 @@ fn claim_slot(con: Rconnection, builtin: bool) -> R<usize> {
     let slot = (3..NCONNECTIONS)
         .find(|&slot| entries.get(slot).is_some_and(Option::is_none))
         .ok_or_else(|| error("all connections are in use"))?;
-    entries[slot] = Some(Entry { con, builtin });
+    entries[slot] = Some(Entry {
+        con,
+        builtin,
+        pinned: false,
+    });
     Ok(slot)
 }
 
@@ -2470,17 +2516,24 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
     connection_object(slot)
 }
 
-/// Runs when a connection's `conn_id` becomes unreachable while the connection is open.
+/// Runs when a connection's `conn_id` becomes unreachable.
 unsafe extern "C" fn connection_finalizer(id: Sexp) {
     from_native(|| {
         let address = id.external_address();
         if address.is_null() {
             return Ok(());
         }
-        let found = (3..NCONNECTIONS)
-            .find(|&slot| entry(slot).is_some_and(|entry| entry.con.cast() == address));
+        let found = (3..NCONNECTIONS).find(|&slot| {
+            entry(slot).is_some_and(|entry| entry.con.cast() == address && !entry.pinned)
+        });
         if let Some(slot) = found {
             let con = address as Rconnection;
+            // GNU R destroys a closed connection, or any text connection, silently and warns
+            // only about an open one of another class.
+            if (*con).isopen == 0 || class_of(con) == "textConnection" {
+                close_slot(slot)?;
+                return Ok(());
+            }
             crate::conditions::warning(format!(
                 "closing unused connection {slot} ({})",
                 description_of(con)
@@ -2493,7 +2546,7 @@ unsafe extern "C" fn connection_finalizer(id: Sexp) {
 
 /// Closes and destroys the connection in `slot`, freeing the slot. Returns the close status.
 unsafe fn close_slot(slot: usize) -> R<c_int> {
-    let Some(Entry { con, builtin }) = entries().get_mut(slot).and_then(Option::take) else {
+    let Some(Entry { con, builtin, .. }) = entries().get_mut(slot).and_then(Option::take) else {
         return Err(error("invalid connection"));
     };
     let closed = if (*con).isopen != 0 {
@@ -2559,6 +2612,12 @@ unsafe fn new_builtin(
     configure(con);
     if !open.is_empty() {
         let slot = resolve_con(object)?.0;
+        // GNU R drops a connection whose text encoding cannot convert, and its constructor
+        // then reports only that the connection is gone.
+        if unsupported_conversion(con)?.is_some() {
+            close_slot(slot)?;
+            return Err(error("invalid connection"));
+        }
         if let Err(unwind) = open_con(con) {
             close_slot(slot)?;
             return Err(unwind);
@@ -2584,6 +2643,28 @@ unsafe fn open_con(con: Rconnection) -> R<()> {
         return Err(error("cannot open the connection"));
     }
     Ok(())
+}
+
+/// GNU R's message when a file connection opened in text mode names an encoding that cannot
+/// convert to or from UTF-8. `con` must be one of ry's own connections.
+unsafe fn unsupported_conversion(con: Rconnection) -> R<Option<String>> {
+    let Device::File(file) = device(con)? else {
+        return Ok(None);
+    };
+    let Some(encoding) = file.text_encoding.as_deref() else {
+        return Ok(None);
+    };
+    let Some(mode) = parse_mode(&mode_of(con)) else {
+        return Ok(None);
+    };
+    if mode.binary || crate::system::convert_to_utf8_prefix(encoding, b"").is_some() {
+        return Ok(None);
+    }
+    Ok(Some(if mode.write {
+        format!("unsupported conversion from 'UTF-8' to '{encoding}'")
+    } else {
+        format!("unsupported conversion from '{encoding}' to 'UTF-8'")
+    }))
 }
 
 /// Runs `body` with the connection open in `mode`, opening it first and closing it afterwards
@@ -3623,6 +3704,14 @@ pub(crate) fn os_message(failure: &std::io::Error) -> String {
     }
 }
 
+/// xz options at `preset`, with the CRC32 integrity check GNU R writes, so files match its
+/// size byte for byte.
+pub(crate) fn xz_options(preset: u32) -> XzOptions {
+    let mut options = XzOptions::with_preset(preset);
+    options.set_check_sum_type(CheckType::Crc32);
+    options
+}
+
 fn io_error(failure: std::io::Error) -> Unwind {
     error(os_message(&failure))
 }
@@ -3630,6 +3719,9 @@ fn io_error(failure: std::io::Error) -> Unwind {
 /// Opens the device for the struct's current mode. A device that cannot open warns why and
 /// returns false; the caller turns that into "cannot open the connection".
 unsafe fn device_open(con: Rconnection) -> R<bool> {
+    if let Some(message) = unsupported_conversion(con)? {
+        return Err(error(message));
+    }
     let mode_bytes = mode_of(con);
     let device = device(con)?;
     let Some(mode) = parse_mode(&mode_bytes) else {
@@ -3848,7 +3940,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
                 file,
                 bzip2::Compression::new(level.clamp(1, 9)),
             )),
-            Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
+            Compressed::Xz => Encoder::Xz(XzWriter::new(file, xz_options(level))?),
             Compressed::Zstd => {
                 Encoder::Zstd(zstd::stream::write::Encoder::new(file, level as i32)?)
             }
@@ -4209,12 +4301,12 @@ fn flush_writes(plain: &mut PlainFile) -> std::io::Result<()> {
 }
 
 /// Writes bytes, or printed text when `printing`, which is the only way into a text output
-/// connection, as in GNU R. Standard output goes where `sink` diverts it, as GNU R's does.
+/// connection, as in GNU R. Standard output is the console itself, past any `sink`, as in GNU R.
 unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usize> {
     match device(con)? {
         Device::Standard(Standard::Input) => Err(error("cannot write to this connection")),
         Device::Standard(Standard::Output) => {
-            crate::write_console(bytes, false);
+            crate::write_terminal(bytes, false);
             Ok(bytes.len())
         }
         Device::Standard(Standard::Error) => {

@@ -79,6 +79,9 @@ pub enum Command {
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
     },
+    /// Rewrite code written for another library into ry's own equivalents
+    #[command(subcommand)]
+    Migrate(Migrate),
     /// Run an R script on ry's runtime, or open ry's console without one
     ///
     /// Everything after FILE goes to the script. A top-level error in the script exits 1,
@@ -175,6 +178,22 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
     },
+    /// Generate a package's documentation with roxygen2, as `devtools::document()` does
+    ///
+    /// The package is loaded lazily, as `ry load` does, so roxygen2 reads the code without a
+    /// full load. The output files are the ones `devtools::document()` writes.
+    Document {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// A roxygen2 roclet to run, such as `rd` or `namespace` (repeatable; default: the
+        /// package's own, which are `collate`, `namespace` and `rd` unless it sets them)
+        #[arg(long = "roclet")]
+        roclets: Vec<String>,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
     /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
     ///
     /// The client launches an R script, which runs on ry's runtime with breakpoints,
@@ -217,6 +236,22 @@ pub struct SessionArguments {
     /// Editing keybindings for the console
     #[arg(long, value_enum, default_value_t, conflicts_with = "script")]
     pub keybindings: Keybindings,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Migrate {
+    /// Rewrite data.table code as DataFrame code
+    ///
+    /// Each form with an exact DataFrame equivalent is rewritten, the same rewrites the editor
+    /// offers as code actions, and everything else is left as it is. Without `--write`, the
+    /// changes are printed as a diff.
+    DataTable {
+        /// R files or directories to rewrite
+        files: Option<Vec<PathBuf>>,
+        /// Write the rewritten files in place instead of printing a diff
+        #[arg(long, default_value_t = false)]
+        write: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

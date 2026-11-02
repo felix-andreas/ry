@@ -1304,6 +1304,10 @@ impl Heap {
         }
         if cell.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
+            // A watched cell is one some lookup was compiled against, and compiled code checks
+            // its speculations by the symbol's stamp alone while that stamp stays put, so a new
+            // value has to move the stamp.
+            bump_symbol_epoch(cell.car());
         }
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
@@ -1346,9 +1350,9 @@ impl Heap {
     }
 
     /// A stamp for lookups of `symbol` through environments other than function frames: it
-    /// changes whenever a binding of `symbol` appears or disappears in such an environment, or
-    /// any enclosure is replaced, so a cell cached under an unchanged stamp is still the one a
-    /// fresh walk would find.
+    /// changes whenever a binding of `symbol` appears or disappears in such an environment, a
+    /// watched binding of it is assigned, or any enclosure is replaced, so a cell cached under an
+    /// unchanged stamp is still the one a fresh walk would find.
     pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
         symbol.symbol_payload().epoch.get() + self.enclosure_epoch
     }
@@ -1432,6 +1436,17 @@ impl Heap {
             return None;
         }
         unsafe { (*env.frame_ptr()).hash_profile() }
+    }
+
+    /// Counts a binding of `symbol` that `env` holds only for the length of one operation, as
+    /// GNU R's complex assignment binds `*tmp*`, in the table that orders a hashed frame. The
+    /// binding itself is never visible, but its insert and removal move GNU R's chain counter
+    /// and so can grow the table, which changes the order the frame lists in.
+    pub unsafe fn count_transient_binding(&mut self, env: Sexp, symbol: Sexp) {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return;
+        }
+        unsafe { (*env.frame_ptr()).count_transient(symbol) }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.

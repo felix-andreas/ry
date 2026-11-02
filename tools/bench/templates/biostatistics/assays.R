@@ -41,7 +41,7 @@ test_that("assay @ID@ recovers the dose-response", {
   expect_equal(nrow(layout), @WELLS@)
   percent: @if-unknown double[] <- normalise_plate_@ID@(layout)$percent
   expect_equal(range(percent), c(0, 100))
-  fit <- tryCatch(fit_dose_response_@ID@(layout), error = function(e) NULL)
+  fit <- tryCatch(fit_dose_response_@ID@(layout), error = function(e: condition) -> NULL NULL)
   if (!is.null(fit)) expect_gt(stats::coef(fit)[["top"]], 50)
   withr::with_tempdir(expect_equal(nrow(write_plate_@ID@(layout, "plate.xlsx")), @WELLS@))
 })

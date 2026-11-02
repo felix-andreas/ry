@@ -1,0 +1,21 @@
+[stdout]
+| [1] "structure(c(1, 2), names = c(\"a\", NA))"
+| [1] "structure(list(1, 2), names = c(\"a\", NA))"
+| [1] "structure(c(1, 2), names = c(NA_character_, NA_character_))"
+| structure(list(1, 2), names = c("a", NA))
+| [1] "structure(c(1, 2), names = c(\"a\", NA))"
+| [1] "list(\"NA\" = 1, \"NA\" = 2)"
+| [1] 0e+00
+| [1] 1e+00 1e+01
+| [1] 1.23e+02
+| [1] 0
+| [1] 123
+| [1] 1e+05
+| [1] 1.5 2.0
+| [1] "list(a = 1, \"NA\" = 2)"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "list(a = 1, \"NA\" = 2)"
