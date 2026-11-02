@@ -7,13 +7,13 @@ use {
         parse, s3_generics,
         stubs::{declaring_namespace, stubs},
     },
-    rowan::{Direction, NodeOrToken},
+    std::cell::LazyCell,
     syntax::{
-        GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
+        Direction, NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TreeEvent,
         ast::BinaryExpr,
-        is_green_inline_annotation,
+        is_inline_annotation_kind,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, walk_green,
+        node_at, node_text, walk_tree,
     },
 };
 
@@ -144,57 +144,108 @@ pub struct LintConfig {
 }
 
 /// Each lint's config key, which is also its code, with its level, for code that sets levels by
-/// name, such as reading lintr's configuration.
+/// name, such as reading lintr's configuration. The destructuring names every field, so a new
+/// field fails to compile until it is listed here or explicitly skipped.
 pub fn lint_levels_mut(config: &mut LintConfig) -> Vec<(&'static str, &mut LintLevel)> {
+    let LintConfig {
+        assignment_operator,
+        boolean_shorthand,
+        trailing_comma,
+        unused_parameter,
+        unused_import,
+        shadows_builtin,
+        shadows_namespace,
+        object_system,
+        equals_na,
+        vector_logic,
+        length_sequence,
+        class_equals,
+        commented_code,
+        redundant_return,
+        duplicate_argument,
+        unreachable_code,
+        sprintf_arguments,
+        any_is_na,
+        paste_sep,
+        lengths,
+        literal_coercion,
+        redundant_equals,
+        single_quotes,
+        testthat_expectation,
+        condition_message,
+        comparison_negation,
+        outer_negation,
+        fixed_regex,
+        which_grepl,
+        length_levels,
+        browser_call,
+        numeric_leading_zero,
+        length_test,
+        implicit_assignment,
+        while_true,
+        scalar_in,
+        order_subset,
+        matrix_apply,
+        empty_assignment,
+        unnecessary_lambda,
+        yoda_test,
+        nzchar,
+        sample_int,
+        unnecessary_concatenation,
+        line_length,
+        data_table,
+        naming_style: _,
+        missing_comma: _,
+        max_line_length: _,
+        object_systems_disabled: _,
+    } = config;
     vec![
-        ("assignment-operator", &mut config.assignment_operator),
-        ("boolean-shorthand", &mut config.boolean_shorthand),
-        ("trailing-comma", &mut config.trailing_comma),
-        ("unused-parameter", &mut config.unused_parameter),
-        ("unused-import", &mut config.unused_import),
-        ("shadows-builtin", &mut config.shadows_builtin),
-        ("shadows-namespace", &mut config.shadows_namespace),
-        ("object-system", &mut config.object_system),
-        ("equals-na", &mut config.equals_na),
-        ("vector-logic", &mut config.vector_logic),
-        ("length-sequence", &mut config.length_sequence),
-        ("class-equals", &mut config.class_equals),
-        ("commented-code", &mut config.commented_code),
-        ("redundant-return", &mut config.redundant_return),
-        ("duplicate-argument", &mut config.duplicate_argument),
-        ("unreachable-code", &mut config.unreachable_code),
-        ("sprintf-arguments", &mut config.sprintf_arguments),
-        ("any-is-na", &mut config.any_is_na),
-        ("paste-sep", &mut config.paste_sep),
-        ("lengths", &mut config.lengths),
-        ("literal-coercion", &mut config.literal_coercion),
-        ("redundant-equals", &mut config.redundant_equals),
-        ("single-quotes", &mut config.single_quotes),
-        ("testthat-expectation", &mut config.testthat_expectation),
-        ("condition-message", &mut config.condition_message),
-        ("comparison-negation", &mut config.comparison_negation),
-        ("outer-negation", &mut config.outer_negation),
-        ("fixed-regex", &mut config.fixed_regex),
-        ("which-grepl", &mut config.which_grepl),
-        ("length-levels", &mut config.length_levels),
-        ("browser-call", &mut config.browser_call),
-        ("numeric-leading-zero", &mut config.numeric_leading_zero),
-        ("length-test", &mut config.length_test),
-        ("implicit-assignment", &mut config.implicit_assignment),
-        ("while-true", &mut config.while_true),
-        ("scalar-in", &mut config.scalar_in),
-        ("order-subset", &mut config.order_subset),
-        ("matrix-apply", &mut config.matrix_apply),
-        ("empty-assignment", &mut config.empty_assignment),
-        ("unnecessary-lambda", &mut config.unnecessary_lambda),
-        ("yoda-test", &mut config.yoda_test),
-        ("nzchar", &mut config.nzchar),
-        ("sample-int", &mut config.sample_int),
-        (
-            "unnecessary-concatenation",
-            &mut config.unnecessary_concatenation,
-        ),
-        ("line-length", &mut config.line_length),
+        ("assignment-operator", assignment_operator),
+        ("boolean-shorthand", boolean_shorthand),
+        ("trailing-comma", trailing_comma),
+        ("unused-parameter", unused_parameter),
+        ("unused-import", unused_import),
+        ("shadows-builtin", shadows_builtin),
+        ("shadows-namespace", shadows_namespace),
+        ("object-system", object_system),
+        ("equals-na", equals_na),
+        ("vector-logic", vector_logic),
+        ("length-sequence", length_sequence),
+        ("class-equals", class_equals),
+        ("commented-code", commented_code),
+        ("redundant-return", redundant_return),
+        ("duplicate-argument", duplicate_argument),
+        ("unreachable-code", unreachable_code),
+        ("sprintf-arguments", sprintf_arguments),
+        ("any-is-na", any_is_na),
+        ("paste-sep", paste_sep),
+        ("lengths", lengths),
+        ("literal-coercion", literal_coercion),
+        ("redundant-equals", redundant_equals),
+        ("single-quotes", single_quotes),
+        ("testthat-expectation", testthat_expectation),
+        ("condition-message", condition_message),
+        ("comparison-negation", comparison_negation),
+        ("outer-negation", outer_negation),
+        ("fixed-regex", fixed_regex),
+        ("which-grepl", which_grepl),
+        ("length-levels", length_levels),
+        ("browser-call", browser_call),
+        ("numeric-leading-zero", numeric_leading_zero),
+        ("length-test", length_test),
+        ("implicit-assignment", implicit_assignment),
+        ("while-true", while_true),
+        ("scalar-in", scalar_in),
+        ("order-subset", order_subset),
+        ("matrix-apply", matrix_apply),
+        ("empty-assignment", empty_assignment),
+        ("unnecessary-lambda", unnecessary_lambda),
+        ("yoda-test", yoda_test),
+        ("nzchar", nzchar),
+        ("sample-int", sample_int),
+        ("unnecessary-concatenation", unnecessary_concatenation),
+        ("line-length", line_length),
+        ("data-table", data_table),
     ]
 }
 
@@ -334,17 +385,17 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
     // One entry per open node, so a `Leave` knows whether its node opened a region.
     let mut opens_annotation = Vec::new();
     let mut annotation_depth = 0usize;
-    // The walk reads the green tree and builds a red node only where a cheap green test says
-    // a lint may fire, because a red walk of every file was a large share of the cold check.
-    walk_green(root, |event| match event {
-        GreenEvent::Enter {
+    // The walk reads borrowed nodes and makes an owned one only where a cheap test says a lint
+    // may fire.
+    walk_tree(root.node_ref(), |event| match event {
+        TreeEvent::Enter {
             node,
             parent,
             range,
         } => {
             let kind = node.kind();
             let opens = kind == SyntaxKind::ANNOTATION
-                || is_green_inline_annotation(kind, parent.map(GreenRef::kind));
+                || is_inline_annotation_kind(kind, parent.map(NodeRef::kind));
             opens_annotation.push(opens);
             annotation_depth += usize::from(opens);
             if opens || !may_lint(node, parent, config) {
@@ -381,12 +432,12 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 _ => {}
             }
         }
-        GreenEvent::Leave(_) => {
+        TreeEvent::Leave(_) => {
             if opens_annotation.pop() == Some(true) {
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { kind, text, range } => {
+        TreeEvent::Token { kind, text, range } => {
             if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
                 commented_code_lint(text, range, config, diagnostics);
             }
@@ -424,7 +475,7 @@ fn line_length_lint(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Ve
         return;
     };
     let limit = config.max_line_length.unwrap_or(80);
-    let text = root.text().to_string();
+    let text = node_text(root);
     let mut line_start = 0usize;
     for line in text.split_inclusive('\n') {
         let content = line.trim_end_matches(['\n', '\r']);
@@ -516,9 +567,9 @@ fn boolean_shorthand_lint(
     );
 }
 
-/// A conservative green-tree test for whether the red lint for `node` can report anything:
+/// A conservative test on a borrowed node for whether the lint for `node` can report anything:
 /// `false` only when it certainly reports nothing.
-fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfig) -> bool {
+fn may_lint(node: NodeRef<'_>, parent: Option<NodeRef<'_>>, config: &LintConfig) -> bool {
     match node.kind() {
         SyntaxKind::BINARY_EXPR => node.child_kinds().any(|kind| {
             matches!(
@@ -696,7 +747,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             .lhs()
             .filter(|target| target.kind() == SyntaxKind::NAME)
     {
-        let name = target.text().to_string();
+        let name = node_text(&target).into_owned();
         if let Some(message) = naming_style_message(&name, style, "Variable") {
             diagnostics.push(Diagnostic::new(
                 significant_range(&target),
@@ -728,11 +779,11 @@ fn object_system_lint(
             let (Some(package), Some(name)) = (names.next(), names.next()) else {
                 return;
             };
-            (Some(package.text().to_string()), name)
+            (Some(node_text(&package).into_owned()), name)
         }
         _ => return,
     };
-    let function = name.text().to_string();
+    let function = node_text(&name);
     let Some((system, defines, home)) = object_system_function(&function) else {
         return;
     };
@@ -766,7 +817,7 @@ fn object_system_lint(
         None => unless_redefined.extend(
             found
                 .into_iter()
-                .map(|diagnostic| (function.clone(), diagnostic)),
+                .map(|diagnostic| (function.to_string(), diagnostic)),
         ),
     }
 }
@@ -1022,8 +1073,8 @@ fn length_sequence_lint(
     );
 }
 
-/// Whether a call to the bare callee `name` can report anything, so the green pre-check
-/// builds a red node only for calls some enabled lint looks at.
+/// Whether a call to the bare callee `name` can report anything, so the pre-check makes an
+/// owned node only for calls some enabled lint looks at.
 fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
     let opted = |level| is_enabled(level, None);
     match name {
@@ -1089,13 +1140,8 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
             let mut children = node.children();
             let name = if named {
                 children.next().map(|name| {
-                    let text = name.text().to_string();
-                    let unquoted = text
-                        .strip_prefix(['`', '"', '\''])
-                        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
-                        .unwrap_or(&text)
-                        .to_owned();
-                    (unquoted, significant_range(&name))
+                    let text = node_text(&name);
+                    (unquoted(&text).to_owned(), significant_range(&name))
                 })
             } else {
                 None
@@ -1106,32 +1152,48 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
         .collect()
 }
 
+fn unquoted(name: &str) -> &str {
+    name.strip_prefix(['`', '"', '\''])
+        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
+        .unwrap_or(name)
+}
+
 /// The name of a bare callee, such as `sprintf` in `sprintf(...)` but not in `base::sprintf(...)`.
 fn bare_callee(call: &SyntaxNode) -> Option<String> {
     call.first_child()
         .filter(|callee| callee.kind() == SyntaxKind::NAME)
-        .map(|callee| callee.text().to_string())
+        .map(|callee| node_text(&callee).into_owned())
 }
 
 fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
     let callee = bare_callee(call);
-    let arguments = call_arguments(call);
-    duplicate_argument_lint(callee.as_deref(), &arguments, config, diagnostics);
+    if repeats_argument_name(call) {
+        duplicate_argument_lint(
+            callee.as_deref(),
+            &call_arguments(call),
+            config,
+            diagnostics,
+        );
+    }
     let Some(callee) = callee else {
         return;
     };
-    let positional: Vec<&SyntaxNode> = arguments
-        .iter()
-        .filter(|argument| argument.name.is_none())
-        .filter_map(|argument| argument.value.as_ref())
-        .collect();
-    let all_positional = positional.len() == arguments.len();
+    // Lazy because collecting the arguments allocates, and most callees have no lint below.
+    let arguments = LazyCell::new(|| call_arguments(call));
+    let positional = LazyCell::new(|| {
+        arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .filter_map(|argument| argument.value.as_ref())
+            .collect::<Vec<&SyntaxNode>>()
+    });
+    let all_positional = LazyCell::new(|| positional.len() == arguments.len());
     match callee.as_str() {
-        "seq" if all_positional && positional.len() == 1 => {
+        "seq" if *all_positional && positional.len() == 1 => {
             length_sequence_lint(call, positional[0], true, config, diagnostics);
         }
         "sprintf" | "gettextf" => sprintf_arguments_lint(&callee, &arguments, config, diagnostics),
-        "any" | "all" if all_positional && positional.len() == 1 => {
+        "any" | "all" if *all_positional && positional.len() == 1 => {
             outer_negation_lint(call, &callee, positional[0], config, diagnostics);
             if callee != "any" {
                 return;
@@ -1160,7 +1222,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 return;
             }
             let expected = if callee == "sapply" { 2 } else { 3 };
-            let counts_lengths = all_positional
+            let counts_lengths = *all_positional
                 && positional.len() == expected
                 && positional[1].kind() == SyntaxKind::NAME
                 && positional[1].text() == "length";
@@ -1183,11 +1245,11 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             }
         }
         "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character"
-            if all_positional && positional.len() == 1 =>
+            if *all_positional && positional.len() == 1 =>
         {
             literal_coercion_lint(call, &callee, positional[0], config, diagnostics);
         }
-        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if all_positional => {
+        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if *all_positional => {
             testthat_expectation_lint(call, &callee, &positional, config, diagnostics);
             if let [expected, actual] = positional[..]
                 && matches!(callee.as_str(), "expect_equal" | "expect_identical")
@@ -1257,7 +1319,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
         "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
             fixed_regex_lint(call, &callee, &arguments, config, diagnostics);
         }
-        "which" if all_positional && positional.len() == 1 => {
+        "which" if *all_positional && positional.len() == 1 => {
             // grep() puts `value` fifth where grepl() has `fixed`, so a fifth positional
             // argument would change meaning in the rewritten call.
             if positional[0].kind() != SyntaxKind::CALL_EXPR
@@ -1290,7 +1352,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 )),
             );
         }
-        "length" if all_positional && positional.len() == 1 => {
+        "length" if *all_positional && positional.len() == 1 => {
             length_test_lint(call, positional[0], config, diagnostics);
             if let Some(("levels", value)) = single_argument_of(positional[0], &["levels"]) {
                 push_lint(
@@ -1327,6 +1389,42 @@ fn opt_in(level: LintLevel) -> LintLevel {
         LintLevel::Default => LintLevel::Off,
         level => level,
     }
+}
+
+/// Whether two named arguments of `call` may share a name. A name of several tokens answers yes and leaves the
+/// decision to [`duplicate_argument_lint`].
+fn repeats_argument_name(call: &SyntaxNode) -> bool {
+    let Some(list) = call
+        .node_ref()
+        .child_nodes()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+    else {
+        return false;
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for argument in list
+        .child_nodes()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+    {
+        if !argument.child_kinds().any(|kind| kind == SyntaxKind::EQ) {
+            continue;
+        }
+        let Some(name) = argument.child_nodes().next() else {
+            continue;
+        };
+        let Some(text) = name.single_token_text() else {
+            return true;
+        };
+        let name = unquoted(text);
+        if name.is_empty() {
+            continue;
+        }
+        if seen.contains(&name) {
+            return true;
+        }
+        seen.push(name);
+    }
+    false
 }
 
 /// A closure stops with "formal argument matched by multiple actual arguments", and `c()` or
@@ -1575,7 +1673,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -1950,12 +2048,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match margin.text().to_string().as_str() {
+    let prefix = match &*node_text(margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match function.text().to_string().as_str() {
+    let suffix = match &*node_text(function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -1978,7 +2076,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
+        (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
@@ -2042,7 +2140,7 @@ fn unnecessary_lambda_lint(
         };
         // These read their argument's expression, not its value, so the wrapper is needed.
         let quoting = matches!(
-            callee.text().to_string().as_str(),
+            &*node_text(&callee),
             "quote"
                 | "bquote"
                 | "substitute"
@@ -2086,7 +2184,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(rhs.text().to_string().as_str(), "0" | "0L") {
+    if !matches!(&*node_text(rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2129,9 +2227,7 @@ fn sample_int_lint(
     else {
         return;
     };
-    if operator.kind() != SyntaxKind::COLON
-        || !matches!(lhs.text().to_string().as_str(), "1" | "1L")
-    {
+    if operator.kind() != SyntaxKind::COLON || !matches!(&*node_text(&lhs), "1" | "1L") {
         return;
     }
     let Some(list) = call
@@ -2142,7 +2238,7 @@ fn sample_int_lint(
     };
     let list_start = list.text_range().start();
     let first_range = significant_range(value) - list_start;
-    let list_text = list.text().to_string();
+    let list_text = node_text(&list).into_owned();
     let (Some(before), Some(after)) = (
         list_text.get(..usize::from(first_range.start())),
         list_text.get(usize::from(first_range.end())..),
@@ -2549,7 +2645,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {
@@ -2927,7 +3023,7 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
 
 fn significant_text(node: &SyntaxNode) -> String {
     let range = significant_range(node) - node.text_range().start();
-    node.text().to_string()[range].to_owned()
+    node_text(node)[range].to_owned()
 }
 
 fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option<String> {

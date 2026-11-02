@@ -2,7 +2,7 @@ use {
     clap::Parser,
     ry::{
         cli::{self, CommandError, Outcome},
-        command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
+        command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
         config::Config,
         debug_adapter, load,
         preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
@@ -209,6 +209,9 @@ fn main() -> ExitCode {
             range,
             verbose,
         } => exit_code(cli::fmt(files.as_deref(), check, diff, range, verbose)),
+        Command::Migrate(Migrate::DataTable { files, write }) => {
+            exit_code(cli::migrate_data_table(files.as_deref(), write))
+        }
         Command::Server {
             stdio: _,
             verbose: _,
@@ -230,10 +233,11 @@ fn main() -> ExitCode {
             full,
             emit_plan: Some(plan_file),
             state,
+            conditions,
             ..
         } => {
             let state = state.unwrap_or_else(|| plan_file.with_extension("state.json"));
-            match load::emit_plan(&path, &plan_file, &state, full) {
+            match load::emit_plan(&path, &plan_file, &state, conditions.as_deref(), full) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     cli::error(&error.to_string());

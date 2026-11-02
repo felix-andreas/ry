@@ -149,6 +149,21 @@ result <- foobar::bazqux(1L)
 result: Unknown
 10..24 warning[unresolved] unknown package namespace `foobar`.
 
+#---- an_inactive_shipped_namespace_still_checks_its_exports
+#~~~~ analysis.R
+kept <- dplyr::mutate
+typo <- dplyr::mutat
+internal <- dplyr:::mutat
+#++++
+== analysis.R
+kept: Unknown
+typo: Unknown
+internal: Unknown
+0..4 warning[unused] `kept` is assigned but never used.
+22..26 warning[unused] `typo` is assigned but never used.
+30..42 warning[unresolved] `mutat` is not exported by `dplyr`.
+43..51 warning[unused] `internal` is assigned but never used.
+
 #---- known_namespace_unknown_export_warns
 #~~~~ R/main.R
 result <- stats::bazqux(1L)

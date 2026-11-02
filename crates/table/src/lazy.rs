@@ -21,11 +21,12 @@ use {
         io::{self, ReadOptions},
         query::{
             self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
-            Select, SortKey, UnaryOp, Warning, collapses, join_layout,
+            Select, SortKey, UnaryOp, Warning, collapses, column_references, join_layout,
         },
     },
     polars::prelude::{
-        IntoLazy, JoinArgs, JoinCoalesce, JoinType, ParquetReader, PlSmallStr, SerReader, col,
+        CrossJoin, IntoLazy, JoinArgs, JoinCoalesce, JoinType, MaintainOrderJoin, ParquetReader,
+        PlSmallStr, SerReader, col,
     },
     rustc_hash::FxHashSet,
     std::{
@@ -92,6 +93,8 @@ pub enum How {
     /// Every left row, matched on the leading keys exactly and on the last key to the nearest
     /// right row in the strategy's direction, with `NA` in the right columns when none is near.
     Asof(Strategy),
+    /// Every left row paired with every right row, left-major, with no key columns.
+    Cross,
 }
 
 /// Which right row an as-of join takes for a left row, comparing the last key.
@@ -132,6 +135,7 @@ impl How {
             "full" => How::Full,
             "semi" => How::Semi,
             "anti" => How::Anti,
+            "cross" => How::Cross,
             _ => return None,
         })
     }
@@ -144,6 +148,7 @@ impl How {
             How::Semi => "semi",
             How::Anti => "anti",
             How::Asof(_) => "asof",
+            How::Cross => "cross",
         }
     }
 }
@@ -211,8 +216,11 @@ pub fn output_name(expr: &Expr) -> PlSmallStr {
     fn first_column(expr: &Expr) -> Option<&PlSmallStr> {
         match expr {
             Expr::Column(name) => Some(name),
-            Expr::Unary(_, arg) | Expr::Head(arg, _) => first_column(arg),
-            Expr::Aggregate { arg, .. } => first_column(arg),
+            Expr::Unary(_, arg)
+            | Expr::Head(arg, _)
+            | Expr::Aggregate { arg, .. }
+            | Expr::Rank { arg, .. }
+            | Expr::Window(arg, _) => first_column(arg),
             Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
                 first_column(left).or_else(|| first_column(right))
             }
@@ -329,7 +337,7 @@ fn push_down_predicates(source_schema: &Schema, steps: &mut Vec<Step>) -> Result
                 index = before;
                 continue;
             }
-            Step::Sort(_) => Some(predicate),
+            Step::Sort(_) if !reads_order(&predicate) => Some(predicate),
             Step::WithColumns(columns)
                 if row_wise
                     && columns.iter().all(|(_, expr)| !contains_aggregate(expr))
@@ -351,12 +359,12 @@ fn push_down_predicates(source_schema: &Schema, steps: &mut Vec<Step>) -> Result
             // its left row. A full join also adds rows no left row produced, so it keeps its
             // filters.
             Step::Join {
-                how: How::Inner | How::Left | How::Semi | How::Anti | How::Asof(_),
+                how: How::Inner | How::Left | How::Semi | How::Anti | How::Asof(_) | How::Cross,
                 ..
             } if row_wise => {
                 let left = schema_before(source_schema, &steps[..before])?;
                 let mut columns = FxHashSet::default();
-                columns_read(&predicate, &mut columns);
+                column_references(&predicate, &mut columns);
                 columns
                     .iter()
                     .all(|name| left.column(name).is_some())
@@ -412,13 +420,33 @@ fn map_columns(expr: &Expr, rename: &dyn Fn(&PlSmallStr) -> Expr) -> Expr {
         Expr::Head(arg, count) => Expr::Head(go(arg), *count),
         Expr::Correlation(left, right) => Expr::Correlation(go(left), go(right)),
         Expr::IfElse(test, yes, no) => Expr::IfElse(go(test), go(yes), go(no)),
+        Expr::Rank { arg, descending } => Expr::Rank {
+            arg: go(arg),
+            descending: *descending,
+        },
+        // A renamed window key must stay a plain column, so only an identity rename passes.
+        Expr::Window(arg, keys) => Expr::Window(
+            go(arg),
+            keys.iter()
+                .map(|key| match rename(key) {
+                    Expr::Column(renamed) => renamed,
+                    _ => key.clone(),
+                })
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
 
+/// Whether `expr` depends on which rows it sees, not only on the row it computes.
 fn contains_aggregate(expr: &Expr) -> bool {
     match expr {
-        Expr::Aggregate { .. } | Expr::Count | Expr::Head(..) | Expr::Correlation(..) => true,
+        Expr::Aggregate { .. }
+        | Expr::Count
+        | Expr::Head(..)
+        | Expr::Correlation(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => true,
         Expr::Unary(_, arg) => contains_aggregate(arg),
         Expr::Binary(_, left, right) => contains_aggregate(left) || contains_aggregate(right),
         Expr::IfElse(test, yes, no) => {
@@ -428,31 +456,38 @@ fn contains_aggregate(expr: &Expr) -> bool {
     }
 }
 
-fn reads(expr: &Expr, column: &str) -> bool {
-    let mut columns = FxHashSet::default();
-    columns_read(expr, &mut columns);
-    columns.contains(column)
-}
-
-fn columns_read(expr: &Expr, columns: &mut FxHashSet<PlSmallStr>) {
+/// Whether `expr` depends on the order of the rows it sees: `first`, `last` and `head` take rows
+/// by position, and a rank breaks ties by it.
+fn reads_order(expr: &Expr) -> bool {
     match expr {
-        Expr::Column(name) => {
-            columns.insert(name.clone());
+        Expr::Aggregate {
+            function: Aggregate::First | Aggregate::Last,
+            ..
         }
-        Expr::Unary(_, arg) | Expr::Head(arg, _) | Expr::Aggregate { arg, .. } => {
-            columns_read(arg, columns);
+        | Expr::Head(..)
+        | Expr::Rank { .. } => true,
+        Expr::Unary(_, arg) | Expr::Aggregate { arg, .. } | Expr::Window(arg, _) => {
+            reads_order(arg)
         }
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
-            columns_read(left, columns);
-            columns_read(right, columns);
+            reads_order(left) || reads_order(right)
         }
-        Expr::IfElse(test, yes, no) => {
-            columns_read(test, columns);
-            columns_read(yes, columns);
-            columns_read(no, columns);
-        }
-        _ => {}
+        Expr::IfElse(test, yes, no) => reads_order(test) || reads_order(yes) || reads_order(no),
+        Expr::Column(_)
+        | Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Date(_)
+        | Expr::Na(_)
+        | Expr::Count => false,
     }
+}
+
+fn reads(expr: &Expr, column: &str) -> bool {
+    let mut columns = FxHashSet::default();
+    column_references(expr, &mut columns);
+    columns.contains(column)
 }
 
 /// The source columns some step reads or passes through to the result, in the source's order.
@@ -466,21 +501,21 @@ fn needed_columns(source_schema: &Schema, steps: &[Step]) -> Vec<PlSmallStr> {
         match step {
             Step::Select(columns) => {
                 for (_, expr) in columns {
-                    columns_read(expr, &mut read);
+                    column_references(expr, &mut read);
                 }
                 needed = Some(read);
                 continue;
             }
             Step::Aggregate { keys, aggregates } => {
                 for (_, expr) in keys.iter().chain(aggregates) {
-                    columns_read(expr, &mut read);
+                    column_references(expr, &mut read);
                 }
                 needed = Some(read);
                 continue;
             }
             Step::WithColumns(columns) => {
                 for (_, expr) in columns {
-                    columns_read(expr, &mut read);
+                    column_references(expr, &mut read);
                 }
                 if let Some(needed) = &mut needed {
                     for (name, _) in columns {
@@ -488,10 +523,10 @@ fn needed_columns(source_schema: &Schema, steps: &[Step]) -> Vec<PlSmallStr> {
                     }
                 }
             }
-            Step::Filter(expr) => columns_read(expr, &mut read),
+            Step::Filter(expr) => column_references(expr, &mut read),
             Step::Sort(keys) => {
                 for key in keys {
-                    columns_read(&key.expr, &mut read);
+                    column_references(&key.expr, &mut read);
                 }
             }
             Step::Join { left_on, .. } => {
@@ -592,10 +627,10 @@ pub fn step_schema(schema: &Schema, step: &Step) -> Result<Schema> {
             suffix,
         } => {
             let right = other.schema()?;
-            check_join_keys(schema, &right, left_on, right_on)?;
+            check_join_keys(schema, &right, left_on, right_on, *how)?;
             Ok(match how {
                 How::Semi | How::Anti => schema.clone(),
-                How::Inner | How::Left | How::Full | How::Asof(_) => {
+                How::Inner | How::Left | How::Full | How::Asof(_) | How::Cross => {
                     let mut columns = schema.columns.clone();
                     for (name, kind) in &right.columns {
                         if right_on.contains(name) {
@@ -632,7 +667,16 @@ fn check_join_keys(
     right: &Schema,
     left_on: &[PlSmallStr],
     right_on: &[PlSmallStr],
+    how: How,
 ) -> Result<()> {
+    if how == How::Cross {
+        if left_on.is_empty() && right_on.is_empty() {
+            return Ok(());
+        }
+        return Err(Error::Query(
+            "a cross join takes no key columns".to_string(),
+        ));
+    }
     if left_on.is_empty() || left_on.len() != right_on.len() {
         return Err(Error::Query(
             "a join needs the same number of key columns on both sides".to_string(),
@@ -796,8 +840,21 @@ fn join(
     suffix: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<Table> {
-    check_join_keys(&left.schema(), &right.schema(), left_on, right_on)?;
+    check_join_keys(&left.schema(), &right.schema(), left_on, right_on, how)?;
     match how {
+        How::Cross => {
+            let left_schema = left.schema();
+            let right_schema = right.schema();
+            let mut frame = left.into_frame();
+            let mut right = right.into_frame();
+            for (name, _) in &right_schema.columns {
+                if left_schema.column(name).is_some() {
+                    right.rename(name, PlSmallStr::from(format!("{name}{suffix}")))?;
+                }
+            }
+            frame = CrossJoin::cross_join(&frame, &right, None, None, MaintainOrderJoin::Left)?;
+            Table::new(frame)
+        }
         How::Inner | How::Left | How::Asof(_) => {
             let on: Vec<On> = right_on
                 .iter()
@@ -812,8 +869,8 @@ fn join(
                 let joined = layout
                     .iter()
                     .find(|column| match column.condition {
-                        Some(index) => &left_on[index] == name,
-                        None => column.side == query::Side::I && &column.source == name,
+                        Some(index) => left_on[index] == name,
+                        None => column.side == query::Side::I && column.source == name,
                     })
                     .ok_or_else(|| Error::NoColumn(name.to_string()))?;
                 select.push((name.clone(), Expr::Column(joined.name.clone())));
@@ -1009,6 +1066,7 @@ impl fmt::Display for Expr {
             Expr::Logical(true) => formatter.write_str("TRUE"),
             Expr::Logical(false) => formatter.write_str("FALSE"),
             Expr::Character(value) => write!(formatter, "{value:?}"),
+            Expr::Date(days) => write!(formatter, "date({days})"),
             Expr::Na(_) => formatter.write_str("NA"),
             Expr::Unary(UnaryOp::Negate, arg) => write!(formatter, "-{arg}"),
             Expr::Unary(UnaryOp::Not, arg) => write!(formatter, "!{arg}"),
@@ -1059,6 +1117,22 @@ impl fmt::Display for Expr {
             Expr::Correlation(left, right) => write!(formatter, "cor({left}, {right})"),
             Expr::IfElse(test, yes, no) => {
                 write!(formatter, "when({test}).then({yes}).otherwise({no})")
+            }
+            Expr::Rank { arg, descending } => {
+                write!(
+                    formatter,
+                    "{}.rank(descending = {})",
+                    Receiver(arg),
+                    if *descending { "TRUE" } else { "FALSE" }
+                )
+            }
+            Expr::Window(arg, keys) => {
+                write!(formatter, "{}.over(", Receiver(arg))?;
+                for (index, key) in keys.iter().enumerate() {
+                    let separator = if index == 0 { "" } else { ", " };
+                    write!(formatter, "{separator}\"{key}\"")?;
+                }
+                formatter.write_str(")")
             }
         }
     }

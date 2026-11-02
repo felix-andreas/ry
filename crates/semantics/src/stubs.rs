@@ -5,6 +5,7 @@ use {
     crate::{
         Db,
         annotations::{NamedDefinition, lower_annotation},
+        hir::Symbol,
         metadata::namespace_active,
         types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
     },
@@ -91,6 +92,61 @@ pub fn declaring_namespace<'db>(db: &'db dyn Db, name: &str) -> Option<&'db str>
 
 pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
     stubs(db).is_some_and(|library| library.exports(package, name))
+}
+
+/// Whether a shipped namespace the project has not activated exports `name`, for validating
+/// `pkg::name`: `::` loads a package without attaching it, so the read is legal R, but its name
+/// must still exist. `None` when no export manifest ships for the package, because typed stubs
+/// alone may describe only part of it.
+pub fn dormant_namespace_exports(db: &dyn Db, package: &str, name: &str) -> Option<bool> {
+    let sources = StubSources::try_get(db)?;
+    dormant_exports(db, sources, Symbol::new(package))
+        .as_ref()
+        .map(|names| names.contains(name))
+}
+
+/// Every name a shipped namespace's manifest lists or its stubs declare, read without
+/// activating it. Stub sources change only with the stub files, so this is computed once.
+#[salsa::tracked(returns(ref))]
+fn dormant_exports(
+    db: &dyn Db,
+    sources: StubSources,
+    package: Symbol,
+) -> Option<FxHashSet<String>> {
+    let package = package.as_str();
+    let (_, manifest) = sources
+        .manifests(db)
+        .iter()
+        .find(|(namespace, _)| namespace == package)?;
+    let mut names: FxHashSet<String> = manifest
+        .lines()
+        .map(|line| strip_comment(line).trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for (_, text) in sources
+        .sources(db)
+        .iter()
+        .filter(|(namespace, _)| namespace == package)
+    {
+        for line in text.lines() {
+            if line.trim_start().starts_with("#'") {
+                continue;
+            }
+            let content = strip_comment(line).trim();
+            if let Some(definition) = type_definition_line(db, content) {
+                names.insert(definition.name.text(db).to_owned());
+            } else if let Some(rest) = content.strip_prefix("@type") {
+                names.insert(rest.trim().to_owned());
+            } else if let Some(separator) = top_level_colon(content) {
+                let name = content[..separator].trim();
+                if is_stub_name(name) {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    Some(names)
 }
 
 /// The namespace of ry's standard library (`Result.map`, `Dict.get`, ...). Its functions are
@@ -369,6 +425,33 @@ fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<St
             .collect(),
     )
 }
+
+/// For each name, every namespace whose export manifest lists it, whether or not the project
+/// uses that package, in namespace order. An unresolved name looks up here which packages could
+/// provide it.
+#[salsa::tracked(returns(ref))]
+pub fn exporting_namespaces(db: &dyn Db, sources: StubSources) -> ExportingNamespaces {
+    let mut index: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    for (namespace, text) in sources.manifests(db) {
+        for line in text.lines() {
+            let name = strip_comment(line).trim();
+            if name.is_empty() {
+                continue;
+            }
+            let namespaces = index.entry(name.to_owned()).or_default();
+            if !namespaces.contains(namespace) {
+                namespaces.push(namespace.clone());
+            }
+        }
+    }
+    for namespaces in index.values_mut() {
+        namespaces.sort_unstable();
+    }
+    ExportingNamespaces(index)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ExportingNamespaces(pub FxHashMap<String, Vec<String>>);
 
 pub fn stubs<'db>(db: &'db dyn Db) -> Option<&'db StubLibrary<'db>> {
     StubSources::try_get(db).map(|sources| stub_library(db, sources))
@@ -1030,7 +1113,7 @@ mod tests {
         install_shipped_stubs(&db);
         let check = first_item_check(&db, "f <- function() cumsum(1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let ret = scheme_return(&db, &check);
+        let ret = scheme_return(&db, check);
         let TyKind::Vector(element) = ret.kind(&db) else {
             panic!("expected integer[], got {:?}", ret.kind(&db));
         };
@@ -1044,7 +1127,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function() sum(1, 2)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1063,7 +1146,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(1)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1103,7 +1186,7 @@ mod tests {
         let scheme = check.scheme.clone().expect("scheme");
         assert!(scheme.binders.is_empty(), "{scheme:?}");
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Unknown
         ));
     }
@@ -1124,7 +1207,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(function(v) v, 1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1146,7 +1229,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function(n) f(n, 2L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1172,7 +1255,7 @@ mod tests {
             "the parameter must stay generic: {scheme:?}"
         );
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Character)
         ));
     }
@@ -1216,7 +1299,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function(x) base::length(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }

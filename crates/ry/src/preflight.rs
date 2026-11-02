@@ -6,13 +6,14 @@ use {
     crate::{
         check_cache::CacheUse,
         cli::{
-            CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
-            render_findings, report, warn_config,
+            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, RelatedNote,
+            analyze_project, check_package_code, render_findings, report, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
     },
     repl::{Filtered, InputFilter},
+    rustc_hash::FxHashMap,
     salsa::Setter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -22,6 +23,7 @@ use {
     std::{
         fs,
         path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
         thread,
     },
     syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
@@ -153,9 +155,10 @@ impl Preflight {
 /// strict mode is a property of the code. The check is `ry check`'s analysis of the project
 /// asked about `R/` alone, so its verdict is the one `ry check` reaches for those files, and
 /// the two share the check cache: a package that `ry check` or the editor last checked loads
-/// without a second analysis, and a load after an edit checks only what the edit reached. A
-/// package that turns strict mode on nowhere, neither in `ry.toml` nor in a file's
-/// `# typing: strict`, skips analysis entirely.
+/// without a second analysis. A reload in the same process keeps the analysis it builds in
+/// [`PACKAGE_CHECKS`] and re-derives only what the edit invalidated. A package that turns
+/// strict mode on nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips
+/// analysis entirely.
 pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
     // The directive is ASCII, so the bytes answer for a file in any encoding.
@@ -175,19 +178,34 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     {
         return Ok(Verdict::Run);
     }
-    let analysis = thread::scope(|scope| {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut checks = PACKAGE_CHECKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The first check in a process reads the shared record, which makes a cold load after
+    // `ry check` or the editor cheap, but its database replays findings it never derived. A
+    // reload builds a database kept for edits instead, so every reload after it is incremental.
+    let first = !checks.contains_key(&key);
+    let previous = checks.remove(&key).flatten();
+    let check = thread::scope(|scope| {
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn_scoped(scope, || {
-                let analysis = analyze_project(
-                    root,
-                    root,
-                    config.clone(),
-                    std::slice::from_ref(&sources),
-                    CacheUse::ReadWrite,
-                )?;
-                let errors = strict_errors(&analysis);
-                Ok::<_, CommandError>((analysis, errors))
+                if first {
+                    let analysis = analyze_project(
+                        root,
+                        root,
+                        config.clone(),
+                        std::slice::from_ref(&sources),
+                        CacheUse::ReadWrite,
+                    )?;
+                    let errors = strict_errors(&analysis);
+                    Ok::<_, CommandError>(Checked::Recorded(analysis, errors))
+                } else {
+                    let check = check_package_code(previous, root, config)?;
+                    let errors = strict_errors(&check.analysis);
+                    Ok(Checked::Kept(check, errors))
+                }
             });
         match worker {
             Ok(handle) => handle
@@ -195,15 +213,18 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
             Err(error) => panic!("the preflight thread should spawn: {error}"),
         }
-    });
-    let (analysis, errors) = analysis?;
+    })?;
+    let (analysis, errors) = match &check {
+        Checked::Recorded(analysis, errors) => (analysis, errors),
+        Checked::Kept(check, errors) => (&check.analysis, errors),
+    };
     // A file the analysis could not read went unchecked, and it has said which.
     if analysis.failures > 0 {
         return Err(CommandError);
     }
     let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
     let mut problems = 0;
-    for (file, errors) in analysis.files.iter().zip(&errors) {
+    for (file, errors) in analysis.files.iter().zip(errors) {
         problems += render_findings(
             OutputFormat::Human,
             MinSeverity::Warning,
@@ -213,11 +234,39 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             &resolve_note,
         );
     }
+    let kept = match check {
+        Checked::Recorded(analysis, _) => {
+            // Freeing every memo of a large package takes longer than any phase of its check,
+            // and the loader is waiting for this verdict, so the memos are freed beside it.
+            if let Err(error) = thread::Builder::new()
+                .name("ry-strict-check-free".to_owned())
+                .spawn(move || drop(analysis))
+            {
+                panic!("the thread that frees the strict check should spawn: {error}");
+            }
+            None
+        }
+        Checked::Kept(check, _) => Some(check),
+    };
+    checks.insert(key, kept);
+    drop(checks);
     if problems == 0 {
         return Ok(Verdict::Run);
     }
     refuse(problems);
     Ok(Verdict::Refuse)
+}
+
+/// Each package's analysis from its last strict check in this process, by canonical root:
+/// `None` after a first check that read the shared record, and the database kept for edits
+/// after any later one.
+static PACKAGE_CHECKS: LazyLock<Mutex<FxHashMap<PathBuf, Option<PackageCheck>>>> =
+    LazyLock::new(Mutex::default);
+
+/// A strict check's analysis and each file's strict-mode errors.
+enum Checked {
+    Recorded(ProjectAnalysis, Vec<Vec<Diagnostic>>),
+    Kept(PackageCheck, Vec<Vec<Diagnostic>>),
 }
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does

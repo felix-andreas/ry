@@ -33,7 +33,7 @@ action: Add inferred type annotations for the whole file
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @18: integer
-hint @34: fn() -> integer
+hint @48 -> integer
 hint @58: integer
 
 #---- local_excludes_same_named_global
@@ -61,5 +61,5 @@ action: Add inferred type annotations for the whole file
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @18: integer
-hint @34: fn() -> integer
+hint @48 -> integer
 hint @58: integer

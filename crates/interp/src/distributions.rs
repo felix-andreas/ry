@@ -1485,10 +1485,7 @@ fn two_sum_pair(high: f64, low: f64, value: f64) -> (f64, f64) {
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use {
-        super::*,
-        crate::{random::SeededDeviates, rmath::*},
-    };
+    use {super::*, crate::random::SeededDeviates};
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 

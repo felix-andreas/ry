@@ -794,7 +794,7 @@ impl Model {
                     }
                     (Some("^"), 2) => {
                         let power = values::as_real_scalar(second());
-                        if !is_numeric_scalar(second()) || !(power >= 1.0) {
+                        if !is_numeric_scalar(second()) || power.is_nan() || power < 1.0 {
                             return Err(self.error("invalid power in formula"));
                         }
                         let left = self.encode(first())?;

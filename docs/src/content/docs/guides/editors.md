@@ -14,8 +14,11 @@ You get:
 
 - diagnostics as you type, the same ones `ry check` reports
 - hover with the inferred type of any expression, parameter or loop variable
-- completion, including the fields of a list such as `person$` and the argument names a call
-  still accepts (`second = `), with your own names ranked ahead of keywords and the library
+- completion, including the fields of a list such as `person$`, the members of `pkg::`, and the
+  argument names a call still accepts (`second = `), also for R6 methods and untyped package
+  functions; a package without a stub completes the exports listed in its installed `NAMESPACE`;
+  among equally good matches, a call's argument names come first, then the enclosing function's
+  own variables (unless a `(` already follows the cursor), then names you use often in the project
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
@@ -24,18 +27,25 @@ You get:
   write, or a member of an R6 class read through `self$` or `private$`
 - navigation into installed packages that have no stub: go-to-definition opens the package's R
   code, read from your R library, and hover shows its help page
-- signature help with each parameter's type and default, and inlay hints for assignments, loop
-  variables, and parameter names in calls with two or more positional arguments
-  (`grow(principal = 100, years = 2)`)
+- signature help with each parameter's type and default, also for an untyped function from an
+  installed package and for a method of an R6 class called through `self$` or an instance
+- inlay hints for assignments, loop variables, the inferred types of a function's parameters and
+  result (`function<T>(x: T) -> T`), and parameter names in calls with two or more positional
+  arguments (`grow(principal = 100, years = 2)`)
 - quick fixes for misspelled names, arguments, fields and columns, and for the lints that have one
   obvious rewrite (`T` to `TRUE`, `=` to `<-`, a trailing comma), and an "Apply all safe fixes"
   action your editor can run on save; [Fixes](/reference/diagnostic-codes#fixes) lists them all
+- for a name no attached package defines but a package exports (one ry has types for, or an
+  installed one the project already uses), a fix that qualifies it as `pkg::name` and, outside a package's own code, one that adds `library(pkg)` after
+  the `library` calls above the name
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
-  functions and sections under the function that defines them, plus workspace symbol search
+  functions and sections under the function that defines them, lists R6 members, S4 slots and a
+  type definition's tags under their class or type, plus workspace symbol search
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
   from a name to its argument, call, statement and block
-- semantic highlighting of parameters, called functions and package namespaces, which an R grammar
-  cannot tell apart, with functions from packages and base R marked as library functions
+- semantic highlighting of parameters, called functions, package namespaces and member names
+  (`x$field`, `x@slot`, `x$method()`, record and pattern fields, R6 members and S4 slots), which an
+  R grammar cannot tell apart, with functions from packages and base R marked as library functions
 - formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
   (a line break lays out the line you finished, and `}` the block it closes, when your editor
   formats on type)

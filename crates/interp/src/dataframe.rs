@@ -21,8 +21,9 @@ use {
     table::{
         Error as TableError, Schema,
         lazy::{self, How, Plan, Source, Step, Strategy},
+        ops,
         polars::prelude::PlSmallStr,
-        query::{Aggregate, BinaryOp, Expr, SortKey, UnaryOp, Warning},
+        query::{Aggregate, BinaryOp, Expr, Output, SortKey, UnaryOp, Warning},
     },
 };
 
@@ -37,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_cor", 2, do_cor),
     builtin(".expr_head", 3, do_head_expr),
     builtin(".expr_format", 1, do_format),
+    builtin(".expr_over", 3, do_over),
+    builtin(".expr_rank", 3, do_rank),
     builtin(".df_select", 3, do_select),
     builtin(".df_with_columns", 3, do_with_columns),
     builtin(".df_filter", 3, do_filter),
@@ -50,6 +53,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_collect", 2, do_collect),
     builtin(".df_explain", 2, do_explain),
     builtin(".df_scan", 2, do_scan),
+    builtin(".df_pivot", 6, do_pivot),
 ];
 
 /// The API, bound in the `ry` namespace and attached with the rest of `package:ry`. Each verb
@@ -75,6 +79,8 @@ Expr.is_null <- function(expr) .expr_operator("is_null", expr, NULL, TRUE)
 Expr.len <- function() .expr_len()
 Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
 Expr.cor <- function(first, second) .expr_cor(first, second)
+Expr.over <- function(expr, ...) .expr_over(expr, c(...), sys.call())
+Expr.rank <- function(expr, descending = FALSE) .expr_rank(expr, descending, sys.call())
 DataFrame.height <- function(df) dim(df)[[1L]]
 DataFrame.width <- function(df) dim(df)[[2L]]
 DataFrame.columns <- function(df) names(df)
@@ -92,6 +98,7 @@ DataFrame.join_asof <- function(df, other, on, by = NULL, strategy = "backward",
   .df_join(df, other, c(by, on), c(by, on), "asof", suffix, strategy, sys.call())
 }
 DataFrame.lazy <- function(df) .df_lazy(df)
+DataFrame.pivot <- function(df, on, index, values, agg = NULL) .df_pivot(df, on, index, values, agg, sys.call())
 GroupBy.agg <- function(group, ...) .df_agg(group, list(...), sys.call())
 LazyFrame.scan_csv <- function(path) .df_scan(path, "csv")
 LazyFrame.scan_parquet <- function(path) .df_scan(path, "parquet")
@@ -104,6 +111,7 @@ LazyFrame.head <- DataFrame.head
 LazyFrame.tail <- DataFrame.tail
 LazyFrame.join <- DataFrame.join
 LazyFrame.join_asof <- DataFrame.join_asof
+LazyFrame.pivot <- DataFrame.pivot
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -123,6 +131,9 @@ local({
     Ops.Expr = function(e1, e2) {
       if (missing(e2)) .expr_operator(.Generic, e1, NULL, TRUE) else .expr_operator(.Generic, e1, e2, FALSE)
     },
+    # An expression wins over the other operand's class, so `col("d") >= as.Date(...)` builds an
+    # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
+    chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
     print.Expr = function(x, ...) {
       cat(.expr_format(x), "\n", sep = "")
@@ -400,6 +411,42 @@ unsafe fn do_head_expr(call: &Call<'_>) -> R<Sexp> {
     }))
 }
 
+/// `.expr_over(expr, keys, call)`: the expression evaluated within each group of `keys`, one
+/// value per row, as data.table's `:=` with `by` gives.
+unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    let named = expression(call.arg(0), caller)?;
+    let keys = call.arg(1);
+    if keys.kind() != SexpType::String || length(keys) == 0 {
+        return Err(error_in(
+            caller,
+            "`over` needs the key columns by name, as `over(x, \"id\")`",
+        ));
+    }
+    let keys = values::strings(keys)
+        .into_iter()
+        .flatten()
+        .map(PlSmallStr::from)
+        .collect();
+    wrap(Object::Expr(Named {
+        alias: named.alias,
+        expr: Expr::Window(Box::new(named.expr), keys),
+    }))
+}
+
+unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    let named = expression(call.arg(0), caller)?;
+    let descending = values::require_flag(call.arg(1), "descending")?;
+    wrap(Object::Expr(Named {
+        alias: named.alias,
+        expr: Expr::Rank {
+            arg: Box::new(named.expr),
+            descending,
+        },
+    }))
+}
+
 unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let named = expression(call.arg(0), call.call)?;
     let text = match &named.alias {
@@ -634,7 +681,12 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(7);
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let (other, _) = plan_of(call.arg(1), caller)?;
+    let cross = call.arg(4).kind() == SexpType::String
+        && values::require_string(call.arg(4), "how")? == "cross";
     let keys = |value: Sexp, side: &str| -> R<Vec<PlSmallStr>> {
+        if cross && is_nil(value) {
+            return Ok(Vec::new());
+        }
         if value.kind() != SexpType::String || length(value) == 0 {
             return Err(error_in(
                 caller,
@@ -660,7 +712,7 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
         })?)
     } else {
         How::parse(&how).ok_or_else(|| {
-            error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\" and \"anti\", not \"{how}\""))
+            error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\", \"anti\" and \"cross\", not \"{how}\""))
         })?
     };
     let suffix = values::require_string(call.arg(5), "suffix")?;
@@ -701,6 +753,73 @@ unsafe fn do_explain(call: &Call<'_>) -> R<Sexp> {
     let text =
         lazy::explain(plan).map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
     scalar_string(&text)
+}
+
+/// `.df_pivot(df, on, index, values, agg, call)`: long to wide, one row per `index` combination
+/// and one column per distinct value of `on`. It runs eagerly, because the output columns depend
+/// on the data.
+unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(5);
+    let table = match object_of(call.arg(0)) {
+        Some(Object::Lazy(plan)) => {
+            let schema = plan.valid_schema();
+            let collected = lazy::collect(plan.clone())
+                .map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
+            raise(&collected.warnings, caller)?;
+            collected.table
+        }
+        _ if is_frame(call.arg(0)) => table_of(call.arg(0))?.fork(),
+        _ => {
+            return Err(error_in(
+                caller,
+                format!(
+                    "expected a DataFrame or a LazyFrame, got {}",
+                    describe(call.arg(0))
+                ),
+            ));
+        }
+    };
+    let on = values::require_string(call.arg(1), "on")?;
+    let index = call.arg(2);
+    if index.kind() != SexpType::String || length(index) == 0 {
+        return Err(error_in(
+            caller,
+            "`pivot` needs the row key columns by name, as `index = \"id\"`",
+        ));
+    }
+    let index: Vec<String> = values::strings(index).into_iter().flatten().collect();
+    let index: Vec<&str> = index.iter().map(String::as_str).collect();
+    let value = values::require_string(call.arg(3), "values")?;
+    let function = if is_nil(call.arg(4)) {
+        None
+    } else {
+        let name = values::require_string(call.arg(4), "agg")?;
+        Some(match name.as_str() {
+            "sum" => Aggregate::Sum,
+            "mean" => Aggregate::Mean,
+            "min" => Aggregate::Min,
+            "max" => Aggregate::Max,
+            "first" => Aggregate::First,
+            "last" => Aggregate::Last,
+            "count" => Aggregate::Length,
+            other => {
+                return Err(error_in(
+                    caller,
+                    format!(
+                        "`agg` is one of \"sum\", \"mean\", \"min\", \"max\", \"first\", \"last\" and \"count\", not \"{other}\""
+                    ),
+                ));
+            }
+        })
+    };
+    let schema = table.schema();
+    let executed = ops::dcast(&table, &index, &on, &value, function)
+        .map_err(|failure| table_error(caller, failure, Some(&schema)))?;
+    raise(&executed.warnings, caller)?;
+    match executed.output {
+        Output::Table(table) => frame::wrap(table),
+        _ => Err(error_in(caller, "`pivot` gave no table")),
+    }
 }
 
 unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {

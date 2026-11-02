@@ -79,6 +79,9 @@ pub enum Command {
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
     },
+    /// Rewrite code written for another library into ry's own equivalents
+    #[command(subcommand)]
+    Migrate(Migrate),
     /// Run an R script on ry's runtime, or open ry's console without one
     ///
     /// Everything after FILE goes to the script. A top-level error in the script exits 1,
@@ -145,6 +148,9 @@ pub enum Command {
         /// Where `--emit-plan` keeps what the session has loaded
         #[arg(long, hide = true, requires = "emit_plan")]
         state: Option<PathBuf>,
+        /// A file holding the values R gave the conditions of `if` directives in `NAMESPACE`
+        #[arg(long, hide = true, requires = "emit_plan")]
+        conditions: Option<PathBuf>,
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
@@ -214,6 +220,22 @@ pub struct SessionArguments {
     /// Editing keybindings for the console
     #[arg(long, value_enum, default_value_t, conflicts_with = "script")]
     pub keybindings: Keybindings,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Migrate {
+    /// Rewrite data.table code as DataFrame code
+    ///
+    /// Each form with an exact DataFrame equivalent is rewritten, the same rewrites the editor
+    /// offers as code actions, and everything else is left as it is. Without `--write`, the
+    /// changes are printed as a diff.
+    DataTable {
+        /// R files or directories to rewrite
+        files: Option<Vec<PathBuf>>,
+        /// Write the rewritten files in place instead of printing a diff
+        #[arg(long, default_value_t = false)]
+        write: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

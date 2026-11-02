@@ -58,6 +58,8 @@ pub enum Error {
     SchemaSyntax(String),
     #[error("invalid query: {0}")]
     Query(String),
+    #[error("the quoted field that opens at byte {0} is never closed")]
+    UnclosedQuote(usize),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -81,6 +83,9 @@ pub enum ColumnType {
     Character,
     /// `factor`, an Arrow dictionary (`Enum`) whose categories are the factor's levels in order.
     Factor,
+    /// `Date`, a Polars `Date`: whole days since 1970-01-01. R stores a date as a double, so a
+    /// fractional day is floored when it enters a table.
+    Date,
 }
 
 impl ColumnType {
@@ -91,6 +96,7 @@ impl ColumnType {
             DataType::Float64 => ColumnType::Double,
             DataType::String => ColumnType::Character,
             DataType::Enum(..) | DataType::Categorical(..) => ColumnType::Factor,
+            DataType::Date => ColumnType::Date,
             _ => return None,
         })
     }
@@ -103,6 +109,7 @@ impl ColumnType {
             ColumnType::Double => "double[]",
             ColumnType::Character => "character[]",
             ColumnType::Factor => "factor",
+            ColumnType::Date => "Date",
         }
     }
 
@@ -113,6 +120,7 @@ impl ColumnType {
             "double[]" => ColumnType::Double,
             "character[]" => ColumnType::Character,
             "factor" => ColumnType::Factor,
+            "Date" => ColumnType::Date,
             _ => return None,
         })
     }
@@ -520,7 +528,11 @@ fn convert(column: Column) -> Result<Column> {
                 .collect();
             return Ok(cleaned.with_name(column.name().clone()).into_column());
         }
-        DataType::Boolean | DataType::Float64 | DataType::String | DataType::Enum(..) => {
+        DataType::Boolean
+        | DataType::Float64
+        | DataType::String
+        | DataType::Enum(..)
+        | DataType::Date => {
             return Ok(column);
         }
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,

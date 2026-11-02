@@ -306,7 +306,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bitwiseShiftR", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
     }),
-    builtin("xtfrm", 1, |call| Ok(call.arg(0))).generic(Generic::Internal),
+    builtin("xtfrm", 1, |call| unsafe {
+        // GNU R's `xtfrm.default` ranks a raw vector, and `rank` refuses a bare one.
+        if call.arg(0).kind() == SexpType::Raw && !call.arg(0).is_object() {
+            return Err(error("raw vectors cannot be sorted"));
+        }
+        Ok(call.arg(0))
+    })
+    .generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
     builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
@@ -438,8 +445,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             }
         }
     }
-    for position in 0..outer {
-        if done[position] {
+    for (position, &finished) in done.iter().enumerate() {
+        if finished {
             continue;
         }
         let mut total = LongDouble::ZERO;
@@ -858,20 +865,6 @@ pub enum Op {
     IntegerDivide,
 }
 
-impl Op {
-    fn symbol(self) -> &'static str {
-        match self {
-            Op::Add => "+",
-            Op::Subtract => "-",
-            Op::Multiply => "*",
-            Op::Divide => "/",
-            Op::Power => "^",
-            Op::Modulo => "%%",
-            Op::IntegerDivide => "%/%",
-        }
-    }
-}
-
 /// Runs an operator, enforcing an Array's strict rules when an operand is one: R's own operator
 /// computes the plain result, which then becomes an Array again.
 unsafe fn strict(
@@ -884,9 +877,9 @@ unsafe fn strict(
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
-    if arrays::check_operands(call.call, &name, class, &operands)? {
+    if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
-        return arrays::finish_result(call.call, &name, result);
+        return arrays::finish_result(call.call, name, result);
     }
     let result = compute(call)?;
     // R's operator may hand back an operand, which is an Array here and may still be bound to a
@@ -1418,7 +1411,9 @@ fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
 
 /// Whether `a %% b` has a quotient beyond what extended precision holds, which GNU R warns
 /// about.
-fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
+/// Whether `a %% b` warns that its result has lost all accuracy, as R does when the
+/// quotient is too large for the remainder to mean anything.
+pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
     let quotient = a / b;
     quotient.is_finite() && quotient.abs() > 2f64.powi(63)
 }
@@ -2323,8 +2318,8 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
                     NA_REAL
                 } else {
                     match base {
-                        Some(base) if base == 10.0 => x.log10(),
-                        Some(base) if base == 2.0 => x.log2(),
+                        Some(10.0) => x.log10(),
+                        Some(2.0) => x.log2(),
                         Some(base) => x.ln() / base.ln(),
                         None => x.ln(),
                     }
@@ -2820,8 +2815,10 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             }
             if kind == SexpType::Real {
                 // Within one argument the first NaN or NA wins, as GNU R's long double loop gives;
-                // each argument's sum is rounded to double, and across arguments NA outranks NaN.
-                let mut total = LongDouble::ZERO;
+                // each argument's sum is rounded to double and added in double, so
+                // `sum(1e308, 1e308, -1e308)` overflows where one argument would not, and across
+                // arguments NA outranks NaN.
+                let mut total = 0.0;
                 let mut na = false;
                 for &item in &items {
                     let finite = if item.kind() == SexpType::Real {
@@ -2868,7 +2865,7 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                     na |= is_na_real(item_sum);
                     total += item_sum;
                 }
-                return scalar_real(if na { NA_REAL } else { total.to_f64() });
+                return scalar_real(if na { NA_REAL } else { total });
             }
             let mut total: i64 = 0;
             for &item in &items {

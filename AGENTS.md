@@ -6,7 +6,7 @@ No static type checker exists for R, so ry defines its own typing semantics, and
 
 The crates live in `crates/`:
 
-- `syntax`: the lexer and parser, which build lossless rowan trees.
+- `syntax`: the lexer and parser, which build lossless flat syntax trees.
 - `semantics`: the salsa-based analysis core and the type checker.
 - `format`: the formatter, which reads syntax only.
 - `ide`: editor features, implemented as pure reads.

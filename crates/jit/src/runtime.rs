@@ -104,22 +104,38 @@ pub struct Compiled {
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
     pub epoch: Cell<u64>,
+    /// Each speculation's symbol's lookup stamp when it was last checked.
+    pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
 /// activation whose frame is `frame`. Every change that could alter such a lookup moves the
-/// binding epoch (see `gp::WATCHED`), so an unchanged epoch proves the lookups without walking
-/// them. `thorough` walks them anyway, for an activation whose frame may have bound a watched
-/// name before the name was watched.
+/// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
+/// unchanged stamps of the speculated symbols, prove the lookups without walking them.
+/// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
+/// before the name was watched.
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    if epoch == compiled.epoch.get() && !thorough {
-        return true;
+    if !thorough {
+        if epoch == compiled.epoch.get() {
+            return true;
+        }
+        // The epoch moves on any binding outside a function frame, which a test suite or a
+        // package load makes all the time, so most moves concern names no speculation uses.
+        let unchanged = compiled
+            .speculations
+            .iter()
+            .zip(&compiled.stamps)
+            .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        if unchanged {
+            compiled.epoch.set(epoch);
+            return true;
+        }
     }
-    for speculation in &compiled.speculations {
+    for (speculation, stamp) in compiled.speculations.iter().zip(&compiled.stamps) {
         // The body's own lookups start past its frame, because the compiler cannot see the
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
@@ -135,6 +151,7 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
                 if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }
+        stamp.set(heap.lookup_stamp(speculation.symbol));
     }
     compiled.epoch.set(epoch);
     true
@@ -417,7 +434,7 @@ pub unsafe extern "C" fn jit_call(
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                for pair in arguments.chunks_exact(2) {
+                for pair in arguments.as_chunks::<2>().0 {
                     let (kind, bits) = (pair[0] as i32, pair[1]);
                     let value = match kind {
                         representation::INTEGER => values::scalar_integer(bits as i32)?,
@@ -689,7 +706,7 @@ pub unsafe extern "C" fn jit_construct(
                 heap.root(value);
                 Slot::Handle(value)
             };
-            for (index, pair) in pairs.chunks_exact(2).enumerate() {
+            for (index, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
                 let (kind, bits) = (pair[0] as i32, pair[1]);
                 let wide = index >= UNBOXED_SLOTS;
                 let slot = match kind {
@@ -719,6 +736,92 @@ pub unsafe extern "C" fn jit_construct(
                 slots.push(slot);
             }
             Ok(heap.alloc_record_slots(layout as u32, &slots)?)
+        })
+    }
+}
+
+/// Puts a new list of `length` elements, each `NULL`, in register `dst`, for a compiled
+/// traversal to fill. Returns 0 when allocating fails, with the error parked.
+pub unsafe extern "C" fn jit_list_new(activation: *mut Activation, length: i64, dst: i64) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            match scoped(|| values::alloc(SexpType::List, length as usize)) {
+                Ok(list) => {
+                    *activation.registers.add(dst as usize) = list;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
+/// Stores the value `kind` and `bits` describe (see [`representation`]) at `index` of the list
+/// in register `dst`, boxing a number. Returns 0 when boxing fails, with the error parked.
+pub unsafe extern "C" fn jit_list_store(
+    activation: *mut Activation,
+    dst: i64,
+    index: i64,
+    kind: i32,
+    bits: i64,
+) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let stored = scoped(|| -> R<()> {
+                let list = *activation.registers.add(dst as usize);
+                let value = match kind {
+                    representation::INTEGER => values::scalar_integer(bits as i32)?,
+                    representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
+                    representation::LOGICAL => values::scalar_logical(bits as i32)?,
+                    _ => Sexp::from_raw(bits as *mut Header)
+                        .ok_or_else(|| error("compiled code stored a null item"))?,
+                };
+                heap().set_element(list, index as usize, value);
+                Ok(())
+            });
+            match stored {
+                Ok(()) => 1,
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
+/// Cuts the list in register `dst` down to its first `count` elements. Returns 0 when
+/// allocating the shorter list fails, with the error parked.
+pub unsafe extern "C" fn jit_list_prefix(activation: *mut Activation, dst: i64, count: i64) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let cell = activation.registers.add(dst as usize);
+            let list = *cell;
+            let count = count as usize;
+            if count == values::length(list) {
+                return 1;
+            }
+            let shortened = scoped(|| -> R<Sexp> {
+                let heap = heap();
+                let shorter = values::alloc(SexpType::List, count)?;
+                for index in 0..count {
+                    heap.set_element(shorter, index, list.element(index));
+                }
+                Ok(shorter)
+            });
+            match shortened {
+                Ok(shorter) => {
+                    *cell = shorter;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
         })
     }
 }
@@ -845,6 +948,12 @@ pub extern "C" fn jit_log(value: f64) -> f64 {
 
 pub extern "C" fn jit_real_modulo(a: f64, b: f64) -> f64 {
     arith::real_modulo(a, b)
+}
+
+/// Whether `%%` on doubles must warn about a total loss of accuracy, which compiled code
+/// leaves to tier 0: 1 when it must, else 0.
+pub extern "C" fn jit_modulus_loses_accuracy(a: f64, b: f64) -> i32 {
+    i32::from(arith::modulus_loses_accuracy(a, b))
 }
 
 /// `%/%` on doubles, as the interpreter computes it.

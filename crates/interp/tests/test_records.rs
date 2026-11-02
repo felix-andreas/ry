@@ -542,12 +542,11 @@ fn records_tuples_tags_and_match() {
             take_output();
             let printed = match evaluate(code) {
                 Ok(value) => {
-                    if interp::interp().visible {
-                        if let Err(failure) = print::print_value_top(value, values::global_env()) {
-                            failures
-                                .push(format!("`{code}`: printing failed: {}", message(failure)));
-                            continue;
-                        }
+                    if interp::interp().visible
+                        && let Err(failure) = print::print_value_top(value, values::global_env())
+                    {
+                        failures.push(format!("`{code}`: printing failed: {}", message(failure)));
+                        continue;
                     }
                     take_output()
                 }
