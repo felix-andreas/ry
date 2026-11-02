@@ -114,14 +114,18 @@ summarize <- function(value) {
       if (!is.null(payloads)) return(summarize(payloads[[1L]]) + summarize(payloads[[2L]]))
     }
     # A list of records with the same fields, such as what `Str.split_first` returns, is
-    # summarized one field at a time for the same reason.
+    # summarized one field at a time for the same reason. Every record must have exactly the
+    # first record's fields, or a field only later records have would drop out of the sum.
     if (inherits(value[[1L]], "ry_record")) {
       fields <- names(as.list(value[[1L]]))
+      sizes <- tryCatch(vapply(value, function(record) length(as.list(record)), 0L),
+        error = function(condition) -1L)
+      if (any(sizes != length(fields))) fields <- NULL
       columns <- tryCatch(lapply(fields, function(field) {
         read <- as.function(c(alist(record = ), call("$", quote(record), as.name(field))))
         lapply(value, read)
       }), error = function(condition) NULL)
-      if (!is.null(columns)) return(Reduce(`+`, lapply(columns, summarize), c(0, 0, 0)))
+      if (!is.null(fields) && !is.null(columns)) return(Reduce(`+`, lapply(columns, summarize), c(0, 0, 0)))
     }
     # Flattening is safe for numbers and logicals, whose sum survives the coercion `unlist`
     # applies to a mix of them, and for strings alone, but a string mixed in with numbers

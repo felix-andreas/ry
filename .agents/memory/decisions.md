@@ -4531,7 +4531,8 @@ check` releases its trees once, and memoized records are compact" below).
   Array without materializing it, so the accessors, `take_*`/`drop_*`, `sublist`, `split_at`
   and `starts_with`/`ends_with` cost what they return. `List.contains` compares a number by
   value against an Array's storage or a list's plain scalars, which is what `identical`
-  decides for a number that is not `NaN`.
+  decides for a number that is not `NaN`. A length-one Array is never such a plain scalar,
+  because `identical([1], 1)` is `FALSE`.
 - **Leaf callbacks skip the call.** A callback that is a leaf builtin (`Str.trim` passed to
   `List.map`) is called through its `BuiltinFn` directly (`Callback::leaf`, `call_leaf`), not
   through `eval::apply`, which built a call and matched arguments per element. A leaf reports
@@ -4539,7 +4540,10 @@ check` releases its trees once, and memoized records are compact" below).
   have built only when an error escapes, so the condition is unchanged.
 - **Updates in place.** `Dict.update` and `List.update` reuse their first argument
   (`reusing_first_argument`) and update an owned value in place after the callback returns,
-  re-checking ownership then, because the callback may have stored the collection. Removal
+  re-checking ownership then, because the callback may have stored the collection.
+  `List.update` holds a reference on the list while the callback runs, as an R closure's
+  argument would, so a `<<-` assignment into the list inside the callback copies it, and a
+  callback that returns the list itself takes the copying path so the list never holds itself. Removal
   through `Dict.update` and `Dict.remove` still rebuild, because a `Dict` keeps insertion order
   and an ordered removal shifts every later entry.
 - **Impact.** Values and errors are unchanged (the docs tests run every library example, and

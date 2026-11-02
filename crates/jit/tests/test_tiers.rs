@@ -963,6 +963,7 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     } else {
         fuzz_iterations(300)
     };
+    let replaying = base.is_some();
     let base = base.unwrap_or(0x5eed_0000);
     with_interpreter(|| {
         let mut errors = 0;
@@ -995,7 +996,11 @@ fn fuzz_stdlib_traversals_agree_with_model() {
             }
         }
         eprintln!("{errors} of {iterations} stdlib cases expected an error");
-        assert!(errors * 2 < iterations.max(2), "too many failing cases");
+        // A replayed case may be one that expects an error, so only a whole run is checked.
+        assert!(
+            replaying || errors * 2 < iterations.max(2),
+            "too many failing cases"
+        );
     });
 }
 

@@ -1368,6 +1368,13 @@ impl<'p, 'b> Translator<'p, 'b> {
                         let back = self.builder.ins().fcvt_from_sint(F64, whole);
                         let exact = self.builder.ins().fcmp(FloatCC::Equal, back, value);
                         self.hand_off_unless(position, before, exact);
+                        // Tier 0 reads the position as an R integer, so a larger one is an error.
+                        let fits = self.builder.ins().icmp_imm_s(
+                            IntCC::SignedLessThanOrEqual,
+                            whole,
+                            i32::MAX as i64,
+                        );
+                        self.hand_off_unless(position, before, fits);
                         whole
                     }
                     _ => self.builder.ins().sextend(I64, value),

@@ -1111,9 +1111,17 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     let Some(at) = position(index, count) else {
         return sequence(call, list, &list_slice(list, 0, count)?);
     };
-    let value = invoke(call, f, &[list_item(list, at)?])?;
-    // Ownership is checked after the callback, which may have stored the list somewhere.
-    if owned_list(call, list) {
+    // The call holds a reference while the callback runs, the way an R closure's argument does,
+    // so a callback that assigns into the list with `<<-` copies it instead of changing the
+    // value being updated.
+    let current = list_item(list, at)?;
+    list.increment_refcount();
+    let value = invoke(call, f, &[current]);
+    list.decrement_refcount();
+    let value = value?;
+    // Ownership is checked after the callback, which may have stored the list somewhere. A
+    // callback that returns the list itself must not store it inside itself.
+    if value != list && owned_list(call, list) {
         crate::moves::replacing(list, at, list.element(at));
         crate::heap().set_element(list, at, value);
         return Ok(list);
@@ -1596,7 +1604,9 @@ unsafe fn list_contains(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
     // A number is compared by value, which is what `identical` decides for a plain number that
     // is not `NaN`, without boxing an Array's items or walking `identical` per element.
-    let plain = |item: Sexp| length(item) == 1 && item.attrib() == nil() && !item.is_altrep();
+    let plain = |item: Sexp| {
+        length(item) == 1 && item.attrib() == nil() && !item.is_altrep() && !item.is_array()
+    };
     if plain(value) {
         match value.kind() {
             SexpType::Real if !values::as_real_scalar(value).is_nan() => {
