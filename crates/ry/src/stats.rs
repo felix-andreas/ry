@@ -403,6 +403,7 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
         if record.file.kind(db) != &DocumentKind::Package {
             continue;
         }
+        let syntax_root = semantics::parse(db, record.file).syntax_node();
         for offset in identifier_offsets(&record.source)
             .into_iter()
             .step_by(COVERAGE_POSITION_STRIDE)
@@ -442,7 +443,13 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
                 IdentifierRole::CallHead => record.source[usize::from(offset)..]
                     .find('(')
                     .map(|open| offset + TextSize::from(open as u32 + 1)),
-                IdentifierRole::ArgumentName => Some(offset),
+                // A parameter's default sits in a definition, where signature help has no call
+                // to describe.
+                IdentifierRole::ArgumentName => syntax_root
+                    .token_at_offset(offset)
+                    .right_biased()
+                    .filter(|token| !is_declaration(token, &record.source[usize::from(offset)..]))
+                    .map(|_| offset),
                 _ => None,
             };
             let mut signature = true;

@@ -1604,7 +1604,18 @@ pub struct Formal {
 /// The parameters of the first function definition in `source`, for a host that reads code the
 /// project does not hold, such as an installed package's generated source.
 pub fn function_formals(source: &str) -> Option<Vec<Formal>> {
-    formals_of(&syntax::parse(source).syntax_node())
+    // Only the first statement's own value counts: a name bound to data must not borrow the
+    // parameters of the next function in the source.
+    let statement = syntax::parse(source).syntax_node().first_child()?;
+    let value = match statement.kind() {
+        FUNCTION_DEF => statement,
+        BINARY_EXPR => statement.last_child()?,
+        _ => return None,
+    };
+    if value.kind() != FUNCTION_DEF {
+        return None;
+    }
+    formals_of(&value)
 }
 
 /// The active parameter follows R's argument matching: a named argument takes the parameter it
@@ -2471,7 +2482,11 @@ pub fn import_fixes(
     let text = file.text(db);
     let mut actions = Vec::new();
     for diagnostic in diagnostics.iter().filter(|diagnostic| {
-        diagnostic.code == "unresolved" && ranges_overlap(diagnostic.range, viewport)
+        // A missing column is a typo in the data, not a missing import, so qualifying it as a
+        // package function would change what the expression means.
+        diagnostic.code == "unresolved"
+            && !diagnostic.message.contains("has no column")
+            && ranges_overlap(diagnostic.range, viewport)
     }) {
         let Some(name) = text
             .get(std::ops::Range::<usize>::from(diagnostic.range))
@@ -2498,12 +2513,14 @@ pub fn import_fixes(
             });
             // A package declares its imports in NAMESPACE, which a `library` call would bypass.
             if *file.kind(db) != DocumentKind::Package {
+                let (position, line_break) =
+                    library_call_position(db, file, diagnostic.range.start());
                 actions.push(CodeAction {
                     title: format!("Add `library({package})`"),
                     kind: CodeActionKind::ImportName,
                     edits: vec![TextEdit {
-                        range: TextRange::empty(library_call_position(db, file)),
-                        replacement: format!("library({package})\n"),
+                        range: TextRange::empty(position),
+                        replacement: format!("{line_break}library({package})\n"),
                     }],
                 });
             }
@@ -2512,13 +2529,20 @@ pub fn import_fixes(
     actions
 }
 
-/// Where a new `library` call goes: after the file's last top-level `library` or `require`
-/// call, so attachments stay together, or else at the start of the file.
-fn library_call_position(db: &dyn Db, file: SourceFile) -> TextSize {
+/// Where a new `library` call goes: after the last top-level `library` or `require` call
+/// before the use, so attachments stay together and run first, or else at the start of the
+/// file. The second value is the line break to write first, when that call ends the file.
+fn library_call_position(
+    db: &dyn Db,
+    file: SourceFile,
+    use_start: TextSize,
+) -> (TextSize, &'static str) {
     let root = semantics::parse(db, file).syntax_node();
+    let text = file.text(db);
     root.children()
         .filter(|statement| {
             statement.kind() == CALL_EXPR
+                && statement.text_range().end() <= use_start
                 && statement.first_child().is_some_and(|callee| {
                     matches!(
                         callee.text().to_string().as_str(),
@@ -2530,12 +2554,11 @@ fn library_call_position(db: &dyn Db, file: SourceFile) -> TextSize {
         .and_then(|statement| {
             // The new line starts after the newline that ends the call's line.
             let end = usize::from(statement.text_range().end());
-            let text = file.text(db);
-            let line_end = text
-                .get(end..)?
-                .find('\n')
-                .map_or(text.len(), |index| end + index + 1);
-            TextSize::try_from(line_end).ok()
+            let position = match text.get(end..)?.find('\n') {
+                Some(index) => (end + index + 1, ""),
+                None => (text.len(), "\n"),
+            };
+            Some((TextSize::try_from(position.0).ok()?, position.1))
         })
         .unwrap_or_default()
 }
@@ -5502,8 +5525,7 @@ fn namespace_completions(
     items
 }
 
-/// The packages the project reads with `::` and the ones it declares or attaches, completed as
-/// the start of a `pkg::name`.
+/// The packages the project already reads with `::`, completed as the start of a `pkg::name`.
 fn package_completions(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<CompletionItem> {
     let mut packages: BTreeSet<&str> = BTreeSet::new();
     for &project_file in files.files(db) {

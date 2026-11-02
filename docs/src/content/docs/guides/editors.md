@@ -33,8 +33,9 @@ You get:
 - quick fixes for misspelled names, arguments, fields and columns, and for the lints that have one
   obvious rewrite (`T` to `TRUE`, `=` to `<-`, a trailing comma), and an "Apply all safe fixes"
   action your editor can run on save; [Fixes](/reference/diagnostic-codes#fixes) lists them all
-- for a name no attached package defines but an installed one exports, a fix that qualifies it as
-  `pkg::name` and, in a script, one that adds `library(pkg)` after your other `library` calls
+- for a name no attached package defines but a package ry has types for exports, a fix that
+  qualifies it as `pkg::name` and, outside a package's own code, one that adds `library(pkg)` after
+  the `library` calls above the name
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
   functions and sections under the function that defines them, plus workspace symbol search
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
