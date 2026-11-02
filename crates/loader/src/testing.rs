@@ -308,6 +308,7 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         "the incrementally derived index differs from a fresh one"
     );
     let names_before: BTreeSet<String> = reloaded.bindings.keys().cloned().collect();
+    let model_before = reloaded.bindings.clone();
     apply(&mut reloaded, &plan, &new_index, &new_texts);
     apply_namespace(&mut reloaded, &plan);
     let mut fresh = fresh_load(&new_index, &new_texts);
@@ -346,6 +347,49 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         reloaded, fresh,
         "reloading differs from a fresh load\n---- before:\n{before:#?}\n---- after:\n{after:#?}\n---- plan:\n{plan:#?}"
     );
+
+    // `ry test --watch` runs first the tests that mention a caller of a touched name, so a
+    // name whose reachable code changed must be a caller. S3 dispatch reaches methods no test
+    // mentions, which this leaves out.
+    if let Some(touched) = plan.touched_names() {
+        loader.commit(root);
+        let callers = loader.callers(root, &touched);
+        for name in model_before.keys().chain(fresh.bindings.keys()) {
+            if reachable(&model_before, name) != reachable(&fresh.bindings, name) {
+                assert!(
+                    callers.contains(name),
+                    "`{name}` reaches changed code, but the callers of {touched:?} are {callers:?}\n---- before:\n{before:#?}\n---- after:\n{after:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// The bindings a call of `name` can reach through the names their values mention, each with
+/// its value, and every mentioned name that is not bound.
+fn reachable<'a>(
+    bindings: &'a FxHashMap<String, String>,
+    name: &'a str,
+) -> BTreeMap<&'a str, Option<&'a str>> {
+    let mut reached = BTreeMap::new();
+    let mut queue = vec![name];
+    while let Some(name) = queue.pop() {
+        if reached.contains_key(name) {
+            continue;
+        }
+        let value = bindings.get(name).map(String::as_str);
+        reached.insert(name, value);
+        for mention in value
+            .unwrap_or("")
+            .split(|character: char| {
+                !(character.is_alphanumeric() || character == '.' || character == '_')
+            })
+            .filter(|mention| !mention.is_empty())
+        {
+            queue.push(mention);
+        }
+    }
+    reached
 }
 
 /// What a backend does with the namespace half of a plan, once its bindings are in place.
