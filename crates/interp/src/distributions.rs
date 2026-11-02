@@ -433,7 +433,6 @@ unsafe fn random_count(value: Sexp) -> R<usize> {
     Ok(count as usize)
 }
 
-/// The drawn deviates, as integers when the routine counts and every count fits.
 /// `rnorm`'s draws in bulk for a scalar mean and standard deviation, when [`rnorm`] would
 /// draw a deviate for every element and the generator supports bulk draws.
 unsafe fn fill_rnorm(slots: &mut [f64], arguments: &[f64; 3]) -> bool {

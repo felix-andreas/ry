@@ -152,7 +152,6 @@ impl Ty {
     }
 }
 
-/// The type tier 0's feedback bits speculate on.
 /// The type to expect of a value whose annotation declares `declared`.
 fn declared_ty(declared: Declared) -> Ty {
     match (declared.kind, declared.scalar) {
@@ -166,6 +165,7 @@ fn declared_ty(declared: Declared) -> Ty {
     }
 }
 
+/// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u16) -> Ty {
     let within = |mask: u16| bits & !mask == 0;
     match bits {

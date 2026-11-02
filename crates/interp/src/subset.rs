@@ -841,7 +841,7 @@ unsafe fn array_subset(
 /// The zero-based row a scalar subscript selects in a matrix of `rows` rows, when it is a plain
 /// positive in-range number; anything else takes the general path, which also reports errors.
 unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
-    if length(index) != 1 || values::has_attributes(index) {
+    if index.is_altrep() || length(index) != 1 || values::has_attributes(index) {
         return None;
     }
     let position = match index.kind() {
