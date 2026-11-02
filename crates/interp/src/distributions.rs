@@ -32,8 +32,9 @@ use {
         rmath::*,
         unwind::{R, error},
         values::{
-            alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
-            ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+            alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits,
+            integer_vector, ints, ints_mut, length, list_vector, materialize, nil, reals,
+            reals_mut, set_attr, symbols,
         },
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real},

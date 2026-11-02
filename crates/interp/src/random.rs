@@ -19,8 +19,8 @@ use {
         unwind::{R, error},
         values::{
             alloc, alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
-            integer_vector, ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at,
-            symbols, unbound,
+            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, real_vector, reals,
+            reals_mut, string_at, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
