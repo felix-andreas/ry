@@ -47,7 +47,7 @@ pub fn real_to_int(value: f64) -> (i32, bool) {
     if value.is_nan() {
         return (NA_INTEGER, false);
     }
-    if value >= 2147483648.0 || value <= -2147483649.0 {
+    if value >= 2147483648.0 || value <= -2147483648.0 {
         return (NA_INTEGER, true);
     }
     (value.trunc() as i32, false)
@@ -436,9 +436,7 @@ pub unsafe fn coerce_atomic(
                             Some(value) if is_na_real(value) => NA_INTEGER,
                             Some(value) => {
                                 let (converted, out_of_range) = real_to_int(value);
-                                if out_of_range || value.is_nan() {
-                                    warnings.na = true;
-                                }
+                                warnings.integer_range |= out_of_range;
                                 converted
                             }
                             None => {

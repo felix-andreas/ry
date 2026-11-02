@@ -2060,6 +2060,12 @@ unsafe fn bin_dist(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn bw_den(call: &NativeCall<'_>) -> R<Sexp> {
     let bins = values::as_integer_scalar(call.arg(0)).max(1) as usize;
     let x = real_values(call.arg(1))?;
+    if let Some(position) = x.iter().position(|value| !value.is_finite()) {
+        return Err(call.error(format!(
+            "non-finite x[{}] in bandwidth calculation",
+            position + 1
+        )));
+    }
     let (low, high) = x
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {

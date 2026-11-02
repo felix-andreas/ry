@@ -7944,7 +7944,8 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
     }
     if alpha > BESSEL_NU_MAX {
         warning(format!(
-            "besselJ(x, nu): nu={alpha} too large for bessel_j() algorithm"
+            "besselJ(x, nu): nu={} too large for bessel_j() algorithm",
+            format_g(alpha)
         ));
         return f64::NAN;
     }
@@ -7954,7 +7955,15 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
     if x == f64::INFINITY {
         return 0.0;
     }
-    bessel_jy_any(x, alpha).0
+    let value = bessel_jy_any(x, alpha).0;
+    if value == 0.0 && x > 0.0 {
+        warning(format!(
+            "bessel_j({},nu={}): precision lost in result",
+            format_g(x),
+            format_g(alpha)
+        ));
+    }
+    value
 }
 
 /// `J_nu(x)` and `Y_nu(x)`. Below `x = 20` the continued fractions of `bessel_jy` serve,
@@ -8141,7 +8150,8 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     }
     if alpha > BESSEL_NU_MAX {
         warning(format!(
-            "besselY(x, nu): nu={alpha} too large for bessel_y() algorithm"
+            "besselY(x, nu): nu={} too large for bessel_y() algorithm",
+            format_g(alpha)
         ));
         return f64::NAN;
     }
@@ -8151,5 +8161,13 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     if x == f64::INFINITY {
         return 0.0;
     }
-    bessel_jy_any(x, alpha).1
+    let value = bessel_jy_any(x, alpha).1;
+    if value.is_infinite() {
+        warning(format!(
+            "bessel_y({},nu={}): precision lost in result",
+            format_g(x),
+            format_g(alpha)
+        ));
+    }
+    value
 }

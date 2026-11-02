@@ -548,7 +548,13 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     if x.kind() == SexpType::Raw && !x.is_object() {
         return Err(error("raw vectors cannot be sorted"));
     }
-    let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
+    let widened: Vec<i32>;
+    let column = if x.kind() == SexpType::Raw {
+        widened = values::raws(x).iter().map(|&byte| i32::from(byte)).collect();
+        Column::Integer(&widened)
+    } else {
+        column(x).ok_or_else(|| unimplemented_type(x, "greater"))?
+    };
     let requested = values::as_real_scalar(call.arg(1));
     if requested.is_nan() || requested < 0.0 {
         return Err(error("invalid 'length(xx)' value"));

@@ -781,15 +781,25 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         } else {
             None
         };
-        match name {
-            Some(name) if !name.is_empty() => {
-                if deparse::is_syntactic(&name) {
-                    tag.push_str(&format!("${name}"));
-                } else {
-                    tag.push_str(&format!("$`{name}`"));
+        // GNU R's tag holds 256 bytes: a name that would overflow it becomes `$...`, and
+        // nothing more is added once it is past that length.
+        const TAG_LIMIT: usize = 256;
+        if saved <= TAG_LIMIT {
+            match name {
+                Some(name) if !name.is_empty() => {
+                    let piece = if deparse::is_syntactic(&name) {
+                        format!("${name}")
+                    } else {
+                        format!("$`{name}`")
+                    };
+                    if saved + piece.len() <= TAG_LIMIT {
+                        tag.push_str(&piece);
+                    } else {
+                        tag.push_str("$...");
+                    }
                 }
+                Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
             }
-            Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
         }
         out(&format!("{tag}\n"));
         if element.is_object() {
