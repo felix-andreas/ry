@@ -1,0 +1,151 @@
+[stdout]
+| <text>:3:5: unexpected symbol
+| 2: 
+| 3: but this
+|        ^
+| <text>:2:0: unexpected end of input
+| 1: f(1,,
+|    ^
+| <text>:1:6: unexpected ')'
+| 1: x <- )
+|          ^
+| <text>:2:0: unexpected end of input
+| 1: 1 +
+|    ^
+| <text>:3:0: unexpected end of input
+| 1: 1 +
+| 2: 
+|   ^
+| <text>:3:0: unexpected end of input
+| 1: 1 +
+| 2: 
+|   ^
+| <text>:1:1: unexpected INCOMPLETE_STRING
+| 1: 'abc
+|     ^
+| <text>:1:3: unexpected symbol
+| 1: a b
+|       ^
+| <text>:1:4: unexpected symbol
+| 1: if x
+|        ^
+| <text>:2:0: unexpected end of input
+| 1: x[[1]
+|    ^
+| <text>:1:3: unexpected numeric constant
+| 1: 5 5
+|       ^
+| <text>:1:5: unexpected symbol
+| 1: f(a b
+|         ^
+| <text>:1:5: unexpected symbol
+| 1: "a" b
+|         ^
+| <text>:1:17: unexpected symbol
+| 1: x               y
+|                     ^
+| <text>:1:3: unexpected symbol
+| 1: é è
+|       ^
+| <text>:6:0: unexpected end of input
+| 4: 
+| 5: f(
+|   ^
+| <text>:1:5: unexpected '='
+| 1: a = =
+|         ^
+| <text>:1:6: unexpected '->'
+| 1: x -> ->
+|          ^
+| <text>:1:8: unexpected SPECIAL
+| 1: a %in% %in%
+|            ^
+| <text>:1:15: unexpected numeric constant
+| 1: NA_character_ 1
+|                   ^
+| <text>:1:6: unexpected numeric constant
+| 1: TRUE 1
+|          ^
+| <text>:1:6: unexpected numeric constant
+| 1: NULL 1
+|          ^
+| <text>:1:14: unexpected ')'
+| 1: f(x = , y == )
+|                  ^
+| <text>:1:3: unexpected numeric constant
+| 1: a$1
+|       ^
+| <text>:1:4: unexpected numeric constant
+| 1: a::1
+|        ^
+| <text>:1:15: unexpected 'else'
+| 1: if (x) 1 else else
+|                   ^
+| <text>:1:15: unexpected symbol
+| 1: function(x) x x
+|                   ^
+| <text>:1:4: unexpected numeric constant
+| 1: {1 2
+|        ^
+| <text>:1:7: unexpected assignment
+| 1: x <<- <-
+|           ^
+| <text>:1:8: unexpected numeric constant
+| 1: \(x) 1 1
+|            ^
+| <text>:1:5: unexpected symbol
+| 1: `a` b
+|         ^
+| <text>:1:3: unexpected ']'
+| 1: a ]
+|       ^
+| <text>:1:7: unexpected ']'
+| 1: x[[1]]]
+|           ^
+| <text>:1:6: unexpected numeric constant
+| 1: ...  1
+|          ^
+| <text>:1:5: unexpected numeric constant
+| 1: ..1 1
+|         ^
+| <text>:1:4: unexpected numeric constant
+| 1: 1i 2
+|        ^
+| <text>:1:6: unexpected numeric constant
+| 1: 0x10 1
+|          ^
+| <text>:1:4: unexpected numeric constant
+| 1: 1L 2
+|        ^
+| <text>:2:3: unexpected symbol
+| 1:  <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <- 1;a <-
+| 2: b c
+|      ^
+| FILE:2:5: unexpected symbol
+| 1: x <- 1
+| 2: but this
+|        ^
+| [1] "Error: unexpected numeric constant in:"
+| [2] "\" y <- f(1,"                          
+| [3] "  2 3\""                               
+| [4] "Execution halted"                      
+| attr(,"status")
+| [1] 1
+| [1] "Error: unexpected symbol in:" "\"  # c"                     
+| [3] "  a b\""                      "Execution halted"            
+| attr(,"status")
+| [1] 1
+| [1] "Error: unexpected end of input" "Execution halted"              
+| attr(,"status")
+| [1] 1
+| [1] "[1] 1"                                             
+| [2] "Error: unexpected 'else' in \"if (x) 1 else else\""
+| [3] "Execution halted"                                  
+| attr(,"status")
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

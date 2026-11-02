@@ -530,3 +530,10 @@ Driven on a three-file package with a record type, a tag alias, `match`, stdlib 
   on GNU R. It does now.
 - The console's editor needs a terminal that answers the cursor-position query (`ESC [6n`), so
   scripted driving of the editor needs a pty; piped stdin is read directly and evaluates.
+
+## Scripts that `source()` a helpers file
+
+- **`source()` was not followed**, so every correct call to a sourced helper reported `unresolved`
+  and every helper reported `unused`, hiding a planted typo and the wrong-arity catch. A literal
+  `source()` path is now followed by `ry check` and the editor (`semantics::sourced_files`, the
+  `source-a-helper-script` scenario).

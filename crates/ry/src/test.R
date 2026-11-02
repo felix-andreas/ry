@@ -9,12 +9,6 @@ local({
     sort(list.files(test_directory(root), pattern = "^test.*\\.[rR]$", full.names = TRUE))
   }
 
-  # Helpers and setup files fill the environment every test file runs in, so a change to one
-  # can affect any test.
-  shared_files <- function(root) {
-    list.files(test_directory(root), pattern = "^(helper|setup).*\\.[rR]$", full.names = TRUE)
-  }
-
   # testthat filters files by their name without `test-` and the extension.
   file_filter <- function(files) {
     stems <- sub("\\.[rR]$", "", sub("^test-?", "", basename(files)))
@@ -37,39 +31,30 @@ local({
     any(summary$failed > 0L) || any(summary$error)
   }
 
-  # Only sources: a run itself creates and deletes files such as `_snaps/`, which would
-  # otherwise retrigger the watch.
-  stamps <- function(root) {
-    paths <- c(
-      list.files(file.path(root, "R"), pattern = "\\.[RrSsq]$", recursive = TRUE, full.names = TRUE),
-      list.files(test_directory(root), pattern = "\\.[rR]$", full.names = TRUE),
-      file.path(root, c("DESCRIPTION", "NAMESPACE"))
-    )
-    info <- file.info(paths, extra_cols = FALSE)
-    stats::setNames(paste(info$size, as.numeric(info$mtime)), paths)
-  }
-
   mentions <- new.env(parent = emptyenv())
-  mentioned <- function(file, stamp) {
-    cached <- mentions[[file]]
-    if (!is.null(cached) && identical(cached$stamp, stamp)) return(cached$names)
-    names <- tryCatch(unique(all.names(parse(file, keep.source = FALSE))), error = function(e) NULL)
-    assign(file, list(stamp = stamp, names = names), envir = mentions)
+  mentioned <- function(file) {
+    if (!is.null(mentions[[file]])) return(mentions[[file]])
+    names <- tryCatch(unique(all.names(parse(file, keep.source = FALSE))), error = function(e) "")
+    assign(file, names, envir = mentions)
     names
   }
 
-  # The test files an edit can affect: the ones that changed, and the ones that mention a
-  # package name whose definition reaches a rebound or removed name. `NULL` when the reload
-  # ran code or a helper changed, which can affect every test.
-  affected <- function(root, before, after, changed) {
-    edited <- names(after)[is.na(match(after, before[names(after)]))]
-    if (is.null(changed) || any(edited %in% shared_files(root))) return(NULL)
+  # The test files an edit can affect: the ones edited, and the ones that mention a package name
+  # whose definition reaches a rebound or removed name. `NULL` when anything else changed (a
+  # helper, a fixture, `inst/`, `src/`, the metadata), notifications were lost, or the reload
+  # ran code, because then any test can be affected.
+  affected <- function(root, edited, changed) {
+    is_test <- dirname(edited) == "tests/testthat" & grepl("^test.*\\.[rR]$", basename(edited))
+    if (is.null(changed) || anyNA(edited) || !all(is_test | startsWith(edited, "R/"))) {
+      return(NULL)
+    }
+    edited_tests <- file.path(root, edited[is_test])
+    for (file in intersect(edited_tests, ls(mentions))) rm(list = file, envir = mentions)
     files <- test_files(root)
     callers <- if (length(changed)) .ry_callers(root, changed) else character()
-    hit <- vapply(files, function(file) {
-      file %in% edited || any(mentioned(file, after[[file]]) %in% callers)
-    }, NA)
-    files[hit]
+    files[files %in% edited_tests | vapply(files, function(file) {
+      any(mentioned(file) %in% callers)
+    }, NA)]
   }
 
   function(root, filter, reporter, watch) {
@@ -81,35 +66,34 @@ local({
       files <- test_files(root)
       if (is.null(filter)) files else files[grepl(filter, basename(files))]
     }
+    # Watching starts before the first run, so an edit made during it is not missed.
+    if (watch) .ry_wait_edits(root, 0)
     results <- run(root, package, selected(), reporter)
     if (!watch) return(!failed(results))
-    before <- stamps(root)
-    for (file in selected()) mentioned(file, before[[file]])
+    for (file in selected()) mentioned(file)
     message("Watching for changes; press Ctrl-C to stop.")
     repeat {
-      Sys.sleep(0.2)
-      after <- stamps(root)
-      if (identical(after, before)) next
-      ok <- tryCatch({
+      # A short timeout keeps the wait interruptible: R handles Ctrl-C between two waits.
+      edited <- .ry_wait_edits(root, 0.25)
+      if (!length(edited)) next
+      reloaded <- tryCatch({
         load_all(root, quiet = TRUE)
         TRUE
       }, error = function(e) {
         message("Reloading failed: ", conditionMessage(e))
         FALSE
       })
-      if (ok) {
-        changed <- .ry_packages[[.ry_find_root(root)]]$changed
-        first <- affected(root, before, after, changed)
-        files <- selected()
-        if (is.null(first)) {
-          run(root, package, files, reporter)
-        } else {
-          first <- intersect(first, files)
-          run(root, package, first, reporter)
-          run(root, package, setdiff(files, first), reporter)
-        }
+      if (!reloaded) next
+      changed <- .ry_packages[[.ry_find_root(root)]]$changed
+      first <- affected(root, edited, changed)
+      files <- selected()
+      if (is.null(first)) {
+        run(root, package, files, reporter)
+      } else {
+        first <- intersect(first, files)
+        run(root, package, first, reporter)
+        run(root, package, setdiff(files, first), reporter)
       }
-      before <- after
     }
   }
 })

@@ -1,0 +1,9 @@
+[stdout]
+| past the sink
+| [1] "into the sink"      "also into the sink"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("into the sink", "also into the sink")

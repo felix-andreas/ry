@@ -10,10 +10,11 @@ ry run [FILE]      # run an R script on ry's runtime; without one, open ry's con
 ry R [FILE]        # the same on GNU R
 ry load [PATH]     # load an R package from source, run code against it, and exit
 ry test [PATH]     # run a package's testthat tests against the loaded package
+ry document [PATH] # write a package's Rd files and NAMESPACE with roxygen2
 ry server          # the language server, over stdio; your editor starts it
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, and `test` need R. They use
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, and `document` need R. They use
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
 built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
 own runtime needs that installation too, because it still reads base R's R code and the default
@@ -110,6 +111,20 @@ the fences, inline `` `r expr` `` code, and indented chunks (such as one inside 
 as written. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
+## migrate
+
+```sh
+ry migrate data-table             # print the rewrites for the project as a diff
+ry migrate data-table R/ --write  # rewrite the files under R/ in place
+```
+
+`ry migrate data-table` rewrites data.table code as [DataFrame](/guides/dataframes) code, applying
+the same rewrites the editor offers as code actions. It takes files and directories, or the whole
+project when given none. Without `--write`, it prints a diff of each file to stderr and leaves the
+files alone. Either way it prints a one-line summary to stdout and exits 0. Each form it rewrites,
+and each it leaves alone, is listed in
+[Moving from data.table](/guides/from-data-table#rewriting-automatically).
+
 ## run and R
 
 ```sh
@@ -175,10 +190,27 @@ reporter's, and the command exits with `1` when a test fails or errors.
 
 - `--filter REGEX` runs only the test files whose names match, as `devtools::test(filter =)` does.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
-- `--watch` keeps running: after every edit under `R/` or `tests/testthat/` it reloads only what
-  changed, runs first the test files the edit can affect, and then the rest. A file is affected
+- `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
+  `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a
+  `src/` edit), runs first the test files the edit can affect, and then the rest. It learns of
+  edits from the operating system's file notifications, so it costs nothing while you type. A file is affected
   when you edited it, or when it mentions a function whose definition reaches a changed one. An
   edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
+## document
+
+`ry document` loads the package at `PATH` the way `ry load` does and runs roxygen2 against the
+loaded namespace, as `devtools::document()` does, writing the same `man/*.Rd` files and `NAMESPACE`
+byte for byte. roxygen2 must be installed. `--roclet NAME` (repeatable) runs only the named
+roclets, such as `rd` or `namespace`; by default the package's own roxygen options decide.
+
+Two things make it faster than roxygen2 alone, without changing what it writes. The parsed
+documentation blocks of each file are cached in ry's cache directory, so a run
+parses again only the files whose content changed, and the steps of roxygen2 that take time
+quadratic in the number of topics (collecting them, ordering them for `@inherit`, and finding
+them by name) run in linear time. A cached block keeps the markdown links it
+resolved when it was parsed, so after you install or remove a package a link points at, edit the
+file or delete the cache.
 
 ## debug-adapter
 

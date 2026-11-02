@@ -11,7 +11,7 @@ use {
         strings::Encoding,
     },
     std::collections::HashSet,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations},
 };
 
 #[derive(Clone)]
@@ -342,16 +342,12 @@ fn run(seed: u64, steps: usize, stress: bool) {
 
 #[test]
 fn fuzz_object_graphs_survive_collection() {
-    for seed in 0..fuzz_iterations(40) as u64 {
-        run(seed, 400, false);
-    }
+    for_each_seed(40, |seed| run(seed, 400, false));
 }
 
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
-    for seed in 0..fuzz_iterations(8) as u64 {
-        run(1000 + seed, 150, true);
-    }
+    for_each_seed(8, |seed| run(1000 + seed, 150, true));
 }
 
 #[test]
@@ -720,8 +716,8 @@ fn the_protect_stack_reports_imbalance_in_gnu_r_words() {
 
 #[test]
 fn fuzz_arena_watermarks_nest() {
-    let mut rng = SplitMix64(7);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let mut arena = Arena::default();
         let mut marks = Vec::new();
         let mut blocks: Vec<(usize, u8, usize)> = Vec::new();
@@ -758,7 +754,7 @@ fn fuzz_arena_watermarks_nest() {
             let encoded = Arena::encode(arena.watermark());
             assert_eq!(Arena::decode(encoded), arena.watermark());
         }
-    }
+    });
 }
 
 #[test]
@@ -834,6 +830,58 @@ fn a_reserved_batch_survives_the_collections_that_follow_it() {
             let outer = kept.element(index);
             assert_eq!(outer.car().kind(), SexpType::Environment);
             assert_eq!(outer.cdr().car().slice::<i32>(), &[index as i32]);
+        }
+    }
+}
+
+/// The intern table against a model through growth, removal by minor and major collections,
+/// and the rebuilds that drop its tombstones: a rooted string always interns to itself, and
+/// after a major collection the table holds exactly the strings still rooted.
+#[test]
+fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
+    let mut random = SplitMix64(0x5EED_7AB1E);
+    let mut heap = Heap::new();
+    unsafe {
+        let base = heap.string_count();
+        let base_mark = heap.handle_mark();
+        let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
+        for round in 0..fuzz_iterations(24) {
+            for _ in 0..random.below(20_000) {
+                // One string in a hundred is longer than the largest small-object slot, so the
+                // large strings' own young list is exercised too.
+                let padding = if random.chance(1, 100) { 3000 } else { 0 };
+                let bytes = format!("s{round}_{}{}", random.below(50_000), "x".repeat(padding))
+                    .into_bytes();
+                let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
+                if random.chance(1, 4) {
+                    heap.root(string);
+                    rooted.push((bytes, string));
+                }
+            }
+            rooted.retain(|_| !random.chance(1, 3));
+            // The kept strings move into one list while every string is still rooted.
+            let holder = heap
+                .alloc_vector(SexpType::List, rooted.len() as isize)
+                .unwrap();
+            for (index, (_, string)) in rooted.iter().enumerate() {
+                heap.set_element(holder, index, *string);
+            }
+            heap.release_handles(base_mark);
+            heap.root(holder);
+            let kind = if random.chance(1, 3) {
+                Collection::Major
+            } else {
+                Collection::Minor
+            };
+            heap.collect(kind);
+            for (bytes, string) in &rooted {
+                assert_eq!(heap.mk_char(bytes, Encoding::Native).unwrap(), *string);
+            }
+            if kind == Collection::Major {
+                let distinct: HashSet<&[u8]> =
+                    rooted.iter().map(|(bytes, _)| bytes.as_slice()).collect();
+                assert_eq!(heap.string_count(), base + distinct.len(), "round {round}");
+            }
         }
     }
 }

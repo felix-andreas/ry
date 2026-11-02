@@ -420,7 +420,7 @@ pub unsafe fn set_mkchar_bytes(
 
 /// Interns the native strings one vectorized call produces, through a table of the call's own
 /// results in front of the heap's string table. The heap's table holds every string of the
-/// session, so at millions of strings each probe misses cache, while a call that extracts
+/// session, so at millions of strings even one probe into it misses cache, while a call that extracts
 /// repeating pieces (a code inside ids, a year inside dates) has few distinct results whose table
 /// stays in cache. A call whose results rarely repeat would only pay for the inserts, so the memo
 /// switches itself off after a window with few hits.

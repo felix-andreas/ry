@@ -13,7 +13,6 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
-    std::io::Write,
 };
 
 /// Warnings a coercion raises, collected so each is reported once per call.
@@ -48,7 +47,7 @@ pub fn real_to_int(value: f64) -> (i32, bool) {
     if value.is_nan() {
         return (NA_INTEGER, false);
     }
-    if value >= 2147483648.0 || value <= -2147483649.0 {
+    if value >= 2147483648.0 || value <= -2147483648.0 {
         return (NA_INTEGER, true);
     }
     (value.trunc() as i32, false)
@@ -437,9 +436,7 @@ pub unsafe fn coerce_atomic(
                             Some(value) if is_na_real(value) => NA_INTEGER,
                             Some(value) => {
                                 let (converted, out_of_range) = real_to_int(value);
-                                if out_of_range || value.is_nan() {
-                                    warnings.na = true;
-                                }
+                                warnings.integer_range |= out_of_range;
                                 converted
                             }
                             None => {
@@ -548,43 +545,9 @@ pub unsafe fn coerce_atomic(
                 };
             }
         }
-        SexpType::String if source == SexpType::Real => {
+        SexpType::String if matches!(source, SexpType::Real | SexpType::Integer) => {
             let object = values::materialize(object)?;
-            let scipen = crate::format::Settings::current_scipen();
-            for index in 0..count {
-                let value = values::reals(object)[index];
-                if is_na_real(value) {
-                    values::set_elt(result, index, na_string());
-                } else {
-                    values::set_mkchar(result, index, &real_as_text(value, scipen))?;
-                }
-            }
-        }
-        SexpType::String if source == SexpType::Integer => {
-            let object = values::materialize(object)?;
-            // Integer codes are mostly small and repeat (factor() converts its codes to
-            // character), so their strings are interned once per call, and the rest are written
-            // into a stack buffer rather than an allocated string.
-            const SMALL: usize = 1024;
-            let mut small = [None::<Sexp>; SMALL];
-            let mut buffer = [0u8; 12];
-            for index in 0..count {
-                let value = values::ints(object)[index];
-                let charsxp = if value == NA_INTEGER {
-                    na_string()
-                } else if let Some(slot) = usize::try_from(value)
-                    .ok()
-                    .and_then(|value| small.get_mut(value))
-                {
-                    match *slot {
-                        Some(charsxp) => charsxp,
-                        None => *slot.insert(integer_charsxp(value, &mut buffer)?),
-                    }
-                } else {
-                    integer_charsxp(value, &mut buffer)?
-                };
-                values::set_elt(result, index, charsxp);
-            }
+            write_number_strings(object, result, crate::format::Settings::current_scipen())?;
         }
         SexpType::String => {
             for index in 0..count {
@@ -649,16 +612,36 @@ pub unsafe fn coerce_atomic(
     Ok(result)
 }
 
-/// The caller stores the string at once into a vector it keeps rooted, so the string skips the
-/// root handle `values::mkchar` would push for it.
-unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
-    let mut cursor = &mut buffer[..];
-    // Eleven bytes hold every `i32`, so the write cannot run out of room.
-    if write!(cursor, "{value}").is_err() {
-        return values::mkchar(&value.to_string());
+/// Writes `as.character` of the integer or double vector `numbers` into the string vector
+/// `result`, of the same length, formatting doubles under scientific-notation penalty `scipen`.
+pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
+    if numbers.kind() == SexpType::Real {
+        for (index, &value) in values::reals(numbers).iter().enumerate() {
+            if is_na_real(value) {
+                values::set_elt(result, index, na_string());
+            } else {
+                values::set_mkchar(result, index, &real_as_text(value, scipen))?;
+            }
+        }
+        return Ok(());
     }
-    let written = 12 - cursor.len();
-    Ok(crate::heap().mk_char(&buffer[..written], Encoding::Native)?)
+    integers_as_strings(values::ints(numbers), result)
+}
+
+/// Element `index` of the integer or double vector `numbers` as `as.character` gives it, with
+/// doubles formatted under scientific-notation penalty `scipen`.
+pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<Sexp> {
+    if numbers.kind() == SexpType::Real {
+        real_as_charsxp(values::reals(numbers)[index], scipen)
+    } else {
+        match values::ints(numbers)[index] {
+            NA_INTEGER => Ok(na_string()),
+            value => {
+                Ok(crate::heap()
+                    .mk_char(integer_digits(value, &mut [0_u8; 11]), Encoding::Native)?)
+            }
+        }
+    }
 }
 
 fn parse_complex(text: &str) -> Option<Rcomplex> {
@@ -954,6 +937,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
 ];
 
+/// The shortest number vector `as.character` converts lazily. Below it, the conversion costs
+/// less than the deferred vector's own allocations.
+const DEFERRED_STRINGS_MINIMUM: usize = 256;
+
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
@@ -966,10 +953,20 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).map(|result| {
+        return factor_as_character(object).inspect(|&result| {
             values::clear_attributes(result);
-            result
         });
+    }
+    // As in GNU R, a long number vector without attributes converts to character lazily, so
+    // the strings are made only when something reads them.
+    if kind == SexpType::String
+        && matches!(object.kind(), SexpType::Integer | SexpType::Real)
+        && !values::has_attributes(object)
+        && !object.is_altrep()
+        && length(object) >= DEFERRED_STRINGS_MINIMUM
+        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+    {
+        return Ok(deferred);
     }
     let result = match object.kind() {
         SexpType::Symbol | SexpType::Language | SexpType::Pairlist if kind == SexpType::String => {
@@ -1200,4 +1197,71 @@ pub unsafe fn type_name(object: Sexp) -> &'static str {
         SexpType::Record => crate::records::native_kind(object).type_name(),
         kind => kind.name(),
     }
+}
+
+/// `as.character` on integers into the string vector `result`. Integer data usually repeats a
+/// few values (codes, ids, years), so when the values span a range no wider than the vector, each
+/// distinct value is formatted and interned once; interning is most of the cost per element.
+unsafe fn integers_as_strings(source: &[i32], result: Sexp) -> R<()> {
+    let mut low = i32::MAX;
+    let mut high = i32::MIN;
+    for &value in source {
+        if value != NA_INTEGER {
+            low = low.min(value);
+            high = high.max(value);
+        }
+    }
+    let span = if low <= high {
+        i64::from(high) - i64::from(low) + 1
+    } else {
+        0
+    };
+    let mut cache: Vec<Option<Sexp>> = if span <= source.len() as i64 {
+        vec![None; span as usize]
+    } else {
+        Vec::new()
+    };
+    let heap = crate::heap();
+    let mut buffer = [0_u8; 11];
+    for (index, &value) in source.iter().enumerate() {
+        let charsxp = if value == NA_INTEGER {
+            na_string()
+        } else {
+            let slot = cache.get_mut((i64::from(value) - i64::from(low)) as usize);
+            match slot {
+                Some(Some(charsxp)) => *charsxp,
+                slot => {
+                    let charsxp =
+                        heap.mk_char(integer_digits(value, &mut buffer), Encoding::Native)?;
+                    if let Some(slot) = slot {
+                        *slot = Some(charsxp);
+                    }
+                    charsxp
+                }
+            }
+        };
+        // Storing at once keeps the string reachable, and the collector does not move objects,
+        // so the cached handle stays valid for the rest of the loop.
+        heap.set_element(result, index, charsxp);
+    }
+    Ok(())
+}
+
+/// The decimal digits of `value`, written at the end of `buffer`, which fits any `i32`.
+fn integer_digits(value: i32, buffer: &mut [u8; 11]) -> &[u8] {
+    let mut magnitude = value.unsigned_abs();
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    &buffer[start..]
 }

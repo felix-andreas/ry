@@ -48,6 +48,17 @@ pub unsafe fn frame_lookup(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
     }
 }
 
+/// A frame lookup that, like GNU R's `findVarInFrame3`, finds nothing in an object that is not
+/// an environment instead of failing. vctrs looks methods up in `R_UnboundValue` when a
+/// closure's environment has no S3 methods table, and relies on getting `R_UnboundValue` back.
+unsafe fn frame_lookup_unchecked(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
+    match env.kind() {
+        SexpType::Environment => frame_lookup(env, symbol),
+        SexpType::Nil => Err(error("use of NULL environment is defunct")),
+        _ => Ok(runtime().heap.known().unbound),
+    }
+}
+
 /// A binding cell's value. An active binding's value is what its function returns when called
 /// with no arguments.
 pub unsafe fn cell_value(cell: Sexp) -> ApiResult<Sexp> {
@@ -63,9 +74,7 @@ pub unsafe fn cell_value(cell: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn assign_cell(cell: Sexp, value: Sexp) -> ApiResult<()> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
         if cell.has_gp(gp::BINDING_LOCKED) {
-            return Err(error(format!(
-                "cannot change active binding if binding is locked"
-            )));
+            return Err(error("cannot change active binding if binding is locked"));
         }
         let global = runtime().heap.known().global_env;
         crate::eval::apply_closure_or_primitive(cell.cdr(), &[value], global)?;
@@ -200,13 +209,13 @@ pub unsafe extern "C" fn Rf_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// With `do_get` false GNU R only checks for existence; the value is cheap to return either way.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame3(env: Sexp, symbol: Sexp, _do_get: Rboolean) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame3")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_findVar` and `R_findVarInFrame`: the names GNU R's own code uses for `Rf_findVar` and
@@ -218,7 +227,7 @@ pub unsafe extern "C" fn R_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_varloc_t`: a binding cell, or null when there is no binding. It is a one-pointer struct
@@ -745,7 +754,7 @@ pub unsafe extern "C" fn R_MakeActiveBinding(symbol: Sexp, function: Sexp, env: 
         if let Some(cell) = runtime().heap.frame_cell(env, symbol)
             && !cell.has_gp(gp::ACTIVE_BINDING)
         {
-            return Err(error(format!("symbol already has a regular binding")));
+            return Err(error("symbol already has a regular binding"));
         }
         let cell = rebind(symbol, function, env)?;
         cell.set_gp_bits(gp::ACTIVE_BINDING, true);

@@ -19,7 +19,7 @@ use {
         },
     },
     heap::{
-        Formal,
+        ENVIRONMENT_BYTES, Formal, TRIPLE_BYTES,
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
@@ -599,7 +599,9 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
         "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "==", "!=", "<", ">", "<=", ">=", "&", "|",
         "!",
     ];
+    // `round` and `signif` count and match their own arguments, as GNU R's do.
     if OPERATORS.contains(&definition.name)
+        || matches!(definition.name, "round" | "signif")
         || (definition.arity >= 0 && args.len() != definition.arity as usize)
     {
         return Ok(());
@@ -963,32 +965,29 @@ pub unsafe fn bind_arguments(
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
     let formals = function.car();
-    let heap = crate::heap();
-    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    if supplied.is_none() && positional(formals, args) {
-        // Most calls pass every argument by position to a function without `...`, which needs no
-        // matching table: argument `i` binds formal `i`, and the formals past the last argument
-        // are missing.
-        let mut formal = formals;
-        let mut index = 0;
-        while formal.kind() == SexpType::Pairlist {
-            let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-            bindings.push(formal_binding(env, formal, actual)?);
-            formal = formal.cdr();
-            index += 1;
-        }
+    // Most calls pass every argument by position to a function without `...`, which needs no
+    // matching table: argument `i` binds formal `i`, and the formals past the last argument are
+    // missing.
+    let actuals = if supplied.is_none() && positional(formals, args) {
+        None
     } else {
-        let actuals = match_args(formals, args, call)?;
-        let mut formal = formals;
-        for &actual in &actuals {
-            bindings.push(formal_binding(env, formal, actual)?);
-            formal = formal.cdr();
-        }
+        Some(match_args(formals, args, call)?)
+    };
+    let env = frame_environment(function, formals)?;
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    let mut formal = formals;
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let actual = match &actuals {
+            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_arg()),
+            None => args.get(index).map_or(missing_arg(), |arg| arg.value),
+        };
+        bindings.push(formal_binding(env, formal, actual)?);
+        formal = formal.cdr();
+        index += 1;
     }
-    heap.define_formals(env, &bindings)?;
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
@@ -997,6 +996,20 @@ pub unsafe fn bind_arguments(
             }
         }
     }
+    Ok(env)
+}
+
+/// A fresh, rooted function frame for a call of `function`, after one collection check that
+/// covers the frame, a binding cell and a default promise per formal, so the caller builds them
+/// with the `_uncollected` allocators. The caller keeps the arguments alive, and the formals'
+/// defaults are reachable from `function`.
+unsafe fn frame_environment(function: Sexp, formals: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = values::length(formals);
+    heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count, &[function]);
+    let env = heap.alloc_environment_uncollected(function.tag(), count)?;
+    heap.root(env);
+    env.set_gp_bits(gp::FUNCTION_FRAME, true);
     Ok(env)
 }
 
@@ -1010,10 +1023,7 @@ pub unsafe fn apply_closure_moved(
     sys_parent: Sexp,
 ) -> R<Sexp> {
     let formals = function.car();
-    let heap = crate::heap();
-    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let env = frame_environment(function, formals)?;
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     let mut formal = formals;
     let mut index = 0;
@@ -1023,7 +1033,8 @@ pub unsafe fn apply_closure_moved(
         formal = formal.cdr();
         index += 1;
     }
-    heap.define_formals(env, &bindings)?;
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
     let promargs = args_pairlist(args)?;
     heap.untrack_references(promargs);
@@ -1047,7 +1058,8 @@ unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
 }
 
 /// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
-/// its default when the argument is missing.
+/// its default when the argument is missing. The promise comes from the budget that
+/// [`frame_environment`] reserved, so it needs no root before the frame holds it.
 unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     let missing = missing_arg();
     let symbol = formal.tag();
@@ -1058,7 +1070,7 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
         let value = if default.kind().is_atomic() || default == nil() {
             default
         } else {
-            make_promise(default, env)?
+            crate::heap().alloc_triple_uncollected(SexpType::Promise, unbound(), default, env)?
         };
         return Ok(Formal {
             symbol,
@@ -1073,12 +1085,16 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     })
 }
 
-/// The arguments as a pairlist of their values or promises, which a frame records.
+/// The arguments as a rooted pairlist of their values or promises, which a frame records. The
+/// caller keeps the values alive, so one collection check covers every cell.
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
+    let heap = crate::heap();
+    heap.reserve(TRIPLE_BYTES * args.len(), &[]);
     let mut list = nil();
     for arg in args.iter().rev() {
-        list = cons_tagged(arg.value, list, arg.tag)?;
+        list = heap.alloc_triple_uncollected(SexpType::Pairlist, arg.value, list, arg.tag)?;
     }
+    heap.root(list);
     Ok(list)
 }
 
@@ -1708,9 +1724,7 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
                 }
             }
             SexpType::Language => {
-                if functions {
-                    walk(expression.car(), functions, names);
-                } else if expression.car().kind() == SexpType::Language {
+                if functions || expression.car().kind() == SexpType::Language {
                     walk(expression.car(), functions, names);
                 }
                 let mut cell = expression.cdr();
@@ -2664,6 +2678,18 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };
+    // A bare `...` splices like an argument list, of which `substitute` keeps the first
+    // element, or `NULL` when the dots are empty.
+    if expression == symbols().dots {
+        let wrapped = values::pairlist(&[(nil(), expression)], SexpType::Pairlist)?;
+        crate::heap().root(wrapped);
+        let substituted = substitute_list(wrapped, env)?;
+        return Ok(if substituted == nil() {
+            nil()
+        } else {
+            substituted.car()
+        });
+    }
     let result = substitute(expression, env)?;
     Ok(result)
 }
@@ -3115,6 +3141,9 @@ pub unsafe fn complex_assign(
         base = values::shallow_duplicate(base)?;
         base.set_array(was_array);
     }
+    // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
+    // that moves the table's chain counter, which `ls(sorted = FALSE)` order depends on.
+    heap.count_transient_binding(env, symbols.tmp);
     crate::heap().root(base);
     interp().tmp_values.push((env, base));
     let replaced: R<Sexp> = (|| unsafe {

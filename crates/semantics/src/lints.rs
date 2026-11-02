@@ -7,14 +7,13 @@ use {
         parse, s3_generics,
         stubs::{declaring_namespace, stubs},
     },
-    rowan::{Direction, NodeOrToken},
     std::cell::LazyCell,
     syntax::{
-        GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
+        Direction, NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TreeEvent,
         ast::BinaryExpr,
-        is_green_inline_annotation,
+        is_inline_annotation_kind,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, node_text, walk_green,
+        node_at, node_text, walk_tree,
     },
 };
 
@@ -386,17 +385,17 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
     // One entry per open node, so a `Leave` knows whether its node opened a region.
     let mut opens_annotation = Vec::new();
     let mut annotation_depth = 0usize;
-    // The walk reads the green tree and builds a red node only where a cheap green test says
-    // a lint may fire, because a red walk of every file was a large share of the cold check.
-    walk_green(root, |event| match event {
-        GreenEvent::Enter {
+    // The walk reads borrowed nodes and makes an owned one only where a cheap test says a lint
+    // may fire.
+    walk_tree(root.node_ref(), |event| match event {
+        TreeEvent::Enter {
             node,
             parent,
             range,
         } => {
             let kind = node.kind();
             let opens = kind == SyntaxKind::ANNOTATION
-                || is_green_inline_annotation(kind, parent.map(GreenRef::kind));
+                || is_inline_annotation_kind(kind, parent.map(NodeRef::kind));
             opens_annotation.push(opens);
             annotation_depth += usize::from(opens);
             if opens || !may_lint(node, parent, config) {
@@ -433,12 +432,12 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 _ => {}
             }
         }
-        GreenEvent::Leave(_) => {
+        TreeEvent::Leave(_) => {
             if opens_annotation.pop() == Some(true) {
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { kind, text, range } => {
+        TreeEvent::Token { kind, text, range } => {
             if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
                 commented_code_lint(text, range, config, diagnostics);
             }
@@ -568,9 +567,9 @@ fn boolean_shorthand_lint(
     );
 }
 
-/// A conservative green-tree test for whether the red lint for `node` can report anything:
+/// A conservative test on a borrowed node for whether the lint for `node` can report anything:
 /// `false` only when it certainly reports nothing.
-fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfig) -> bool {
+fn may_lint(node: NodeRef<'_>, parent: Option<NodeRef<'_>>, config: &LintConfig) -> bool {
     match node.kind() {
         SyntaxKind::BINARY_EXPR => node.child_kinds().any(|kind| {
             matches!(
@@ -1074,8 +1073,8 @@ fn length_sequence_lint(
     );
 }
 
-/// Whether a call to the bare callee `name` can report anything, so the green pre-check
-/// builds a red node only for calls some enabled lint looks at.
+/// Whether a call to the bare callee `name` can report anything, so the pre-check makes an
+/// owned node only for calls some enabled lint looks at.
 fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
     let opted = |level| is_enabled(level, None);
     match name {
@@ -1179,8 +1178,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
     let Some(callee) = callee else {
         return;
     };
-    // Lazy because the arguments are red nodes, one allocation each, and most callees have
-    // no lint below.
+    // Lazy because collecting the arguments allocates, and most callees have no lint below.
     let arguments = LazyCell::new(|| call_arguments(call));
     let positional = LazyCell::new(|| {
         arguments
@@ -1393,12 +1391,11 @@ fn opt_in(level: LintLevel) -> LintLevel {
     }
 }
 
-/// Whether two named arguments of `call` may share a name, read off the green tree so the
-/// common call builds no red nodes. A name of several tokens answers yes and leaves the
+/// Whether two named arguments of `call` may share a name. A name of several tokens answers yes and leaves the
 /// decision to [`duplicate_argument_lint`].
 fn repeats_argument_name(call: &SyntaxNode) -> bool {
-    let green = call.green();
-    let Some(list) = GreenRef::new(&green)
+    let Some(list) = call
+        .node_ref()
         .child_nodes()
         .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
     else {
@@ -1676,7 +1673,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -2051,12 +2048,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match &*node_text(&margin) {
+    let prefix = match &*node_text(margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match &*node_text(&function) {
+    let suffix = match &*node_text(function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -2079,7 +2076,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
+        (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
@@ -2187,7 +2184,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(&*node_text(&rhs), "0" | "0L") {
+    if !matches!(&*node_text(rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2648,7 +2645,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {

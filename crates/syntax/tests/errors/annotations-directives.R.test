@@ -7,6 +7,15 @@ error: unexpected text after the `@type` definition
   | #: @type Person {list{name: character}} extra
   |                                         ^^^^^
 
+#---- a_second_annotation_on_one_line
+#: double #: character
+x <- 1
+#++++
+error: a second `#:` annotation on this line is read as a comment. Put each annotation on its own `#:` line
+ --> 1:11
+  | #: double #: character
+  |           ^^^^^^^^^^^^
+
 #---- bare_at
 #: @
 x <- 1

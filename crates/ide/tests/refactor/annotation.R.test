@@ -1,0 +1,95 @@
+#==== convert_annotation
+#---- function_to_inline
+#: fn(price: double, [rate]: double) -> double
+$0discount <- function(price, rate = 0.1) {
+  price * (1 - rate)
+}
+#++++
+action Convert to inline annotation
+  discount <- function(price: double, rate: double = 0.1) -> double {
+    price * (1 - rate)
+  }
+
+#---- generic_function_to_inline
+$0#: <T> fn(x: T) -> T
+identity2 <- function(x) x
+#++++
+action Convert to inline annotation
+  identity2 <- function<T>(x: T) -> T x
+
+#---- binding_to_inline
+#: integer
+$0count <- 0L
+#++++
+action Convert to inline annotation
+  count: integer <- 0L
+
+#---- trust_directive_to_inline
+#: @trust integer
+$0count <- g()
+#++++
+action Convert to inline annotation
+  count: @trust integer <- g()
+
+#---- function_to_comment
+$0discount <- function(price: double, rate: double = 0.1) -> double {
+  price * (1 - rate)
+}
+#++++
+action Convert to `#:` annotation
+  #: fn(price: double, [rate]: double) -> double
+  discount <- function(price, rate = 0.1) {
+    price * (1 - rate)
+  }
+
+#---- generic_function_to_comment
+$0identity2 <- function<T>(x: T) -> T x
+#++++
+action Convert to `#:` annotation
+  #: <T> fn(x: T) -> T
+  identity2 <- function(x) x
+
+#---- binding_to_comment
+$0count: integer <- 0L
+#++++
+action Convert to `#:` annotation
+  #: integer
+  count <- 0L
+
+#---- partly_typed_function_stays
+$0f <- function(x: double, y) x + y
+#++++
+no refactors
+
+#---- inside_a_function
+outer <- function() {
+  #: double
+  $0rate <- 0.5
+  rate
+}
+#++++
+action Convert to inline annotation
+  outer <- function() {
+    rate: double <- 0.5
+    rate
+  }
+
+#---- directive_binding_to_comment
+$0count: @trust integer <- g()
+#++++
+action Convert to `#:` annotation
+  #: @trust integer
+  count <- g()
+
+#---- dots_parameter_to_inline
+#: fn(x: double, ...: character) -> double
+$0f <- function(x, ...) x
+#++++
+action Convert to inline annotation
+  f <- function(x: double, ...: character) -> double x
+
+#---- mismatched_parameter_names_stay
+#: fn(y: double) -> double
+$0f <- function(x) x
+#++++
+no refactors

@@ -1,0 +1,13 @@
+[stdout]
+| [1] 476
+| [1] 476
+| [1] TRUE
+| [1] fd 37 7a 58 5a 00 00 01
+| [1] 472
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

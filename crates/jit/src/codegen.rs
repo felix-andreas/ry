@@ -1048,22 +1048,8 @@ impl<'p, 'b> Translator<'p, 'b> {
         let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
         let next = self.next_pc(position)?;
         let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
-        let ok = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
         let continued = self.builder.create_block();
-        let problem = self.builder.create_block();
-        self.builder.ins().brif(ok, continued, &[], problem, &[]);
-        self.builder.switch_to_block(problem);
-        self.builder.set_cold_block(problem);
-        let errored = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::Equal, result, outcome::FAILED as i64);
-        self.builder
-            .ins()
-            .brif(errored, failed, &[], invalidated, &[]);
+        self.branch_on_outcome(result, continued, failed, invalidated);
         self.builder.switch_to_block(continued);
         match effect {
             Effect::Pure => {}
@@ -1098,8 +1084,15 @@ impl<'p, 'b> Translator<'p, 'b> {
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
+        let after = self.after_with_boxed(position, Some(dst.0))?;
+        let next = self.next_pc(position)?;
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
+        let continued = self.builder.create_block();
         // A calling handler could run R code during the callee, before it forces an argument
-        // that this call evaluates early, so tier 0 makes such a call lazily.
+        // that this call evaluates early, so then tier 0's instruction makes the call lazily.
+        // Code running under a test harness always has handlers, which is why this stays in
+        // compiled code rather than leaving for tier 0.
         let handlers = self
             .call(
                 runtime::jit_handlers_present as *const () as usize,
@@ -1108,13 +1101,21 @@ impl<'p, 'b> Translator<'p, 'b> {
                 &[],
             )
             .ok_or(Refusal("a helper without a result"))?;
-        let observed = self.deopt(pc, before.id, None, position, reason::HANDOFF);
-        let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, handlers, 0);
-        self.guard(unobserved, observed);
+        let observed = self.builder.create_block();
+        let unobserved = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(handlers, observed, &[], unobserved, &[]);
+        self.builder.switch_to_block(observed);
+        self.box_reads(position, &before);
+        self.flush_all(&before, failed);
+        let validate = self.builder.ins().iconst(I32, 1);
+        let result = self.call_step(pc, validate)?;
+        self.branch_on_outcome(result, continued, failed, invalidated);
+        self.builder.switch_to_block(unobserved);
         for &(step, state) in steps {
             self.action(position, self.plan.state(state), step)?;
         }
-        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         self.flush_all(&before, failed);
         let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -1178,14 +1179,26 @@ impl<'p, 'b> Translator<'p, 'b> {
                 ],
             )
             .ok_or(Refusal("a helper without a result"))?;
-        let after = self.after_with_boxed(position, Some(dst.0))?;
-        let next = self.next_pc(position)?;
-        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
+        self.branch_on_outcome(result, continued, failed, invalidated);
+        self.builder.switch_to_block(continued);
+        self.forget_slots();
+        self.refine(dst.0, dst.1, next, after, position + 1);
+        Ok(())
+    }
+
+    /// Continues at `continued` when a helper's `result` is [`outcome::OK`], and otherwise
+    /// deoptimizes to `failed` after an error or to `invalidated` after the code was invalidated.
+    fn branch_on_outcome(
+        &mut self,
+        result: Value,
+        continued: Label,
+        failed: Label,
+        invalidated: Label,
+    ) {
         let ok = self
             .builder
             .ins()
             .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
-        let continued = self.builder.create_block();
         let problem = self.builder.create_block();
         self.builder.ins().brif(ok, continued, &[], problem, &[]);
         self.builder.switch_to_block(problem);
@@ -1197,10 +1210,6 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder
             .ins()
             .brif(errored, failed, &[], invalidated, &[]);
-        self.builder.switch_to_block(continued);
-        self.forget_slots();
-        self.refine(dst.0, dst.1, next, after, position + 1);
-        Ok(())
     }
 
     /// Checks that the value an instruction left in `register` has type `ty` and unboxes it,
@@ -1284,7 +1293,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             let same = self
                 .builder
                 .ins()
-                .icmp_imm_s(IntCC::Equal, held, function.as_ptr() as i64);
+                .icmp_imm_u(IntCC::Equal, held, function.as_ptr() as i64);
             self.hand_off_unless(position, before, same);
         }
         for &(step, state) in prelude {
@@ -1999,6 +2008,17 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::Modulo(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);
                 let b = self.as_double(args[1], types[1]);
+                // Tier 0 raises the warning, so a modulus that loses accuracy hands off.
+                let loses = self
+                    .call(
+                        runtime::jit_modulus_loses_accuracy as *const () as usize,
+                        &[F64, F64],
+                        Some(I32),
+                        &[a, b],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let keeps = self.builder.ins().icmp_imm_u(IntCC::Equal, loses, 0);
+                self.hand_off_unless(position, before, keeps);
                 let result = self
                     .call(
                         runtime::jit_real_modulo as *const () as usize,

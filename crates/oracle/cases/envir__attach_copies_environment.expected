@@ -1,0 +1,10 @@
+[stdout]
+| [1] 1
+| [1] 1
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+environment
+| <environment>

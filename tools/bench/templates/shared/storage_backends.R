@@ -8,8 +8,8 @@ open_storage_@ID@ <- function(account: character, client: BlobClient@ID@ | NULL 
     token <- AzureAuth::get_azure_token("https://storage.azure.com", tenant = "common", app = account)
     endpoint <- AzureStor::storage_endpoint(paste0("https://", account, ".blob.core.windows.net"), token = token)
     client <- list(
-      list = function(container) AzureStor::list_blobs(AzureStor::storage_container(endpoint, container)),
-      read = function(container, name) AzureStor::storage_download(AzureStor::storage_container(endpoint, container), name, NULL)
+      list = function(container: character) -> data.frame | character[] AzureStor::list_blobs(AzureStor::storage_container(endpoint, container)),
+      read = function(container: character, name: character) -> raw[] | NULL AzureStor::storage_download(AzureStor::storage_container(endpoint, container), name, NULL)
     )
   }
   client
@@ -51,13 +51,13 @@ connect_database_@ID@ <- function<T>(dsn: character, connector: fn(dsn: characte
 }
 #@ test
 test_that("storage backends @ID@ use the injected client", {
-  fake <- list(list = function(container) paste0("blob", seq_len(@BLOBS@)), read = function(container, name) name)
+  fake <- list(list = function(container: character) -> character[] paste0("blob", seq_len(@BLOBS@)), read = function(container: character, name: character) -> character name)
   client <- open_storage_@ID@("account", fake)
   expect_length(client$list("c"), @BLOBS@)
-  secrets <- load_secrets_@ID@("https://vault.test", c("a", "b"), client = function(name) toupper(name))
+  secrets <- load_secrets_@ID@("https://vault.test", c("a", "b"), client = function(name: character) -> character toupper(name))
   expect_equal(secrets$b, "B")
   first_value <- function(row: list[named: double]) -> double | NULL row$x
   expect_equal(append_table_row_@ID@("https://t.test", list(x = 1), client = first_value), 1)
   expect_equal(query_text_@ID@("trades", c("id", "price")), "SELECT \"id\", \"price\" FROM \"trades\" LIMIT @BLOBS@")
-  expect_equal(connect_database_@ID@("dsn", connector = function(dsn) paste("connected", dsn)), "connected dsn")
+  expect_equal(connect_database_@ID@("dsn", connector = function(dsn: character) -> character paste("connected", dsn)), "connected dsn")
 })

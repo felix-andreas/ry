@@ -79,6 +79,34 @@ the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gcto
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
+## The plot gallery
+
+```sh
+cargo run -p oracle -- gallery                          # every figure, every device
+cargo run -p oracle -- gallery --seed 3 --count 20      # a seeded sample
+cargo run -p oracle -- gallery --figures base:persp_surface,lattice:lattice_xyplot_groups --devices agg
+```
+
+The oracle cases check graphics state by value, and the gallery checks what is drawn. Each
+`crates/oracle/gallery/*.R` file (base graphics, the PerformanceAnalytics and xts charts in
+`finance.R`, grid, lattice, ggplot2) declares figures with `figure("name", { ... })`, and
+`oracle gallery` renders each one under GNU R and under ry's runtime on the `agg` (ragg), `png`,
+`pdf` and `svg` devices, then compares the images and times every render. A figure's visible value is printed, as at the top level, because lattice,
+ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is skipped, so set
+`R_LIBS` to the corpus library (`.corpus/library`) to run all of them.
+
+ragg rasterizes the same way under both engines, so `agg` is the sharp check: at most 0.2% of
+pixels may differ. `png` and `pdf` (rasterized with `pdftoppm` to `<figure>.pdf.png`) allow 5%, and there a pixel
+counts as differing only when nothing within one pixel in the other image matches it, because
+GNU R's cairo and ry's renderer antialias differently. `svg` is timed but not compared, because
+cairo writes text as glyph paths. The report lists each figure's differing share per device and both
+engines' times; `--repeats` keeps the fastest of several renders. A figure name used twice in the gallery, or a device outside `agg`, `png`, `pdf` and `svg`, is an error. `--seed` picks the sample and
+seeds R's random numbers in every figure, so a run replays exactly.
+
+`cargo test -p oracle` runs a bounded sample (`tests/test_gallery.rs`, four figures on `agg`, or
+`png` without ragg), picked by `FUZZ_SEED` and sized by `FUZZ_ITERS`. It skips without GNU R or a
+built runtime, and a failure prints the `oracle gallery` command that replays it.
+
 ## Package tests
 
 ```sh
@@ -105,8 +133,8 @@ killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to a
 first if you rebuild while a long run is going.
 
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
-measures the container, not ry. With the packages ry installed itself, ry passes 135 of the 164
-that GNU R passes (82.3%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
+measures the container, not ry. With the packages ry installed itself, ry passes 140 of the 164
+that GNU R passes (85.4%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
 `MEMORY.md` records the current rate.
 
 ## Installing on ry
@@ -158,8 +186,8 @@ ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
 On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time (today every case passes under 4.3.3). Four of the
-remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
+against 124 of 125 under 4.3.3 at the time. Today all 203 cases pass under 4.3.3, except the two
+knitr cases on a machine without knitr. Four of the remaining 4.6.1 differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
 calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines

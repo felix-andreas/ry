@@ -9,7 +9,8 @@ use {
     rustc_hash::FxHashMap,
     std::{collections::BTreeSet, num::NonZero, thread},
     syntax::{
-        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, node_text,
+        NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind,
+        node_text,
     },
 };
 
@@ -343,7 +344,7 @@ pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<Strin
     attached
 }
 
-pub(crate) fn is_green_attach_call(node: GreenRef<'_>) -> bool {
+pub(crate) fn is_attach_call_ref(node: NodeRef<'_>) -> bool {
     node.kind() == SyntaxKind::CALL_EXPR
         && node
             .child_nodes()
@@ -802,14 +803,14 @@ pub fn argument_name(argument: &SyntaxNode) -> Option<String> {
     let mut seen_name = None;
     for element in argument.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::EQ => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::EQ => {
                 return seen_name;
             }
-            rowan::NodeOrToken::Token(token) if token.kind().is_trivia() => {}
-            rowan::NodeOrToken::Token(token) => {
+            NodeOrToken::Token(token) if token.kind().is_trivia() => {}
+            NodeOrToken::Token(token) => {
                 seen_name = Some(unquote(token.text()));
             }
-            rowan::NodeOrToken::Node(node) => {
+            NodeOrToken::Node(node) => {
                 seen_name = name_argument(&node).map(|(name, _)| name);
             }
         }

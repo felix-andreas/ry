@@ -120,7 +120,8 @@ bench-stdlib filter="" n="1e6" *args:
     python3 -I tools/bench/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
-# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`.
+# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
+# (`--joins-only` runs the join questions alone).
 bench-table dir *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/table/report.py {{ dir }} --write {{ args }}
@@ -264,6 +265,12 @@ release-kind $version:
     	[0-9]*.[0-9]*.[0-9]*) echo release ;;
     	*) echo pre-release ;;
     esac
+
+# Times the benchmark code bases' table modules end to end (data.table on GNU R and on ry, typed DataFrame on ry) and rewrites their table in r-runtime.md, e.g. `just bench-frames --rows 1e7`.
+bench-frames *args:
+    cargo build --release -p ry-lang
+    cargo build --release -p libr
+    python3 -I tools/bench/frames/run.py --write {{ args }}
 
 # Install the benchmark dependency closure into .corpus/library (needs GNU R, network access and tools/corpus/system-packages.txt).
 corpus:

@@ -7,11 +7,12 @@
 use {
     crate::{
         eval,
-        graphics::{Colour, parse_colour_spec, text_width_ems},
+        graphics::{Colour, SYMBOL_BOX, parse_colour_spec, symbol_metrics, text_width_ems},
         graphics_engine::{
             DevDesc, GEContext, Rboolean, TRANSPARENT_WHITE, VERSION_GLYPHS, VERSION_GROUP,
             add_device_named, check_device_available, create_device, fail, fail_with,
         },
+        plotmath::adobe_symbol_code,
         unwind::{R, error},
         values::{self, length, nil},
     },
@@ -443,6 +444,17 @@ pub fn render_files(
             let document =
                 postscript_document(&drawing.pages, size, paper, landscape, false, title);
             return Ok(vec![document]);
+        }
+        // Cairo's svg surface exists from the moment the device opens, so GNU R writes an
+        // empty document for a device that never drew.
+        Format::Svg if drawing.pages.is_empty() => {
+            let page = Page {
+                background: TRANSPARENT_WHITE as Colour,
+                items: Vec::new(),
+            };
+            return Ok(vec![
+                svg_document(&page, &drawing.definitions, size).into_bytes(),
+            ]);
         }
         _ => {}
     }
@@ -2261,7 +2273,8 @@ fn draw_items(
     if depth > MAX_NESTING {
         return;
     }
-    let mut current: Option<((Clip, Option<usize>), Option<tiny_skia::Mask>)> = None;
+    type CoverageKey = (Clip, Option<usize>);
+    let mut current: Option<(CoverageKey, Option<tiny_skia::Mask>)> = None;
     for item in items {
         let key = (item.clip, item.mask);
         if current.as_ref().is_none_or(|(known, _)| *known != key) {
@@ -2315,9 +2328,9 @@ fn draw_items(
 /// tiny-skia lacks: the source, scaled down to fit the room the destination's alpha leaves,
 /// is added to the destination. Both are premultiplied and the same size.
 fn saturate(canvas: &mut tiny_skia::Pixmap, layer: &tiny_skia::Pixmap, coverage: &tiny_skia::Mask) {
-    let pixels = canvas.data_mut().chunks_exact_mut(4);
+    let pixels = canvas.data_mut().as_chunks_mut::<4>().0.iter_mut();
     for ((destination, source), &cover) in pixels
-        .zip(layer.data().chunks_exact(4))
+        .zip(layer.data().as_chunks::<4>().0)
         .zip(coverage.data())
     {
         let cover = f32::from(cover) / 255.0;
@@ -3437,7 +3450,7 @@ impl RenderDevice {
     }
 
     /// The map from device units to inches.
-    fn from_device(&self) -> Affine {
+    fn device_to_inches(&self) -> Affine {
         let unit = self.unit_inches;
         if self.y_down {
             Affine([unit, 0.0, 0.0, -unit, 0.0, self.size[1]])
@@ -3844,7 +3857,7 @@ unsafe extern "C" fn device_use_group(reference: Sexp, transform: Sexp, dd: *mut
     let transform = if transform != nil() && length(transform) >= 6 {
         let t: Vec<f64> = (0..6).map(|index| number_at(transform, index)).collect();
         let in_device = Affine([t[0], t[3], t[1], t[4], t[2], t[5]]);
-        let from_device = device.from_device();
+        let from_device = device.device_to_inches();
         match from_device.invert() {
             Some(to_device) => to_device.then(in_device).then(from_device),
             None => Affine::IDENTITY,
@@ -3959,8 +3972,9 @@ unsafe extern "C" fn device_glyph(
 
 /// A font file's face `index`, loaded once per session.
 fn font_file(file: &str, index: u32) -> Option<Rc<ab_glyph::FontVec>> {
+    type FontCache = BTreeMap<(String, u32), Option<Rc<ab_glyph::FontVec>>>;
     thread_local! {
-        static FONTS: RefCell<BTreeMap<(String, u32), Option<Rc<ab_glyph::FontVec>>>> =
+        static FONTS: RefCell<FontCache> =
             const { RefCell::new(BTreeMap::new()) };
     }
     FONTS.with(|fonts| {
@@ -4084,9 +4098,14 @@ unsafe fn fill(dd: *mut DevDesc, gc: &GEContext) -> Option<Fill> {
     Some(Fill::Colour(colour))
 }
 
-/// The text size a context asks for, in points.
-fn text_points(gc: &GEContext) -> f64 {
-    gc.ps * gc.cex
+/// The text size a context asks for, in points. GNU R's PDF and PostScript devices round it
+/// to a whole point, for metrics as well as glyphs; its Cairo devices do not.
+fn text_points(device: &RenderDevice, gc: &GEContext) -> f64 {
+    let points = gc.ps * gc.cex;
+    match device.format {
+        Some(Format::Pdf | Format::Postscript { .. }) => (points + 0.5).floor().max(1.0),
+        _ => points,
+    }
 }
 
 unsafe fn draw_outline(dd: *mut DevDesc, outline: Outline, rule: FillRule, gc: &GEContext) {
@@ -4188,9 +4207,17 @@ unsafe extern "C" fn device_metric_info(
     let device = render_device(dd);
     let gc = &*gc;
     let bold = gc.fontface == 2 || gc.fontface == 4;
-    let scale = text_points(gc) / 72.0 / device.unit_inches / 1000.0;
+    let scale = text_points(device, gc) / 72.0 / device.unit_inches / 1000.0;
     let code = c.unsigned_abs();
-    let (up, down, across) = if code == 0 {
+    let (up, down, across) = if gc.fontface == 5 {
+        // A negative character is Unicode, a positive one an Adobe Symbol code.
+        let [width, up, down] = match c {
+            0 => [SYMBOL_BOX[2], SYMBOL_BOX[0], SYMBOL_BOX[1]],
+            1.. => symbol_metrics(code),
+            _ => symbol_metrics(adobe_symbol_code(code).unwrap_or(code)),
+        };
+        (f64::from(up), f64::from(down), f64::from(width))
+    } else if code == 0 {
         if bold {
             (962.0, 228.0, 0.0)
         } else {
@@ -4395,7 +4422,7 @@ unsafe extern "C" fn device_str_width(
 ) -> f64 {
     let device = render_device(dd);
     let text = CStr::from_ptr(text).to_string_lossy();
-    text_width_ems(&text, (*gc).fontface) * text_points(&*gc) / 72.0 / device.unit_inches
+    text_width_ems(&text, (*gc).fontface) * text_points(device, &*gc) / 72.0 / device.unit_inches
 }
 
 unsafe extern "C" fn device_text(
@@ -4418,7 +4445,7 @@ unsafe extern "C" fn device_text(
         Mark::Text {
             origin,
             text,
-            points: text_points(gc),
+            points: text_points(device, gc),
             font: gc.fontface,
             rotation: rot,
             hadj,
