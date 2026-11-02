@@ -3386,7 +3386,13 @@ fn empty_room(keys: Sexp, index: &[i32]) -> usize {
 unsafe fn reserve_collection(call: &Call<'_>, object: Sexp, spare: usize) -> R<Sexp> {
     let count = entry_count(object);
     if count == 0 {
-        return Collection::with_room(records::native_kind(object), spare)?.write();
+        let keys = records::slot_value(object, 0)?;
+        let kind = records::native_kind(object);
+        let index = records::slot_value(object, index_slot(kind))?;
+        if empty_room(keys, values::ints(index)) >= spare {
+            return Ok(object);
+        }
+        return Collection::with_room(kind, spare)?.write();
     }
     let object = if owned_collection(call, object) {
         object

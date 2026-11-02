@@ -414,6 +414,9 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- `List.from_vector` is a leaf but materializes an ALTREP vector, and a package's ALTREP class
+  could run R code in its materialize method. No such class is known among the benchmark
+  dependencies; if one appears, check `is_altrep` in the compiled call or drop it from `LEAVES`.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.

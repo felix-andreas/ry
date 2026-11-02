@@ -3280,7 +3280,8 @@ Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
 <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 ```
 
-The dictionary with no room beyond its entries.
+The dictionary with no room beyond its entries. An empty dictionary keeps its smallest index,
+which has room for 4.
 
 ```r ry run runtime=ry dput
 Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L)))
@@ -3584,7 +3585,8 @@ Set.capacity(Set.reserve(Set.single("a"), 9L))
 <T: key> fn(set: Set<T>) -> Set<T>
 ```
 
-The set with no room beyond its elements.
+The set with no room beyond its elements. An empty set keeps its smallest index, which has room
+for 4.
 
 ```r ry run runtime=ry dput
 Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))

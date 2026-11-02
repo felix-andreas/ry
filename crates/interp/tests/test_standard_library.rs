@@ -883,8 +883,8 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     // An empty collection keeps its room in its index until the first key fixes the key type.
     (
-        "(function() { d <- Dict.with_capacity(100L); e <- Dict.insert(d, \"a\", 1L); s <- Set.insert(Set.reserve(Set.empty(), 30L), 2L); c(Dict.capacity(d), Dict.capacity(e), Dict.len(e), Set.capacity(s), Set.capacity(Set.release_excess_capacity(s))) })()",
-        "[1] 128 128   1  32   1\n",
+        "(function() { d <- Dict.with_capacity(100L); e <- Dict.insert(d, \"a\", 1L); s <- Set.insert(Set.reserve(Set.empty(), 30L), 2L); c(Dict.capacity(d), Dict.capacity(e), Dict.len(e), Set.capacity(s), Set.capacity(Set.release_excess_capacity(s)), Dict.capacity(Dict.reserve(d, 10L)), Dict.capacity(Dict.release_excess_capacity(d))) })()",
+        "[1] 128 128   1  32   1 128   4\n",
     ),
     (
         "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",

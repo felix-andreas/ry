@@ -586,7 +586,7 @@ Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<
 Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
 #' How many entries the dictionary holds before its storage must grow.
 Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> integer
-#' The dictionary with no room beyond its entries.
+#' The dictionary with no room beyond its entries. An empty dictionary keeps room for 4.
 Dict.release_excess_capacity : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 #' An empty dictionary of the same type.
 Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
@@ -635,7 +635,7 @@ Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
 #' How many elements the set holds before its storage must grow.
 Set.capacity : <T: key> fn(set: Set<T>) -> integer
-#' The set with no room beyond its elements.
+#' The set with no room beyond its elements. An empty set keeps room for 4.
 Set.release_excess_capacity : <T: key> fn(set: Set<T>) -> Set<T>
 
 # DataFrame

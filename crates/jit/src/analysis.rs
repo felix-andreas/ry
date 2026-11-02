@@ -2056,7 +2056,6 @@ impl<'a> Builder<'a> {
         action
     }
 
-    /// Adds a step to an inlined call, with the state before it.
     /// Retypes as boxed every [`Ty::Num`] register the instruction at `position` cannot read
     /// unboxed, returning them so code generation boxes them first. Only a copy, an assignment
     /// and arithmetic whose result is a double whatever the flag says read one unboxed.
@@ -2102,6 +2101,7 @@ impl<'a> Builder<'a> {
         boxed
     }
 
+    /// Adds a step to an inlined call, with the state before it.
     fn push_step(&mut self, lowering: &mut Lowering<'a>, action: Action<'a>) {
         let id = self.states.push(&lowering.state);
         lowering.steps.push((action, id));
