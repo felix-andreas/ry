@@ -11,7 +11,7 @@
 
 use {
     crate::{
-        Code, Loader, Source,
+        Code, Loader, Source, find_package_root,
         r::{RUNTIME_RY, RValue, error_value, plan_value},
         s4_cache_path,
     },
@@ -50,6 +50,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderDeferred", 1, do_deferred),
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
+    internal("ryLoaderCallers", 2, do_callers),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
@@ -359,6 +360,15 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
         force,
     });
     Ok(nil())
+}
+
+/// `.Internal(ryLoaderCallers(root, names))`: [`Loader::callers`] of the package at `root`.
+unsafe fn do_callers(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let changed: Vec<String> = values::strings(call.arg(1)).into_iter().flatten().collect();
+    let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
+    let callers = session().loader.callers(&root, &changed);
+    values::string_vector(&callers)
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

@@ -110,6 +110,11 @@ pub enum BrowseInput {
     Attach(Box<dyn Transport>, Value),
 }
 
+/// Wakes the console's wait for input, so it answers the help server's queued requests.
+pub fn wake() {
+    platform::wake();
+}
+
 /// Answers the requests queued while a command runs. Called from the evaluator's interrupt poll.
 pub fn service() {
     // SAFETY: the poll runs on the interpreter's thread.
@@ -358,7 +363,7 @@ mod platform {
             Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, SERVING_REQUEST, Transport,
             answer_plain, lock, read_directly, response,
         },
-        crate::{interp, unwind::INTERRUPT_REQUESTED},
+        crate::{help_server, interp, unwind::INTERRUPT_REQUESTED},
         serde_json::{Value, json},
         std::{
             collections::{BTreeMap, VecDeque},
@@ -379,6 +384,8 @@ mod platform {
 
     enum Event {
         Input(Option<String>),
+        /// The help server queued a request, which it holds itself.
+        Help,
         Request(u64, Value),
         Closed(u64),
     }
@@ -539,6 +546,16 @@ mod platform {
     /// down instead of growing the queue, and no request is dropped unanswered.
     const QUEUED_PER_CONNECTION: usize = 64;
 
+    pub fn wake() {
+        // One token answers every queued request, and a script that never prompts would
+        // otherwise collect one per request.
+        let mut events = lock(&EVENTS);
+        if !events.iter().any(|event| matches!(event, Event::Help)) {
+            events.push_back(Event::Help);
+            ARRIVED.notify_all();
+        }
+    }
+
     fn push(event: Event) {
         let poke = !matches!(event, Event::Input(_));
         let mut events = lock(&EVENTS);
@@ -609,9 +626,11 @@ mod platform {
     /// Answers requests until the line read after `prompt` arrives. At a `Browse[1]>` prompt
     /// (`browse`), an editor's `initialize` ends the wait instead, handing the stop over.
     unsafe fn wait_for_input(prompt: &str, browse: bool) -> BrowseInput {
-        if lock(&SERVER).is_none() {
+        if lock(&SERVER).is_none() && !help_server::running() {
             return BrowseInput::Line(read_directly(prompt));
         }
+        // Help requests that arrived while a command ran were left for the prompt.
+        serve_help();
         ask(prompt);
         loop {
             let event = match lock(&STASHED_INPUT).take() {
@@ -638,8 +657,19 @@ mod platform {
                 }
                 Some(Event::Request(connection, message)) => idle_request(connection, message),
                 Some(Event::Closed(connection)) => closed(connection),
+                Some(Event::Help) => serve_help(),
                 None => {}
             }
+        }
+    }
+
+    /// Answers help requests while waiting for input. A Ctrl-C that stopped a handler has
+    /// nothing else to stop here, as at GNU R's prompt.
+    fn serve_help() {
+        // SAFETY: the console waits for input on the interpreter's thread, where GNU R's event
+        // loop runs R handlers too.
+        if let Err(unwind) = unsafe { help_server::serve_pending() } {
+            drop(unwind);
         }
     }
 
@@ -708,6 +738,9 @@ mod platform {
             match event {
                 Event::Request(connection, message) => busy_request(connection, message),
                 Event::Closed(connection) => closed(connection),
+                // GNU R's help server answers only while R waits, so the request stays queued
+                // for the prompt.
+                Event::Help => {}
                 // A line typed while a command runs waits for the next prompt, and the requests
                 // behind it are still answered.
                 Event::Input(input) => *lock(&STASHED_INPUT) = Some(input),
@@ -869,6 +902,9 @@ mod platform {
                     Some(Event::Closed(connection)) => {
                         lock(&CONNECTIONS).remove(&connection);
                     }
+                    // A stopped program waits like a prompt, so it answers the help server too.
+                    Some(Event::Help) if wait => serve_help(),
+                    Some(Event::Help) => {}
                     // A typed line waits for the next prompt: a stop must not end on it, or the
                     // debugger would take it for a hang-up, and between statements the editor's
                     // requests behind it must still be answered.
@@ -901,6 +937,8 @@ mod platform {
     }
 
     pub fn finish() {}
+
+    pub fn wake() {}
 
     use super::{BrowseInput, read_directly};
 

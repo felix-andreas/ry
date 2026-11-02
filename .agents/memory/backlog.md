@@ -66,8 +66,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
   read bundled files at load time (`.onLoad`) fail until this exists.
-- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` sources them itself,
-  but `load_all()` followed by interactive use of a helper does not see it.
+- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
+  sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
+- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
+  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
+  or `src/` does not trigger a rerun.
 - **Importers of a development package keep stale copies** of its changed bindings; only one
   development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
@@ -156,8 +159,30 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is back down to 98. About 20 of the rest are true bugs in the packages; most of the
-others are false reports on correct R. The classes:
+lifecycle, and is down to 75. About 22 of the rest are true bugs in the packages (NlcOptim calls the
+matrices `indall` and `A` as functions); the other 53
+or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
+packages (`tools/bench/generate.py`) report nothing. The classes:
+
+- **A parameter passed as `FUN` to a `match.fun` caller is inferred as a function** (kernlab
+  `apply(x, 2, var)` beside a formal `var = 1`, diffobj `lapply(hunk[nm], op, n)` with `op` one
+  of `"head"` and `"tail"`). `match.fun` takes a string, and looks a non-function binding's
+  symbol up with `mode = "function"`, so the later `var < 10^-3` or `op == "tail"` is reported.
+  Leaving the parameter open there would lose `function(xs, f) lapply(xs, f)`'s inferred
+  `f: fn(T) -> U`, so the fix needs a union-shaped inference (`fn(T) -> U | character`).
+- **A return chosen by a flag default keeps both branches** (DistributionUtils `pDist(...,
+  valueOnly = TRUE)` ends in `if (valueOnly) prob else list(value = prob, error = err)`, 3
+  reports). A call that omits the flag gets the default's branch in R, but the signature has one
+  return type; specializing needs the interface to keep the per-branch returns.
+- **An inferred callback's `logical` parameter rejects a number** (gmp `lapply(0:(n-1L),
+  Eulerian, n = n)`). A direct call passes `integer` to an inferred `logical` parameter
+  (`fits_inferred_scalar`), but the callback check in `function_compatible` has no such leniency.
+- **A string passed to an inferred condition parameter is reported** (renv `not(check)` with
+  `check <- Sys.getenv(..., unset = "TRUE")`). `if` reads `"TRUE"` through `as.logical`, but
+  `&&` and `!` reject a string, and the inferred `logical` does not record which use bound it.
+- **Free names that R6 or withr inject read as base functions** (R6 `if (class)` in
+  `generator_funs$new`, which R6 reparents onto the generator; withr's `wrap()` template reads
+  `append`). The same shape is a true bug in gmp (`if (log)` with no `log` formal).
 
 - **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
   `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
@@ -560,10 +585,18 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
-- **`.Random.seed` is reread on every RNG call** (`crates/interp/src/random.rs`, `from_words`, about
-  4,400 instructions per `rnorm` call), as GNU R does. Caching the state against the binding's
-  identity would make `vasicek` match GNU R; it is still about 10% behind, with `qnorm` and the
-  twister refill the rest of the cost.
+- **First-call compiles stop at builtins and subscripts.** A fully typed closure compiles at its
+  first call from its signature (`decisions.md`, "the JIT tier"), but a body that calls a builtin
+  or subscripts a value has no result type until feedback arrives, so `vasicek_paths` is refused
+  as COLD at its first call. Its loop runs 2,000 iterations, under the 10,000 back-edge threshold,
+  so it stays in tier 0. Result types for common builtins (`length`, `numeric`, `matrix`, `sqrt`,
+  `rnorm`) and for `[` on typed vectors would let it compile at the first call.
+- **Cold-code cost of typing is unmeasured.** finbench's typed variant uses `#:` comments, which
+  never reach the runtime, so measuring typed against untyped with the JIT on needs an
+  inline-annotated variant (or the strict session's typed finbench) first.
+- **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
+  `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
+  `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
 - **One oracle case fails under both `ry` and `ry-jit`** (`stats__lbfgsb` differs from GNU R
   in late digits), so it is a native gap, not a JIT one. Run the oracle against a release build with `ORACLE_RY=target/release/ry` after building
   both `ry-lang` and `libr`: the JIT lives in `libR`, so building `ry-lang` alone tests a stale JIT.
@@ -2326,7 +2359,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
   out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
   with a release build.
-- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+- **Default-package routines still failing on purpose:** tools' `parseLatex`, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
