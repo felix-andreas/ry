@@ -2820,8 +2820,9 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             }
             if kind == SexpType::Real {
                 // Within one argument the first NaN or NA wins, as GNU R's long double loop gives;
-                // each argument's sum is rounded to double, and across arguments NA outranks NaN.
-                let mut total = LongDouble::ZERO;
+                // each argument's sum is rounded to double and added to a double total, so
+                // `sum(1e308, 1e308, -1e308)` overflows, and across arguments NA outranks NaN.
+                let mut total = 0.0_f64;
                 let mut na = false;
                 for &item in &items {
                     let finite = if item.kind() == SexpType::Real {
@@ -2868,7 +2869,7 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                     na |= is_na_real(item_sum);
                     total += item_sum;
                 }
-                return scalar_real(if na { NA_REAL } else { total.to_f64() });
+                return scalar_real(if na { NA_REAL } else { total });
             }
             let mut total: i64 = 0;
             for &item in &items {

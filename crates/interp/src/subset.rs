@@ -1665,9 +1665,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         && matches!(object.kind(), SexpType::List | SexpType::Expression)
         && indices.len() <= 1
     {
+        let index = indices.first().copied().unwrap_or(missing_arg());
+        let object = if logical_stretch(index) > length(object) {
+            grow(object, logical_stretch(index))?
+        } else {
+            object
+        };
         let count = length(object);
         let names = values::names(object);
-        let index = indices.first().copied().unwrap_or(missing_arg());
         let (positions, _) = resolve(index, count, names, true, call)?;
         let remove: std::collections::HashSet<usize> = positions
             .into_iter()
@@ -1824,19 +1829,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .into_iter()
         .filter(|&position| position != NA_POSITION)
         .collect();
-    if positions.is_empty() {
-        return Ok(result);
-    }
-    if value_count == 0 {
-        return Err(crate::unwind::error_in(call, "replacement has length zero"));
-    }
-    if !positions.len().is_multiple_of(value_count) {
-        conditions::warning_call(
-            call,
-            "number of items to replace is not a multiple of replacement length",
-        )?;
-    }
-    let needed = positions.iter().copied().max().map_or(0, |max| max + 1);
+    let needed = positions
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max| max + 1)
+        .max(logical_stretch(index));
     if needed > count {
         result = grow(result, needed)?;
         if names != nil() || !new_names.is_empty() {
@@ -1854,10 +1852,32 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             values::set_attr(result, symbols().names, grown_names)?;
         }
     }
+    if positions.is_empty() {
+        return Ok(result);
+    }
+    if value_count == 0 {
+        return Err(crate::unwind::error_in(call, "replacement has length zero"));
+    }
+    if !positions.len().is_multiple_of(value_count) {
+        conditions::warning_call(
+            call,
+            "number of items to replace is not a multiple of replacement length",
+        )?;
+    }
     for (position, &target) in positions.iter().enumerate() {
         assign_element(result, target, value, position % value_count)?;
     }
     Ok(result)
+}
+
+/// A logical subscript longer than the vector stretches it on assignment to the subscript's
+/// length, whatever the subscript selects, as GNU R does.
+unsafe fn logical_stretch(index: Sexp) -> usize {
+    if index.kind() == SexpType::Logical {
+        length(index)
+    } else {
+        0
+    }
 }
 
 /// `vector` extended to `length`, padded with NA, keeping its attributes but not its dims.

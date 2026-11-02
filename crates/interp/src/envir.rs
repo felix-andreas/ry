@@ -1246,7 +1246,8 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             crate::format::set_output_decimal(&mark);
             Ok(value)
         }
-        "scipen" | "deparse.cutoff" => {
+        // GNU R keeps `scipen` as given and reads it as an integer where it is used.
+        "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {
