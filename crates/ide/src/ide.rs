@@ -665,7 +665,7 @@ fn hover_definition<'db>(
             CopySource::Slot(origin) => origin,
             CopySource::NonLocal(source) => {
                 return global_hover_definition(db, files, &source, None)
-                    .or_else(|| stub_hover_definition(db, &source));
+                    .or_else(|| bare_stub_hover_definition(db, &source));
             }
         };
         let info = naming.bindings.get(&binding)?;
@@ -684,7 +684,20 @@ fn hover_definition<'db>(
     if !naming.non_locals.contains_key(&expression) {
         return None;
     }
-    global_hover_definition(db, files, name, None).or_else(|| stub_hover_definition(db, name))
+    global_hover_definition(db, files, name, None).or_else(|| bare_stub_hover_definition(db, name))
+}
+
+/// A bare name reaches the standard library only through the prelude, so with the prelude off
+/// it has no stub declaration to show, matching the checker's unresolved-name report.
+fn bare_stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
+    if hidden_by_prelude(db, name) {
+        return None;
+    }
+    stub_hover_definition(db, name)
+}
+
+fn hidden_by_prelude(db: &dyn Db, name: &str) -> bool {
+    stubs(db).is_some_and(|library| outside_prelude(db, library, name))
 }
 
 fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
@@ -807,6 +820,9 @@ fn referenced_scheme<'db>(
 ) -> Option<TypeScheme<'db>> {
     if let Some(item) = declaring_item(db, files, name) {
         return Some(global_scheme(db, item));
+    }
+    if hidden_by_prelude(db, name) {
+        return None;
     }
     let candidates = stubs(db)?.schemes.get(name)?;
     let index = check
@@ -7376,7 +7392,7 @@ fn non_local_target<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Ta
     if global_declaration_exists(db, files, name) {
         return Target::Global(name.to_string());
     }
-    if stub_declaration(db, name).is_some() {
+    if stub_declaration(db, name).is_some() && !hidden_by_prelude(db, name) {
         return Target::StubGlobal(name.to_string());
     }
     Target::Package(PackageTarget {

@@ -27,7 +27,7 @@ use {
         parse, prelude_enabled, project_type_definitions, statement_annotations,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
-            namespace_exports, namespace_known, stubs,
+            namespace_exports, namespace_known, outside_prelude, stubs,
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
@@ -2097,7 +2097,9 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         true => {
             let name = read.name.as_ref()?;
             if !read.internal && !namespace_exports(db, &read.package, name) {
-                let hint = if namespace_exports(db, STANDARD_LIBRARY, name) {
+                // `ry` is the other namespace ry ships, so `ry::List.map` is the likely slip.
+                let hint = if read.package == "ry" && namespace_exports(db, STANDARD_LIBRARY, name)
+                {
                     format!(" It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`.")
                 } else {
                     String::new()
@@ -2298,7 +2300,8 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .schemes
             .keys()
             .chain(library.known_exports.iter())
-            .map(String::as_str),
+            .map(String::as_str)
+            .filter(|candidate| !outside_prelude(db, library, candidate)),
     )
 }
 

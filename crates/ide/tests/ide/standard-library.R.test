@@ -194,3 +194,8 @@ action: Add inferred type annotations for the whole file
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @33: list[integer]
 hint @51list =
+
+#---- prelude_off_bare_library_name_has_no_library_hover
+# [check] prelude = false
+doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
+#++++

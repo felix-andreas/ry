@@ -182,8 +182,8 @@ pub fn set_package_check_on_ry_runtime(
 /// run, and any other value is the status the process exits with. It may block.
 pub type PackageVerdict = extern "C" fn() -> std::ffi::c_int;
 
-/// What ry's runtime does with inline type annotations and the standard library; mirrors the `RUN_FLAG_*` bits of
-/// `libr::eval`.
+/// What ry's runtime does with inline type annotations and the standard library; mirrors the
+/// `RUN_FLAG_*` bits of `libr::eval`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeFlags {
     /// Inline annotations become checks at function boundaries.

@@ -99,6 +99,11 @@ fn parse_library(source: &str) -> Result<Library, String> {
                 items: Vec::new(),
             });
         } else if let Some(declaration) = line.strip_prefix('@') {
+            if !pending.is_empty() {
+                return Err(format!(
+                    "line {number}: `#'` documentation above a type declaration is not rendered"
+                ));
+            }
             types.push(format!("@{declaration}"));
         } else if let Some((name, signature)) = line.split_once(" : ") {
             let module = modules.last_mut().ok_or_else(|| {
@@ -121,7 +126,13 @@ fn parse_library(source: &str) -> Result<Library, String> {
             }
         } else if !line.trim().is_empty() && !line.starts_with('#') {
             return Err(format!("line {number}: unexpected line `{line}`"));
-        } else if !line.trim().is_empty() {
+        } else if line.trim().is_empty() {
+            if !pending.is_empty() {
+                return Err(format!(
+                    "line {number}: a blank line separates `#'` documentation from its declaration"
+                ));
+            }
+        } else {
             pending.clear();
         }
     }
