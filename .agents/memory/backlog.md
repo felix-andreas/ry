@@ -26,11 +26,20 @@ The quality bar is four things.
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
-- **`rowSums` and `colSums` accumulate in a software long double model** to match GNU R's last digit, which makes them slower than GNU R on large matrices. A faster exact accumulator (two-sum, or 128-bit fixed point) would keep the digits.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__device_files` (the PostScript header lacks `%%DocumentMedia`, and the bounding box swaps width and height), and `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
-- **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
+- **A hashed frame lists in a different order from GNU R after `rm()`.** `Frame::hash_chains` replays GNU R's table growth over the live bindings only, but GNU R grew its table while the removed ones were still there, so `h <- new.env(hash = TRUE)`, 60 assignments, then `rm()` of the first 45 lists `w60` first in GNU R and last in ry. Replaying needs the removed bindings' insertion history, which compaction drops (`crates/heap/src/env.rs`).
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 115k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: compiled promise code, since a promise's expression is evaluated by the AST walker (about 9 promises per `sd`, with their builtin arguments evaluated through `evaluate_args_into` and uncached `find_called_fun`, roughly 15k instructions); GNU R compiles it to bytecode and reads the expression back through `R_PromiseExpr`, so the 83 readers of a promise's code would go through one accessor. Then fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call, and the callers of `mk_char` in the test code.
+
+## Open: base R kernels against GNU R
+
+`just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). At 1e6 rows, 31 of 52 kernels run at or below GNU R's time and three more within 5%. Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. These are still slower:
+
+- **Strings:** `formatC` 1.5x, `substr` 1.5x (interning an already-interned piece still costs about 200 instructions in `Heap::mk_char`), `grepl(fixed = TRUE)` 1.3x, `sub` and `gsub(perl = TRUE)` 1.1x.
+- **Grouping and tabulation:** `match` on integers 2.7x (a hash table where GNU R uses a direct-address table for small ranges), `order` on two keys 1.6x, `split` 1.5x, `cut` 1.5x, `table` on two factors 1.25x, `sort` on integers and strings 1.1 to 1.2x.
+- **Matrix and time series:** `apply` over rows 1.8x (per-call interpreter cost, which the tier-0 work owns), xts `period.apply` 1.7x, zoo `na.locf` 1.5x.
+- **Correctness gaps found beside the kernels** (unverified against every GNU R version): `sum` over several arguments keeps one long double total, so `sum(1e308, 1e308, -1e308)` is `1e+308` where GNU R, which adds each argument's sum in double, gives `Inf`. A logical subscript longer than the vector does not stretch it on assignment (`y <- NA; y[c(TRUE, TRUE, FALSE, TRUE, FALSE)] <- 1:3` gives length 4, GNU R 5), which breaks `rank(c(2, 1, NA, 2, NaN), ties.method = "first")`. `format(-0)` under `options(scipen = -5)` writes `-0e+00` (GNU R `0e+00`). `order(<raw>, method = "radix")` succeeds where GNU R errors.
+- **Peak memory** (`run.py --memory`) is 1.1 to 1.45 times GNU R's at 1e6 rows, about 30 MB above it on kernels that allocate little. ry starts 10 MB higher (60 MB against 50 MB for an empty script). Most of the rest is freed large vectors that mimalloc keeps resident for its purge delay while the next allocation takes fresh pages; GNU R's large vectors come from glibc `malloc`, which unmaps them on `free`. `MIMALLOC_PURGE_DELAY=0` brings the setup of `tools/bench/base/kernels.R` level with GNU R but slows several kernels by about 20%, so the fix is a reuse policy for large vectors rather than that setting. Tightening the collector's young budget (a quarter of the old generation instead of half) did not lower the peak.
 
 ## Open: the package loader
 
@@ -87,10 +96,6 @@ False reports on correct R, worst first:
   no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
   `::` loads without attaching; validating it against the shipped manifest and stub types without
   activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
-- **A trailing comma inside rlang's dynamic dots.** `mutate(d, y = 1, )` runs in dplyr, because
-  rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
-  The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
-  dplyr verbs at least). Unverified against a live R session.
 - **`with`, `subset` and `transform` are strict findings.** base declares them as bare `Any`
   values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
   `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
@@ -412,24 +417,13 @@ protects construction but nothing after it.
   so each call copies. Ending only when the closure can reach the moved value would need an
   escape check on the closure's body; closures the helper creates itself are already covered
   (`decisions.md`, "Moving a collection into a helper's parameter").
-- In a helper that creates a closure, the tail form `List.append(xs, f(i))` copies, because
-  `Op::CallTailUpdate` stays off when the body may capture its frame. Allowing it needs proof
-  that no created closure can read the parameter after the update.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
-- Tuple `t[[1L]]` and tag payload reads through `match` have no shape cache or JIT fast path;
-  `[[` on a tuple goes through `subset2`, and a JIT intrinsic needs per-site evidence that the
-  subject is a tuple of a known layout (the way `Op::Field` caches one for `$`).
-- The tail update covers only a body's last statement; `if (c) Dict.insert(d, k, 1) else d` and
-  `return(Dict.insert(d, ...))` still copy.
+- `l[[i]]` on a list compiles to `Intrinsic::Element` with a boxed result, so arithmetic on the
+  element runs in tier 0. Tuple items and record fields speculate on the site's type feedback
+  (`Analysis::slot_read`) and stay native; a list element read should do the same, with a type
+  check that hands off to tier 0 on a mismatch.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- A type parameter shared by two arguments binds to the first and does not widen to a wider
-  second: with `light: :Red | :Green`, `Bool.is_eq(light, :Red)` checks but
-  `Bool.is_eq(:Red, light)` reports "expected `:Red`, found `:Red | :Green`". The same holds for
-  any `<T> fn(T, T)` signature. Belongs to the checker's call inference.
-- Some functions still return `NaN` for infinite input (`Num.sin(Inf)`, `Num.pow(-1, 0.5)`,
-  `Num.div_trunc_checked(Inf, Inf)` as `:Ok(NaN)`). The unchecked operations error on a `NaN`
-  result; decide whether these should too, or return a tag.
 - The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
   saves its state around each call. Adding them is safe (none runs R code) once the JIT's
   intrinsic table is settled.
@@ -1111,8 +1105,6 @@ corpus cache, and an OSS-Fuzz submission.
 
 Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
 
-- **Startup-mode collection stress (`RY_GC_STRESS=startup`) is unusable in a debug build**: an empty script runs for over 300 s, because each collection scans every root and every eighth is major. Cheaper root scanning would make it usable.
-- **Run `just gc-torture` over every oracle case on an idle machine.** No full run has completed yet; a debug build needs several minutes per four cases.
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
 - **The oracle's `run_command` timeout kills only the direct child** (`crates/oracle/src/oracle.rs`). A grandchild that inherited stdout or stderr keeps the drain threads blocked in `join`, so a hung subprocess tree still hangs the harness. Spawn the engine in its own process group and kill the group.
 - **The simulator does not model idle preemption** (`preempt_idle`/`set_idle` in `server.rs`: a request queued during an idle unit cancels that unit, never a sync or another request). Its interrupted steps deliver only notifications, so schedule requests mid-idle-unit and check the preempted unit is redone, including `pending_lowering` and the parallel warm-up.
@@ -1132,19 +1124,6 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 A second independent review of the fuzzing and test architecture, with every claim measured rather
 than read off the code. The findings it shares with the two reviews above are written up there. These
 are the ones only it found, ranked, each stating the change and why it is worth it.
-
-### The formatter battery cannot notice the formatter deleting code
-
-`check_format_invariants` asserts determinism, idempotence, and that the output re-formats. A
-formatter that silently dropped a statement passes all three.
-
-The missing oracle is the sequence of non-trivia token kinds, excluding `{`, `}`, `;` and
-`ANNOTATION_MARKER`, because the formatter legitimately adds braces, splits `;` chains and re-lays
-out `#:` blocks. It was built and run, with no mismatch over 1,182 fixture case sources, of which
-972 formatted, and 20,000 fuzz-shaped inputs, of which 4,073 formatted. The weaker formulations do
-not hold: raw token equality fails on 50 brace and semicolon insertions, and text equality fails on
-9 normalizations of `'x'` to `"x"`. So the assertion to write is kinds with those four excluded, at
-about ten lines.
 
 ### `crates/ry` has no property coverage, and the protocol edge panics
 
@@ -3047,17 +3026,28 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
-  tabs, and `browser()` in code without a srcref does not stop.
+  tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
-  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`.
-- `browser()` typed at a console with no debugger attached runs past instead of giving GNU R's
-  text `Browse>` prompt.
-- The data viewer has no sorting, filtering or column search; each would be a request the
-  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
+  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`,
+  which waits for a Windows runner to test it on.
+- The `Browse[1]>` prompt always shows depth 1 (GNU R counts nested browsers), and `where` names
+  frames by function, not by call as GNU R does.
+- The data viewer filters by one text over all columns and sorts by one column; per-column
+  filters (a numeric range, a factor level) and multi-column sorts would extend the `ryTable`
+  request the same way.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
+  httr2 (`pkg::name`, `$` field, argument name, call head, variable):
+  - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
+    its `list(name = ...)` or `x$name <- ...` site; R6 `self$`/`private$` members are most of them.
+  - Goto and hover on calls into imported packages with no stub (rlang's `is_null`, `enquos`;
+    lifecycle) answer nothing; purrr's call heads answer 74%. More stubs, or reading an installed
+    package's R source for navigation, would close it.
+  - A named argument that R completes by partial matching (`f(fac = 1)` for `factor`) is not
+    linked to its parameter, so a parameter rename leaves it behind.
 - Not done from rust-analyzer's list, with the reason:
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
@@ -3088,14 +3078,19 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.45-1.6 s on 4 cores and already uses about 3.4 of them, so the 1 s cold
-  target needs about a third less CPU work. Under callgrind the finance bench went from 27.6 to
-  24.6 G instructions with: direct descent in `node_at`, green walks for `write_tokens`, a node-only
-  `walk_green` (syntax lints 2.1 to 1.06 G, syntax sites 0.82 to 0.66 G), a per-check memo of type
-  definitions, and a formal-use walk that tracks only the formals. Wall time did not move outside the
-  machine's noise. What is left is flat: item checking 11.05 G (45%, `infer_ordinary_call` 5.7 G,
-  argument matching 1.75 G, `InferenceTable::resolve` 1.8 G), parse inside `file_attached_namespaces`
-  4.2 G (rowan's node cache, `flush_deferred_trivia`, the lexer), HIR lowering 3.7 G, naming
-  `resolve` 0.88 G, mimalloc about 4.5 G spread over all of them, and salsa's dependency edges about
-  0.7 G. A real third needs the checker's per-call allocations gone (argument targets, scheme clones,
-  `match_arguments` vectors) and a cheaper tree build, not more local cuts.
+- A cold check is about 1.4-1.5 s on 4 cores (4.3 s on one core) and already uses about 3.3 of
+  them, so the 1 s cold target still needs about a third less CPU work. Under callgrind the finance
+  bench went from 27.6 to 24.6 G instructions with green walks and direct descent, then to about
+  22.6-22.8 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
+  symbol-keyed `GlobalEnv` lookups, a token-only green builder, lexer fast paths and parallel
+  rendering (`decisions.md`, "The cold check's per-call work"). In interleaved runs against the
+  build before them, one-core wall went from 4.6-4.8 s to 4.2-4.5 s and 4-core medians from about
+  1.6 s to about 1.48 s, while peak RSS rose from about 440 to 510 MiB because green nodes are no
+  longer deduplicated. What is left is flat: mimalloc about 1.4 G, salsa bookkeeping about 1.1 G
+  (dependency edges, memo setup), hashbrown about 1.1 G spread over many tables, parse about 3.4 G
+  inclusive, HIR lowering about 3.6 G inclusive (much of it red-cursor allocation, 3.6 M
+  `NodeData::new`), naming `resolve` about 2.9 G inclusive, and item checking about 7 G. A real third
+  needs a structural change rather than local cuts: lowering HIR straight from the green tree during
+  or right after the parse (no red cursors), and a one-shot check path that does not record salsa
+  dependency edges per item (`package_name` and `test_name` are fetched about 340 k times only to
+  record edges a cold check never replays).

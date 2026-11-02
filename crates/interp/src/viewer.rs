@@ -4,7 +4,11 @@
 //! variable that held the object was reassigned.
 //!
 //! Only the rows of the requested page are ever formatted, which keeps a view of a million-row
-//! table as cheap to open as one of ten rows. An R object's page is formatted by R's own
+//! table as cheap to open as one of ten rows. A page may ask for the rows filtered by a search
+//! text and sorted by a column. The view then keeps the matching row numbers in order, never a
+//! sorted copy of the data, and reuses them while later pages ask for the same order. A ry
+//! `DataFrame` filters and sorts in its table engine; an R object through R's `grepl()` and
+//! `order()`. An R object's page is formatted by R's own
 //! `format()` on that slice, so classes such as factors and dates read as they print; a ry
 //! `DataFrame` page is a slice of its columns.
 //!
@@ -42,11 +46,28 @@ struct Views {
     open: VecDeque<View>,
 }
 
-#[derive(Clone, Copy)]
 struct View {
     id: u64,
     object: Sexp,
     shape: Shape,
+    order: Option<Order>,
+}
+
+/// Drops every view's cached order, so the next page sorts and filters the object as it is now.
+pub fn forget_orders() {
+    VIEWS.with(|views| {
+        for view in &mut views.borrow_mut().open {
+            view.order = None;
+        }
+    });
+}
+
+/// A view's rows as one search and sort leave them: the zero-based row numbers, in the order
+/// they are shown.
+struct Order {
+    search: String,
+    sort: Option<(usize, bool)>,
+    rows: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +96,12 @@ pub unsafe fn open(object: Sexp, title: &str) -> Result<Value, String> {
         let mut views = views.borrow_mut();
         let id = views.next;
         views.next += 1;
-        views.open.push_back(View { id, object, shape });
+        views.open.push_back(View {
+            id,
+            object,
+            shape,
+            order: None,
+        });
         if views.open.len() > MAX_VIEWS
             && let Some(oldest) = views.open.pop_front()
         {
@@ -92,7 +118,10 @@ pub unsafe fn open(object: Sexp, title: &str) -> Result<Value, String> {
     }))
 }
 
-/// Answers `ryTable` (a page of rows) and `ryRelease` (closes a view).
+/// Answers `ryTable` (a page of rows) and `ryRelease` (closes a view). A `ryTable` request may
+/// carry `filter`, a text that some cell of a shown row contains (ignoring case), and `sort`,
+/// `{ "column": <zero-based index>, "descending": <bool> }`; its `total` is the number of rows
+/// they leave.
 pub unsafe fn request(command: &str, arguments: &Value) -> Result<Value, String> {
     let id = arguments
         .get("viewId")
@@ -111,26 +140,60 @@ pub unsafe fn request(command: &str, arguments: &Value) -> Result<Value, String>
             Ok(json!({}))
         }
         "ryTable" => {
-            let view = VIEWS
-                .with(|views| {
-                    views
-                        .borrow()
-                        .open
-                        .iter()
-                        .find(|view| view.id == id)
-                        .copied()
-                })
-                .ok_or("the view was closed")?;
             let start = arguments.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
             let count = arguments
                 .get("count")
                 .and_then(Value::as_u64)
                 .unwrap_or(100)
                 .min(MAX_PAGE as u64) as usize;
+            let search = arguments
+                .get("filter")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_lowercase();
+            let sort = arguments.get("sort").and_then(|sort| {
+                let column = usize::try_from(sort.get("column")?.as_u64()?).ok()?;
+                Some((
+                    column,
+                    sort.get("descending").and_then(Value::as_bool) == Some(true),
+                ))
+            });
+            // The order is taken out of the view while R code runs, because a user's `format`
+            // method may open another view.
+            let (object, shape, cached) = VIEWS
+                .with(|views| {
+                    let mut views = views.borrow_mut();
+                    let view = views.open.iter_mut().find(|view| view.id == id)?;
+                    Some((view.object, view.shape, view.order.take()))
+                })
+                .ok_or("the view was closed")?;
             let mark = crate::heap().handle_mark();
-            let page = page(view, start, count);
+            let order = match (search.is_empty() && sort.is_none(), cached) {
+                (true, _) => Ok(None),
+                (false, Some(order)) if order.search == search && order.sort == sort => {
+                    Ok(Some(order))
+                }
+                (false, _) => rows_in_order(object, shape, &search, sort).map(|rows| {
+                    Some(Order {
+                        search: search.clone(),
+                        sort,
+                        rows,
+                    })
+                }),
+            };
+            let page = order.and_then(|order| {
+                let rows = order.as_ref().map(|order| order.rows.as_slice());
+                let page = page(object, shape, rows, start, count).map_err(message);
+                VIEWS.with(|views| {
+                    let mut views = views.borrow_mut();
+                    if let Some(view) = views.open.iter_mut().find(|view| view.id == id) {
+                        view.order = order;
+                    }
+                });
+                page
+            });
             crate::heap().release_handles(mark);
-            page.map_err(message)
+            page
         }
         command => Err(format!("`{command}` is not a data viewer request")),
     }
@@ -255,18 +318,101 @@ unsafe fn describe(object: Sexp, shape: Shape) -> R<(usize, Value)> {
     })
 }
 
+/// The zero-based numbers of the rows that contain `search` (already lower case) in some cell,
+/// in the order `sort` (a column index and whether it sorts descending) gives them.
+unsafe fn rows_in_order(
+    object: Sexp,
+    shape: Shape,
+    search: &str,
+    sort: Option<(usize, bool)>,
+) -> Result<Vec<u32>, String> {
+    let (rows, columns) = describe(object, shape).map_err(message)?;
+    let width = columns.as_array().map_or(0, Vec::len);
+    if let Some((column, _)) = sort
+        && column >= width
+    {
+        return Err(format!("the view has no column {}", column + 1));
+    }
+    if shape == Shape::Table {
+        let table = frame::table_of(object).map_err(message)?;
+        let names: Vec<String> = table
+            .frame()
+            .columns()
+            .iter()
+            .map(|series| series.name().to_string())
+            .collect();
+        let sort =
+            sort.and_then(|(column, descending)| Some((names.get(column)?.as_str(), descending)));
+        return table::ops::view_rows(table, search, sort).map_err(|failure| failure.to_string());
+    }
+    let column = match shape {
+        Shape::DataFrame => "x[[k]]",
+        Shape::Matrix => "x[, k]",
+        _ => "x",
+    };
+    let template = format!(
+        "{{
+            column <- function(k) {column}
+            rows <- seq_len(n)
+            if (nzchar(f)) {{
+                keep <- logical(n)
+                for (k in seq_len(w))
+                    keep <- keep | (!is.na(column(k)) &
+                        grepl(f, tolower(format(column(k), trim = TRUE)), fixed = TRUE))
+                rows <- rows[keep]
+            }}
+            if (s > 0) rows <- rows[order(column(s)[rows], decreasing = d, na.last = FALSE)]
+            rows
+        }}"
+    );
+    let (sorted, descending) =
+        sort.map_or((0, false), |(column, descending)| (column + 1, descending));
+    let bindings = [
+        ("n", scalar_integer(rows as i32).map_err(message)?),
+        ("w", scalar_integer(width as i32).map_err(message)?),
+        ("f", values::scalar_string(search).map_err(message)?),
+        ("s", scalar_integer(sorted as i32).map_err(message)?),
+        (
+            "d",
+            values::scalar_logical(i32::from(descending)).map_err(message)?,
+        ),
+    ];
+    let rows = run(&template, object, &bindings).map_err(message)?;
+    if rows.kind() != SexpType::Integer {
+        return Err("sorting the view did not give row numbers".to_owned());
+    }
+    Ok(rows
+        .slice::<i32>()
+        .iter()
+        .filter_map(|&row| u32::try_from(row - 1).ok())
+        .collect())
+}
+
 /// Rows `start .. start + count` as strings, row-major, with the row names when the object has
-/// them.
-unsafe fn page(view: View, start: usize, count: usize) -> R<Value> {
-    let (rows, columns) = describe(view.object, view.shape)?;
-    let end = rows.min(start.saturating_add(count));
+/// them. With `order`, the rows are counted in that order, and a row is named by its number in
+/// the object when the object names none.
+unsafe fn page(
+    object: Sexp,
+    shape: Shape,
+    order: Option<&[u32]>,
+    start: usize,
+    count: usize,
+) -> R<Value> {
+    let (rows, columns) = describe(object, shape)?;
+    let total = order.map_or(rows, <[u32]>::len);
+    let end = total.min(start.saturating_add(count));
     let start = start.min(end);
     let width = columns.as_array().map_or(0, Vec::len);
     let mut cells = vec![vec![String::new(); width]; end - start];
     let mut row_names = None;
-    if view.shape == Shape::Table {
-        let table = frame::table_of(view.object)?;
-        let slice = table.frame().slice(start as i64, end - start);
+    let shown = order.map(|order| &order[start..end]);
+    if shape == Shape::Table {
+        let table = frame::table_of(object)?;
+        let slice = match shown {
+            Some(shown) => table::ops::take_rows(table, shown)
+                .map_err(|failure| crate::unwind::error(failure.to_string()))?,
+            None => table.frame().slice(start as i64, end - start),
+        };
         for (column, series) in slice.columns().iter().enumerate() {
             for (row, line) in cells.iter_mut().enumerate() {
                 line[column] = match series.get(row) {
@@ -279,19 +425,19 @@ unsafe fn page(view: View, start: usize, count: usize) -> R<Value> {
             }
         }
     } else if end > start {
-        let indices = values::integer_vector(
-            &(start + 1..=end)
-                .map(|index| index as i32)
-                .collect::<Vec<_>>(),
-        )?;
-        let template = match view.shape {
+        let numbers: Vec<i32> = match shown {
+            Some(shown) => shown.iter().map(|&row| row as i32 + 1).collect(),
+            None => (start + 1..=end).map(|index| index as i32).collect(),
+        };
+        let indices = values::integer_vector(&numbers)?;
+        let template = match shape {
             Shape::DataFrame => "format(x[[j]][i], trim = TRUE)",
             Shape::Matrix => "format(x[i, j], trim = TRUE)",
             _ => "format(x[i], trim = TRUE)",
         };
         for column in 0..width {
-            let bindings = Some((indices, column + 1));
-            let formatted = run(template, view.object, bindings).and_then(|value| {
+            let bindings = [("i", indices), ("j", scalar_integer(column as i32 + 1)?)];
+            let formatted = run(template, object, &bindings).and_then(|value| {
                 if value.kind() == SexpType::String {
                     Ok(value)
                 } else {
@@ -306,12 +452,12 @@ unsafe fn page(view: View, start: usize, count: usize) -> R<Value> {
                 };
             }
         }
-        let template = match view.shape {
+        let template = match shape {
             Shape::DataFrame => "as.character(row.names(x)[i])",
             Shape::Matrix => "as.character(rownames(x)[i])",
             _ => "as.character(names(x)[i])",
         };
-        let names = run(template, view.object, Some((indices, 0)))?;
+        let names = run(template, object, &[("i", indices)])?;
         if names.kind() == SexpType::String && length(names) == end - start {
             row_names = Some(
                 (0..end - start)
@@ -320,18 +466,22 @@ unsafe fn page(view: View, start: usize, count: usize) -> R<Value> {
             );
         }
     }
-    Ok(json!({ "start": start, "rows": cells, "rowNames": row_names }))
+    if row_names.is_none()
+        && let Some(shown) = shown
+    {
+        row_names = Some(shown.iter().map(|row| (row + 1).to_string()).collect());
+    }
+    Ok(json!({ "start": start, "total": total, "rows": cells, "rowNames": row_names }))
 }
 
-/// Evaluates a fixed R expression with `x` bound to the object and, given, `i` to row indices and
-/// `j` to a column number. It is evaluated in a fresh environment over base, so the user's
-/// bindings cannot shadow `format` or `nrow`, while S3 methods still dispatch.
-unsafe fn run(template: &str, object: Sexp, rows: Option<(Sexp, usize)>) -> R<Sexp> {
+/// Evaluates a fixed R expression with `x` bound to the object and each of `bindings` to its
+/// value. It is evaluated in a fresh environment over base, so the user's bindings cannot shadow
+/// `format` or `order`, while S3 methods still dispatch.
+unsafe fn run(template: &str, object: Sexp, bindings: &[(&str, Sexp)]) -> R<Sexp> {
     let env = values::new_env(base_env())?;
     eval::define(values::install("x")?, object, env)?;
-    if let Some((indices, column)) = rows {
-        eval::define(values::install("i")?, indices, env)?;
-        eval::define(values::install("j")?, scalar_integer(column as i32)?, env)?;
+    for &(name, value) in bindings {
+        eval::define(values::install(name)?, value, env)?;
     }
     let expressions = lower::parse_text(template, "<data viewer>")?;
     crate::heap().root(expressions);

@@ -9,22 +9,66 @@
 //! `ryTable`, `ryRelease`, and `rySubscribe` for the `ryView` events `View()` sends.
 //!
 //! Every request is answered on the interpreter's thread, because R values live there. Socket
-//! threads only parse messages and queue them. While the console waits for input, the input is
-//! read on a helper thread and the interpreter answers requests as they come. While a command
-//! runs, a request sets a flag the evaluator polls with its interrupts, and the poll answers the
-//! debugger's requests (`pause`, breakpoints) but refuses the others as busy, because they run R
-//! code in the middle of the user's. While the debugger has the program stopped, its transport
-//! answers everything, since the program is then at a statement boundary.
+//! threads only parse messages and queue them. Input is read on an input thread, which reads a
+//! line whenever the console asks for one, so the interpreter answers requests while it waits.
+//! While a command runs, a request sets a flag the evaluator polls with its interrupts, and the
+//! poll answers the debugger's requests (`pause`, breakpoints) but refuses the others as busy,
+//! because they run R code in the middle of the user's. While the debugger has the program
+//! stopped, its transport answers everything, since the program is then at a statement boundary.
+//!
+//! `browser()` with no editor attached stops at a `Browse[1]>` prompt, which drives the same
+//! debug adapter through [`Browse`], a transport that turns typed commands into requests. An
+//! editor that attaches during that prompt takes the stopped program over.
 
 use {
     crate::debugger::{Adapter, Request, Transport, response},
-    serde_json::Value,
-    std::sync::atomic::AtomicBool,
+    serde_json::{Value, json},
+    std::{
+        collections::VecDeque,
+        path::Path,
+        sync::{
+            Mutex, MutexGuard, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
+    },
 };
 
 /// Set by a socket thread with [`crate::unwind::INTERRUPT_REQUESTED`], so the evaluator's
 /// interrupt poll (one load on its fast path) also notices requests.
 pub static SERVICE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The console's line reader, which shows a prompt and returns the line typed, or `None` at the
+/// end of the input.
+pub type Reader = Box<dyn FnMut(&str) -> Option<String> + Send>;
+
+/// The reader until the input thread takes it, or for good when there is no socket to serve.
+static READER: Mutex<Option<Reader>> = Mutex::new(None);
+/// Whether an interactive console installed a reader, which is what lets `browser()` stop.
+static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Makes `reader` the console's source of input. Called once, before the console's first prompt.
+pub fn install_reader(reader: Reader) {
+    *lock(&READER) = Some(reader);
+    INTERACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Whether input comes from an interactive console, so `browser()` has a prompt to stop at.
+pub fn interactive() -> bool {
+    INTERACTIVE.load(Ordering::Relaxed) && !SERVING_REQUEST.load(Ordering::Relaxed)
+}
+
+/// Set while R code runs for an editor's request at the idle prompt. A `browser()` there has no
+/// prompt of its own: the top-level read owns the terminal, and the editor waits for its answer.
+static SERVING_REQUEST: AtomicBool = AtomicBool::new(false);
+
+/// Reads with the reader on this thread, for a console with no socket.
+fn read_directly(prompt: &str) -> Option<String> {
+    lock(&READER).as_mut().and_then(|read| read(prompt))
+}
 
 /// Starts listening, unless the console cannot make a private socket directory, in which case
 /// the console runs without one. Returns the socket's path.
@@ -37,12 +81,33 @@ pub fn finish() {
     platform::finish();
 }
 
-/// Reads the next input with `read` on a helper thread, and answers requests until it arrives.
+/// Reads the console's next input after `prompt`, answering requests until it arrives.
 ///
 /// # Safety
 /// Called on the interpreter's thread, at the top level of the console.
-pub unsafe fn read_while_serving(read: impl FnOnce() -> Option<String> + Send) -> Option<String> {
-    platform::read_while_serving(read)
+pub unsafe fn read_line(prompt: &str) -> Option<String> {
+    // A command a client terminated unwinds at its next statement, and one that ended first
+    // must not take the stale adapter into the next command. A `Browse>` prompt's adapter ends
+    // with the command it stopped.
+    let state = crate::interp();
+    if state
+        .debugger
+        .as_ref()
+        .is_some_and(|adapter| adapter.is_detached() || adapter.is_browse())
+    {
+        state.debugger = None;
+    }
+    // A command may have changed a viewed object in place, so its sorted and filtered rows are
+    // derived again on the next page.
+    crate::viewer::forget_orders();
+    platform::read_line(prompt)
+}
+
+/// What the `Browse>` prompt received: a line, or an editor's `initialize`, with which the
+/// editor takes the stopped program over through the transport that comes with it.
+pub enum BrowseInput {
+    Line(Option<String>),
+    Attach(Box<dyn Transport>, Value),
 }
 
 /// Answers the requests queued while a command runs. Called from the evaluator's interrupt poll.
@@ -85,10 +150,214 @@ unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
     }
 }
 
+/// The terminal's side of a `browser()` stop with no editor attached. GNU R's browser commands
+/// become debug adapter requests, so stepping follows the same rules as in an editor: `c`
+/// continues (the adapter then leaves, as an editor that disconnects), `n`, `s` and `f` step
+/// over, into and out of calls, `Q` ends the command, `where` shows the stack, and any other
+/// line is evaluated in the stopped frame and printed as at the top level. An empty line steps,
+/// as in GNU R.
+#[derive(Default)]
+pub struct Browse {
+    editor: Option<Box<dyn Transport>>,
+    /// The line a queued `source` request asks for, which its response does not echo.
+    text_line: Option<u64>,
+    /// Requests the transport makes itself to describe a stop, answered before the next prompt.
+    queued: VecDeque<Value>,
+}
+
+/// The `seq`s of the requests [`Browse`] makes itself, far above any a client numbers.
+const LOCATION: u64 = u64::MAX - 1;
+const STACK: u64 = u64::MAX - 2;
+const TEXT: u64 = u64::MAX - 3;
+
+impl Browse {
+    fn request(seq: u64, command: &str, arguments: Value) -> Value {
+        json!({ "type": "request", "seq": seq, "command": command, "arguments": arguments })
+    }
+
+    /// The request a typed line stands for, or `None` for a line the prompt answers itself.
+    fn command(line: &str) -> Option<Value> {
+        let (command, arguments) = match line.trim() {
+            "c" | "cont" => ("disconnect", json!({})),
+            "" | "n" => ("next", json!({ "threadId": 1 })),
+            "s" => ("stepIn", json!({ "threadId": 1 })),
+            "f" => ("stepOut", json!({ "threadId": 1 })),
+            "Q" => ("terminate", json!({})),
+            "where" => {
+                return Some(Browse::request(
+                    STACK,
+                    "stackTrace",
+                    json!({ "threadId": 1 }),
+                ));
+            }
+            "help" => {
+                crate::write_console(
+                    b"n          next\ns          step into\nf          finish\nc or cont  continue\nQ          quit\nwhere      show stack\nhelp       show help\n<expr>     evaluate expression\n",
+                    false,
+                );
+                return None;
+            }
+            expression => (
+                "evaluate",
+                json!({ "expression": expression, "frameId": 1, "context": "ryBrowse" }),
+            ),
+        };
+        Some(Browse::request(0, command, arguments))
+    }
+
+    fn render(&mut self, message: &Value) {
+        let body = &message["body"];
+        if message["type"] == "event" {
+            match message["event"].as_str() {
+                Some("stopped") => self.queued.push_back(Browse::request(
+                    LOCATION,
+                    "stackTrace",
+                    json!({ "threadId": 1, "levels": 1 }),
+                )),
+                Some("output") => {
+                    let error = body["category"] == "stderr";
+                    let text = body["output"].as_str().unwrap_or_default();
+                    crate::write_console(text.as_bytes(), error);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if message["success"] == false {
+            // An evaluation's message is the error as R prints it, `Error in ...` included.
+            let text = message["message"]
+                .as_str()
+                .unwrap_or("Error: the command failed");
+            let text = match text.starts_with("Error") {
+                true => text.trim_end().to_owned(),
+                false => format!("Error: {}", text.trim_end()),
+            };
+            crate::write_console(format!("{text}\n").as_bytes(), true);
+            return;
+        }
+        let frames = body["stackFrames"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        match message["request_seq"].as_u64() {
+            Some(LOCATION) => {
+                let Some(frame) = frames.first() else { return };
+                let line = frame["line"].as_u64().unwrap_or(0);
+                if line == 0 {
+                    // Code with no source, such as a function built by `eval(parse(...))`.
+                    let name = frame["name"].as_str().unwrap_or("?");
+                    crate::write_console(format!("Called from: {name}\n").as_bytes(), false);
+                    return;
+                }
+                let path = frame["source"]["path"].as_str();
+                let text =
+                    path.and_then(|path| source_line(&std::fs::read_to_string(path).ok()?, line));
+                match (path, frame["source"]["sourceReference"].as_u64()) {
+                    (None, Some(reference)) => self.queued.push_back(Browse::request(
+                        TEXT,
+                        "source",
+                        json!({ "sourceReference": reference, "line": line }),
+                    )),
+                    _ => announce(path.unwrap_or_default(), line, text.as_deref()),
+                }
+            }
+            Some(TEXT) => {
+                let content = body["content"].as_str().unwrap_or_default();
+                let line = self.text_line.take().unwrap_or(0);
+                announce("", line, source_line(content, line).as_deref());
+            }
+            Some(STACK) => {
+                for (index, frame) in frames.iter().enumerate() {
+                    let name = frame["name"].as_str().unwrap_or("?");
+                    let place = match frame["source"]["path"].as_str().map(Path::new) {
+                        Some(path) => {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            format!(" at {name}#{}", frame["line"])
+                        }
+                        None => String::new(),
+                    };
+                    crate::write_console(
+                        format!("where {}{place}: {name}\n", index + 1).as_bytes(),
+                        false,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Line `line` (1-based) of `text`, without its line break.
+fn source_line(text: &str, line: u64) -> Option<String> {
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    Some(text.lines().nth(index)?.trim().to_owned())
+}
+
+/// Tells the user where the program stopped, as GNU R's browser does.
+fn announce(path: &str, line: u64, text: Option<&str>) {
+    let name = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let code = text.map(|text| format!(": {text}")).unwrap_or_default();
+    crate::write_console(format!("debug at {name}#{line}{code}\n").as_bytes(), false);
+}
+
+impl Transport for Browse {
+    fn receive(&mut self, wait: bool) -> Option<Value> {
+        if let Some(editor) = &mut self.editor {
+            return editor.receive(wait);
+        }
+        if let Some(request) = self.queued.pop_front() {
+            if request["seq"] == TEXT {
+                self.text_line = request["arguments"]["line"].as_u64();
+            }
+            return Some(request);
+        }
+        // Between statements the terminal has nothing to say; only a stop prompts.
+        if !wait {
+            return None;
+        }
+        loop {
+            // SAFETY: the adapter receives on the interpreter's thread.
+            match unsafe { platform::browse_input("Browse[1]> ") } {
+                BrowseInput::Attach(editor, message) => {
+                    crate::write_console(
+                        b"\nry: an editor attached and drives this stop now\n",
+                        false,
+                    );
+                    self.editor = Some(editor);
+                    return Some(message);
+                }
+                BrowseInput::Line(None) => return None,
+                BrowseInput::Line(Some(line)) => {
+                    if let Some(request) = Browse::command(&line) {
+                        return Some(request);
+                    }
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, message: Value) {
+        match &mut self.editor {
+            Some(editor) => editor.send(message),
+            None => self.render(&message),
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.editor.is_none()
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use {
-        super::{Adapter, Request, SERVICE_REQUESTED, Transport, answer_plain, response},
+        super::{
+            Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, SERVING_REQUEST, Transport,
+            answer_plain, lock, read_directly, response,
+        },
         crate::{interp, unwind::INTERRUPT_REQUESTED},
         serde_json::{Value, json},
         std::{
@@ -100,7 +369,10 @@ mod platform {
                 net::{UnixListener, UnixStream},
             },
             path::PathBuf,
-            sync::{Condvar, Mutex, MutexGuard, PoisonError, atomic::Ordering},
+            sync::{
+                Condvar, Mutex, PoisonError,
+                atomic::{AtomicBool, Ordering},
+            },
             time::Duration,
         },
     };
@@ -124,6 +396,8 @@ mod platform {
 
     static EVENTS: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
     static ARRIVED: Condvar = Condvar::new();
+    /// Signalled when the interpreter takes an event, so a reader waiting for room can go on.
+    static TAKEN: Condvar = Condvar::new();
     static CONNECTIONS: Mutex<BTreeMap<u64, Connection>> = Mutex::new(BTreeMap::new());
     static SERVER: Mutex<Option<Server>> = Mutex::new(None);
     /// The prompt's input, when it arrived while code run for a request was stopped.
@@ -131,9 +405,23 @@ mod platform {
     /// The connection that owns the debugger, while one is attached.
     static DEBUG_CONNECTION: Mutex<Option<u64>> = Mutex::new(None);
 
-    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    /// What the console asked the input thread for: `prompt` is the line it should read next,
+    /// and `outstanding` stays set from the request until the interpreter takes the line, so a
+    /// prompt shown while an earlier one still waits does not read ahead.
+    struct Asked {
+        prompt: Option<String>,
+        outstanding: bool,
+        /// The prompt the input thread last showed.
+        shown: String,
     }
+
+    static ASKED: Mutex<Asked> = Mutex::new(Asked {
+        prompt: None,
+        outstanding: false,
+        shown: String::new(),
+    });
+    static ASKED_CHANGED: Condvar = Condvar::new();
+    static INPUT_THREAD: AtomicBool = AtomicBool::new(false);
 
     pub fn start() -> Option<String> {
         let directory = private_directory()?;
@@ -246,9 +534,26 @@ mod platform {
         serde_json::from_slice(&body).ok()
     }
 
+    /// The requests one connection may have waiting before its reader stops reading. The peer
+    /// then blocks on a full socket buffer, so a client that floods the console slows itself
+    /// down instead of growing the queue, and no request is dropped unanswered.
+    const QUEUED_PER_CONNECTION: usize = 64;
+
     fn push(event: Event) {
         let poke = !matches!(event, Event::Input(_));
-        lock(&EVENTS).push_back(event);
+        let mut events = lock(&EVENTS);
+        if let Event::Request(id, _) = event {
+            while events
+                .iter()
+                .filter(|queued| matches!(queued, Event::Request(other, _) if *other == id))
+                .count()
+                >= QUEUED_PER_CONNECTION
+            {
+                events = TAKEN.wait(events).unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+        events.push_back(event);
+        drop(events);
         ARRIVED.notify_all();
         if poke {
             SERVICE_REQUESTED.store(true, Ordering::Relaxed);
@@ -260,6 +565,7 @@ mod platform {
         let mut events = lock(&EVENTS);
         loop {
             if let Some(event) = events.pop_front() {
+                TAKEN.notify_all();
                 return Some(event);
             }
             if !wait {
@@ -289,49 +595,107 @@ mod platform {
         }
     }
 
-    pub unsafe fn read_while_serving(
-        read: impl FnOnce() -> Option<String> + Send,
-    ) -> Option<String> {
+    pub unsafe fn read_line(prompt: &str) -> Option<String> {
+        match wait_for_input(prompt, false) {
+            BrowseInput::Line(line) => line,
+            BrowseInput::Attach(..) => None,
+        }
+    }
+
+    pub unsafe fn browse_input(prompt: &str) -> BrowseInput {
+        wait_for_input(prompt, true)
+    }
+
+    /// Answers requests until the line read after `prompt` arrives. At a `Browse[1]>` prompt
+    /// (`browse`), an editor's `initialize` ends the wait instead, handing the stop over.
+    unsafe fn wait_for_input(prompt: &str, browse: bool) -> BrowseInput {
         if lock(&SERVER).is_none() {
-            return read();
+            return BrowseInput::Line(read_directly(prompt));
         }
-        // A command a client terminated unwinds at its next statement; one that ended first must
-        // not take the stale adapter into the next command.
-        let state = interp();
-        if state
-            .debugger
-            .as_ref()
-            .is_some_and(|adapter| adapter.is_detached())
-        {
-            state.debugger = None;
-        }
-        std::thread::scope(|scope| {
-            let reader = std::thread::Builder::new()
-                .name("ry-console-input".to_owned())
-                .spawn_scoped(scope, || push(Event::Input(read())));
-            if reader.is_err() {
-                return None;
-            }
-            loop {
-                let event = match lock(&STASHED_INPUT).take() {
-                    Some(input) => Some(Event::Input(input)),
-                    None => pop(true),
-                };
-                match event {
-                    Some(Event::Input(input)) => {
-                        // Requests answered while idle set the flag too; with nothing left to
-                        // answer it would only cost the next command a spurious poll.
-                        if SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
-                            INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
-                        }
-                        return input;
+        ask(prompt);
+        loop {
+            let event = match lock(&STASHED_INPUT).take() {
+                Some(input) => Some(Event::Input(input)),
+                None => pop(true),
+            };
+            match event {
+                Some(Event::Input(input)) => {
+                    lock(&ASKED).outstanding = false;
+                    // Requests answered while idle set the flag too; with nothing left to
+                    // answer it would only cost the next command a spurious poll.
+                    if SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
+                        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
                     }
-                    Some(Event::Request(connection, message)) => idle_request(connection, message),
-                    Some(Event::Closed(connection)) => closed(connection),
-                    None => {}
+                    return BrowseInput::Line(input);
                 }
+                Some(Event::Request(connection, message))
+                    if browse
+                        && message["command"] == "initialize"
+                        && lock(&DEBUG_CONNECTION).is_none() =>
+                {
+                    *lock(&DEBUG_CONNECTION) = Some(connection);
+                    return BrowseInput::Attach(Box::new(ConsoleTransport { connection }), message);
+                }
+                Some(Event::Request(connection, message)) => idle_request(connection, message),
+                Some(Event::Closed(connection)) => closed(connection),
+                None => {}
             }
-        })
+        }
+    }
+
+    /// Asks the input thread for the line after `prompt`, unless a line is still owed from an
+    /// earlier prompt. The thread is started on the first prompt and reads for the session's
+    /// life, so the reader keeps one thread and a stop can hand its pending line to the next
+    /// prompt.
+    fn ask(prompt: &str) {
+        let mut asked = lock(&ASKED);
+        if asked.outstanding {
+            // The line still owed was asked for at another prompt, such as a `Browse[1]>` stop
+            // an editor took over; the terminal must show which prompt the line now answers.
+            if asked.shown != prompt {
+                asked.shown = prompt.to_owned();
+                drop(asked);
+                crate::write_console(format!("\n{prompt}").as_bytes(), false);
+            }
+            return;
+        }
+        asked.prompt = Some(prompt.to_owned());
+        asked.outstanding = true;
+        drop(asked);
+        ASKED_CHANGED.notify_all();
+        if INPUT_THREAD.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("ry-console-input".to_owned())
+            .spawn(read_on_request);
+        if spawned.is_err() {
+            // Without the thread no line would ever arrive; the session sees the end of input.
+            push(Event::Input(None));
+        }
+    }
+
+    fn read_on_request() {
+        let Some(mut read) = lock(&READER).take() else {
+            push(Event::Input(None));
+            return;
+        };
+        loop {
+            let mut asked = lock(&ASKED);
+            let prompt = loop {
+                match asked.prompt.take() {
+                    Some(prompt) => break prompt,
+                    None => {
+                        asked = ASKED_CHANGED
+                            .wait(asked)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    }
+                }
+            };
+            asked.shown = prompt.clone();
+            drop(asked);
+            push(Event::Input(read(&prompt)));
+        }
     }
 
     pub unsafe fn service() {
@@ -344,10 +708,9 @@ mod platform {
             match event {
                 Event::Request(connection, message) => busy_request(connection, message),
                 Event::Closed(connection) => closed(connection),
-                Event::Input(input) => {
-                    lock(&EVENTS).push_front(Event::Input(input));
-                    return;
-                }
+                // A line typed while a command runs waits for the next prompt, and the requests
+                // behind it are still answered.
+                Event::Input(input) => *lock(&STASHED_INPUT) = Some(input),
             }
         }
     }
@@ -398,7 +761,9 @@ mod platform {
             send(connection, response(&request, Ok(json!({}))));
             return;
         }
+        let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
         let outcome = answer_plain(&request);
+        SERVING_REQUEST.store(serving, Ordering::Relaxed);
         send(connection, response(&request, outcome));
     }
 
@@ -504,13 +869,10 @@ mod platform {
                     Some(Event::Closed(connection)) => {
                         lock(&CONNECTIONS).remove(&connection);
                     }
-                    // A line typed while a request's code is stopped waits for the prompt; the
-                    // stop itself must not end, or the debugger would take it for a hang-up.
-                    Some(Event::Input(input)) if wait => *lock(&STASHED_INPUT) = Some(input),
-                    Some(Event::Input(input)) => {
-                        lock(&EVENTS).push_front(Event::Input(input));
-                        return None;
-                    }
+                    // A typed line waits for the next prompt: a stop must not end on it, or the
+                    // debugger would take it for a hang-up, and between statements the editor's
+                    // requests behind it must still be answered.
+                    Some(Event::Input(input)) => *lock(&STASHED_INPUT) = Some(input),
                 }
             }
         }
@@ -540,10 +902,14 @@ mod platform {
 
     pub fn finish() {}
 
-    pub unsafe fn read_while_serving(
-        read: impl FnOnce() -> Option<String> + Send,
-    ) -> Option<String> {
-        read()
+    use super::{BrowseInput, read_directly};
+
+    pub unsafe fn read_line(prompt: &str) -> Option<String> {
+        read_directly(prompt)
+    }
+
+    pub unsafe fn browse_input(prompt: &str) -> BrowseInput {
+        BrowseInput::Line(read_directly(prompt))
     }
 
     pub unsafe fn service() {}

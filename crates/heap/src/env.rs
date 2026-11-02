@@ -33,6 +33,12 @@ struct Binding {
     cell: Sexp,
 }
 
+/// The symbol of a removed binding's slot. Removal leaves the slot in place, so it costs O(1)
+/// instead of shifting every later binding and index entry, and `rm()` over a large frame stays
+/// linear; once half the slots are removed the frame compacts. No real symbol lives at the
+/// dangling address, so a lookup never matches it.
+const REMOVED: Sexp = Sexp::dangling();
+
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
@@ -49,9 +55,11 @@ pub struct Frame {
     index: Option<Box<FxHashMap<Sexp, u32>>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
-    /// How many leading cells are a closure's formals, which GNU R lists after the locals and
+    /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     formals: u32,
+    /// How many slots hold [`REMOVED`].
+    removed: u32,
     /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
     /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
@@ -74,19 +82,25 @@ impl Frame {
     }
 
     pub fn cells(&self) -> impl Iterator<Item = Sexp> + '_ {
-        self.bindings.iter().map(|binding| binding.cell)
+        self.live().map(|binding| binding.cell)
     }
 
     pub fn symbols(&self) -> impl Iterator<Item = Sexp> + '_ {
-        self.bindings.iter().map(|binding| binding.symbol)
+        self.live().map(|binding| binding.symbol)
     }
 
     pub fn len(&self) -> usize {
-        self.bindings.len()
+        self.bindings.len() - self.removed as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
+        self.len() == 0
+    }
+
+    fn live(&self) -> impl DoubleEndedIterator<Item = &Binding> + '_ {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
     }
 
     /// The binding cell for `symbol`, if the frame binds it.
@@ -135,15 +149,17 @@ impl Frame {
                 .iter()
                 .rev()
                 .chain(formals)
+                .filter(|binding| binding.symbol != REMOVED)
                 .map(|binding| binding.cell)
                 .collect();
         }
         let (heads, next, _) = unsafe { self.hash_chains() };
-        let mut listed = Vec::with_capacity(self.bindings.len());
+        let cells: Vec<Sexp> = self.cells().collect();
+        let mut listed = Vec::with_capacity(cells.len());
         for &head in &heads {
             let mut position = head;
             while position != EMPTY_CHAIN {
-                listed.push(self.bindings[position].cell);
+                listed.push(cells[position]);
                 position = next[position];
             }
         }
@@ -181,15 +197,14 @@ impl Frame {
     /// `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry prepended,
     /// after which the count restarts at the number of occupied buckets. Each bucket is a chain
     /// threaded through `next`, so an insert and a rehash allocate nothing per entry. Returns the
-    /// bucket heads, the chain links and the count.
+    /// bucket heads, the chain links and the count, with positions counting live bindings only.
     unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>, usize) {
         let mut size = (self.hash_size as usize).max(1);
         let mut heads = vec![EMPTY_CHAIN; size];
         let mut next = vec![EMPTY_CHAIN; self.bindings.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
-            .bindings
-            .iter()
+            .live()
             .map(|binding| unsafe { pjw_hash(binding.symbol.car().bytes()) } as usize)
             .collect();
         for (position, hash) in hashes.iter().enumerate() {
@@ -231,7 +246,9 @@ impl Frame {
             None if self.bindings.len() > INDEX_THRESHOLD => {
                 let mut index = FxHashMap::default();
                 for (position, binding) in self.bindings.iter().enumerate() {
-                    index.entry(binding.symbol).or_insert(position as u32);
+                    if binding.symbol != REMOVED {
+                        index.entry(binding.symbol).or_insert(position as u32);
+                    }
                 }
                 self.index = Some(Box::new(index));
             }
@@ -239,8 +256,11 @@ impl Frame {
         }
     }
 
-    /// Removes the cell for `symbol` and returns it.
+    /// Removes the cell for `symbol` and returns it, in O(1) amortized time.
     pub(crate) fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
+        if self.filter & filter_bit(symbol) == 0 {
+            return None;
+        }
         let position = match &mut self.index {
             Some(index) => index.remove(&symbol)? as usize,
             None => self
@@ -248,26 +268,38 @@ impl Frame {
                 .iter()
                 .position(|binding| binding.symbol == symbol)?,
         };
-        // Removal keeps the insertion order, which the listing order is derived from.
-        let cell = self.bindings.remove(position).cell;
-        if let Some(index) = &mut self.index {
-            for slot in index.values_mut() {
-                if *slot as usize > position {
-                    *slot -= 1;
-                }
-            }
-            // A duplicate formal behind the removed binding now answers for its symbol.
-            if let Some(offset) = self.bindings[position..]
-                .iter()
-                .position(|binding| binding.symbol == symbol)
-            {
-                index.insert(symbol, (position + offset) as u32);
-            }
+        let binding = self.bindings.get_mut(position)?;
+        let cell = binding.cell;
+        binding.symbol = REMOVED;
+        self.removed += 1;
+        // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
+        if let Some(index) = &mut self.index
+            && let Some(duplicate) = (position + 1..self.formals as usize)
+                .find(|&later| self.bindings[later].symbol == symbol)
+        {
+            index.insert(symbol, duplicate as u32);
         }
-        if position < self.formals as usize {
-            self.formals -= 1;
+        if self.removed as usize * 2 > self.bindings.len() {
+            self.compact();
         }
         Some(cell)
+    }
+
+    /// Drops the removed slots, keeping the live bindings in insertion order.
+    fn compact(&mut self) {
+        let formals = self.bindings[..(self.formals as usize).min(self.bindings.len())]
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+            .count();
+        self.bindings.retain(|binding| binding.symbol != REMOVED);
+        self.formals = formals as u32;
+        self.removed = 0;
+        if let Some(index) = &mut self.index {
+            index.clear();
+            for (position, binding) in self.bindings.iter().enumerate() {
+                index.entry(binding.symbol).or_insert(position as u32);
+            }
+        }
     }
 }
 

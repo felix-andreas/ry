@@ -5,7 +5,8 @@
 // attaches over that socket, and a second connection subscribes to `View()` calls. A viewer
 // never holds the data: it asks for one page of rows at a time with `ryTable`, so a data frame
 // with millions of rows costs one page, and it closes the view with `ryRelease` when the panel
-// closes.
+// closes. Sorting and filtering are part of the page request, so the console sorts and filters
+// the whole object, not just the rows the viewer has seen.
 
 import * as crypto from "crypto"
 import * as fs from "fs"
@@ -180,10 +181,20 @@ export function openViewer(source: DataSource, view: View): WebviewPanel {
       return
     }
     try {
-      const page = await source.request("ryTable", { viewId: view.viewId, start: message.start, count: PAGE_SIZE })
-      void panel.webview.postMessage({ type: "page", ...page })
+      const page = await source.request("ryTable", {
+        viewId: view.viewId,
+        start: message.start,
+        count: PAGE_SIZE,
+        filter: message.filter,
+        sort: message.sort,
+      })
+      void panel.webview.postMessage({ type: "page", generation: message.generation, ...page })
     } catch (error) {
-      void panel.webview.postMessage({ type: "error", message: String((error as Error).message ?? error) })
+      void panel.webview.postMessage({
+        type: "error",
+        generation: message.generation,
+        message: String((error as Error).message ?? error),
+      })
     }
   })
   panel.onDidDispose(() => {
@@ -209,7 +220,9 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
   button:disabled { opacity: 0.5; cursor: default; }
   table { border-collapse: collapse; }
   th, td { padding: 2px 8px; border: 1px solid var(--vscode-panel-border); white-space: pre; text-align: right; }
-  th { position: sticky; top: 33px; background: var(--vscode-editorWidget-background); }
+  input { background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent); padding: 2px 4px; }
+  th { position: sticky; top: 33px; background: var(--vscode-editorWidget-background); cursor: pointer; }
   th small { display: block; font-weight: normal; opacity: 0.7; }
   td.name { opacity: 0.7; }
   #error { color: var(--vscode-errorForeground); }
@@ -220,6 +233,7 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
   <button id="first">«</button><button id="previous">‹</button>
   <span id="range"></span>
   <button id="next">›</button><button id="last">»</button>
+  <input id="filter" type="search" placeholder="Filter rows" aria-label="Filter rows">
   <span id="error"></span>
 </header>
 <table><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table>
@@ -227,6 +241,12 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
   const vscode = acquireVsCodeApi()
   const view = ${data}
   let start = 0
+  // The rows the current filter leaves, which the console reports with each page.
+  let total = view.rows
+  let filter = ""
+  let sort = undefined
+  // Bumped whenever the filter or sort changes, so an answer for an older one is ignored.
+  let generation = 0
   const element = (id) => document.getElementById(id)
   const cell = (tag, text, className) => {
     const node = document.createElement(tag)
@@ -236,23 +256,50 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
   }
   const head = element("head")
   head.appendChild(cell("th", ""))
-  for (const column of view.columns) {
+  const headers = view.columns.map((column, index) => {
     const node = cell("th", column.name)
+    node.title = "Sort by " + column.name
     node.appendChild(cell("small", column.type))
+    // A click sorts ascending, a second descending, and a third restores the original order.
+    node.onclick = () => {
+      sort = sort?.column !== index ? { column: index, descending: false }
+        : !sort.descending ? { column: index, descending: true }
+        : undefined
+      headers.forEach((header, other) => {
+        header.firstChild.textContent = view.columns[other].name
+          + (sort?.column === other ? (sort.descending ? " ▼" : " ▲") : "")
+      })
+      reorder()
+    }
     head.appendChild(node)
-  }
-  const lastStart = Math.max(0, Math.floor((view.rows - 1) / view.pageSize) * view.pageSize)
+    return node
+  })
+  const lastStart = () => Math.max(0, Math.floor((total - 1) / view.pageSize) * view.pageSize)
   const go = (next) => {
-    start = Math.min(Math.max(0, next), lastStart)
-    vscode.postMessage({ type: "page", start })
+    start = Math.min(Math.max(0, next), lastStart())
+    vscode.postMessage({ type: "page", start, filter, sort, generation })
+  }
+  const reorder = () => {
+    generation += 1
+    start = 0
+    vscode.postMessage({ type: "page", start, filter, sort, generation })
+  }
+  let typing
+  element("filter").oninput = (event) => {
+    clearTimeout(typing)
+    typing = setTimeout(() => {
+      filter = event.target.value
+      reorder()
+    }, 250)
   }
   element("first").onclick = () => go(0)
   element("previous").onclick = () => go(start - view.pageSize)
   element("next").onclick = () => go(start + view.pageSize)
-  element("last").onclick = () => go(lastStart)
+  element("last").onclick = () => go(lastStart())
   window.addEventListener("message", ({ data: message }) => {
-    // After quick clicks, a slow answer for a page the user already left must not replace the
-    // page they are on.
+    // After quick clicks, a slow answer for a page the user already left, or for an order they
+    // already changed, must not replace the page they are on.
+    if (message.generation !== generation) return
     if (message.type === "page" && message.start !== start) return
     if (message.type === "error") {
       element("error").textContent = message.message
@@ -267,12 +314,14 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
       for (const value of row) line.appendChild(cell("td", value))
       body.appendChild(line)
     })
+    total = message.total ?? view.rows
     const end = message.start + message.rows.length
-    element("range").textContent = view.rows === 0
-      ? "no rows"
-      : (message.start + 1) + "–" + end + " of " + view.rows + " rows, " + view.columns.length + " columns"
+    const filtered = total === view.rows ? "" : " (filtered from " + view.rows + ")"
+    element("range").textContent = total === 0
+      ? "no rows" + filtered
+      : (message.start + 1) + "–" + end + " of " + total + " rows" + filtered + ", " + view.columns.length + " columns"
     element("first").disabled = element("previous").disabled = message.start === 0
-    element("next").disabled = element("last").disabled = end >= view.rows
+    element("next").disabled = element("last").disabled = end >= total
   })
   go(0)
 </script>

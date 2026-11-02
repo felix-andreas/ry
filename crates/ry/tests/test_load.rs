@@ -283,6 +283,57 @@ fn a_strict_project_binds_pure_constants_lazily_on_both_runtimes() {
 }
 
 #[test]
+fn r6_generators_bind_lazily_and_build_the_same_classes_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let installed = Command::new("Rscript")
+        .args([
+            "-e",
+            "quit(status = !requireNamespace('R6', quietly = TRUE))",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !installed {
+        eprintln!("skipped: R6 is not installed");
+        return;
+    }
+    // `Child` inherits from a class of an earlier file, and a method calls a function that
+    // comes later, which only the method's call reads.
+    let root = package(&[
+        (
+            "DESCRIPTION",
+            "Package: counters\nVersion: 1.0\nImports: R6\n",
+        ),
+        ("NAMESPACE", "importFrom(R6, R6Class)\n"),
+        (
+            "R/a.R",
+            "Base <- R6Class(\"Base\", public = list(n = 0, add = function() { self$n <- self$n + step(); invisible(self) }))\n",
+        ),
+        (
+            "R/b.R",
+            "Child <- R6::R6Class(\"Child\", inherit = Base, public = list(twice = function() { self$add(); self$add() }))\n\
+             step <- function() 10\n",
+        ),
+    ]);
+    let probe =
+        "x <- Child$new(); x$twice(); cat(x$n, class(x), environmentName(Child$parent_env), '\\n')";
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &[probe]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("3 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("20 Child Base R6 counters"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn a_failing_statement_names_its_file_and_line() {
     if !r_available() {
         return;

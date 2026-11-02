@@ -205,7 +205,7 @@ s: Unknown
 #---- checked_addition_keeps_the_number_type
 sum <- Num.add_checked(1L, 2L)
 #++++
-sum: :Ok(integer) | :Err(:Overflow)
+sum: :Ok(integer) | :Err(:Overflow | :Undefined)
 
 #---- compare_returns_an_ordering
 order <- Num.compare(1, 2)
