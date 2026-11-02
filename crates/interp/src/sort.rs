@@ -1791,7 +1791,8 @@ fn singleton_sort<T: Copy + PartialOrd>(items: &mut [T], index: &mut [i32]) {
                         items[slot as usize] = items[(slot - 1) as usize];
                         index[slot as usize] = index[(slot - 1) as usize];
                         slot -= 1;
-                        if slot < 1 || !(value < get(items, slot)) {
+                        if slot < 1 || value.partial_cmp(&get(items, slot)) != Some(Ordering::Less)
+                        {
                             break;
                         }
                     }

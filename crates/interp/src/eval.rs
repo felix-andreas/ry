@@ -1708,9 +1708,7 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
                 }
             }
             SexpType::Language => {
-                if functions {
-                    walk(expression.car(), functions, names);
-                } else if expression.car().kind() == SexpType::Language {
+                if functions || expression.car().kind() == SexpType::Language {
                     walk(expression.car(), functions, names);
                 }
                 let mut cell = expression.cdr();

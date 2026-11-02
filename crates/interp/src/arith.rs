@@ -445,8 +445,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             }
         }
     }
-    for position in 0..outer {
-        if done[position] {
+    for (position, &finished) in done.iter().enumerate() {
+        if finished {
             continue;
         }
         let mut total = LongDouble::ZERO;
@@ -2316,8 +2316,8 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
                     NA_REAL
                 } else {
                     match base {
-                        Some(base) if base == 10.0 => x.log10(),
-                        Some(base) if base == 2.0 => x.log2(),
+                        Some(10.0) => x.log10(),
+                        Some(2.0) => x.log2(),
                         Some(base) => x.ln() / base.ln(),
                         None => x.ln(),
                     }

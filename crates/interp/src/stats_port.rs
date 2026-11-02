@@ -711,7 +711,7 @@ fn cholesky(matrix: &mut [f64], size: usize) -> bool {
         for k in 0..j {
             diagonal -= matrix[k * size + j].powi(2);
         }
-        if !(diagonal > 0.0) || !diagonal.is_finite() {
+        if diagonal <= 0.0 || !diagonal.is_finite() {
             return false;
         }
         let root = diagonal.sqrt();

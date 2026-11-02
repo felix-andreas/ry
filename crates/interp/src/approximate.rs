@@ -285,8 +285,8 @@ unsafe fn adist(call: &Call<'_>) -> R<Sexp> {
                         [NA_INTEGER, NA_INTEGER, NA_INTEGER, -1, -1]
                     }
                 };
-                for kind in 0..3 {
-                    values::ints_mut(edit_counts)[cell + kind * cells] = entries[kind];
+                for (kind, &count) in entries.iter().take(3).enumerate() {
+                    values::ints_mut(edit_counts)[cell + kind * cells] = count;
                 }
                 values::ints_mut(offsets)[cell] = entries[3];
                 values::ints_mut(offsets)[cell + cells] = entries[4];

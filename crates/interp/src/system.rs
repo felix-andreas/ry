@@ -232,7 +232,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
-            if !(seconds >= 0.0) {
+            if seconds.is_nan() || seconds < 0.0 {
                 return Err(error("invalid 'time' value"));
             }
             if seconds.is_finite() && seconds > 0.0 {
