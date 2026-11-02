@@ -196,21 +196,27 @@ pub fn set_verdict(verdict: Verdict) {
     }
 }
 
-/// Asks the host to run strict mode's check of the package at `root`, a NUL-terminated path,
-/// before a load runs any of it: 0 lets the load run, 1 means strict mode refused the package,
-/// and any other value that the check failed. The host has reported why. It may block.
+/// Asks the host about the package at `root`, a NUL-terminated path. As the strict check of
+/// [`set_check`], it runs strict mode's check before a load runs any of the package: 0 lets the
+/// load run, 1 means strict mode refused the package, and any other value that the check failed,
+/// after the host has reported why. It may block. As the strict query, it returns 1 when the
+/// configuration that governs `root` turns strict mode on, and 0 otherwise.
 pub type Check = extern "C" fn(*const c_char) -> c_int;
 
 static CHECK: OnceLock<Check> = OnceLock::new();
+
+static STRICT_CONFIG: OnceLock<Check> = OnceLock::new();
 
 /// Whether a plan has been made in this session, whose first load the verdict covers.
 static PLANNED: AtomicBool = AtomicBool::new(false);
 
 /// Lets the host check every load of a strict package that changes something, before the
 /// load runs any of it. The first load of a session with a [`set_verdict`] is the verdict's
-/// to check instead, while its definitions bind.
-pub fn set_check(check: Check) {
-    if CHECK.set(check).is_err() {
+/// to check instead, while its definitions bind. Whether a package is strict is the
+/// `strict_config` query's answer for its own root, so a strict package that a non-strict
+/// script loads is checked, as it is on GNU R.
+pub fn set_check(strict_config: Check, check: Check) {
+    if STRICT_CONFIG.set(strict_config).is_err() || CHECK.set(check).is_err() {
         panic!("the host sets the strict check once per session");
     }
 }
@@ -274,8 +280,15 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
 }
 
 fn plan(root: &str, full: bool) -> RValue {
+    let Ok(path) = CString::new(root) else {
+        return error_value(&format!("{root} has a NUL byte in its path"));
+    };
+    let strict = match STRICT_CONFIG.get() {
+        Some(strict_config) => strict_config(path.as_ptr()) == 1,
+        None => STRICT.load(Ordering::Relaxed),
+    };
     let mut session = session();
-    session.loader.set_strict(STRICT.load(Ordering::Relaxed));
+    session.loader.set_strict(strict);
     let plan = match session.loader.plan(Path::new(root), full) {
         Ok(plan) => plan,
         Err(failure) => return error_value(&failure.to_string()),
@@ -642,31 +655,54 @@ unsafe fn lower_handle_code(handle: Sexp, position: Position) -> R<Sexp> {
 /// Lowers the code at `position` of `source`, with source references against `srcfile` when
 /// there is one. In a tree the code is the outermost node spanning exactly its range, and in text
 /// it is the code alone, parsed on its own: a top-level item parses the same either way, so a
-/// file whose text is all the loader holds is never parsed whole. Source references count lines
-/// and columns as the file does, so their code is parsed alone after as many spaces as its
-/// column, and its lines are shifted to the line it starts on.
+/// file whose text is all the loader holds is never parsed whole. Source references count lines,
+/// bytes and columns as the file does, so the code is parsed after as many spaces as its line
+/// has bytes before it, its source references read the line's real text in their place, and its
+/// lines are shifted to the line it starts on.
 unsafe fn lower_code(source: &Source, position: Position, srcfile: Option<Sexp>) -> R<Sexp> {
     let missing = || error("a definition's code is not in its source file");
     let Position {
-        start,
-        end,
-        line,
-        column,
+        start, end, line, ..
     } = position;
-    let code = match (source, srcfile) {
-        (Source::Tree(tree), None) => return lower_node(&node_spanning(tree, start, end)?),
-        (Source::Tree(tree), Some(_)) => node_spanning(tree, start, end)?.text().to_string(),
-        (Source::Text(text), _) => text
-            .get(start as usize..end as usize)
-            .ok_or_else(missing)?
-            .to_owned(),
+    let (code, prefix) = match source {
+        Source::Tree(tree) => {
+            let node = node_spanning(tree, start, end)?;
+            if srcfile.is_none() {
+                return lower_node(&node);
+            }
+            (node.text().to_string(), line_prefix(&node))
+        }
+        Source::Text(text) => {
+            let code = text.get(start as usize..end as usize).ok_or_else(missing)?;
+            let before = text.get(..start as usize).ok_or_else(missing)?;
+            let prefix = &before[before.rfind('\n').map_or(0, |newline| newline + 1)..];
+            (code.to_owned(), prefix.to_owned())
+        }
     };
     let Some(srcfile) = srcfile else {
         return lower_node(&sole_node(&code, 0)?);
     };
-    let padded = format!("{}{code}", " ".repeat(column as usize));
-    let node = sole_node(&padded, column)?;
-    lower_node_at_line(&node, &padded, line as usize, srcfile)
+    let node = sole_node(
+        &format!("{}{code}", " ".repeat(prefix.len())),
+        prefix.len() as u32,
+    )?;
+    lower_node_at_line(&node, &format!("{prefix}{code}"), line as usize, srcfile)
+}
+
+/// The text of `node`'s line before it, read back token by token to the line's start.
+fn line_prefix(node: &SyntaxNode) -> String {
+    let mut pieces = Vec::new();
+    let mut token = node.first_token().and_then(|token| token.prev_token());
+    while let Some(current) = token {
+        let text = current.text();
+        if let Some(newline) = text.rfind('\n') {
+            pieces.push(text[newline + 1..].to_owned());
+            break;
+        }
+        pieces.push(text.to_owned());
+        token = current.prev_token();
+    }
+    pieces.iter().rev().map(String::as_str).collect()
 }
 
 /// The outermost node of `tree` spanning exactly `start..end`.

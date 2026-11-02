@@ -48,8 +48,9 @@ use {
 pub struct Loader {
     db: RootDatabase,
     packages: Vec<LoadedPackage>,
-    /// Size and modification time of each file as last read, per package root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+    /// Size, modification time and declared encoding of each file as last read, per package
+    /// root.
+    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -756,8 +757,8 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources. A file whose size and modification time are unchanged
-    /// since the last read is not read again.
+    /// Reads the package's sources. A file whose size, modification time and declared encoding
+    /// are unchanged since the last read is not read again.
     fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
         let description = read_description(&root.join("DESCRIPTION"))?;
         let encoding = SourceEncoding::of(&description);
@@ -772,8 +773,9 @@ impl Loader {
         let mut stamps = FxHashMap::default();
         for path in paths {
             let absolute = root.join(&path);
+            // The encoding is part of the stamp, so declaring another one decodes every file again.
             let stamp = fs::metadata(&absolute)
-                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+                .map(|metadata| (metadata.len(), metadata.modified().ok(), encoding))
                 .map_err(|error| LoadError::Io(absolute.clone(), error))?;
             let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
             let text = if unchanged {
@@ -2018,13 +2020,13 @@ fn stamp(metadata: &fs::Metadata) -> String {
 /// reads code in the declared encoding, so a latin1 package's files are decoded byte by byte;
 /// any other declaration is read as UTF-8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceEncoding {
+pub enum SourceEncoding {
     Utf8,
     Latin1,
 }
 
 impl SourceEncoding {
-    fn of(description: &str) -> SourceEncoding {
+    pub fn of(description: &str) -> SourceEncoding {
         match description_field(description, "Encoding") {
             Some(name)
                 if ["latin1", "ISO-8859-1", "ISO8859-1"]
@@ -2036,22 +2038,28 @@ impl SourceEncoding {
             _ => SourceEncoding::Utf8,
         }
     }
+
+    /// The text of a code file's `bytes`, or `None` when they are not valid UTF-8 in a UTF-8
+    /// package.
+    pub fn decode(self, bytes: Vec<u8>) -> Option<String> {
+        match self {
+            SourceEncoding::Latin1 => Some(bytes.iter().map(|&byte| char::from(byte)).collect()),
+            SourceEncoding::Utf8 => String::from_utf8(bytes).ok(),
+        }
+    }
 }
 
 /// A code file's text, decoded as `encoding` and with its line endings normalized to `\n`.
 fn read_source(path: &Path, encoding: SourceEncoding) -> Result<String, LoadError> {
     let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
-    let text = match encoding {
-        SourceEncoding::Latin1 => bytes.iter().map(|&byte| char::from(byte)).collect(),
-        SourceEncoding::Utf8 => String::from_utf8(bytes).map_err(|_| {
-            let message = "the file is not valid UTF-8; a package whose code is latin1 declares \
-                           `Encoding: latin1` in DESCRIPTION";
-            LoadError::Io(
-                path.to_path_buf(),
-                io::Error::new(io::ErrorKind::InvalidData, message),
-            )
-        })?,
-    };
+    let text = encoding.decode(bytes).ok_or_else(|| {
+        let message = "the file is not valid UTF-8; a package whose code is latin1 declares \
+                       `Encoding: latin1` in DESCRIPTION";
+        LoadError::Io(
+            path.to_path_buf(),
+            io::Error::new(io::ErrorKind::InvalidData, message),
+        )
+    })?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 

@@ -46,11 +46,15 @@ This page is the exact behavior.
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
 - **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
   `inst/` is found as if the package were installed, so `system.file("extdata", "a.txt", package =
-  "mypkg")` returns `inst/extdata/a.txt`, and other paths are looked up in the package root. The
-  package's own code, `.onLoad` included, and every other caller see this mapping.
+  "mypkg")` returns `inst/extdata/a.txt`, and other paths are looked up in the package root. Code
+  of a package loaded from source, `.onLoad` included, and code run from the console or a script
+  see this mapping. Code inside an installed package calls base R's `system.file()`, which does
+  not know the source package.
 - **testthat helpers**, the `tests/testthat/helper*.R` files, are sourced into the namespace after
-  the code, so tests and the console can call them. A reload sources them again when one was added,
-  changed or deleted. With `export_all = TRUE` their objects are attached with the package's.
+  the code when `export_all = TRUE`, the default, and attached with the package's objects, so tests
+  and the console can call them. A reload sources them again when it changed any code, or when a
+  helper was added, changed or deleted, so a helper's value computed from the package's functions
+  stays current. A helper that fails fails the load, and the next load sources it again.
 - **A file in latin1** loads when `DESCRIPTION` says `Encoding: latin1` (or `ISO-8859-1`): its text
   is read as latin1, and its strings arrive in R as UTF-8. Without that field, a file that is not
   valid UTF-8 refuses the load with a message naming the field.
@@ -128,7 +132,9 @@ Functions keep their source references on both runtimes, so `print()` shows them
 `getSrcLocation()`, tracebacks and the debugger point into your files, as long as
 `options(keep.source = TRUE)` is set, which is the default in an interactive session. On ry's runtime
 a lazily bound definition gets its source reference when it is first used, and a file's `srcfile` is
-built only then.
+built only then. On GNU R, a definition placed after a non-ASCII character on the same line,
+such as `m <- function() "é"; n <- function() 3`, reports a column as many places too far right as
+that character has extra bytes in UTF-8; its line, byte offsets and printed text are right.
 
 ## The load-index cache
 
@@ -166,7 +172,9 @@ file loads it before the next command. An edit under `src/` is not noticed: call
 after one.
 
 When a package another development package imports reloads, the importer's imports are rebuilt
-too, so it calls the new definitions without reloading itself.
+too, so it calls the new definitions without reloading itself. If the importer's `NAMESPACE` no
+longer fits, because it imports a name the reload removed, the reload still succeeds, and the
+importer keeps its old imports with a warning until you reload it.
 
 ## Limits
 
@@ -174,6 +182,10 @@ too, so it calls the new definitions without reloading itself.
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
+- A reload that leaves a declared S3 method without its function is refused before it changes
+  anything, unless it also runs top-level statements or reloads `R/sysdata.rda`, either of which
+  could define the function. Then the refusal comes after they ran, and the namespace holds the
+  new code.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
 - Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names

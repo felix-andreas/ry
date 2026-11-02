@@ -431,18 +431,30 @@ fn check_strict_package(root: &Path) -> StrictCheck {
 /// The host side of `loader::ry_runtime::set_check`: ry's runtime calls it before a load of a
 /// strict package runs anything.
 pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
-    if root.is_null() {
+    let Some(root) = runtime_path(root) else {
         return StrictCheck::Failed as c_int;
-    }
-    // SAFETY: the runtime passes a NUL-terminated path that outlives the call.
-    let root = PathBuf::from(
-        unsafe { CStr::from_ptr(root) }
-            .to_string_lossy()
-            .into_owned(),
-    );
+    };
     // Unwinding into the runtime's frames aborts, so a panic in the check, whose message the
     // panic hook has printed, counts as a failed check.
     catch_unwind(|| check_strict_package(&root)).unwrap_or(StrictCheck::Failed) as c_int
+}
+
+/// The host side of the strict query of `loader::ry_runtime::set_check`: 1 when the
+/// configuration that governs the package at `root` turns strict mode on, as [`strict_config`]
+/// decides for GNU R's loader.
+pub extern "C" fn strict_config_on_ry_runtime(root: *const c_char) -> c_int {
+    runtime_path(root)
+        .and_then(|root| catch_unwind(|| strict_config(&root)).ok())
+        .map_or(0, c_int::from)
+}
+
+fn runtime_path(path: *const c_char) -> Option<PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the runtime passes a NUL-terminated path that outlives the call.
+    let path = unsafe { CStr::from_ptr(path) };
+    Some(PathBuf::from(path.to_string_lossy().into_owned()))
 }
 
 /// Whether the configuration that governs `root` turns strict mode on. A broken config counts as

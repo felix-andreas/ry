@@ -37,7 +37,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(plan$warnings)) {
     for (warning_text in plan$warnings) warning(warning_text, call. = FALSE)
   }
-  helpers <- .ry_helpers(state, root, export_all, plan$full)
+  helpers <- .ry_helpers(state, root, export_all, plan$full || !plan$noop)
   # Switching `export_all` changes what is exported even when no file changed, and so does
   # sourcing the helpers again.
   resync <- !identical(state$export_all, export_all) || (!plan$full && !is.null(helpers))
@@ -60,13 +60,15 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
   # A statement that fails leaves the namespace partly updated, so the attached package
   # environment follows it either way rather than mixing two versions.
+  if (!plan$full) {
+    .ry_refuse_missing_s3(state, plan)
+  }
   applied <- FALSE
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
   if (!is.null(helpers)) {
     .ry_source_helpers(state, helpers)
   }
-  .ry_update_importers(state)
   applied <- TRUE
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
@@ -75,6 +77,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   .ry_phase("attach")
   .ry_commit(root)
+  .ry_update_importers(state)
   if (!quiet) {
     elapsed <- proc.time()[["elapsed"]] - started
     held <- if (is.null(state$s4_deferred)) 0L else length(state$s4_deferred$run)
@@ -83,34 +86,58 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   invisible(state$ns)
 }
 
+# A reload that would leave a declared S3 method without its function is refused before it
+# changes anything, as R refuses such a package. When the reload runs statements or reads
+# `sysdata.rda`, either may define the function, so `.ry_register_s3` checks after them instead.
+.ry_refuse_missing_s3 <- function(state, plan) {
+  if (length(plan$run_path) || !identical(plan$sysdata, "keep")) {
+    return(invisible())
+  }
+  for (method in plan$s3_register) {
+    name <- method$`function`
+    bound <- name %in% plan$bind_name ||
+      (!(name %in% plan$remove) && exists(name, envir = state$ns, inherits = FALSE))
+    if (!bound) {
+      stop(sprintf("object '%s' not found whilst loading namespace '%s'", name, state$name),
+           call. = FALSE)
+    }
+  }
+}
+
 # The testthat helpers, `tests/testthat/helper*.R`, which `load_all()` sources into the
 # namespace when it exports everything, as `pkgload` does, so they are at hand interactively.
-# A reload sources them again only when their names, sizes or modification times changed, and
-# returns NULL otherwise.
-.ry_helpers <- function(state, root, export_all, full) {
-  if (!isTRUE(export_all)) {
+# A helper may compute a value from the package's code, so a reload sources them again when the
+# load changed anything or the helpers' names, sizes or modification times changed, and returns
+# NULL otherwise.
+.ry_helpers <- function(state, root, export_all, rerun) {
+  files <- if (isTRUE(export_all)) {
+    sort(list.files(file.path(root, "tests", "testthat"), pattern = "^helper.*\\.[rR]$",
+                    full.names = TRUE))
+  } else {
+    character()
+  }
+  if (!length(files)) {
     return(if (length(state$helper_names)) list(files = character(), stamp = NULL))
   }
-  files <- sort(list.files(file.path(root, "tests", "testthat"), pattern = "^helper.*\\.[rR]$",
-                           full.names = TRUE))
   info <- file.info(files, extra_cols = FALSE)
   stamp <- paste(files, info$size, as.numeric(info$mtime), collapse = "\n")
-  if (!full && identical(state$helpers_stamp, stamp)) {
+  if (!rerun && identical(state$helpers_stamp, stamp)) {
     return(NULL)
   }
   list(files = files, stamp = stamp)
 }
 
 # Names a helper bound are removed before the helpers run again, so a deleted helper leaves
-# nothing behind.
+# nothing behind. The stamp is recorded only once every helper ran, so a helper that failed
+# runs again on the next load.
 .ry_source_helpers <- function(state, helpers) {
   ns <- state$ns
   if (length(state$helper_names)) {
     rm(list = intersect(state$helper_names, names(ns)), envir = ns)
   }
-  state$helper_names <- character()
-  state$helpers_stamp <- helpers$stamp
+  state$helpers_stamp <- NULL
   before <- names(ns)
+  on.exit(state$helper_names <- setdiff(names(ns), before))
   keep <- isTRUE(getOption("keep.source", interactive()))
   for (file in helpers$files) {
     withCallingHandlers(
@@ -120,7 +147,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       }
     )
   }
-  state$helper_names <- setdiff(names(ns), before)
+  state$helpers_stamp <- helpers$stamp
   .ry_sync_exports(ns, state$namespace_spec, state$export_all)
 }
 
@@ -266,7 +293,9 @@ View <- function(x, title) {
 
 # Another package loaded from source that imports this one holds copies of its bindings, which
 # this load replaced, so its imports are rebuilt from its own `NAMESPACE` directives, and its
-# attached environment follows when it exports its imports.
+# attached environment follows, since it may re-export an import. This load has already
+# succeeded, so an importer whose directives no longer fit (it imports a name this load
+# removed) keeps its old imports and gets a warning rather than failing the load.
 .ry_update_importers <- function(state) {
   for (root in ls(.ry_packages, all.names = TRUE)) {
     importer <- .ry_packages[[root]]
@@ -276,8 +305,15 @@ View <- function(x, title) {
         !(state$name %in% names(getNamespaceInfo(importer$ns, "imports")))) {
       next
     }
-    .ry_import(importer$ns, importer$name, importer$import_directives)
-    if (!is.null(importer$package_env) && isTRUE(importer$export_all)) {
+    rebuilt <- tryCatch({
+      .ry_import(importer$ns, importer$name, importer$import_directives)
+      TRUE
+    }, error = function(error) {
+      warning(sprintf("%s's imports could not be rebuilt, so it keeps the old ones: %s",
+                      importer$name, conditionMessage(error)), call. = FALSE)
+      FALSE
+    })
+    if (rebuilt && !is.null(importer$package_env)) {
       .ry_sync_package_env(importer)
     }
   }
@@ -618,9 +654,20 @@ View <- function(x, title) {
   rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
 }
 
+# Builds the imports in a fresh environment, so a name an exporter dropped goes too, and a
+# directive that fails leaves the namespace with the imports it had. Copying the old bindings
+# aside instead would force the promises that lazy definitions import as.
 .ry_import <- function(ns, name, imports) {
-  environment <- parent.env(ns)
-  rm(list = ls(environment, all.names = TRUE), envir = environment)
+  previous <- parent.env(ns)
+  previous_info <- getNamespaceInfo(ns, "imports")
+  environment <- new.env(parent = parent.env(previous), hash = TRUE)
+  attr(environment, "name") <- attr(previous, "name")
+  parent.env(ns) <- environment
+  done <- FALSE
+  on.exit(if (!done) {
+    parent.env(ns) <- previous
+    setNamespaceInfo(ns, "imports", previous_info)
+  })
   canonical <- list(base = TRUE)
   for (directive in imports) {
     package <- directive$package
@@ -642,6 +689,7 @@ View <- function(x, title) {
   }
   setNamespaceInfo(ns, "imports", canonical)
   assign("system.file", system.file, envir = environment)
+  done <- TRUE
 }
 
 .ry_unregister <- function(ns, registration) {

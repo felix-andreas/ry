@@ -158,19 +158,23 @@ pub fn run_on_ry_runtime(
     })
 }
 
-/// Asked by the package loader of ry's runtime before a load of a strict package, given its
-/// root as a NUL-terminated path, runs anything: 0 lets the load run, 1 means strict mode
-/// refused the package, and any other value that the check failed.
+/// Asked by the package loader of ry's runtime about a package, given its root as a
+/// NUL-terminated path. The strict query returns 1 when the package's configuration turns strict
+/// mode on. The check runs before a load of a strict package runs anything: 0 lets the load run,
+/// 1 means strict mode refused the package, and any other value that the check failed.
 pub type PackageCheck = extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
 
 /// Makes ry's runtime ask `check` before every load of a strict package that changes
 /// something, so code strict mode refuses never runs. Call it once, before running the runtime.
-pub fn set_package_check_on_ry_runtime(check: PackageCheck) -> Result<(), ReplError> {
+pub fn set_package_check_on_ry_runtime(
+    strict_config: PackageCheck,
+    check: PackageCheck,
+) -> Result<(), ReplError> {
     let library = ry_runtime()?;
-    type SetCheck = unsafe extern "C" fn(PackageCheck);
+    type SetCheck = unsafe extern "C" fn(PackageCheck, PackageCheck);
     let set_check = runtime_entry::<SetCheck>(library, "ry_loader_set_check")?;
     // SAFETY: the entry point has this signature in every runtime of this build.
-    unsafe { set_check(check) };
+    unsafe { set_check(strict_config, check) };
     Ok(())
 }
 

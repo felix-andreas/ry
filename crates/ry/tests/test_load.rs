@@ -695,13 +695,16 @@ fn source_references_point_into_the_file() {
         ("DESCRIPTION", "Package: located\nVersion: 1.0\n"),
         (
             "R/a.R",
-            "first <- function() 1\n\n\nlater <- function() {\n  2\n}\n",
+            "first <- function() 1\n\n\nlater <- function() {\n  2\n}\n\
+             m <- function() \"\u{e9}\"; n <- function() 3\n",
         ),
     ]);
+    // `n` starts after a two-byte character on its line, so its byte offset is one past its
+    // column.
     let script = format!(
         "options(keep.source = TRUE)\nload_all({root:?}, full = TRUE)\n\
          cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n\
-         print(later)\n",
+         print(later)\ncat('byte', utils::getSrcLocation(n, 'byte'), '\\n')\nprint(n)\n",
         root = root.path().display().to_string(),
     );
     for runtime in RUNTIMES {
@@ -712,6 +715,10 @@ fn source_references_point_into_the_file() {
         // The function prints as written, not deparsed.
         assert!(
             printed.contains("later <- function() {") || printed.contains("function() {\n  2\n}"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("byte 28 \nfunction() 3\n"),
             "{runtime}: {printed}"
         );
     }
@@ -752,6 +759,49 @@ fn system_file_finds_inst_and_helpers_are_sourced() {
 }
 
 #[test]
+fn helpers_run_again_after_a_code_change_and_after_they_failed() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: helped\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(f)\n"),
+        ("R/a.R", ""),
+        ("tests/testthat/helper-a.R", ""),
+    ]);
+    let code = root.path().join("R/a.R").display().to_string();
+    let helper = root
+        .path()
+        .join("tests/testthat/helper-a.R")
+        .display()
+        .to_string();
+    // A helper's value follows the package's code, and a helper that failed is sourced again by
+    // the next load even when only package code changed.
+    let script = format!(
+        "cat(helper_value, '\\n')\n\
+         writeLines('f <- function(x) x * 3', {code:?}); load_all({root:?}, quiet = TRUE)\n\
+         cat(helper_value, '\\n')\n\
+         writeLines('helper_value <- f(1); stop(\"helper broke\")', {helper:?})\n\
+         cat(tryCatch(load_all({root:?}, quiet = TRUE), error = conditionMessage), '\\n')\n\
+         writeLines('helper_value <- f(1)', {helper:?});\n\
+         writeLines('f <- function(x) x * 5', {code:?}); load_all({root:?}, quiet = TRUE)\n\
+         cat(helper_value, '\\n')\n",
+        root = root.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(root.path().join("R/a.R"), "f <- function(x) x + 1\n").expect("write file");
+        fs::write(&helper, "helper_value <- f(1)\n").expect("write file");
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("2 \n3 \nhelper broke \n5 \n"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn a_latin1_package_loads() {
     if !r_available() {
         return;
@@ -779,6 +829,22 @@ fn a_latin1_package_loads() {
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(printed.contains("TRUE UTF-8"), "{runtime}: {printed}");
     }
+    // Strict mode reads the file as latin1 too, so it finds the untyped parameter.
+    fs::write(directory.path().join("ry.toml"), "[check]\nstrict = true\n").expect("write file");
+    fs::write(
+        directory.path().join("R/a.R"),
+        b"#: fn() -> character\ngreet <- function() \"caf\xe9\"\nloose <- function(x) cat('a value')\n",
+    )
+    .expect("write file");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, directory.path(), &["cat('ran\\n')"]);
+        let printed = text(&output);
+        assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
+        assert!(
+            printed.contains("parameter `x` has no type"),
+            "{runtime}: {printed}"
+        );
+    }
 }
 
 #[test]
@@ -802,16 +868,29 @@ fn an_importer_sees_the_changed_bindings_of_a_reloaded_package() {
     let script = format!(
         "load_all({user:?}, quiet = TRUE)\ncat(userpkg::uses(), '\\n')\n\
          writeLines('value <- function() 2', file.path({base:?}, 'R', 'a.R'))\n\
-         load_all({base:?}, quiet = TRUE)\ncat(userpkg::uses(), '\\n')\n",
+         load_all({base:?}, quiet = TRUE)\ncat(userpkg::uses(), '\\n')\n\
+         writeLines('other <- function() 3', file.path({base:?}, 'R', 'a.R'))\n\
+         writeLines('export(other)', file.path({base:?}, 'NAMESPACE'))\n\
+         withCallingHandlers(load_all({base:?}, quiet = TRUE), \
+           warning = function(w) {{ cat(conditionMessage(w), '\\n'); invokeRestart('muffleWarning') }})\n\
+         cat(basepkg::other(), userpkg::uses(), '\\n')\n",
         base = base.path().display().to_string(),
         user = user.path().display().to_string(),
     );
     for runtime in RUNTIMES {
         fs::write(base.path().join("R/a.R"), "value <- function() 1\n").expect("write file");
+        fs::write(base.path().join("NAMESPACE"), "export(value)\n").expect("write file");
         let output = ry_load_on(runtime, base.path(), &[&script]);
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(printed.contains("1 \n2 \n"), "{runtime}: {printed}");
+        // An importer whose directives no longer fit keeps its old imports, and the reload
+        // that removed the name still succeeds.
+        assert!(
+            printed.contains("userpkg's imports could not be rebuilt, so it keeps the old ones"),
+            "{runtime}: {printed}"
+        );
+        assert!(printed.contains("3 2 \n"), "{runtime}: {printed}");
     }
 }
 
@@ -855,6 +934,36 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
 }
 
 #[test]
+fn a_strict_package_is_checked_when_a_lax_project_loads_it() {
+    if !r_available() {
+        return;
+    }
+    let lax = package(&[
+        ("DESCRIPTION", "Package: laxpkg\nVersion: 1.0\n"),
+        ("R/a.R", "lax <- function(x) x\n"),
+    ]);
+    let strict = package(&[
+        ("DESCRIPTION", "Package: strictpkg\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(s)\n"),
+        ("ry.toml", "[check]\nstrict = true\n"),
+        ("R/a.R", "s <- function(x) cat('a value')\n"),
+    ]);
+    let script = format!(
+        "cat(tryCatch(load_all({strict:?}, quiet = TRUE), error = conditionMessage), '\\n')\n",
+        strict = strict.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, lax.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("strictpkg was not loaded, because strict mode refused it"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
     if !r_available() {
         return;
@@ -879,7 +988,8 @@ fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
          load_all({root:?}, quiet = TRUE)\nprint(make())\n\
          cat('hooks', length(getHook(packageEvent('notinstalledpkg', 'onLoad'))), '\\n')\n\
          writeLines(\"make <- function() structure(1, class = 'foo')\", {file:?})\n\
-         cat(tryCatch(load_all({root:?}, quiet = TRUE), error = conditionMessage), '\\n')\n",
+         cat(tryCatch(load_all({root:?}, quiet = TRUE), error = conditionMessage), '\\n')\n\
+         print(make())\n",
         root = root.path().display().to_string(),
     );
     for runtime in RUNTIMES {
@@ -887,9 +997,17 @@ fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
         let output = ry_load_on(runtime, root.path(), &[&script]);
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
-        assert!(printed.contains("a foo\na foo!\nhooks 1"), "{runtime}: {printed}");
+        assert!(
+            printed.contains("a foo\na foo!\nhooks 1"),
+            "{runtime}: {printed}"
+        );
         assert!(
             printed.contains("object 'print.foo' not found whilst loading namespace 'methodical'"),
+            "{runtime}: {printed}"
+        );
+        // The refusal came before the reload changed anything.
+        assert!(
+            printed.contains("'methodical' \na foo!\n"),
             "{runtime}: {printed}"
         );
     }

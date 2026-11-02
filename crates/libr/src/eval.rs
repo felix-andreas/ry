@@ -1597,8 +1597,11 @@ pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
 /// `loader::ry_runtime::set_check`). Every command that runs ry's runtime calls it once, before
 /// [`ry_run`].
 #[unsafe(no_mangle)]
-pub extern "C" fn ry_loader_set_check(check: loader::ry_runtime::Check) {
-    loader::ry_runtime::set_check(check);
+pub extern "C" fn ry_loader_set_check(
+    strict_config: loader::ry_runtime::Check,
+    check: loader::ry_runtime::Check,
+) {
+    loader::ry_runtime::set_check(strict_config, check);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

@@ -462,13 +462,16 @@ fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     }
 }
 
-/// ry's runtime returns the script's status; failing to start it is ry's failure, so 2.
 /// Makes ry's runtime run strict mode's check before every load of a strict package, as GNU
 /// R's loader in `ry R` does: `load_all()`, a console's reload, and a script's own loads.
 fn checking_loads() -> Result<(), repl::ReplError> {
-    repl::set_package_check_on_ry_runtime(load::strict_check_on_ry_runtime)
+    repl::set_package_check_on_ry_runtime(
+        load::strict_config_on_ry_runtime,
+        load::strict_check_on_ry_runtime,
+    )
 }
 
+/// ry's runtime returns the script's status; failing to start it is ry's failure, so 2.
 fn runtime_exit(result: Result<i32, repl::ReplError>) -> ExitCode {
     match result {
         Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
