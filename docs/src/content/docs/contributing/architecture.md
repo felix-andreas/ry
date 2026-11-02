@@ -118,6 +118,13 @@ a token, and an element's end is where the next element after its subtree starts
 therefore a contiguous index range and a node's text a contiguous slice of the file text, so a
 whole-tree walk is a linear scan and reading a node's text never allocates.
 
+An item's tree is a window onto its file's tree, not a copy. A `Tree` holds the file's arrays
+behind an `Arc` plus the window's first index, length and base offset, and every accessor
+subtracts those, so an item tree reports indices from zero and offsets relative to the item.
+Equality compares kinds, subtree ends and those relative offsets, which is why moving an item
+within its file does not invalidate what was computed from it. Copying item ranges instead would
+duplicate every file's arrays, about 114 MiB on the finance bench.
+
 Cursors are indices. An owned `SyntaxNode` or `SyntaxToken` is the tree's `Arc` plus a `u32`, so
 moving one is arithmetic and a clone is one reference-count increment. A borrowed `NodeRef` is the
 tree reference plus the index and costs nothing to copy, which is what the whole-file passes and
@@ -357,11 +364,13 @@ items that read its name. `crates/semantics/tests/test_incremental.rs` pins thes
 
 `ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
 cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
-`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
-instead of interning a name and going through `package_name` or `test_name`, and `item_group`
-finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
-`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
+A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
+answers each name with a hash probe, instead of interning a name and going through `package_name`
+or `test_name`. A frame binder that `item_frame_binders` does not list comes from the file's
+binders, read once per reader, instead of a `frame_binder` memo per item and name. And
+`item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
+instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
 per-item answer. The language server and a cached `ry check` keep the firewalls.

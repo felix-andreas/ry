@@ -752,7 +752,7 @@ tree: the checker runs on per-item HIR, and the tree serves the fidelity layers,
 the formatter and refactorings.
 
 Value equality is the mechanism for cutoffs, not pointer identity. An item's subtree compares
-structurally (one slice compare per column), and rust-analyzer's barriers are likewise value
+structurally (kinds, subtree ends and item-relative offsets), and rust-analyzer's barriers are likewise value
 equality on its `ItemTree` and `AstIdMap`. Parse stays a pure per-file query and correctness never
 depends on splicing.
 
@@ -5640,8 +5640,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     item, salsa keeps that capacity in the handle's reused query-stack frame, and every later query
     at the same depth then cleared a table sized for the project (about 0.75 G instructions,
     depending on which thread ran the walk).
-  - The tree builder shares nodes of at most three children again, keyed by kind and the
-    addresses of their already shared children, so the key never reads text.
+  - Node sharing in the tree builder is gone with rowan; the flat tree (the record "The syntax
+    tree is ry's own flat preorder arena") stores each file once without it.
+  - A one-shot check reads each name's project layer once per lookup: `NameLookup` resolves the
+    project maps (`package_definitions` and the conditional-writer maps, or their test
+    counterparts) once per query instead of two salsa fetches per name, and the incremental path
+    keeps the `projected_name_layer` firewall, cross-checked under `enable_invariants()`.
+  - On a one-shot check an unlisted frame binder (a name the item interface did not list, looked up
+    in an enclosing function's frame) is answered by building `FrameBinders::of` once per item
+    instead of one `frame_binder` query execution per name, which recorded about 216 k query
+    executions on the finance bench.
   - The global allocator enters mimalloc through `mi_malloc` and friends when the alignment is at
     most 16 and no larger than the size; the `mimalloc` crate always took the aligned path.
 - **Impact.** Callgrind on the finance bench went from 22.8 G to 22.0 G instructions, and
@@ -5754,16 +5762,42 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   refcount bump; their API mirrors rowan's so the typed AST, the formatter and the IDE did not
   change shape. `NodeRef` and `TokenRef` are borrowed `Copy` cursors for hot walks, and
   `walk_tree` is a flat index scan. The one cursor model replaced `GreenRef` and `walk_green`.
-- **Items.** An item's syntax is `Tree::subtree`, a rebased copy of its index range with offsets
-  starting at zero. Equality is a slice compare, which keeps per-item cutoffs position independent
-  without rowan's widths-only encoding.
+- **Items.** A `Tree` is a window over shared columns: an `Arc` of the file's columns plus the
+  window's first index, its length and its base offset. An item's syntax is `Tree::subtree`, which
+  bumps the refcount and records the window, so every accessor reports indices and offsets
+  relative to the item and nothing is copied. Equality compares kinds, subtree ends and
+  item-relative offsets, which keeps per-item cutoffs position independent without rowan's
+  widths-only encoding. A first version copied each item's index range into fresh columns; that
+  copied the whole file's columns once more (about 114 MiB on the finance bench, 14 bytes per
+  element) and raised peak memory by about 80 MiB, which is why the window shape won.
 - **Splice.** `tree::splice` concatenates index runs from the old tree and the reparsed middle,
   rebasing offsets and indices; `enable_invariants()` cross-checks it against a full parse, and
   `syntax::testing` cross-checks every navigation primitive (`token_at_offset`, sibling steps,
   `next_token`, `child_or_token_at_range`) against a naive reference on every fuzzed tree.
-- **What was given up.** Token sharing across files and the node cache. Neither paid for itself:
-  the flat arrays are smaller than the deduplicated green nodes.
+- **What was given up.** Token sharing across files and the node cache. An old tree held by a
+  window keeps its whole file's columns alive, which is fine because an edit replaces the item
+  trees of that file too.
 - **Impact.** One source of truth per file instead of green plus transient red copies, no
-  per-node allocation, and contiguous columns that a walk reads sequentially. Measured numbers are
-  in `backlog.md`, "Check cache follow-ups".
+  per-node allocation, and contiguous columns that a walk reads sequentially. Together with the
+  name-lookup, frame-binder and overload-shape changes (the records "One-shot checks record coarse
+  dependencies" and "Overload probes reject by call shape first"), a whole-process callgrind run
+  of the finance bench went from 23.6 G to 22.5 G instructions and from 19.8 M to 11.1 M `mi_malloc`
+  calls; in two sets of seven interleaved runs the wall median fell from 1.35-1.45 s to 1.11-1.15 s,
+  CPU from 4.4-4.7 s to 3.6-3.7 s and peak memory from 431 MiB to 371 MiB, with byte-identical
+  findings. The windows cost about 0.85 G instructions of offset arithmetic over copied item
+  trees but measured faster, because the copies' memory traffic cost more. The 1 s cold-check target is still not met.
+
+## Overload probes reject by call shape first
+
+- **Previous shape.** Each overload candidate was instantiated and its arguments matched with full
+  type inference before arity was known to fit, and the finance bench ran about 155 k probes for
+  17 k overloaded calls.
+- **Target shape.** `shape_verdict` in `crates/semantics/src/check.rs` decides arity, overflow and
+  missing required arguments from the argument targets alone. `match_arguments` uses it for its
+  own arity findings, so the two never disagree, and `probe_overload_candidate` runs it before
+  instantiating a candidate's scheme and rejects a candidate whose shape cannot fit. A call that
+  forwards `...` or names an unmatched argument gets no shape verdict and falls through to full
+  matching.
+- **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
+  stay byte-identical because the verdict is the same one full matching reached.
 

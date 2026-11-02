@@ -19,9 +19,25 @@ use {
     text_size::{TextRange, TextSize},
 };
 
-/// An immutable syntax tree over its own text. Element 0 is the root.
-#[derive(Clone, PartialEq, Eq)]
+/// An immutable syntax tree. Element 0 is the root, and offsets count from the root's start.
+///
+/// A tree is a window onto a file's shared columns, so a subtree is the same columns with a
+/// different first element: taking one copies nothing, and it reads its offsets and indices
+/// relative to its own root. Two trees are equal when their windows hold the same elements over
+/// the same text, wherever each sits in its file, which is what makes an item's syntax
+/// position independent.
+#[derive(Clone)]
 pub struct Tree {
+    columns: Arc<Columns>,
+    /// The column index of this tree's root.
+    first: u32,
+    len: u32,
+    /// The absolute offset of this tree's root.
+    base: TextSize,
+}
+
+/// One file's elements in preorder, with absolute offsets and indices.
+struct Columns {
     text: Box<str>,
     kinds: Box<[SyntaxKind]>,
     starts: Box<[TextSize]>,
@@ -35,19 +51,40 @@ pub struct Tree {
 const NO_PARENT: u32 = u32::MAX;
 
 impl Tree {
+    fn from_columns(columns: Columns) -> Tree {
+        let len = u32::try_from(columns.kinds.len()).expect("a syntax tree has fewer than 2^32 elements");
+        Tree {
+            columns: Arc::new(columns),
+            first: 0,
+            len,
+            base: TextSize::new(0),
+        }
+    }
+
+    #[inline]
     pub fn text(&self) -> &str {
-        &self.text
+        let start = usize::from(self.base);
+        &self.columns.text[start..start + usize::from(self.end_offset(0))]
+    }
+
+    /// The text of `range`, which is relative to this window.
+    #[inline]
+    fn slice(&self, range: TextRange) -> &str {
+        &self.columns.text[range + self.base]
     }
 
     /// The number of elements, nodes and tokens together.
+    #[inline]
     pub fn len(&self) -> usize {
-        self.kinds.len()
+        self.len as usize
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
+        self.len == 0
     }
 
+    #[inline]
     pub fn root(&self) -> NodeRef<'_> {
         NodeRef {
             tree: self,
@@ -55,66 +92,74 @@ impl Tree {
         }
     }
 
-    /// The subtree at `node` as a tree of its own, with offsets counted from its start. Two
-    /// equal subtrees anywhere in any file copy out equal.
+    /// The subtree at `node` as a tree of its own, with offsets counted from its start. It
+    /// shares this tree's columns, and two equal subtrees anywhere in any file compare equal.
     pub fn subtree(&self, node: NodeRef<'_>) -> Tree {
-        let first = node.index as usize;
-        let end = self.ends[first] as usize;
-        let offset = self.starts[first];
-        let base = node.index;
         Tree {
-            text: self.text[node.range()].into(),
-            kinds: self.kinds[first..end].into(),
-            starts: self.starts[first..end]
-                .iter()
-                .map(|&start| start - offset)
-                .collect(),
-            ends: self.ends[first..end]
-                .iter()
-                .map(|&end| end - base)
-                .collect(),
-            parents: iter::once(NO_PARENT)
-                .chain(
-                    self.parents[first + 1..end]
-                        .iter()
-                        .map(|&parent| parent - base),
-                )
-                .collect(),
+            columns: self.columns.clone(),
+            first: self.first + node.index,
+            len: self.end(node.index) - node.index,
+            base: self.base + self.start_offset(node.index),
         }
     }
 
-    fn kind(&self, index: u32) -> SyntaxKind {
-        self.kinds[index as usize]
+    #[inline]
+    fn column(&self, index: u32) -> usize {
+        (self.first + index) as usize
     }
 
+    #[inline]
+    fn kind(&self, index: u32) -> SyntaxKind {
+        self.columns.kinds[self.column(index)]
+    }
+
+    #[inline]
     fn is_node(&self, index: u32) -> bool {
         self.kind(index).is_node()
     }
 
+    #[inline]
     fn end(&self, index: u32) -> u32 {
-        self.ends[index as usize]
+        self.columns.ends[self.column(index)] - self.first
     }
 
+    #[inline]
     fn start_offset(&self, index: u32) -> TextSize {
-        self.starts[index as usize]
+        self.columns.starts[self.column(index)] - self.base
     }
 
+    /// An element ends where the next element in preorder starts, which for the window's last
+    /// element is the next element in the file, or the end of the file.
+    #[inline]
     fn end_offset(&self, index: u32) -> TextSize {
-        match self.starts.get(self.end(index) as usize) {
+        let end = self.columns.ends[self.column(index)] as usize;
+        let absolute = match self.columns.starts.get(end) {
             Some(&start) => start,
-            None => TextSize::of(&*self.text),
-        }
+            None => TextSize::of(&*self.columns.text),
+        };
+        absolute - self.base
     }
 
+    #[inline]
     fn range(&self, index: u32) -> TextRange {
         TextRange::new(self.start_offset(index), self.end_offset(index))
     }
 
-    fn parent(&self, index: u32) -> Option<u32> {
-        let parent = self.parents[index as usize];
-        (parent != NO_PARENT).then_some(parent)
+    /// How many elements in `first..end` start before the cut `before` draws: starts never
+    /// decrease in preorder, so this is a binary search.
+    #[inline]
+    fn partition_starts(&self, first: u32, end: u32, before: impl Fn(TextSize) -> bool) -> u32 {
+        let base = self.base;
+        self.columns.starts[self.column(first)..self.column(end)]
+            .partition_point(|&start| before(start - base)) as u32
     }
 
+    #[inline]
+    fn parent(&self, index: u32) -> Option<u32> {
+        (index != 0).then(|| self.columns.parents[self.column(index)] - self.first)
+    }
+
+    #[inline]
     fn first_child_or_token(&self, index: u32) -> Option<u32> {
         (index + 1 < self.end(index)).then_some(index + 1)
     }
@@ -124,6 +169,7 @@ impl Tree {
         (last != index).then(|| self.child_containing(index, last))
     }
 
+    #[inline]
     fn next_sibling_or_token(&self, index: u32) -> Option<u32> {
         let parent = self.parent(index)?;
         let next = self.end(index);
@@ -140,8 +186,10 @@ impl Tree {
     /// The child of `node` whose subtree holds the descendant `element`.
     fn child_containing(&self, node: u32, element: u32) -> u32 {
         let mut child = element;
-        while self.parents[child as usize] != node {
-            child = self.parents[child as usize];
+        while let Some(parent) = self.parent(child)
+            && parent != node
+        {
+            child = parent;
         }
         child
     }
@@ -216,9 +264,7 @@ impl Tree {
         }
         let first = node + 1;
         let end = self.end(node);
-        let split = first
-            + self.starts[first as usize..end as usize].partition_point(|&start| start < offset)
-                as u32;
+        let split = first + self.partition_starts(first, end, |start| start < offset);
         let left = (first..split)
             .rev()
             .find(|&element| !self.is_node(element) && !self.range(element).is_empty())
@@ -246,15 +292,14 @@ impl Tree {
         let start = range.start();
         // The child holding the last element that starts before the range (or at its start,
         // for a non-empty range) is the only child that can contain it.
-        let before = self.starts[first as usize..end as usize].partition_point(|&element| {
+        let before = self.partition_starts(first, end, |element| {
             if range.is_empty() {
                 element < start
             } else {
                 element <= start
             }
         });
-        let candidate =
-            (before > 0).then(|| self.child_containing(node, first + before as u32 - 1));
+        let candidate = (before > 0).then(|| self.child_containing(node, first + before - 1));
         if !range.is_empty() {
             return candidate.filter(|&child| self.range(child).contains_range(range));
         }
@@ -282,6 +327,23 @@ impl Tree {
         }
     }
 }
+
+impl PartialEq for Tree {
+    fn eq(&self, other: &Tree) -> bool {
+        if Arc::ptr_eq(&self.columns, &other.columns) && self.first == other.first {
+            return self.len == other.len;
+        }
+        self.len == other.len
+            && self.text() == other.text()
+            && (0..self.len).all(|index| {
+                self.kind(index) == other.kind(index)
+                    && self.end(index) == other.end(index)
+                    && self.start_offset(index) == other.start_offset(index)
+            })
+    }
+}
+
+impl Eq for Tree {}
 
 impl fmt::Debug for Tree {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -401,13 +463,13 @@ impl TreeBuilder {
                 preorder_parents[position] = preorder[parent as usize];
             }
         }
-        Tree {
+        Tree::from_columns(Columns {
             text: text.into(),
             kinds: kinds.into(),
             starts: starts.into(),
             ends: ends.into(),
             parents: preorder_parents.into(),
-        }
+        })
     }
 }
 
@@ -435,21 +497,15 @@ pub(crate) fn splice(kind: SyntaxKind, text: &str, runs: &[(&Tree, Range<u32>)])
         let first_offset = tree.start_offset(elements.start);
         let base = kinds.len() as u32;
         let shift = |index: u32| index - elements.start + base;
-        let range = elements.start as usize..elements.end as usize;
-        kinds.extend_from_slice(&tree.kinds[range.clone()]);
-        starts.extend(
-            tree.starts[range.clone()]
-                .iter()
-                .map(|&start| start - first_offset + offset),
-        );
-        ends.extend(tree.ends[range.clone()].iter().map(|&end| shift(end)));
-        parents.extend(tree.parents[range].iter().map(|&parent| {
-            if parent < elements.start {
-                0
-            } else {
-                shift(parent)
-            }
-        }));
+        for element in elements.clone() {
+            kinds.push(tree.kind(element));
+            starts.push(tree.start_offset(element) - first_offset + offset);
+            ends.push(shift(tree.end(element)));
+            parents.push(match tree.parent(element) {
+                Some(parent) if parent >= elements.start => shift(parent),
+                _ => 0,
+            });
+        }
         offset += tree.end_offset(elements.end - 1) - first_offset;
     }
     assert_eq!(
@@ -457,13 +513,13 @@ pub(crate) fn splice(kind: SyntaxKind, text: &str, runs: &[(&Tree, Range<u32>)])
         text.len(),
         "the spliced runs cover the text"
     );
-    Tree {
+    Tree::from_columns(Columns {
         text: text.into(),
         kinds: kinds.into(),
         starts: starts.into(),
         ends: ends.into(),
         parents: parents.into(),
-    }
+    })
 }
 
 /// A node or a token, generic so the owned and borrowed cursors share it.
@@ -679,7 +735,7 @@ impl SyntaxNode {
     }
 
     pub fn text(&self) -> &str {
-        &self.tree.text[self.text_range()]
+        self.tree.slice(self.text_range())
     }
 
     pub fn parent(&self) -> Option<SyntaxNode> {
@@ -902,7 +958,7 @@ impl SyntaxToken {
     }
 
     pub fn text(&self) -> &str {
-        &self.tree.text[self.text_range()]
+        self.tree.slice(self.text_range())
     }
 
     /// The token as a borrowed value, for code that reads it without keeping it.
@@ -1224,7 +1280,7 @@ fn token_ref(tree: &Tree, index: u32) -> TokenRef<'_> {
     let range = tree.range(index);
     TokenRef {
         kind: tree.kind(index),
-        text: &tree.text[range],
+        text: tree.slice(range),
         range,
     }
 }
@@ -1251,7 +1307,7 @@ impl<'a> NodeRef<'a> {
     }
 
     pub fn text(self) -> &'a str {
-        &self.tree.text[self.range()]
+        self.tree.slice(self.range())
     }
 
     pub fn parent(self) -> Option<NodeRef<'a>> {
@@ -1301,7 +1357,7 @@ impl<'a> NodeRef<'a> {
     pub fn single_token_text(self) -> Option<&'a str> {
         let child = self.tree.first_child_or_token(self.index)?;
         (!self.tree.is_node(child) && self.tree.end(child) == self.tree.end(self.index))
-            .then(|| &self.tree.text[self.tree.range(child)])
+            .then(|| self.tree.slice(self.tree.range(child)))
     }
 
     /// The first token found by descending into first children, so an empty first child node
@@ -1323,11 +1379,10 @@ impl<'a> NodeRef<'a> {
     /// starts sits in one run that a binary search finds.
     pub fn find(self, kind: SyntaxKind, range: TextRange) -> Option<NodeRef<'a>> {
         let tree = self.tree;
-        let first = self.index as usize;
-        let end = tree.end(self.index) as usize;
-        let run = first + tree.starts[first..end].partition_point(|&start| start < range.start());
+        let first = self.index;
+        let end = tree.end(self.index);
+        let run = first + tree.partition_starts(first, end, |start| start < range.start());
         (run..end)
-            .map(|index| index as u32)
             .take_while(|&index| tree.start_offset(index) == range.start())
             .find(|&index| tree.kind(index) == kind && tree.end_offset(index) == range.end())
             .map(|index| NodeRef { tree, index })
@@ -1390,7 +1445,7 @@ pub fn walk_tree(root: NodeRef<'_>, mut visit: impl FnMut(TreeEvent<'_>)) {
             let range = tree.range(index);
             visit(TreeEvent::Token {
                 kind,
-                text: &tree.text[range],
+                text: tree.slice(range),
                 range,
             });
         }
