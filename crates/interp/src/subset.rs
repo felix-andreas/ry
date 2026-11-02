@@ -2414,9 +2414,14 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     let use_names = values::as_logical_scalar(call.arg(1)) != 0;
     let count = length(object);
     let result = alloc(SexpType::Integer, count)?;
+    crate::heap().root(result);
     for index in 0..count {
         let element = match object.kind() {
-            SexpType::List | SexpType::Expression => length(object.element(index)),
+            // A classed element answers with its own `length` method, S4 ones included
+            // (Matrix's sparse vectors).
+            SexpType::List | SexpType::Expression => {
+                dispatch_length(object.element(index), call.env)?
+            }
             _ => 1,
         };
         values::ints_mut(result)[index] = element as i32;
@@ -2479,6 +2484,22 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     } else {
         coerce_vector(names, SexpType::String)?
     };
+    let is_vector_or_list = matches!(
+        object.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+            | SexpType::Pairlist
+            | SexpType::Language
+    );
+    if !is_vector_or_list && !object.has_gp(gp::S4_OBJECT) {
+        return Err(error("names() applied to a non-vector"));
+    }
     let count = length(object);
     if length(names) > count {
         return Err(error(format!(

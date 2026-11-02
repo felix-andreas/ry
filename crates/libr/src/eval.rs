@@ -90,6 +90,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         enter_from_native: |body| unsafe { crate::boundary::enter(|| body()) },
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
+        find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
     };
     interp::install(&mut runtime.heap, hooks);
     heap::object::install_altrep_elements(heap::object::AltrepElements {

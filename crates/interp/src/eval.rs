@@ -2573,7 +2573,13 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
                 return Ok(expression);
             }
             if value.kind() == SexpType::Promise {
-                return Ok(value.cdr());
+                // An argument passed on as a promise, like a replacement function's `value`,
+                // substitutes to the code of the innermost promise.
+                let mut code = value.cdr();
+                while code.kind() == SexpType::Promise {
+                    code = code.cdr();
+                }
+                return Ok(code);
             }
             if value.kind() == SexpType::Dots {
                 return Ok(expression);
@@ -3014,6 +3020,10 @@ pub unsafe fn complex_assign(
         }
         levels.push(level);
     }
+    let right_hand_side = match whole.cdr().cdr().kind() {
+        SexpType::Pairlist | SexpType::Language => whole.cdr().cdr().car(),
+        _ => value,
+    };
     let mut replacement = value;
     for (depth, getter) in getters.iter().enumerate() {
         let object = levels[levels.len() - 1 - depth];
@@ -3028,8 +3038,13 @@ pub unsafe fn complex_assign(
         let object_promise = forced_promise(object_code, object)?;
         crate::heap().untrack_references(object_promise);
         // GNU R's value promise does not count either, so a replacement that updated its target
-        // in place stays uniquely referenced for the next update.
-        let value_promise = forced_promise(replacement, replacement)?;
+        // in place stays uniquely referenced for the next update. Its code is the right-hand
+        // side as written, which `substitute(value)` reports (tibble names it in errors).
+        let value_code = match depth {
+            0 => right_hand_side,
+            _ => replacement,
+        };
+        let value_promise = forced_promise(value_code, replacement)?;
         crate::heap().untrack_references(value_promise);
         let mut items = vec![(nil(), setter), (nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {

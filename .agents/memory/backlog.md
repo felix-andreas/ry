@@ -2192,12 +2192,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - Passed before the merge of the PCRE2 work with main's parallel runtime fixes and fail after
-    it (`--installed`; first failures in `.corpus/tests/summary-installed.md`): fs (`file_copy`
-    into another directory), purrr (`compose` dots), tibble (`[<-` with a matrix), pillar, plyr
-    (`names<-` on an immutable data frame), cachem (disk cache `set`), sessioninfo (subprocess
-    exit), randtoolbox (`test-WELL.R`), PerformanceAnalytics (tinytest), Matrix (`lengths` of a
-    `which` result). Bisect against the two parents of the merge first.
+  - sessioninfo crashes in `external_info()`: GNU R's own `tcltk.so` is built with R's internals
+    and reads `SEXPREC` fields directly, so it segfaults on ry's layout. ry's R home needs a tcltk
+    built against ry, or a `tclVersion()` that errors cleanly when Tcl is unavailable.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
