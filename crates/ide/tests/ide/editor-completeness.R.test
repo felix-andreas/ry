@@ -51,7 +51,8 @@ sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- DataFrame.$0
 #++++
 hover 67..77: DataFrame.: Unknown
-definition: none
+hover-definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed DataFrame. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -166,7 +167,8 @@ helper <- function(first, second = 2L) first
 helper(1L, se$0)
 #++++
 hover 56..58: se: Unknown
-definition: none
+hover-definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
@@ -182,7 +184,8 @@ hint @56second =
 x <- Str.$0
 #++++
 hover 5..9: Str.: Unknown
-definition: none
+hover-definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed Str. from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -412,12 +415,12 @@ hint @1: character
 x <- utils::past$0e("a", "b")
 #++++
 hover 5..17: Unknown
-definition: none
+hover-definition: installed paste from utils
+definition: installed paste from utils
 references: none
 rename: none
 signature: none
 completion (6): package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
-
 
 #---- abbreviated_argument_is_not_followed
 grow <- function(principal, rate) principal * (1 + rate)

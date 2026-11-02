@@ -157,6 +157,11 @@ fn render_at(
                         output.push_str(&format!("hover-documentation: {line}\n"));
                     }
                 }
+                Some(HoverDefinition::Package(target)) => output.push_str(&format!(
+                    "hover-definition: installed {} from {}\n",
+                    target.name,
+                    target.packages.join(", "),
+                )),
                 None => {}
             }
         }
@@ -169,6 +174,11 @@ fn render_at(
         Some(DefinitionTarget::Stub(target)) => format!(
             "{label}: stub source {}\n",
             stub_text(db, target.source_index, target.range),
+        ),
+        Some(DefinitionTarget::Package(target)) => format!(
+            "{label}: installed {} from {}\n",
+            target.name,
+            target.packages.join(", "),
         ),
         None => format!("{label}: none\n"),
     };

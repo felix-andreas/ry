@@ -75,7 +75,8 @@ completion (17): Money, Any, character, complex, double, fn, integer, list
 price: Mo$0
 #++++
 hover 25..34: Unknown
-definition: none
+hover-definition: installed Mo from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed Mo from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none

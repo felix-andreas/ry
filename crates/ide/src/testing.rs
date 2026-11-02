@@ -49,7 +49,7 @@ pub fn check_ide_invariants(source: &str) {
             Some(crate::Target::Field(field)) if !field.precise
         );
         let definition = match definitions.as_slice() {
-            [single] if !guessed_field => Some(*single),
+            [single] if !guessed_field => Some(single.clone()),
             _ => None,
         };
         check_names(

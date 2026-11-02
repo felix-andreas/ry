@@ -833,34 +833,40 @@ impl<'db> Resolver<'db> {
             return;
         }
         let variable = *variable;
-        for &file in self.files.files(self.db) {
-            let text = file.text(self.db);
-            if !text.contains(variable.as_str()) || !text.contains(name.as_str()) {
+        let written_items: Vec<Item<'db>> = {
+            let mut items: Vec<Item<'db>> = Vec::new();
+            let writes = field_index(self.db, self.files)
+                .by_name
+                .get(name.as_str())
+                .into_iter()
+                .flatten()
+                .filter(|spelled| spelled.kind == SpellingKind::Write);
+            for spelled in writes {
+                if let Some(position) =
+                    position_in_item(self.db, spelled.file, spelled.range.start())
+                    && !items.contains(&position.item)
+                {
+                    items.push(position.item);
+                }
+            }
+            items
+        };
+        for other in written_items {
+            let (Some(hir), Some(naming)) = (
+                item_hir(self.db, other).as_ref(),
+                item_naming(self.db, other).as_ref(),
+            ) else {
                 continue;
-            }
-            if !field_spellings(self.db, file)
-                .iter()
-                .any(|spelled| spelled.kind == SpellingKind::Write && spelled.name == name.as_str())
-            {
-                continue;
-            }
-            for &other in item_tree(self.db, file) {
-                let (Some(hir), Some(naming)) = (
-                    item_hir(self.db, other).as_ref(),
-                    item_naming(self.db, other).as_ref(),
-                ) else {
-                    continue;
-                };
-                sites.extend(field_writes(hir, other, &|written| {
-                    matches!(hir.kind(written), ExpressionKind::NameRef(spelled) if *spelled == variable)
-                        && naming.resolutions.get(&written).is_none_or(|binding| {
-                            naming
-                                .bindings
-                                .get(binding)
-                                .is_some_and(|info| info.kind == BindingKind::TopLevel)
-                        })
-                }));
-            }
+            };
+            sites.extend(field_writes(hir, other, &|written| {
+                matches!(hir.kind(written), ExpressionKind::NameRef(spelled) if *spelled == variable)
+                    && naming.resolutions.get(&written).is_none_or(|binding| {
+                        naming
+                            .bindings
+                            .get(binding)
+                            .is_some_and(|info| info.kind == BindingKind::TopLevel)
+                    })
+            }));
         }
     }
 }

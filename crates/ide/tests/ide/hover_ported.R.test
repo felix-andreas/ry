@@ -687,7 +687,8 @@ completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid
 unde$0fined_fn(1L)
 #++++
 hover 0..12: undefined_fn: Unknown
-definition: none
+hover-definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none

@@ -7,7 +7,8 @@ wrapper <- function(parameter, partner) {
 }
 #++++
 hover 85..87: pa: Unknown
-definition: none
+hover-definition: installed pa from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed pa from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -21,7 +22,8 @@ wrapper <- function(value) {
 }
 #++++
 hover 62..64: va: Unknown
-definition: none
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -36,7 +38,8 @@ wrapper <- function() {
 }
 #++++
 hover 72..79: outer_v: Unknown
-definition: none
+hover-definition: installed outer_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed outer_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -58,7 +61,8 @@ wrapper <- function() {
 }
 #++++
 hover 118..120: va: Unknown
-definition: none
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -73,7 +77,8 @@ hint @107: integer
 na_$0
 #++++
 hover 0..3: na_: Unknown
-definition: none
+hover-definition: installed na_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed na_ from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -88,7 +93,8 @@ wrapper <- function(x) {
 }
 #++++
 hover 55..62: block_v: Unknown
-definition: none
+hover-definition: installed block_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed block_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -109,7 +115,8 @@ wrapper <- function(x) {
 }
 #++++
 hover 83..91: switch_v: Unknown
-definition: none
+hover-definition: installed switch_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed switch_v from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -126,7 +133,8 @@ wrapper <- function(values) {
 }
 #++++
 hover 59..62: ite: Unknown
-definition: none
+hover-definition: installed ite from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed ite from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -145,7 +153,8 @@ wrapper <- function() {
 }
 #++++
 hover 65..67: va: Unknown
-definition: none
+hover-definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed va from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -186,7 +195,8 @@ completion (2): fi, first_field
 pkg:al$0
 #++++
 hover 0..6: Unknown
-definition: none
+hover-definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed al from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -197,7 +207,8 @@ MyValue <- 1L
 my$0
 #++++
 hover 14..16: my: Unknown
-definition: none
+hover-definition: installed my from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed my from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -213,7 +224,8 @@ wrapper <- function(fortune) {
 }
 #++++
 hover 49..51: fo: Unknown
-definition: none
+hover-definition: installed fo from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed fo from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -227,7 +239,8 @@ value <- 1L
 zz$0
 #++++
 hover 12..14: zz: Unknown
-definition: none
+hover-definition: installed zz from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed zz from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none

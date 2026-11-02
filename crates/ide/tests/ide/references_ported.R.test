@@ -3,7 +3,8 @@
 pkg::fu$0nc
 #++++
 hover 0..9: Unknown
-definition: none
+hover-definition: installed func from pkg
+definition: installed func from pkg
 references: none
 rename: none
 signature: none

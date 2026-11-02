@@ -17,7 +17,7 @@ use {
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
-        metadata::is_own_package,
+        metadata::{PackageMetadata, is_own_package},
         naming::{BindingId, BindingKind, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
@@ -68,6 +68,8 @@ pub enum HoverDefinition {
         /// The declaration's `#'` lines, as Markdown.
         documentation: Option<String>,
     },
+    /// The host renders the package's help page for the name.
+    Package(PackageTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,10 +85,23 @@ pub struct NavigationTarget {
 }
 
 /// Stub sources are not project files: the host maps `source_index` to a file on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionTarget {
     Project(NavigationTarget),
     Stub(StubTarget),
+    Package(PackageTarget),
+}
+
+/// A name that neither the project nor a stub declares, so only an installed package can
+/// define it. Analysis never reads the library: the host looks the name up in the first of
+/// `packages` whose namespace binds it, lazily, when a request needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTarget {
+    /// In R's lookup order for the reference: the qualifier of `pkg::name`, or for a bare name
+    /// its `importFrom` sources, then `import`ed and attached packages, then the default search
+    /// path.
+    pub packages: Vec<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +117,55 @@ pub struct Occurrence {
     pub is_declaration: bool,
 }
 
+/// A name only an installed package defines hovers with that package's help page, which the
+/// host renders, whether or not the checker knows its type.
 pub fn hover(
+    db: &dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<Hover> {
+    let typed = typed_hover(db, files, file, offset);
+    if typed
+        .as_ref()
+        .is_some_and(|hover| hover.definition.is_some())
+    {
+        return typed;
+    }
+    let package = match target_at(db, files, file, offset) {
+        Some(Target::Package(target)) => target,
+        Some(Target::StubGlobal(name)) if stub_target(db, &name).is_none() => {
+            library_target(db, name)
+        }
+        _ => return typed,
+    };
+    let mut hover = typed.unwrap_or_else(|| {
+        let range = name_range_at(file.text(db), offset);
+        Hover {
+            range,
+            lines: vec![package.name.clone()],
+            definition: None,
+        }
+    });
+    hover.definition = Some(HoverDefinition::Package(package));
+    Some(hover)
+}
+
+/// The R name around `offset`, backticks excluded.
+fn name_range_at(text: &str, offset: TextSize) -> TextRange {
+    let is_name_character =
+        |character: char| character.is_alphanumeric() || character == '.' || character == '_';
+    let at = usize::from(offset).min(text.len());
+    let start = text[..at]
+        .rfind(|character| !is_name_character(character))
+        .map_or(0, |found| found + 1);
+    let end = text[at..]
+        .find(|character| !is_name_character(character))
+        .map_or(text.len(), |found| at + found);
+    TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32))
+}
+
+fn typed_hover(
     db: &dyn Db,
     files: ProjectFiles,
     file: SourceFile,
@@ -521,6 +584,59 @@ fn item_target(db: &dyn Db, item: Item<'_>) -> Option<NavigationTarget> {
     })
 }
 
+/// A stub-declared name with no stub source to show, like a base primitive whose signature the
+/// stubs synthesize, navigates to its package like a name without stubs.
+fn library_target(db: &dyn Db, name: String) -> PackageTarget {
+    let mut packages = candidate_packages(db, &name);
+    if let Some(namespace) = declaring_namespace(db, &name) {
+        packages.retain(|package| package != namespace);
+        packages.insert(0, namespace.to_owned());
+    }
+    PackageTarget { packages, name }
+}
+
+/// The packages R would search for a bare `name` from the project, in order.
+fn candidate_packages(db: &dyn Db, name: &str) -> Vec<String> {
+    let mut packages: Vec<String> = Vec::new();
+    let mut push = |package: &str| {
+        if !packages.iter().any(|seen| seen == package) && !is_own_package(db, package) {
+            packages.push(package.to_owned());
+        }
+    };
+    if let Some(metadata) = PackageMetadata::try_get(db) {
+        let imports = metadata.imports(db);
+        for (package, imported) in imports {
+            if imported.as_deref() == Some(name) {
+                push(package);
+            }
+        }
+        for (package, imported) in imports {
+            if imported.is_none() {
+                push(package);
+            }
+        }
+        for package in metadata.attached(db) {
+            push(package);
+        }
+    }
+    for package in DEFAULT_SEARCH_PATH {
+        push(package);
+    }
+    packages
+}
+
+/// The packages R attaches at startup, last searched first-to-last after the project's own
+/// imports.
+const DEFAULT_SEARCH_PATH: [&str; 7] = [
+    "base",
+    "stats",
+    "utils",
+    "methods",
+    "graphics",
+    "grDevices",
+    "datasets",
+];
+
 fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
     stub_declaration(db, name).map(|declaration| StubTarget {
         source_index: declaration.source_index,
@@ -648,6 +764,7 @@ fn single_definition(
 ) -> Option<DefinitionTarget> {
     match target {
         Target::Field(_) => None,
+        Target::Package(target) => Some(DefinitionTarget::Package(target)),
         Target::Slot { item, binding } => {
             let info = item_naming(db, item).as_ref()?.bindings.get(&binding)?;
             let item_offset = item_node(db, item)?.text_range().start();
@@ -658,7 +775,10 @@ fn single_definition(
             }))
         }
         Target::TypeName(name) => type_name_definition(db, files, &name),
-        Target::StubGlobal(name) => stub_target(db, &name).map(DefinitionTarget::Stub),
+        Target::StubGlobal(name) => Some(match stub_target(db, &name) {
+            Some(target) => DefinitionTarget::Stub(target),
+            None => DefinitionTarget::Package(library_target(db, name)),
+        }),
         Target::TypeParameter(occurrences) => occurrences
             .into_iter()
             .find(|occurrence| occurrence.is_declaration)
@@ -5197,6 +5317,9 @@ enum Target<'db> {
     Global(String),
     TypeName(String),
     StubGlobal(String),
+    /// Declared by neither the project nor the stubs: navigable through the host's library,
+    /// with no references or rename.
+    Package(PackageTarget),
     Field(fields::FieldTarget),
     S4 {
         name: String,
@@ -5312,10 +5435,16 @@ fn expression_target<'db>(
                 .then(|| Target::Global(name.to_string()));
         }
         // A stub declares names by their bare spelling, so the qualifier must name the package
-        // that declaration belongs to.
-        return (declaring_namespace(db, name.as_str()) == Some(package.as_str())
-            && stub_declaration(db, name.as_str()).is_some())
-        .then(|| Target::StubGlobal(name.to_string()));
+        // that declaration belongs to. Any other qualified name is the package's to define.
+        if declaring_namespace(db, name.as_str()) == Some(package.as_str())
+            && stub_declaration(db, name.as_str()).is_some()
+        {
+            return Some(Target::StubGlobal(name.to_string()));
+        }
+        return Some(Target::Package(PackageTarget {
+            packages: vec![package.to_string()],
+            name: name.to_string(),
+        }));
     }
     // A call head skips bindings that hold no function, so it navigates where the call goes.
     let callee_target =
@@ -5359,6 +5488,10 @@ fn expression_target<'db>(
         if stub_declaration(db, name).is_some() {
             return Some(Target::StubGlobal(name.to_string()));
         }
+        return Some(Target::Package(PackageTarget {
+            packages: candidate_packages(db, name),
+            name: name.to_string(),
+        }));
     }
     None
 }
@@ -5548,7 +5681,7 @@ fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bo
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {
     let mut result = Vec::new();
     match target {
-        Target::StubGlobal(_) => {}
+        Target::StubGlobal(_) | Target::Package(_) => {}
         Target::Field(field) => result = fields::field_occurrences(db, files, field),
         Target::TypeParameter(occurrences) => result = occurrences.clone(),
         Target::Tag(name) => result = tag_occurrences(db, files, name),

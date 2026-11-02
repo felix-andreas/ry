@@ -490,7 +490,8 @@ f <- function(total_count) {
 }
 #++++
 hover 31..34: tot: Unknown
-definition: none
+hover-definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed tot from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -501,7 +502,8 @@ print <- function(x) x
 g <- function() pri$0
 #++++
 hover 39..42: pri: Unknown
-definition: none
+hover-definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed pri from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -532,7 +534,8 @@ hint @41: fn() -> double
 h <- function() stats::med$0
 #++++
 hover 16..26: Unknown
-definition: none
+hover-definition: installed med from stats
+definition: installed med from stats
 references: none
 rename: none
 signature: none
@@ -542,7 +545,8 @@ completion (11): median, median.default, medpolish, runmed, makepredictcall, mod
 g <- function() fun$0
 #++++
 hover 16..19: fun: Unknown
-definition: none
+hover-definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed fun from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
