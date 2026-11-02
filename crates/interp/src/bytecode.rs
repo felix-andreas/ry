@@ -796,13 +796,13 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// A constructor call's items, the layout it builds and each item's slot.
+type ConstructorPlan<'a> = (&'a [(Sexp, Sexp)], u32, Vec<usize>);
+
 /// The items of a `.ry_record`, `.ry_tuple` or `.ry_tag` call named `name`, the layout it
 /// builds and each item's slot, when its syntax fixes them and evaluating the items into
 /// registers is what the builtin's own evaluation would do.
-unsafe fn constructor<'a>(
-    name: &str,
-    args: &'a [(Sexp, Sexp)],
-) -> Option<(&'a [(Sexp, Sexp)], u32, Vec<usize>)> {
+unsafe fn constructor<'a>(name: &str, args: &'a [(Sexp, Sexp)]) -> Option<ConstructorPlan<'a>> {
     if args
         .iter()
         .any(|(_, value)| *value == symbols().dots || *value == missing_arg())
@@ -2918,44 +2918,44 @@ unsafe fn step(
     pc: &mut usize,
 ) -> R<Option<Sexp>> {
     let env = machine.env;
+    // Only `code` and `registers` are read by nearly every instruction. The rest are read
+    // through `decoded` where an instruction needs them, so the dispatch path does not reload
+    // them from the stack on every instruction.
     let Decoded {
-        code,
-        constants,
-        cache,
-        registers,
-        ..
+        code, registers, ..
     } = *decoded;
     let at = *pc;
     let operand = |index: usize| *code.get_unchecked(at + 1 + index) as usize;
     let register = |index: usize| *registers.add(index);
     let set = |index: usize, value: Sexp| *registers.add(index) = value;
-    let op = OPS[code[at] as usize];
+    debug_assert!(at < code.len() && (code[at] as usize) < OPS.len());
+    let op = *OPS.get_unchecked(*code.get_unchecked(at) as usize);
     let next = at + 1 + operand_count(op);
     match op {
         Op::Constant => {
-            set(operand(0), constants.element(operand(1)));
+            set(operand(0), decoded.constants.element(operand(1)));
             interp().visible = true;
         }
         Op::GetVar => {
             // Visible before the lookup, so that forcing a promise to `invisible()` leaves the
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
-            let symbol = constants.element(operand(1));
+            let symbol = decoded.constants.element(operand(1));
             let held = machine.base..machine.base + operand(0);
-            let value = lookup_variable(symbol, env, cache, operand(2), held)?;
+            let value = lookup_variable(symbol, env, decoded.cache, operand(2), held)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::SetVar => {
-            let symbol = constants.element(operand(0));
+            let symbol = decoded.constants.element(operand(0));
             let value = register(operand(1));
             eval::assign_symbol(symbol, value, env, false)?;
             interp().visible = false;
         }
         Op::GetFun => {
-            let symbol = constants.element(operand(1));
-            let call = constants.element(operand(3));
-            let function = lookup_function(symbol, env, cache, operand(2), call)?;
+            let symbol = decoded.constants.element(operand(1));
+            let call = decoded.constants.element(operand(3));
+            let function = lookup_function(symbol, env, decoded.cache, operand(2), call)?;
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
@@ -2966,7 +2966,7 @@ unsafe fn step(
         }
         Op::CallBuiltin => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let first = operand(3);
             let count = operand(4);
             let definition = eval::builtin_def(function)?;
@@ -2991,12 +2991,12 @@ unsafe fn step(
         }
         Op::CallGeneric => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let value = if function.kind() == SexpType::Closure {
-                let mut compiled = constants.element(operand(2) + 1);
+                let mut compiled = decoded.constants.element(operand(2) + 1);
                 if compiled == unbound() {
                     compiled = compile_promise_arguments(machine.function, call.cdr())?;
-                    crate::heap().set_element(constants, operand(2) as usize + 1, compiled);
+                    crate::heap().set_element(decoded.constants, operand(2) + 1, compiled);
                 }
                 let arguments = if compiled == nil() {
                     call.cdr()
@@ -3015,37 +3015,37 @@ unsafe fn step(
         }
         Op::CallRebinding => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
-            let target = constants.element(operand(3));
+            let call = decoded.constants.element(operand(2));
+            let target = decoded.constants.element(operand(3));
             let value = eval::rebind_call(call, function, target, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallTailUpdate => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
-            let target = constants.element(operand(3));
+            let call = decoded.constants.element(operand(2));
+            let target = decoded.constants.element(operand(3));
             let value = eval::tail_update(call, function, target, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Field => {
             let object = register(operand(1));
-            let name = constants.element(operand(2));
-            let call = constants.element(operand(3));
-            let shape = constants.element(operand(4));
+            let name = decoded.constants.element(operand(2));
+            let call = decoded.constants.element(operand(3));
+            let shape = decoded.constants.element(operand(4));
             let value = match crate::records::cached_field(object, name, shape)? {
                 Some(value) => value,
                 None => crate::subset::dollar_value(object, name.car(), call, env)?,
             };
-            record_feedback(constants, at, value);
+            record_feedback(decoded.constants, at, value);
             interp().visible = true;
             set(operand(0), value);
         }
         Op::Item => {
             let object = register(operand(1));
-            let index = constants.element(operand(2));
-            let shape = constants.element(operand(3));
+            let index = decoded.constants.element(operand(2));
+            let shape = decoded.constants.element(operand(3));
             match crate::records::cached_item(object, index, shape)? {
                 Some(value) => {
                     decoded.record(at, value);
@@ -3071,7 +3071,7 @@ unsafe fn step(
             }
         }
         Op::MatchLiteral => {
-            let pattern = constants.element(operand(1));
+            let pattern = decoded.constants.element(operand(1));
             if !crate::records::literal_matches(pattern, register(operand(0))) {
                 *pc = operand(2);
                 return Ok(None);
@@ -3083,7 +3083,7 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::MatchFail => {
-            let call = constants.element(operand(1));
+            let call = decoded.constants.element(operand(1));
             return Err(crate::records::no_arm_matches(register(operand(0)), call));
         }
         Op::Construct => {
@@ -3094,25 +3094,25 @@ unsafe fn step(
         }
         Op::Move => set(operand(0), register(operand(1))),
         Op::SwitchArm => {
-            let value = switch_arm(register(operand(1)), constants.element(operand(2)))?;
+            let value = switch_arm(register(operand(1)), decoded.constants.element(operand(2)))?;
             set(operand(0), value);
         }
         Op::BoundEval => {
-            let expression = constants.element(operand(1));
-            let names = constants.element(operand(2));
+            let expression = decoded.constants.element(operand(1));
+            let names = decoded.constants.element(operand(2));
             let bound = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
             let value = crate::records::eval_bound_registers(expression, names, bound, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::MatchCondition => {
-            let guard = constants.element(operand(2));
-            let call = constants.element(operand(3));
+            let guard = decoded.constants.element(operand(2));
+            let call = decoded.constants.element(operand(3));
             let holds = crate::records::guard_holds(register(operand(1)), guard, call)?;
             set(operand(0), values::scalar_logical(i32::from(holds))?);
         }
         Op::BranchUnlessPrimitive => {
-            if register(operand(0)) != constants.element(operand(1)) {
+            if register(operand(0)) != decoded.constants.element(operand(1)) {
                 *pc = operand(2);
                 return Ok(None);
             }
@@ -3125,7 +3125,7 @@ unsafe fn step(
         }
         Op::DispatchSubject => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let definition = eval::builtin_def(function)?;
             let mut args = eval::Args::new();
             let value = match dispatch::dispatch_evaluated_subject(
@@ -3144,18 +3144,18 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::Ast => {
-            let expression = constants.element(operand(1));
+            let expression = decoded.constants.element(operand(1));
             let value = eval::eval(expression, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Guard => {
-            let symbol = constants.element(operand(0));
-            let expected = constants.element(operand(1));
+            let symbol = decoded.constants.element(operand(0));
+            let expected = decoded.constants.element(operand(1));
             let found = if operand(3) == 0 {
-                lookup_enclosing_function(symbol, env, cache, operand(2))
+                lookup_enclosing_function(symbol, env, decoded.cache, operand(2))
             } else {
-                lookup_function(symbol, env, cache, operand(2), unbound())
+                lookup_function(symbol, env, decoded.cache, operand(2), unbound())
             };
             if !matches!(found, Ok(function) if function == expected) {
                 *pc = operand(4);
@@ -3171,7 +3171,7 @@ unsafe fn step(
             return Ok(None);
         }
         Op::JumpUnless => {
-            let call = constants.element(operand(1));
+            let call = decoded.constants.element(operand(1));
             if !as_condition(register(operand(0)), call)? {
                 *pc = operand(2);
                 return Ok(None);
@@ -3183,8 +3183,8 @@ unsafe fn step(
             let value = match fast_arithmetic(ARITHS[operand(0)].0, left, right)? {
                 Some(value) => value,
                 None => {
-                    let call = constants.element(operand(4));
-                    let function = constants.element(operand(5));
+                    let call = decoded.constants.element(operand(4));
+                    let function = decoded.constants.element(operand(5));
                     let definition = eval::builtin_def(function)?;
                     let args = [
                         Arg {
@@ -3205,7 +3205,7 @@ unsafe fn step(
         }
         Op::Return => return Ok(Some(register(operand(0)))),
         Op::ForInit => {
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let mut sequence = register(operand(1));
             if values::inherits(sequence, "factor") {
                 sequence = crate::coerce::factor_as_character(sequence)?;
@@ -3235,7 +3235,7 @@ unsafe fn step(
                 return Ok(None);
             }
             let sequence = register(operand(1));
-            let variable = constants.element(operand(2));
+            let variable = decoded.constants.element(operand(2));
             let index = state.index;
             state.index += 1;
             if !overwrite_loop_variable(sequence, index, variable, env) {
@@ -3255,7 +3255,7 @@ unsafe fn step(
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
         Op::SetSrcref => {
-            interp().srcref = constants.element(operand(0));
+            interp().srcref = decoded.constants.element(operand(0));
             if operand(1) == 1 && interp().debugger.is_some() {
                 crate::debugger::statement()?;
             }
@@ -3267,7 +3267,7 @@ unsafe fn step(
             }
         }
         Op::LogicLeft => {
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let is_and = operand(3) == 1;
             let left = eval::logical_operand_of(
                 register(operand(1)),
@@ -3284,7 +3284,7 @@ unsafe fn step(
             set(operand(1), values::scalar_logical(left)?);
         }
         Op::LogicRight => {
-            let call = constants.element(operand(3));
+            let call = decoded.constants.element(operand(3));
             let is_and = operand(4) == 1;
             let left = values::ints(register(operand(1)))[0];
             let right = eval::logical_operand_of(
@@ -3300,9 +3300,9 @@ unsafe fn step(
             interp().visible = true;
         }
         Op::Closure => {
-            let formals = constants.element(operand(1));
-            let body = constants.element(operand(2));
-            let srcref = constants.element(operand(3));
+            let formals = decoded.constants.element(operand(1));
+            let body = decoded.constants.element(operand(2));
+            let srcref = decoded.constants.element(operand(3));
             let closure = eval::make_closure(formals, body, srcref, env)?;
             // Every closure this site creates shares one compiled body, as GNU R compiles inner
             // functions with their outer one. Compiling per closure object would leave a function
@@ -3313,19 +3313,16 @@ unsafe fn step(
             if body.kind() != SexpType::Bytecode && worth_compiling(body) {
                 // A body the compiler rejects (an error is its way of saying so, such as for a
                 // `break` outside a loop) stays source, which the AST evaluator runs.
-                match compile(body, closure) {
-                    Ok(Some(code)) => {
-                        crate::heap().set_element(constants, operand(2), code);
-                        crate::heap().set_cdr(closure, code);
-                    }
-                    Ok(None) | Err(_) => {}
+                if let Ok(Some(code)) = compile(body, closure) {
+                    crate::heap().set_element(decoded.constants, operand(2), code);
+                    crate::heap().set_cdr(closure, code);
                 }
             }
             set(operand(0), closure);
             interp().visible = true;
         }
         Op::SubAssign => {
-            let call = constants.element(operand(4));
+            let call = decoded.constants.element(operand(4));
             let value = register(operand(3));
             eval::complex_assign(call, call.cdr().car(), value, env, false)?;
             set(operand(0), value);

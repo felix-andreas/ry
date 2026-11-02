@@ -15,7 +15,11 @@ pub mod top_level;
 pub mod types;
 
 use {
-    crate::{hir::Symbol, sorted::SortedSet},
+    crate::{
+        hir::{ExpressionKind, Symbol},
+        naming::RefClassKey,
+        sorted::SortedSet,
+    },
     rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
@@ -540,7 +544,185 @@ pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::Item
     let module = item_hir(db, item).as_ref()?;
     let no_masked_verbs = FxHashMap::default();
     let masked_verbs = stubs::stubs(db).map_or(&no_masked_verbs, |library| &library.masked);
-    Some(naming::resolve_item(module, masked_verbs))
+    let file = *item.file(db);
+    let files = ProjectFiles::try_get(db);
+    let is_member = |class: RefClassKey, member: Symbol| match files {
+        _ if class == RefClassKey::R6 => ref_class_binds(&RefClassIndex::default(), class, member),
+        Some(files) => *project_ref_class_binds(db, files, class, member),
+        None => ref_class_binds(file_ref_classes(db, file), class, member),
+    };
+    Some(naming::resolve_item(module, masked_verbs, &is_member))
+}
+
+/// The Reference Classes a file defines, keyed by class name, with the members that
+/// `Gen$methods(...)` and `Gen$fields(...)` add kept under the generator's name until a
+/// `Gen <- setRefClass("Name", ...)` ties the two together.
+#[derive(Debug, Default, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct RefClassIndex {
+    classes: BTreeMap<Symbol, RefClassMembers>,
+    generators: BTreeMap<Symbol, Symbol>,
+    generator_members: BTreeMap<Symbol, BTreeSet<Symbol>>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct RefClassMembers {
+    members: BTreeSet<Symbol>,
+    contains: Vec<Symbol>,
+}
+
+impl RefClassIndex {
+    fn extend(&mut self, other: &RefClassIndex) {
+        for (class, members) in &other.classes {
+            let entry = self.classes.entry(*class).or_default();
+            entry.members.extend(members.members.iter().copied());
+            entry.contains.extend(members.contains.iter().copied());
+        }
+        self.generators.extend(
+            other
+                .generators
+                .iter()
+                .map(|(generator, class)| (*generator, *class)),
+        );
+        for (generator, members) in &other.generator_members {
+            self.generator_members
+                .entry(*generator)
+                .or_default()
+                .extend(members.iter().copied());
+        }
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn file_ref_classes(db: &dyn Db, file: SourceFile) -> RefClassIndex {
+    let mut index = RefClassIndex::default();
+    for span in item_spans(db, file) {
+        let Some(module) = item_hir(db, span.item) else {
+            continue;
+        };
+        for id in module.expression_ids() {
+            if let ExpressionKind::Assign { target, value, .. } = module.kind(id)
+                && let ExpressionKind::NameRef(generator) = module.kind(*target)
+                && let Some(naming::RefClassDefinition {
+                    key: RefClassKey::Class(class),
+                    ..
+                }) = naming::ref_class_definition(module, *value)
+            {
+                index.generators.insert(*generator, class);
+            }
+            let Some(definition) = naming::ref_class_definition(module, id) else {
+                continue;
+            };
+            let members = definition
+                .fields
+                .iter()
+                .copied()
+                .chain(definition.methods.iter().map(|(name, _)| *name));
+            match definition.key {
+                RefClassKey::R6 => {}
+                RefClassKey::Class(class) => {
+                    let entry = index.classes.entry(class).or_default();
+                    entry.members.extend(members);
+                    entry.contains.extend(definition.contains);
+                }
+                RefClassKey::Generator(generator) => {
+                    index
+                        .generator_members
+                        .entry(generator)
+                        .or_default()
+                        .extend(members);
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Unioned once per project; reads go through [`project_ref_class_binds`], so an edit to a
+/// class re-checks only the items whose answers change.
+#[salsa::tracked(returns(ref))]
+fn project_ref_classes(db: &dyn Db, files: ProjectFiles) -> RefClassIndex {
+    let mut index = RefClassIndex::default();
+    for &file in files.files(db).iter() {
+        index.extend(file_ref_classes(db, file));
+    }
+    index
+}
+
+#[salsa::tracked]
+fn project_ref_class_binds(
+    db: &dyn Db,
+    files: ProjectFiles,
+    class: RefClassKey,
+    member: Symbol,
+) -> bool {
+    ref_class_binds(project_ref_classes(db, files), class, member)
+}
+
+/// Every Reference Class object inherits these from `envRefClass`, and `.self` is the object.
+const REF_CLASS_BUILTINS: [&str; 14] = [
+    ".self",
+    "callSuper",
+    "copy",
+    "export",
+    "field",
+    "getClass",
+    "getRefClass",
+    "import",
+    "initFields",
+    "methods",
+    "show",
+    "trace",
+    "untrace",
+    "usingMethods",
+];
+
+/// A class whose generator or superclass this project does not define binds every name,
+/// because its members are out of sight and reporting them would be guesswork.
+fn ref_class_binds(index: &RefClassIndex, class: RefClassKey, member: Symbol) -> bool {
+    let (start, generator) = match class {
+        RefClassKey::R6 => return matches!(member.as_str(), "self" | "private" | "super"),
+        _ if REF_CLASS_BUILTINS.contains(&member.as_str()) => return true,
+        RefClassKey::Class(class) => (class, None),
+        RefClassKey::Generator(generator) => match index.generators.get(&generator) {
+            Some(&class) => (class, Some(generator)),
+            None => return true,
+        },
+    };
+    if generator
+        .and_then(|generator| index.generator_members.get(&generator))
+        .is_some_and(|members| members.contains(&member))
+    {
+        return true;
+    }
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(class) = pending.pop() {
+        if !visited.insert(class) {
+            continue;
+        }
+        let Some(members) = index.classes.get(&class) else {
+            if class != "envRefClass" {
+                return true;
+            }
+            continue;
+        };
+        if members.members.contains(&member)
+            || index
+                .generators
+                .iter()
+                .filter(|(_, generated)| **generated == class)
+                .any(|(generator, _)| {
+                    index
+                        .generator_members
+                        .get(generator)
+                        .is_some_and(|members| members.contains(&member))
+                })
+        {
+            return true;
+        }
+        pending.extend(members.contains.iter().copied());
+    }
+    false
 }
 
 /// Recognized structurally by the checker rather than through the stub corpus.
@@ -892,6 +1074,143 @@ pub struct DataPath<'db> {
 pub fn data_file_layout<'db>(db: &'db dyn Db, path: DataPath<'db>) -> Option<sniff::Layout> {
     let files = DataFiles::try_get(db)?;
     files.layouts(db).get(path.text(db).as_str()).cloned()
+}
+
+/// Every project file by its path relative to the project root, with `/` separators. Hosts set
+/// it so a literal `source("utils.R")` names the file it reads; without it nothing is followed.
+#[salsa::input(singleton, debug)]
+pub struct SourcePaths {
+    #[returns(ref)]
+    pub paths: BTreeMap<String, SourceFile>,
+}
+
+/// The literal paths a file passes to `source()` or `sys.source()`, in source order. A call
+/// inside a function counts too, because `source()` evaluates into the global environment
+/// unless told otherwise.
+#[salsa::tracked(returns(ref))]
+pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
+    let mut paths = Vec::new();
+    for span in item_spans(db, file) {
+        let Some(module) = item_hir(db, span.item) else {
+            continue;
+        };
+        for id in module.expression_ids() {
+            let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+                continue;
+            };
+            let callee = match module.kind(*callee) {
+                ExpressionKind::NameRef(name) => *name,
+                ExpressionKind::Namespace {
+                    package: Some(package),
+                    name: Some(name),
+                    ..
+                } if package == "base" => *name,
+                _ => continue,
+            };
+            if callee != "source" && callee != "sys.source" {
+                continue;
+            }
+            let arguments = &module[arguments];
+            let path = arguments
+                .iter()
+                .find(|argument| module.argument_name(argument).as_deref() == Some("file"))
+                .or_else(|| arguments.iter().find(|argument| argument.name.is_none()))
+                .and_then(|argument| argument.value);
+            if let Some(path) = path
+                && let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path)
+            {
+                paths.push(module[text].to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// The project files a script or test reads through `source()` with a literal path,
+/// transitively, in the order the calls appear. R resolves the path against the working
+/// directory, which is usually the project root or the sourcing file's own directory, so both
+/// are tried. A package file is skipped: the namespace already holds every `R/` file.
+#[salsa::tracked(returns(ref))]
+pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
+    if *file.kind(db) == DocumentKind::Package || file_source_calls(db, file).is_empty() {
+        return Vec::new();
+    }
+    let Some(paths) = SourcePaths::try_get(db) else {
+        return Vec::new();
+    };
+    let paths = paths.paths(db);
+    let path_of = |target: SourceFile| {
+        paths
+            .iter()
+            .find(|(_, candidate)| **candidate == target)
+            .map(|(path, _)| path.as_str())
+    };
+    let mut sourced = Vec::new();
+    let mut pending = vec![file];
+    let mut visited = FxHashSet::from_iter([file]);
+    while let Some(current) = pending.pop() {
+        let directory = path_of(current)
+            .and_then(|path| path.rsplit_once('/'))
+            .map(|(directory, _)| directory);
+        for literal in file_source_calls(db, current) {
+            let candidates = directory
+                .map(|directory| normalize_relative_path(&format!("{directory}/{literal}")))
+                .into_iter()
+                .chain([normalize_relative_path(literal)]);
+            let Some(target) = candidates
+                .flatten()
+                .find_map(|candidate| paths.get(&candidate).copied())
+            else {
+                continue;
+            };
+            if visited.insert(target) {
+                sourced.push(target);
+                pending.push(target);
+            }
+        }
+    }
+    sourced
+}
+
+/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root.
+fn normalize_relative_path(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// The item a sourced file binds `name` with. Per name, so a sourced file's edit re-checks only
+/// the reads whose definition changes; the last sourced file to bind it wins, as at run time.
+#[salsa::tracked]
+pub fn sourced_definition<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    name: Symbol,
+) -> Option<Item<'db>> {
+    sourced_files(db, file).iter().rev().find_map(|&sourced| {
+        file_definitions(db, sourced)
+            .iter()
+            .rev()
+            .find(|(defined, _)| *defined == name)
+            .map(|(_, item)| *item)
+    })
+}
+
+/// Whether some project file sources `file`, whose bindings are then read elsewhere.
+#[salsa::tracked]
+pub fn file_is_sourced(db: &dyn Db, files: ProjectFiles, file: SourceFile) -> bool {
+    files
+        .files(db)
+        .iter()
+        .any(|&other| sourced_files(db, other).contains(&file))
 }
 
 /// Set by a file's `# typing:` comments and `#: @strict` directives, the last winning.
@@ -2508,7 +2827,15 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                 )
             })
             .map(|files| self.layer(&self.test_layers, files, name, true));
-        test.into_iter().chain(self.package_layer(name))
+        let sourced =
+            sourced_definition(self.db, self.file, name.symbol()).map(|winner| NameLayer {
+                winner: Some(winner),
+                conditional_writers: &[],
+            });
+        sourced
+            .into_iter()
+            .chain(test)
+            .chain(self.package_layer(name))
     }
 
     fn package_layer(&self, name: types::Name<'db>) -> Option<NameLayer<'db>> {

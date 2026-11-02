@@ -15,7 +15,7 @@ use {
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
     },
-    syntax::TextRange,
+    syntax::{SyntaxKind, TextRange, lex},
     thin_vec::ThinVec,
 };
 
@@ -196,10 +196,19 @@ pub struct InvalidAssignmentTarget {
 
 /// `masked_verbs` maps each stub `@masked` verb to its formals before `...` (the data
 /// arguments, resolved normally); the rest stay quiet. An empty list masks every argument.
-pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String>>) -> ItemNaming {
+/// `is_member` answers whether a Reference Class binds a name in its objects, which R reads
+/// before the defining namespace when a method body runs.
+pub fn resolve_item(
+    module: &Module,
+    masked_verbs: &FxHashMap<String, Vec<String>>,
+    is_member: &dyn Fn(RefClassKey, Symbol) -> bool,
+) -> ItemNaming {
     let mut context = Context {
         module,
         masked_verbs,
+        is_member,
+        method_classes: FxHashMap::default(),
+        class_stack: Vec::new(),
         next_binding: 0,
         scopes: vec![Scope {
             id: 0,
@@ -235,6 +244,10 @@ enum ScopeKind {
     /// `local({...})`: writes vanish with it, but it runs immediately, so it is no capture
     /// boundary.
     Local,
+    /// A masked argument such as `within(d, total <- a + b)`: like `Local`, but the data's
+    /// environment outlives the expression (`within` copies it back into the frame), so a
+    /// write there is never a dead store.
+    Mask,
     TopLevel,
 }
 
@@ -268,6 +281,12 @@ struct AssignmentWrite {
 struct Context<'a> {
     module: &'a Module,
     masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    is_member: &'a dyn Fn(RefClassKey, Symbol) -> bool,
+    /// Function literals a Reference Class definition installs as methods.
+    method_classes: FxHashMap<ExprId, RefClassKey>,
+    /// The classes of the enclosing method bodies, innermost last. A closure inside a method
+    /// still reaches the object's fields through its enclosing frames.
+    class_stack: Vec<RefClassKey>,
     next_binding: u32,
     scopes: Vec<Scope>,
     /// Loop re-walks must mint no new ids: one binding per (site, name).
@@ -352,7 +371,9 @@ impl Context<'_> {
         }
         let owned = match self.current_scope().kind {
             ScopeKind::TopLevel => true,
-            ScopeKind::Function | ScopeKind::Local => self.current_scope().slots.contains_key(name),
+            ScopeKind::Function | ScopeKind::Local | ScopeKind::Mask => {
+                self.current_scope().slots.contains_key(name)
+            }
         };
         if owned {
             let range = module.range(target);
@@ -375,7 +396,7 @@ impl Context<'_> {
     fn assignment_binding_kind(&mut self) -> BindingKind {
         match self.current_scope().kind {
             ScopeKind::TopLevel => BindingKind::TopLevel,
-            ScopeKind::Function | ScopeKind::Local => BindingKind::Local,
+            ScopeKind::Function | ScopeKind::Local | ScopeKind::Mask => BindingKind::Local,
         }
     }
 
@@ -384,6 +405,14 @@ impl Context<'_> {
         match module.kind(id) {
             ExpressionKind::Missing | ExpressionKind::Next => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
+            // glue and cli evaluate `{...}` inside a string in the caller's frame, and so does
+            // any wrapper that forwards `parent.frame()`, so a name there keeps its binding
+            // alive. It is never an unresolved read, because the string may be plain text.
+            ExpressionKind::Literal(LiteralKind::String(text)) => {
+                for name in interpolated_names(&module[text]) {
+                    self.mark_slot_read(Symbol::new(name));
+                }
+            }
             ExpressionKind::Literal(_) => {}
             ExpressionKind::NameRef(name) => self.resolve_read(id, *name),
             ExpressionKind::Assign {
@@ -439,6 +468,11 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Call { callee, arguments } => {
+                if let Some(definition) = ref_class_definition(module, id) {
+                    for (_, method) in definition.methods {
+                        self.method_classes.insert(method, definition.key);
+                    }
+                }
                 self.resolve(*callee);
                 let callee_symbol = match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => Some(*name),
@@ -583,32 +617,28 @@ impl Context<'_> {
                     self.resolve_arguments(&module[arguments]);
                     return;
                 };
-                // R matches named arguments first and fills the rest positionally, so a
-                // positional argument takes the next data formal no name has claimed.
-                let claimed_by_name = module[arguments]
-                    .iter()
-                    .filter_map(|argument| module.argument_name(argument))
-                    .filter(|name| leading.contains(&name.as_str()))
-                    .count();
-                let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
-                for argument in &module[arguments] {
-                    let data_argument = match module.argument_name(argument) {
-                        Some(name) => leading.contains(&name.as_str()),
-                        None => {
-                            let takes_a_data_slot = unclaimed > 0;
-                            unclaimed = unclaimed.saturating_sub(1);
-                            takes_a_data_slot
-                        }
-                    };
+                let flags = data_argument_flags(module, &module[arguments], &leading);
+                for (argument, data_argument) in module[arguments].iter().zip(flags) {
                     let Some(value) = argument.value else {
                         continue;
                     };
                     if data_argument {
                         self.resolve(value);
                     } else {
+                        // The argument evaluates in an environment made from the data, so an
+                        // assignment in it, as in `within(d, total <- a + b)`, binds there and
+                        // never in the caller's scope.
+                        let scope_id = self.stable_scope_id(value);
+                        self.scopes.push(Scope {
+                            id: scope_id,
+                            kind: ScopeKind::Mask,
+                            slots: FxHashMap::default(),
+                        });
+                        self.premint_frame_assignments(value);
                         self.quiet_depth += 1;
                         self.resolve(value);
                         self.quiet_depth -= 1;
+                        self.scopes.pop();
                     }
                 }
             }
@@ -664,6 +694,10 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Function { parameters, body } => {
+                let class = self.method_classes.get(&id).copied();
+                if let Some(class) = class {
+                    self.class_stack.push(class);
+                }
                 let scope_id = self.stable_scope_id(id);
                 self.scopes.push(Scope {
                     id: scope_id,
@@ -689,6 +723,9 @@ impl Context<'_> {
                 self.in_defaults = saved_in_defaults;
                 self.scopes.pop();
                 self.flow = saved_flow;
+                if class.is_some() {
+                    self.class_stack.pop();
+                }
             }
             ExpressionKind::If {
                 condition,
@@ -1012,6 +1049,20 @@ impl Context<'_> {
                     self.premint_frame_assignments(arm.body);
                 }
             }
+            // A masked argument gets its own scope when it is resolved, so its assignments
+            // mint nothing in this frame.
+            ExpressionKind::Call { callee, arguments }
+                if let Some(leading) =
+                    syntactic_masking_family(module, self.masked_verbs, *callee) =>
+            {
+                self.premint_frame_assignments(*callee);
+                let flags = data_argument_flags(module, &module[arguments], &leading);
+                for (argument, data_argument) in module[arguments].iter().zip(flags) {
+                    if let Some(value) = argument.value.filter(|_| data_argument) {
+                        self.premint_frame_assignments(value);
+                    }
+                }
+            }
             _ => {
                 let module = self.module;
                 module.for_each_child(id, |child| self.premint_frame_assignments(child));
@@ -1138,6 +1189,12 @@ impl Context<'_> {
                     self.naming.maybe_undefined.insert(id);
                 }
             }
+            // A method's object frame sits between its body and the namespace, so a field or
+            // sibling method shadows a top-level name and is no non-local read.
+            None if self
+                .class_stack
+                .last()
+                .is_some_and(|&class| (self.is_member)(class, name)) => {}
             None => {
                 if self.emit {
                     if self.quiet_depth == 0 {
@@ -1238,7 +1295,8 @@ impl Context<'_> {
                         let kind = self.assignment_binding_kind();
                         let slot = self.frame_slot(name, range, kind);
                         self.naming.resolutions.insert(target, slot);
-                        let reportable = kind == BindingKind::Local;
+                        let reportable = kind == BindingKind::Local
+                            && self.current_scope().kind != ScopeKind::Mask;
                         self.record_write_site(assignment, name, range, slot, reportable);
                     }
                 }
@@ -1385,6 +1443,231 @@ impl Context<'_> {
 }
 
 /// Free rather than a method so the borrow lives as long as the corpus map, not the walker.
+/// A Reference Class, named the way a definition names it: `setRefClass("Name", ...)` by its
+/// class name, `Gen$methods(...)` by the generator variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum RefClassKey {
+    Class(Symbol),
+    Generator(Symbol),
+    /// An R6 method, whose frame R6 gives `self`, `private` and `super` and nothing else.
+    R6,
+}
+
+/// What one Reference Class call declares: `setRefClass(...)`, `Gen$methods(...)` or
+/// `Gen$fields(...)`.
+pub(crate) struct RefClassDefinition {
+    pub key: RefClassKey,
+    pub fields: Vec<Symbol>,
+    pub methods: Vec<(Symbol, ExprId)>,
+    pub contains: Vec<Symbol>,
+}
+
+/// Recognized by name: a local function called `setRefClass` is still taken as the class
+/// definition, because nothing else would shadow it.
+pub(crate) fn ref_class_definition(module: &Module, call: ExprId) -> Option<RefClassDefinition> {
+    let ExpressionKind::Call { callee, arguments } = module.kind(call) else {
+        return None;
+    };
+    let arguments = &module[arguments];
+    match module.kind(*callee) {
+        ExpressionKind::NameRef(name) if name == "setRefClass" => {}
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } if name == "setRefClass" => {}
+        ExpressionKind::NameRef(name) if name == "R6Class" => {
+            return Some(r6_definition(module, arguments));
+        }
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } if name == "R6Class" => return Some(r6_definition(module, arguments)),
+        ExpressionKind::Field {
+            at: false,
+            target,
+            name: Some(member),
+        } => {
+            let ExpressionKind::NameRef(generator) = module.kind(*target) else {
+                return None;
+            };
+            let key = RefClassKey::Generator(*generator);
+            let mut definition = RefClassDefinition {
+                key,
+                fields: Vec::new(),
+                methods: Vec::new(),
+                contains: Vec::new(),
+            };
+            match module[*member].name.as_str() {
+                "methods" => {
+                    for argument in arguments {
+                        match (module.argument_name(argument), argument.value) {
+                            (Some(name), Some(value)) => {
+                                if matches!(module.kind(value), ExpressionKind::Function { .. }) {
+                                    definition.methods.push((name, value));
+                                }
+                            }
+                            (None, Some(value)) => {
+                                definition.methods.extend(list_methods(module, value));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // `Gen$set("public", "name", function(...) ...)` adds an R6 method.
+                "set" => {
+                    let mut positional =
+                        arguments.iter().filter(|argument| argument.name.is_none());
+                    let which = positional.next().and_then(|argument| argument.value)?;
+                    if !matches!(module.kind(which), ExpressionKind::Literal(LiteralKind::String(text))
+                        if matches!(&module[text], "public" | "private" | "active"))
+                    {
+                        return None;
+                    }
+                    let name = positional.next().and_then(|argument| argument.value)?;
+                    let ExpressionKind::Literal(LiteralKind::String(name)) = module.kind(name)
+                    else {
+                        return None;
+                    };
+                    let value = arguments
+                        .iter()
+                        .find(|argument| module.argument_name(argument).as_deref() == Some("value"))
+                        .or_else(|| positional.next())
+                        .and_then(|argument| argument.value)?;
+                    definition.key = RefClassKey::R6;
+                    if matches!(module.kind(value), ExpressionKind::Function { .. }) {
+                        definition.methods.push((Symbol::new(&module[name]), value));
+                    }
+                }
+                "fields" => {
+                    for argument in arguments {
+                        match (module.argument_name(argument), argument.value) {
+                            (Some(name), _) => definition.fields.push(name),
+                            (None, Some(value)) => {
+                                definition.fields.extend(declared_names(module, value));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => return None,
+            }
+            return Some(definition);
+        }
+        _ => return None,
+    }
+    let value_of = |name: &str, position: Option<usize>| {
+        arguments
+            .iter()
+            .find(|argument| module.argument_name(argument).as_deref() == Some(name))
+            .or_else(|| {
+                position.and_then(|position| {
+                    arguments
+                        .iter()
+                        .filter(|argument| argument.name.is_none())
+                        .nth(position)
+                })
+            })
+            .and_then(|argument| argument.value)
+    };
+    let class = value_of("Class", Some(0))?;
+    let ExpressionKind::Literal(LiteralKind::String(class)) = module.kind(class) else {
+        return None;
+    };
+    Some(RefClassDefinition {
+        key: RefClassKey::Class(Symbol::new(&module[class])),
+        fields: value_of("fields", Some(1))
+            .map(|value| declared_names(module, value))
+            .unwrap_or_default(),
+        methods: value_of("methods", None)
+            .map(|value| list_methods(module, value))
+            .unwrap_or_default(),
+        contains: value_of("contains", None)
+            .map(|value| declared_names(module, value))
+            .unwrap_or_default(),
+    })
+}
+
+fn r6_definition(module: &Module, arguments: &[Argument]) -> RefClassDefinition {
+    RefClassDefinition {
+        key: RefClassKey::R6,
+        fields: Vec::new(),
+        methods: arguments
+            .iter()
+            .filter(|argument| {
+                module
+                    .argument_name(argument)
+                    .is_some_and(|name| matches!(name.as_str(), "public" | "private" | "active"))
+            })
+            .filter_map(|argument| argument.value)
+            .flat_map(|value| list_methods(module, value))
+            .collect(),
+        contains: Vec::new(),
+    }
+}
+
+/// The named function elements of `list(name = function(...) ...)`.
+fn list_methods(module: &Module, value: ExprId) -> Vec<(Symbol, ExprId)> {
+    let ExpressionKind::Call { callee, arguments } = module.kind(value) else {
+        return Vec::new();
+    };
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "list") {
+        return Vec::new();
+    }
+    module[arguments]
+        .iter()
+        .filter_map(|argument| {
+            let value = argument.value?;
+            matches!(module.kind(value), ExpressionKind::Function { .. })
+                .then_some((module.argument_name(argument)?, value))
+        })
+        .collect()
+}
+
+/// The names a field or superclass declaration spells: the element names of
+/// `list(a = "numeric")` or `c(a = "numeric")`, the strings of `c("a", "b")`, or one string.
+fn declared_names(module: &Module, value: ExprId) -> Vec<Symbol> {
+    match module.kind(value) {
+        ExpressionKind::Literal(LiteralKind::String(text)) => vec![Symbol::new(&module[text])],
+        ExpressionKind::Call { callee, arguments } if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "list" || name == "c") => {
+            module[arguments]
+                .iter()
+                .filter_map(
+                    |argument| match (module.argument_name(argument), argument.value) {
+                        (Some(name), _) => Some(name),
+                        (None, Some(value)) => match module.kind(value) {
+                            ExpressionKind::Literal(LiteralKind::String(text)) => {
+                                Some(Symbol::new(&module[text]))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                )
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The masking family of a call by its spelling alone, before resolution can tell whether a
+/// local definition shadows the callee. Pre-minting runs before resolution, so it uses this.
+fn syntactic_masking_family<'a>(
+    module: &Module,
+    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    callee: ExprId,
+) -> Option<Vec<&'a str>> {
+    match module.kind(callee) {
+        ExpressionKind::NameRef(name) => base_masking_family(name.as_str())
+            .or_else(|| declared_masked_verb(masked_verbs, name.as_str())),
+        ExpressionKind::Namespace {
+            package,
+            name: Some(name),
+            ..
+        } => base_masking_family(name)
+            .filter(|_| package.as_deref() == Some("base"))
+            .or_else(|| declared_masked_verb(masked_verbs, name)),
+        _ => None,
+    }
+}
+
 fn declared_masked_verb<'a>(
     masked_verbs: &'a FxHashMap<String, Vec<String>>,
     name: &str,
@@ -1530,7 +1813,7 @@ pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.
-fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
+pub(crate) fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "with" | "within" => Some(vec!["data"]),
         "subset" => Some(vec!["x"]),
@@ -1538,6 +1821,100 @@ fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
         // stay masked, so `x` cannot be the data formal here as it is for `subset`.
         "transform" => Some(vec!["_data"]),
         _ => None,
+    }
+}
+
+/// Which arguments of a masking call are its data. R matches named arguments first and fills
+/// the rest positionally, so a positional argument takes the next data formal no name has
+/// claimed.
+pub(crate) fn data_argument_flags(
+    module: &Module,
+    arguments: &[Argument],
+    leading: &[&str],
+) -> Vec<bool> {
+    let claimed_by_name = arguments
+        .iter()
+        .filter_map(|argument| module.argument_name(argument))
+        .filter(|name| leading.contains(&name.as_str()))
+        .count();
+    let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
+    arguments
+        .iter()
+        .map(|argument| match module.argument_name(argument) {
+            Some(name) => leading.contains(&name.as_str()),
+            None => {
+                let takes_a_data_slot = unclaimed > 0;
+                unclaimed = unclaimed.saturating_sub(1);
+                takes_a_data_slot
+            }
+        })
+        .collect()
+}
+
+/// The names a `{...}` segment of a glue or cli template reads. `{{` is glue's escaped brace;
+/// a segment opening with `.` is cli markup (`{.cls {x}}`) whose style name is not a read, and
+/// one opening with `?` is cli pluralization text (`{?s}`); a name after `$`, `@` or `::` is a member, not a variable.
+fn interpolated_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    if !text.contains('{') {
+        return names;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut segment_start = None;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if depth == 0 && bytes.get(index + 1) == Some(&b'{') => index += 1,
+            b'{' => {
+                if depth == 0 {
+                    segment_start = Some(index + 1);
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0
+                    && let Some(start) = segment_start.take()
+                    && let Some(segment) = text.get(start..index)
+                {
+                    collect_segment_names(segment, &mut names);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    names
+}
+
+fn collect_segment_names<'a>(segment: &'a str, names: &mut Vec<&'a str>) {
+    if segment.starts_with('?') {
+        return;
+    }
+    let markup = segment.starts_with('.');
+    let (tokens, _) = lex(segment);
+    let mut offset = 0usize;
+    let mut previous = None;
+    let mut first = true;
+    for token in tokens {
+        let start = offset;
+        offset += usize::from(token.len);
+        if token.kind.is_trivia() {
+            continue;
+        }
+        if token.kind == SyntaxKind::IDENT
+            && !(first && markup)
+            && !matches!(
+                previous,
+                Some(SyntaxKind::DOLLAR | SyntaxKind::AT | SyntaxKind::COLON2 | SyntaxKind::COLON3)
+            )
+            && let Some(name) = segment.get(start..offset)
+        {
+            names.push(name);
+        }
+        previous = Some(token.kind);
+        first = false;
     }
 }
 
@@ -1582,7 +1959,7 @@ mod tests {
         let root = parse.syntax_node();
         let item = root.children().next().expect("one top-level item");
         let module = lower_item(&item);
-        resolve_item(&module, &FxHashMap::default())
+        resolve_item(&module, &FxHashMap::default(), &|_, _| false)
     }
 
     #[test]

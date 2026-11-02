@@ -259,10 +259,7 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         SexpType::Real => {
             let positions = values::reals(index);
-            if positions
-                .iter()
-                .any(|&position| !(position >= 1.0) && !position.is_nan())
-            {
+            if positions.iter().any(|&position| position < 1.0) {
                 return Ok(None);
             }
             let position_of = |position: &f64| {
@@ -4119,7 +4116,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         .map_or(call.call, |position| frames[position].call);
                     crate::conditions::warning_call(
                         closure_call,
-                        &format!(
+                        format!(
                             "number of {direction} of result is not a multiple of vector length (arg {})",
                             position + 1
                         ),

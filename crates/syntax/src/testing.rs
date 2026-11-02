@@ -11,6 +11,7 @@ use {
         collections::HashSet,
         env, fs,
         ops::Range,
+        panic::{self, AssertUnwindSafe},
         path::{Path, PathBuf},
         sync::atomic::{AtomicBool, Ordering},
     },
@@ -355,6 +356,45 @@ impl Entropy for ByteStream<'_> {
         };
         (value % bound) as usize
     }
+}
+
+/// Runs `case` once per seed and, when one fails, panics with the command that replays exactly
+/// that seed. The seeds are `0..fuzz_iterations(default)`. `FUZZ_SEED=<seed>` runs only that
+/// seed, or, with `FUZZ_ITERS` set as well, that many seeds starting there. Each seed is the
+/// harness's whole input: the case builds its generator with `SplitMix64(seed)` and must draw
+/// nothing else, so the replay reproduces the failure byte for byte.
+pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
+    let iterations: Option<u64> = env::var("FUZZ_ITERS").ok().and_then(|value| value.parse().ok());
+    let seeds = match env::var("FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok()) {
+        Some(first) => first..first.saturating_add(iterations.unwrap_or(1)),
+        None => 0..iterations.unwrap_or(default as u64),
+    };
+    for seed in seeds {
+        if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
+            panic!("seed {seed} failed; replay with\n    {}", replay_command(seed));
+        }
+    }
+}
+
+/// `FUZZ_SEED=<seed> cargo test -p <package> --test <binary> <test> -- --exact`, from what cargo
+/// and the test harness tell the running test about itself.
+pub fn replay_command(seed: u64) -> String {
+    let package = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "<package>".to_owned());
+    let binary = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .map(|stem| match stem.rsplit_once('-') {
+            Some((name, hash)) if hash.chars().all(|c| c.is_ascii_hexdigit()) => name.to_owned(),
+            _ => stem,
+        })
+        .unwrap_or_default();
+    let target = if binary.is_empty() || binary == package.replace('-', "_") {
+        "--lib".to_owned()
+    } else {
+        format!("--test {binary}")
+    };
+    let test = std::thread::current().name().unwrap_or("").to_owned();
+    format!("FUZZ_SEED={seed} cargo test -p {package} {target} {test} -- --exact")
 }
 
 /// `FUZZ_ITERS` overrides each harness's default budget.

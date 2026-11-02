@@ -5,6 +5,7 @@ use {
     crate::{
         Db,
         annotations::{NamedDefinition, lower_annotation},
+        hir::Symbol,
         metadata::namespace_active,
         types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
     },
@@ -91,6 +92,61 @@ pub fn declaring_namespace<'db>(db: &'db dyn Db, name: &str) -> Option<&'db str>
 
 pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
     stubs(db).is_some_and(|library| library.exports(package, name))
+}
+
+/// Whether a shipped namespace the project has not activated exports `name`, for validating
+/// `pkg::name`: `::` loads a package without attaching it, so the read is legal R, but its name
+/// must still exist. `None` when no export manifest ships for the package, because typed stubs
+/// alone may describe only part of it.
+pub fn dormant_namespace_exports(db: &dyn Db, package: &str, name: &str) -> Option<bool> {
+    let sources = StubSources::try_get(db)?;
+    dormant_exports(db, sources, Symbol::new(package))
+        .as_ref()
+        .map(|names| names.contains(name))
+}
+
+/// Every name a shipped namespace's manifest lists or its stubs declare, read without
+/// activating it. Stub sources change only with the stub files, so this is computed once.
+#[salsa::tracked(returns(ref))]
+fn dormant_exports(
+    db: &dyn Db,
+    sources: StubSources,
+    package: Symbol,
+) -> Option<FxHashSet<String>> {
+    let package = package.as_str();
+    let (_, manifest) = sources
+        .manifests(db)
+        .iter()
+        .find(|(namespace, _)| namespace == package)?;
+    let mut names: FxHashSet<String> = manifest
+        .lines()
+        .map(|line| strip_comment(line).trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for (_, text) in sources
+        .sources(db)
+        .iter()
+        .filter(|(namespace, _)| namespace == package)
+    {
+        for line in text.lines() {
+            if line.trim_start().starts_with("#'") {
+                continue;
+            }
+            let content = strip_comment(line).trim();
+            if let Some(definition) = type_definition_line(db, content) {
+                names.insert(definition.name.text(db).to_owned());
+            } else if let Some(rest) = content.strip_prefix("@type") {
+                names.insert(rest.trim().to_owned());
+            } else if let Some(separator) = top_level_colon(content) {
+                let name = content[..separator].trim();
+                if is_stub_name(name) {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    Some(names)
 }
 
 /// The namespace of ry's standard library (`Result.map`, `Dict.get`, ...). Its functions are

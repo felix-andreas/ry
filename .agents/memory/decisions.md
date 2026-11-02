@@ -1819,6 +1819,23 @@ GNU R runs a closure's first call through the AST, so code that depends on eithe
 already fails there. The ledger fold
 template's per-fill cost dropped from about 19.1k to 17.8k instructions.
 
+**The dispatch loop reads only the code and registers into locals.** `step` is one large inlined
+`match`, and every field of `Decoded` it destructured into a local was reloaded or spilled per
+instruction under register pressure. It now copies out `code` and `registers` and reads the
+constants and the cache through `decoded` where an op needs them, and it fetches the opcode with
+an unchecked index, since the code words are built in process and never deserialized. The ledger
+fold went from about 17.7k to 16.7k instructions per fill. Returning a `Flow` enum from `step`
+instead of its current result was tried and cost about 860 instructions per fill, because the
+compiler stopped keeping the loop state in registers; codegen here is fragile, so measure every
+change to `step` with callgrind.
+
+**A closure call runs one collection check for its frame.** `frame_environment` reserves room
+for the environment plus a binding cell and a default promise per formal (`Heap::reserve`), then
+`bind_arguments` builds them with the `_uncollected` allocators, and `args_pairlist` does the same
+for the argument list, rooting only its head. This is safe because the caller keeps the argument
+values alive and the defaults are reachable from the closure; anything the batch reads that is
+not, such as `match_args`' result, is computed before the reservation.
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
@@ -5911,6 +5928,28 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
 - **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.
 
+## Seeded batteries replay through one loop
+
+- **Previous shape.** Each battery looped over its own seed range and printed its own replay hint, if any, so replaying a failure meant reading the test to find how its seed was formed.
+- **Shape.** `syntax::testing::for_each_seed(default, |seed| ...)` runs seeds `0..default` scaled by `FUZZ_ITERS`, runs only `FUZZ_SEED` when it is set, and on a panic prints `FUZZ_SEED=<seed> cargo test -p <package> <target> <test> -- --exact`. A battery whose seeds are offset (`1000 + seed`) keeps the offset inside the closure, so the printed seed is still the one to pass.
+
+## A reload diffs S3 registrations per table entry
+
+- **Previous shape.** The reload diff compared `S3method` directives as a set, and registered a directive whenever its function was rebound.
+- **Why that was wrong.** R registers directives in order into one entry per generic and class, so a later directive for the same pair wins. Rebinding the function of a losing directive re-registered it and made it win, and dropping one of two directives for a pair unregistered an entry that still exists (found by `test_reload_fuzz`, pinned in `crates/loader/tests/reload/edits.test`).
+- **Shape.** `loader::diff` maps each pair to its winning directive and registers or unregisters only winners. The same diff's `keeps_names` claim (no binding appears or disappears) now also requires every name a rerun statement may write to be bound already, and a statement whose writes are unknown rules the claim out.
+
+## `R CMD` make variables expand as GNU make expands them
+
+- **Shape.** `make_assignments` and `expand_make` (`crates/rcmd/src/makeconf.rs`) follow GNU make 4.3: recursive (`=`) values expand at use, simple (`:=`) values expand at assignment, `?=` assigns once, `+=` keeps the flavor of the original and adds no space to an empty value, a backslash-newline run collapses to one space, `$$` is a literal dollar, a lone trailing `$` stays, and a variable that references itself expands to nothing at the inner reference instead of recursing (GNU make stops there with an error). There is no depth bound, so a non-cyclic doubling chain expands exponentially, exactly as it does under GNU make. `R_HOME` is ry's home whatever the makefile assigns, because R passes it on make's command line.
+- **Why.** A package's `Makevars` is written against GNU make, and any difference in expansion changes compiler flags silently. `make_expansion_agrees_with_gnu_make` checks generated makefiles against the real `make`, so the rule is GNU make's behavior, not a reading of its manual.
+
+## The JIT leaves a lossy double modulus to tier 0
+
+- **Previous shape.** Compiled `%%` on doubles computed `a - floor(a / b) * b` directly.
+- **Why that was wrong.** GNU R warns "probable complete loss of accuracy in modulus" when the finite quotient `|a / b|` exceeds 2^63, and compiled code skipped the warning.
+- **Shape.** Both the bytecode codegen and native code call `runtime::jit_modulus_loses_accuracy` (`interp::arith::modulus_loses_accuracy`, the single rule) and hand the operation to tier 0 when it is true, so the warning has one implementation.
+
 ## The young generation allocates by bumping a cursor
 
 - **Previous shape.** Each small allocation went through `allocate_with`, a non-inlined call that ran the collection check, claimed a bitmap word on a miss and took the next free bit by trailing-zero count, then wrote the header. The write barrier looked up the parent's mark bit in its page's side bitmap and cached the last unmarked parent in `Heap::young_parent`. `sd` on 20 doubles cost 121.5k instructions per call against GNU R's 70.6k, and a loop of `cons` + `root` + a scalar vector cost 298 instructions per iteration, 191 of them in `allocate_with`.
@@ -5929,3 +5968,136 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `library_candidates` (`crates/interp/src/linalg.rs`) tries, in order: the sonames, so `LD_LIBRARY_PATH` stays the user's override and a distribution's R gets the library it links; Accelerate on macOS; each library `BLAS_LIBS` (and for LAPACK, `LAPACK_LIBS` then `BLAS_LIBS`) names, in its `-L` directories and then by soname; and `R_HOME/lib/libRblas`/`libRlapack` last, because R's own libraries leave `xerbla_` to GNU R's `libR`. A candidate must define every routine of the table, so a BLAS tried for LAPACK is passed over. Opening LAPACK loads BLAS first, so a LAPACK whose BLAS sits in a directory of its own resolves the dependency by soname. A failure lists every place searched and the fix.
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
+
+## Reference Class and R6 method bodies resolve object members in naming
+
+- **Before.** A file that called `R6Class` accepted `self`, `private` and `super` anywhere in it
+  (`diagnostics::file_defines_r6_class`), and a Reference Class method's fields, `.self` and sibling
+  methods were unresolved reads. A sibling method sharing a top-level function's name typed as that
+  function, so openxlsx's `getBaseFont()` method call was reported for leaving out `wb`.
+- **Shape.** `naming::ref_class_definition` recognizes `setRefClass(...)`, `Gen$methods(...)`,
+  `Gen$fields(...)`, `R6Class(...)` and `Gen$set("public", ...)` syntactically, and
+  `naming::resolve_item` takes an `is_member(RefClassKey, Symbol)` oracle. A read inside a method
+  body (or a closure in one) that has no lexical slot and that the oracle accepts records nothing:
+  it is neither a non-local nor a resolution, so diagnostics report nothing and the checker reads
+  `Unknown`. R6 methods answer only `self`, `private`, `super`.
+- **Membership is a per-name projection.** `semantics::file_ref_classes` indexes one file from HIR
+  alone, `project_ref_classes` unions them, and `item_naming` asks
+  `project_ref_class_binds(files, class, member)`, so a class edit re-runs only the methods whose
+  answers change (`test_incremental`,
+  `a_reference_class_edit_rechecks_only_methods_whose_member_answers_change`). The index reads
+  `item_hir` only, never naming, so there is no cycle.
+- **Unknown classes bind everything.** A superclass the project does not define, or a generator the
+  project does not bind to `setRefClass`, hides the members, so every name binds rather than
+  guessing. The file-level R6 guard stays for helper functions placed in an R6 list by name.
+
+## A literal `source()` path is followed for resolution
+
+- **Before.** A script saw only its own definitions and the package's, so every call to a helper it
+  `source()`d was unresolved and every helper was unused.
+- **Shape.** `semantics::file_source_calls` collects the literal paths of `source`, `sys.source` and
+  `base::source` calls anywhere in a non-package file. A `SourcePaths` input maps project-relative
+  paths to files; `sourced_files` resolves each literal against the sourcing file's directory, then
+  the project root (R's usual working directory), transitively. `sourced_definition(file, name)` is
+  a per-name projection layered after the file's own scope and before the test and package layers,
+  so the last sourced binding wins and an edit to a helper rechecks only the reads whose answer
+  changes (`test_incremental`, `a_sourced_helper_edit_rechecks_only_the_script_reads_it_changes`).
+  A sourced file reports no unused assignments (`file_is_sourced`).
+- **Position is ignored.** A sourced name is visible anywhere in the script, not only after the
+  `source()` call, because a call inside a function or a branch runs at an unknown time.
+- **The server loads sourced scripts from disk.** It otherwise holds only `R/` and open documents,
+  so `Worker::sync_sourced_files` keeps the loaded scripts exactly the open documents plus what they
+  and the package transitively source, dropping a helper nobody sources any more, which keeps a
+  session equal to a fresh start. Its read of `file_source_calls` retries on cancellation, because
+  the set must be complete before the project file list is rebuilt.
+- **Package files' `source()` calls are ignored**, since a package's namespace is its `R/` files.
+
+## A masked argument is its own scope, and the base masking family is typed
+
+- **Before.** `subset`, `transform`, `with` and `within` were bare `Any` values in `base.Rtypes`,
+  so every call gave `Unknown` and a strict finding. A masked argument resolved in the caller's
+  scope, so `within(d, c <- a * 2)` bound `c` at the top level of a package (a conditional
+  definition that then shadowed `base::c`) and reported it unused.
+- **Shape.** naming pushes a `ScopeKind::Mask` scope around each non-data argument of a masking
+  call (the base family and `@masked` verbs) and pre-mints its assignments there; the enclosing
+  frame's pre-mint skips those arguments (`syntactic_masking_family`). A write in a mask scope is
+  never reportable as unused, because `within` copies the data environment back. `top_level`
+  walks a base-family masked argument with fresh locals, as for `local()`. The stubs type the
+  results and are `@pure`, because the arguments are walked for effects on their own.
+- **Ambiguous overloads propagate `Unknown` silently.** An overloaded call that only an
+  already-`Unknown` argument leaves ambiguous returns `Unknown` without a new strict origin. The
+  argument's own origin is the report (or it was silenced on purpose, as a masked read is), so the
+  old extra origin on the call only duplicated it (`unknown-origins.R.test`).
+
+## `pkg::name` on an inactive shipped namespace checks the shipped export list
+
+- An inactive conditional namespace stays out of the stub library, so its names never resolve
+  bare reads. `stubs::dormant_namespace_exports` reads the shipped manifest plus that package's
+  stub declarations directly from `StubSources`, without activating anything, and
+  `diagnostics::namespace_read_message` reports a missing name as "not exported".
+- A package with stubs but no shipped manifest is not checked, since partial stubs would report
+  real exports. `:::` reads stay unchecked as everywhere.
+
+## A name inside a string's `{...}` is a read for liveness
+
+- **Before.** A local used only in a glue or cli template (`n <- length(x); cli_abort("{n} files")`)
+  was reported unused: about 280 of the corpus's 3,180 unused warnings.
+- **Shape.** naming scans every string literal for `{...}` segments, lexes each with the R lexer,
+  and marks the binding each identifier would resolve to as read (`interpolated_names`). It records
+  no resolution and no unresolved read, since the string may be plain text, so rename and hover
+  ignore template names. It applies to every string, not a list of interpolating functions,
+  because wrappers that forward `parent.frame()` (devtools' `ui_*`, waldo's `should_be`) are as
+  common as direct glue and cli calls; the cost of a false read is only a missed unused warning.
+- `{{` is glue's escape, a `.`-led segment is cli markup whose first name is a style, a `?`-led one
+  is pluralization text, and a name after `$`, `@` or `::` is a member.
+
+## An `if` with an `Any` branch is `Any`; a two-path write still unifies
+
+- **Before.** `join_types` unified the branch values, and `Any` unifies with anything, so
+  `if (is.null(f)) order else f` with `f: Any` typed as `order`'s signature and the `Any` path was
+  then checked as a function (sets `as.list.cset`).
+- **Shape.** `join_branch_values` returns `Any` when either side is `Any`, matching the union rule.
+  `join_written_values` keeps unifying, so a variable written `Any` on one path keeps the typed
+  path's type and a later misuse is still reported; applying the rule there too dropped NlcOptim's
+  two true positives (a matrix called as a function).
+
+## tidyr and tibble ship masked-verb stubs beside their manifests
+
+- `types/tidyr.Rtypes` and `types/tibble.Rtypes` declare only the `@masked` verbs; every other
+  export still comes from the `.exports` manifest. Masking is keyed by stub declarations, so a
+  manifest-only package could not mask, and `pivot_longer(d, cols = c(a, b))` reported its columns.
+  Reshaping verbs return `Any` because their columns depend on the data; row-preserving ones
+  (`drop_na`, `fill`, `complete`) keep `<T>`. tidyr re-exports `tibble`, so it declares it too.
+
+## A `NULL` local inside a query of unknown columns is the column
+
+- **Before.** `time <- NULL` (the R CMD check "no visible binding" idiom) followed by
+  `dt[...][order(-time)]` read the lexical `NULL` whenever the columns were unknown, and `-time`
+  was reported (data.table's own test runner).
+- **Shape.** `read_column` types a resolved `NULL` local as an `Unknown` masked column when the
+  scope's columns are unknown. A plain `[` on a subject that may be a data.table (declared, with
+  data.table syntax, or `Unknown`/`Any`/an open variable) counts `unseen_frames`, and `infer_read`
+  turns a `NULL` local read into `Unknown` there. A column scope was not pushed for the plain case
+  because it masks every read, which hid a true unresolved name in `m[not_a_column]`.
+
+## `length(x)` guards drop `NULL`
+
+- `recognize_guard` treats `length(x)` as a condition and `length(x) <op> literal` (either side) as a
+  test whose edge a zero length cannot reach is non-`NULL` (`non_null_edge`). It only drops `NULL`
+  from a union, never shapes an open variable, because a length test says nothing else about the
+  value. usethis `if (length(r) != 2) return(...)` then `r[1]:r[2]`.
+
+## A numeric binding yields to a matrix or a generic argument
+
+- **Before.** Arithmetic ties its operands to one variable (`a * H` gives `fn(a: T, H: T)`), and the
+  first argument bound it, so `weigh(2, m)` reported `expected double, found matrix`, and
+  `outer <- function(H) weigh(2, H)` pinned `H` to `double` (ks `mise.mixt`, the shape pins
+  through call chains).
+- **Shape.** `widen_numeric_binding` extends the existing `f(1L, 0.5)` rebind: a `matrix` absorbs a
+  numeric binding (and is absorbed by one already bound to a matrix; the element type is not
+  tracked, so a character matrix passes). An open variable or numeric rigid argument meeting a
+  variable bound to `double` is only constrained numeric and accepted, leaving the binding at
+  `double`, so the caller's parameter stays `<T: numeric>` and the result keeps R's promotion.
+- **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
+  `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
+  them, so an outer function's variable was generalized by an inner one.
