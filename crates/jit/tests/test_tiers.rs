@@ -1327,8 +1327,12 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
 /// The items as an Array literal, now and then, when they share one type and none is `NA`.
 fn homogeneous_array(rng: &mut SplitMix64, items: &[Scalar]) -> Option<String> {
     // An Array holds no `NA`, so a list with one stays a list.
-    let all_int = items.iter().all(|item| matches!(item, Scalar::Int(Some(_))));
-    let all_dbl = items.iter().all(|item| matches!(item, Scalar::Dbl(Some(_))));
+    let all_int = items
+        .iter()
+        .all(|item| matches!(item, Scalar::Int(Some(_))));
+    let all_dbl = items
+        .iter()
+        .all(|item| matches!(item, Scalar::Dbl(Some(_))));
     if items.is_empty() || !(all_int || all_dbl) || !rng.chance(1, 4) {
         return None;
     }

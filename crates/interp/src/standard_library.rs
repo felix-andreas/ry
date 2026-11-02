@@ -22,8 +22,7 @@ use {
         annotations::Entry,
         arrays,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, builtin},
-        conditions,
-        eval,
+        conditions, eval,
         long_double::{self, LongDouble},
         records, scope,
         sort::{IdenticalFlags, identical},
@@ -688,7 +687,12 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
 /// The leaf reports its errors against `function` itself, which stands in for the call until
 /// an error needs the real one, `(f)(value)` as `eval::apply` builds it, so the condition is the
 /// same either way.
-unsafe fn call_leaf(call: &Call<'_>, function: Sexp, leaf: BuiltinFn, arguments: &[Arg]) -> R<Sexp> {
+unsafe fn call_leaf(
+    call: &Call<'_>,
+    function: Sexp,
+    leaf: BuiltinFn,
+    arguments: &[Arg],
+) -> R<Sexp> {
     let context = Call {
         call: function,
         op: function,
