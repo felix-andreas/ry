@@ -1248,6 +1248,9 @@ impl Context<'_> {
             _ => match replacement_base(module, target) {
                 Some((base_expression, name, range)) => {
                     let fresh = !self.current_scope().slots.contains_key(&name);
+                    // A loop body is walked more than once, and an earlier walk's resolution of
+                    // the base to this very copy must not be read back as its source.
+                    self.naming.resolutions.remove(&base_expression);
                     self.resolve(base_expression);
                     let source = match self.naming.resolutions.get(&base_expression) {
                         Some(&outer) => CopySource::Slot(outer),

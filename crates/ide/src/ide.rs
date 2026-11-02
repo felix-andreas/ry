@@ -6335,8 +6335,12 @@ fn target_at<'db>(
 /// The variable a replacement assignment's local copy was copied from, through any chain of
 /// copies (`naming::ItemNaming::replacement_copies`), or the binding itself when it is no copy.
 fn copy_origin(naming: &ItemNaming, mut binding: BindingId) -> CopySource {
-    // Each copy's source lives in a strictly enclosing scope, so the chain ends.
-    while let Some(source) = naming.replacement_copies.get(&binding) {
+    // Naming records a copy's source from a strictly enclosing scope, so a chain is no longer
+    // than the scope nesting; the bound only keeps a malformed map from hanging the editor.
+    for _ in 0..naming.replacement_copies.len() {
+        let Some(source) = naming.replacement_copies.get(&binding) else {
+            break;
+        };
         match *source {
             CopySource::Slot(outer) => binding = outer,
             CopySource::NonLocal(name) => return CopySource::NonLocal(name),

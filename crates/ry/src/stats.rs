@@ -771,7 +771,12 @@ fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
             ));
         }
         // Renaming edits every file it touches, so it runs on every other sample.
-        if position % RENAME_EVERY != 0 || site.name.contains('`') {
+        // A non-syntactic name would need quoting the harness's new spelling does not add.
+        let syntactic = site
+            .name
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '.' | '_'));
+        if position % RENAME_EVERY != 0 || !syntactic {
             continue;
         }
         tally.rename_total += 1;
@@ -825,7 +830,7 @@ fn rename_round_trip(
     let first = ide::rename(db, files, record.file, site.range.start())
         .ok_or_else(|| "refused".to_owned())?;
     let edits = rename_edits(db, &first, &site.name, &renamed)?;
-    let touched: Vec<SourceFile> = edits.iter().map(|(file, _)| *file).collect();
+    let mut touched: Vec<SourceFile> = edits.iter().map(|(file, _)| *file).collect();
     set_texts(db, edits);
     // Every occurrence before the site in its file grew by the same amount.
     let shift = first
@@ -844,6 +849,7 @@ fn rename_round_trip(
             back.len()
         )),
         Some(back) => rename_edits(db, &back, &renamed, &site.name).map(|edits| {
+            touched.extend(edits.iter().map(|(file, _)| *file));
             set_texts(db, edits);
         }),
     };
@@ -870,7 +876,8 @@ fn rename_round_trip(
     changed.map_or(Ok(()), Err)
 }
 
-/// Each edited file's new text, provided every occurrence spells `from`.
+/// Each edited file's new text, provided every occurrence spells `from`. A backticked
+/// occurrence keeps its backticks, so every occurrence grows by the same amount.
 fn rename_edits(
     db: &RootDatabase,
     occurrences: &[ide::Occurrence],
@@ -894,7 +901,11 @@ fn rename_edits(
             if spelled.trim_matches('`') != from {
                 return Err(format!("an occurrence spells `{spelled}`"));
             }
-            text.replace_range(span, to);
+            if spelled.starts_with('`') {
+                text.replace_range(span, &format!("`{to}`"));
+            } else {
+                text.replace_range(span, to);
+            }
         }
         edits.push((file, text));
     }

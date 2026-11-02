@@ -1112,3 +1112,24 @@ action: Add inferred type annotations for the whole file
 completion (21): config, confint, confint.default, confint.lm, conflictRules, conflicts, conformMethod, pcre_config
 hint @19 -> list{}
 hint @30: list{}
+
+#---- a_copy_inside_a_loop_body_refers_to_the_global
+the <- new.env()
+for (i in 1:2) {
+  f <- function() {
+    the$x <- 1
+    th$0e$x
+  }
+}
+#++++
+hover 73..76: the: Unknown
+hover-definition: global 0..3
+definition 0..3
+references: 0..3*, 58..61, 73..76
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": environment"
+completion (2): the, Theoph
+hint @3: environment
+hint @23: integer
