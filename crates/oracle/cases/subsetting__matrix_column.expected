@@ -1,0 +1,25 @@
+[stdout]
+| [1] 4 5 6
+| [1] 4 5 6
+|   a   b 
+| 3.5 4.5 
+|   a   b 
+| 3.5 4.5 
+|     q
+| a 3.5
+| b 4.5
+| [1]  TRUE FALSE
+| [1] 2
+| [1] "subscript out of bounds"
+| [1] NA NA NA
+|     
+| [1,]
+| [2,]
+| [3,]
+| [1] 18 24
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(18, 24)

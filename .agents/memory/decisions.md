@@ -1836,6 +1836,17 @@ for the argument list, rooting only its head. This is safe because the caller ke
 values alive and the defaults are reachable from the closure; anything the batch reads that is
 not, such as `match_args`' result, is computed before the reservation.
 
+**Compiled `x[[i]] <- v` updates in place before it falls back to `complex_assign`.**
+`Op::SubAssign` used to hand every element assignment to `complex_assign`, which builds `*tmp*`
+promises and a replacement call per assignment. `assign_element_in_place` (bytecode.rs) now writes
+the element directly when the result is certain to equal what `[[<-` or `[<-` returns: a local,
+unlocked, unshared, classless, non-Array vector, a scalar position inside it, and either a
+non-`NULL` value under `[[` on a list or an attribute-free scalar of the vector's own atomic type.
+It applies the same sharing checks as `complex_assign` (`moves::modifying`, `maybe_shared`,
+`reuse_permitted`) and clears the binding's missing bits as an assignment does. Everything else,
+including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
+(oracle case `assignment__element_in_place`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
