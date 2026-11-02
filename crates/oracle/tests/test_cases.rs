@@ -12,6 +12,7 @@ use {
     },
     std::{
         path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
     syntax::testing::{SplitMix64, fuzz_iterations},
@@ -99,25 +100,57 @@ fn cases_survive_gc_torture() {
     let ry = ProcessEngine::ry().with_timeout(timeout);
     let torture = ProcessEngine::ry_gc_torture().with_timeout(timeout);
     let started = Instant::now();
-    let mut failures = Vec::new();
-    for case in &chosen {
-        let unstressed = match ry.run(case) {
-            Ok(outcome) => outcome,
-            // A case ry cannot run at all is the plain oracle's finding, not torture's.
-            Err(error) => {
-                eprintln!("{}: ry: {error}", case.display());
-                continue;
-            }
-        };
-        match torture.run(case) {
-            Ok(stressed) => {
-                if let Some(difference) = diff("ry", &unstressed, "ry-gctorture", &stressed) {
-                    failures.push(format!("{}\n{difference}", case.display()));
-                }
-            }
-            Err(error) => failures.push(format!("{}: {error}", case.display())),
-        }
-    }
+    // Each case is two independent processes, so the cases run on every core; the failures are
+    // reported in the order the seed chose the cases, whichever thread finished first.
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut found = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(case) = chosen.get(index) else {
+                            return found;
+                        };
+                        let unstressed = match ry.run(case) {
+                            Ok(outcome) => outcome,
+                            // A case ry cannot run at all is the plain oracle's finding, not
+                            // torture's.
+                            Err(error) => {
+                                eprintln!("{}: ry: {error}", case.display());
+                                continue;
+                            }
+                        };
+                        match torture.run(case) {
+                            Ok(stressed) => {
+                                if let Some(difference) =
+                                    diff("ry", &unstressed, "ry-gctorture", &stressed)
+                                {
+                                    found
+                                        .push((index, format!("{}\n{difference}", case.display())));
+                                }
+                            }
+                            Err(error) => {
+                                found.push((index, format!("{}: {error}", case.display())))
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    failures.sort_by_key(|(index, _)| *index);
+    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
     eprintln!(
         "{} case(s) from seed {seed} under collection stress in {:.1} s",
         chosen.len(),

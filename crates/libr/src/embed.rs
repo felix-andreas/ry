@@ -27,8 +27,9 @@ pub extern "C" fn ry_initialize() -> c_int {
     0
 }
 
-/// With `enabled`, every allocation collects first (and every eighth collection is a major
-/// one), which turns a missing root into a crash at the allocation that exposes it.
+/// With `enabled`, every allocation collects first (with major collections spaced as
+/// [`heap::GcStress::EveryAllocation`] describes), which turns a missing root into a crash at the
+/// allocation that exposes it.
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_set_gc_stress(enabled: c_int) {
     runtime().heap.policy_mut().stress = if enabled != 0 {

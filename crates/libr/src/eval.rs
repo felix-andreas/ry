@@ -24,7 +24,7 @@ use {
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
-        native::Interface,
+        native::{Interface, foreign_context},
         unwind::park,
     },
     std::{
@@ -78,7 +78,7 @@ unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
-        write_console: |text, is_error| crate::boundary::write_console(text, is_error),
+        write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
@@ -101,6 +101,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
+    interp::register_builtins(crate::inspect::BUILTINS);
     interp::register_builtins(crate::altrep::INTERNALS);
     install_evaluator(&Interpreter);
 }
@@ -571,23 +572,32 @@ impl crate::boundary::Handout for Option<Sexp> {
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
+        foreign_context(call.call, || dot_call(call, RoutineKind::Call))
     }),
     builtin(".External", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
+        foreign_context(call.call, || dot_call(call, RoutineKind::External))
     }),
     // GNU R lets `.External2` keep whatever visibility its native code last evaluated with,
     // which is how magrittr's pipe forwards `invisible()`.
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
+    builtin(".External2", -1, |call| unsafe {
+        foreign_context(call.call, || dot_external2(call))
+    })
+    .keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        })
     }),
-    builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
+    builtin(".C", -1, |call| unsafe {
+        foreign_context(call.call, || dot_c(call, RoutineKind::C))
+    }),
     builtin(".Fortran", -1, |call| unsafe {
-        dot_c(call, RoutineKind::Fortran)
+        foreign_context(call.call, || dot_c(call, RoutineKind::Fortran))
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
@@ -1516,40 +1526,47 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         interp::session::run_text(startup, "<startup>");
     }
     let mut buffer = vec![0u8; 64 * 1024];
+    // The reader runs on the console's input thread, so the interpreter's thread answers an
+    // editor's requests while the user types.
+    let reader = move |prompt: &str| {
+        use std::io::Write;
+        if let Err(error) = std::io::stdout().flush() {
+            crate::boundary::write_console(
+                format!("ry: cannot write output: {error}\n").as_bytes(),
+                true,
+            );
+        }
+        // A prompt never holds a NUL, so the empty fallback is unreachable.
+        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+        let mut input = Vec::new();
+        // A line longer than the buffer arrives in several chunks; only the last one ends the
+        // line, and the text is decoded once it is whole, so no character is split.
+        loop {
+            // SAFETY: `read` is the host's reader, which may run on any thread.
+            if unsafe { read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) } == 0 {
+                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+            }
+            let end = buffer
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(buffer.len());
+            input.extend_from_slice(&buffer[..end]);
+            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+            // cut off whenever it comes within two bytes of the buffer's end.
+            if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                return Some(String::from_utf8_lossy(&input).into_owned());
+            }
+            prompt = std::ffi::CString::default();
+        }
+    };
+    interp::console_server::install_reader(Box::new(reader));
+    interp::console_server::start();
     interp::session::run_console(
-        |prompt| {
-            use std::io::Write;
-            if let Err(error) = std::io::stdout().flush() {
-                crate::boundary::write_console(
-                    format!("ry: cannot write output: {error}\n").as_bytes(),
-                    true,
-                );
-            }
-            // A prompt never holds a NUL, so the empty fallback is unreachable.
-            let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-            let mut input = Vec::new();
-            // A line longer than the buffer arrives in several chunks; only the last one ends the
-            // line, and the text is decoded once it is whole, so no character is split.
-            loop {
-                if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-                    return (!input.is_empty())
-                        .then(|| String::from_utf8_lossy(&input).into_owned());
-                }
-                let end = buffer
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(buffer.len());
-                input.extend_from_slice(&buffer[..end]);
-                // A reader may stop one byte short of the contract's limit, so a chunk is taken as
-                // cut off whenever it comes within two bytes of the buffer's end.
-                if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                    return Some(String::from_utf8_lossy(&input).into_owned());
-                }
-                prompt = std::ffi::CString::default();
-            }
-        },
+        // SAFETY: the console reads on the interpreter's thread, at its top level.
+        |prompt| unsafe { interp::console_server::read_line(prompt) },
         false,
     );
+    interp::console_server::finish();
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
@@ -1566,6 +1583,14 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
     }
     let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
     loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
+}
+
+/// Makes the package loader wait for `verdict` before the parts of a load that may have
+/// effects, so the host can check the package while the definitions bind (see
+/// `loader::ry_runtime::set_verdict`). `ry load` calls it once, before [`ry_run`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
+    loader::ry_runtime::set_verdict(verdict);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

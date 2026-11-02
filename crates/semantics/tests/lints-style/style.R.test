@@ -204,3 +204,599 @@ y <- 3L # ry: allow(assignment-operator)
 f <- function(x) x
 #++++
 clean
+
+#==== any-is-na
+#---- any_of_is_na_warns
+if (any(is.na(x))) stop("missing")
+#++++
+4..17 warning[any-is-na] Use anyNA(x), which stops at the first NA instead of building a vector for any()
+  safe fix 4..17 "anyNA(x)"
+
+#---- na_rm_and_other_reductions_are_clean
+any(is.na(x), na.rm = TRUE)
+all(is.na(x))
+#++++
+clean
+
+#==== paste-sep
+#---- empty_separator_warns
+paste("a", x, sep = "")
+paste(sep = '', "id_", n, collapse = ",")
+paste("a", # why
+  x, sep = "")
+#++++
+0..23 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 0..23 "paste0(\"a\", x)"
+24..65 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 24..65 "paste0(\"id_\", n, collapse = \",\")"
+36..38 warning[single-quotes] Use double quotes for strings
+  safe fix 36..38 "\"\""
+66..97 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+
+#---- other_separators_are_clean
+paste("a", x)
+paste("a", x, sep = "-")
+#++++
+clean
+
+#==== lengths
+#---- applying_length_warns
+n <- sapply(parts, length)
+m <- vapply(parts, length, integer(1))
+#++++
+5..26 warning[lengths] Use lengths(x), which counts every element's length without calling length() through sapply()
+  unsafe fix 5..26 "lengths(parts)"
+32..65 warning[lengths] Use lengths(x), which counts every element's length without calling length() through vapply()
+  unsafe fix 32..65 "lengths(parts)"
+
+#---- other_functions_are_clean
+n <- sapply(parts, nchar)
+m <- vapply(parts, length, integer(1), USE.NAMES = FALSE)
+#++++
+clean
+
+#==== literal-coercion
+#---- coerced_literals_warn
+a <- as.integer(1)
+b <- as.numeric(2L)
+e <- as.character("x")
+d <- as.logical(TRUE)
+#++++
+5..18 warning[literal-coercion] Write the literal `1L` instead of coercing it with as.integer()
+  safe fix 5..18 "1L"
+24..38 warning[literal-coercion] Write the literal `2` instead of coercing it with as.numeric()
+  safe fix 24..38 "2"
+44..61 warning[literal-coercion] Write the literal `"x"` instead of coercing it with as.character()
+  safe fix 44..61 "\"x\""
+67..83 warning[literal-coercion] Write the literal `TRUE` instead of coercing it with as.logical()
+  safe fix 67..83 "TRUE"
+
+#---- non_literals_and_lossy_coercions_are_clean
+a <- as.integer(1.5)
+b <- as.integer(x)
+e <- as.character(1)
+#++++
+clean
+
+#---- values_beyond_the_integer_range_are_clean
+as.integer(3000000000)
+#++++
+clean
+
+#==== redundant-equals
+#---- comparing_with_a_boolean_warns
+if (ok == TRUE) 1
+if (done != TRUE) 2
+y <- FALSE == flag
+#++++
+4..14 warning[redundant-equals] Comparing with TRUE is redundant for a logical value. Write `ok`
+  unsafe fix 4..14 "ok"
+22..34 warning[redundant-equals] Comparing with TRUE is redundant for a logical value. Write `!done`
+  unsafe fix 22..34 "!done"
+43..56 warning[redundant-equals] Comparing with FALSE is redundant for a logical value. Write `!flag`
+  unsafe fix 43..56 "!flag"
+
+#---- other_comparisons_are_clean
+if (x == 1) 1
+if (TRUE == FALSE) 2
+#++++
+clean
+
+#---- a_negation_inside_a_looser_operator_gets_parentheses
+a <- x == FALSE & y
+#++++
+5..15 warning[redundant-equals] Comparing with FALSE is redundant for a logical value. Write `!x`
+  unsafe fix 5..15 "(!x)"
+
+#==== single-quotes
+#---- single_quoted_strings_warn
+x <- 'abc'
+y <- 'say "hi"'
+#++++
+5..10 warning[single-quotes] Use double quotes for strings
+  safe fix 5..10 "\"abc\""
+16..26 warning[single-quotes] Use double quotes for strings
+
+#---- double_quotes_are_clean
+x <- "abc"
+y <- "it's"
+#++++
+clean
+
+#==== duplicate-argument
+#---- a_name_given_twice_warns
+f(a = 1, b = 2, a = 3)
+x <- list(`key` = 1, "key" = 2)
+#++++
+16..17 warning[duplicate-argument] `a` is passed twice in this call. A function stops with "matched by multiple actual arguments", and c() or list() keeps both values under one name
+44..49 warning[duplicate-argument] `key` is passed twice in this call. A function stops with "matched by multiple actual arguments", and c() or list() keeps both values under one name
+
+#---- distinct_names_and_sequential_verbs_are_clean
+f(a = 1, b = 2)
+df |> mutate(x = x + 1, x = x * 2)
+g(1, 1, 1)
+#++++
+clean
+
+#==== testthat-expectation
+#---- general_expectations_with_a_specific_form_warn
+expect_equal(x, NULL)
+expect_identical(x, TRUE)
+expect_equal(length(x), 3)
+expect_equal(names(x), e)
+expect_true(!ok)
+expect_false(!ok)
+expect_true(is.null(x))
+expect_true(inherits(x, "tbl"))
+#++++
+0..21 warning[testthat-expectation] Use expect_null(), which says what the test checks and fails with a clearer message
+  safe fix 0..21 "expect_null(x)"
+22..47 warning[testthat-expectation] Use expect_true(), which says what the test checks and fails with a clearer message
+  unsafe fix 22..47 "expect_true(x)"
+48..74 warning[testthat-expectation] Use expect_length(), which says what the test checks and fails with a clearer message
+  unsafe fix 48..74 "expect_length(x, 3)"
+75..100 warning[testthat-expectation] Use expect_named(), which says what the test checks and fails with a clearer message
+  unsafe fix 75..100 "expect_named(x, e)"
+101..117 warning[testthat-expectation] Use expect_false(), which says what the test checks and fails with a clearer message
+  unsafe fix 101..117 "expect_false(ok)"
+118..135 warning[testthat-expectation] Use expect_true(), which says what the test checks and fails with a clearer message
+  unsafe fix 118..135 "expect_true(ok)"
+136..159 warning[testthat-expectation] Use expect_null(), which says what the test checks and fails with a clearer message
+  safe fix 136..159 "expect_null(x)"
+160..191 warning[testthat-expectation] Use expect_s3_class(), which says what the test checks and fails with a clearer message
+  unsafe fix 160..191 "expect_s3_class(x, \"tbl\")"
+
+#---- specific_expectations_are_clean
+expect_null(x)
+expect_equal(x, 1)
+expect_true(ok)
+expect_false(is.null(x))
+expect_equal(x, NULL, info = "why")
+#++++
+clean
+
+#==== condition-message
+#---- pasted_messages_warn
+stop(paste0("no file ", path))
+warning(paste("a", b, sep = ""), call. = FALSE)
+message(paste0())
+#++++
+5..29 warning[condition-message] stop() joins its arguments itself, so paste0() is not needed
+  unsafe fix 5..29 "\"no file \", path"
+39..62 warning[condition-message] warning() joins its arguments itself, so paste() is not needed
+  unsafe fix 39..62 "\"a\", b"
+39..62 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 39..62 "paste0(\"a\", b)"
+87..95 warning[condition-message] message() joins its arguments itself, so paste0() is not needed
+
+#---- plain_messages_are_clean
+stop("no file ", path)
+stop(paste("no", "file"))
+message(paste0(x, collapse = ", "))
+#++++
+clean
+
+#==== comparison-negation
+#---- negated_comparisons_warn
+if (!(x == 1)) 1
+y <- !(a < b)
+z <- 1 + !(a >= b)
+#++++
+4..13 warning[comparison-negation] Use `!=` instead of negating `==`
+  safe fix 4..13 "x != 1"
+22..30 warning[comparison-negation] Use `>=` instead of negating `<`
+  safe fix 22..30 "a >= b"
+40..49 warning[comparison-negation] Use `<` instead of negating `>=`
+  safe fix 40..49 "(a < b)"
+
+#---- other_negations_are_clean
+if (!(x %in% y)) 1
+!x
+!(a & b)
+#++++
+clean
+
+#---- rlang_injection_is_clean
+filter(z, !!(x == y))
+#++++
+clean
+
+#==== outer-negation
+#---- negated_elements_warn
+all(!x)
+y <- any(!is.na(x))
+all(!x) + 1
+#++++
+0..7 warning[outer-negation] Use `!any(x)` instead of `all(!x)`, which negates every element first
+  safe fix 0..7 "!any(x)"
+13..27 warning[outer-negation] Use `!all(x)` instead of `any(!x)`, which negates every element first
+  safe fix 13..27 "!all(is.na(x))"
+28..35 warning[outer-negation] Use `!any(x)` instead of `all(!x)`, which negates every element first
+  safe fix 28..35 "(!any(x))"
+
+#---- outer_negations_are_clean
+!any(x)
+all(!x, na.rm = TRUE)
+#++++
+clean
+
+#---- rlang_injection_is_clean
+any(!!x)
+#++++
+clean
+
+#==== fixed-regex
+#---- plain_patterns_warn
+grepl("abc", x)
+sub("-", "_", x)
+strsplit(x, ",")
+regexpr(text = x, "a b")
+#++++
+6..11 warning[fixed-regex] This pattern has no regular expression syntax, so grepl() matches it faster with `fixed = TRUE`
+  unsafe fix 14..14 ", fixed = TRUE"
+20..23 warning[fixed-regex] This pattern has no regular expression syntax, so sub() matches it faster with `fixed = TRUE`
+  unsafe fix 31..31 ", fixed = TRUE"
+45..48 warning[fixed-regex] This pattern has no regular expression syntax, so strsplit() matches it faster with `fixed = TRUE`
+  unsafe fix 48..48 ", fixed = TRUE"
+68..73 warning[fixed-regex] This pattern has no regular expression syntax, so regexpr() matches it faster with `fixed = TRUE`
+  unsafe fix 73..73 ", fixed = TRUE"
+
+#---- regex_and_configured_patterns_are_clean
+grepl("^abc", x)
+grepl("a.c", x)
+grepl("abc", x, fixed = TRUE)
+grepl("abc", x, ignore.case = TRUE)
+gsub("a", "\\1", x)
+grepl(pattern, x)
+grepl("abc", ...)
+#++++
+clean
+
+#==== which-grepl
+#---- which_of_grepl_warns
+which(grepl("a", x, fixed = TRUE))
+#++++
+0..34 warning[which-grepl] Use grep(...), which returns the matching positions directly, instead of which(grepl(...))
+  safe fix 0..34 "grep(\"a\", x, fixed = TRUE)"
+
+#---- which_of_others_is_clean
+which(x > 1)
+which(grepl("^a", x), arr.ind = TRUE)
+#++++
+clean
+
+#---- five_positional_grepl_arguments_are_clean
+which(grepl("^a", z, FALSE, FALSE, TRUE))
+#++++
+clean
+
+#==== length-levels
+#---- length_of_levels_warns
+length(levels(f))
+#++++
+0..17 warning[length-levels] Use nlevels(x) instead of length(levels(x))
+  safe fix 0..17 "nlevels(f)"
+
+#---- nlevels_is_clean
+nlevels(f)
+length(unique(f))
+#++++
+clean
+
+#==== browser-call
+#---- browser_warns
+f <- function() {
+  browser()
+}
+#++++
+20..29 warning[browser-call] Remove this browser() call, which pauses the code whenever it runs in an interactive session
+
+#---- quoted_browser_is_clean
+debug_at <- function(env) eval(quote(browser()), env)
+#++++
+clean
+
+#==== numeric-leading-zero
+#---- missing_leading_zeros_warn
+x <- .5
+y <- .5e3L
+#++++
+5..7 warning[numeric-leading-zero] Write `0.5` with a leading zero, which is easier to read
+  safe fix 5..7 "0.5"
+13..18 warning[numeric-leading-zero] Write `0.5e3L` with a leading zero, which is easier to read
+  safe fix 13..18 "0.5e3L"
+
+#---- leading_zeros_are_clean
+x <- 0.5
+y <- 5.
+#++++
+clean
+
+#==== line-length
+#---- a_line_over_the_limit_warns
+x <- c("item00", "item01", "item02", "item03", "item04", "item05", "item06", "item07", "item08", "item09", "item10", "item11")
+y <- "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+#++++
+100..126 warning[line-length] This line is 126 characters long, over the limit of 100
+321..344 warning[line-length] This line is 112 characters long, over the limit of 100
+
+#---- a_line_at_the_limit_is_clean
+z <- "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#++++
+clean
+
+#==== implicit-assignment
+#---- an_assignment_in_a_condition_warns
+if (x <- f()) print(x)
+while ((entry <- read_entry()) != "") print(entry)
+if (g() -> y) y
+#++++
+4..12 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+31..52 warning[implicit-assignment] Move this assignment out of the `while` condition, where it reads like a comparison
+78..86 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+
+#---- an_assignment_inside_a_subset_or_block_condition_warns
+if (y[x <- 1]) 1
+if ({x <- 3; x}) 1
+#++++
+6..12 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+22..28 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+
+#---- a_comparison_or_a_nested_function_is_clean
+if (x < -1) print(x)
+if (any(vapply(xs, function(x) { y <- x; y > 0 }, logical(1)))) 1
+x <- if (y) 1 else 2
+#++++
+clean
+
+#==== while-true
+#---- while_true_warns
+while (TRUE) {
+  if (done()) break
+}
+while (TRUE) step()
+#++++
+0..12 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+  safe fix 0..12 "repeat"
+37..49 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+  safe fix 37..49 "repeat"
+
+#---- other_loops_are_clean
+while (running) step()
+while (FALSE) step()
+repeat step()
+#++++
+clean
+
+#---- a_comment_in_the_header_keeps_the_lint_without_a_fix
+while (TRUE # forever
+) step()
+#++++
+0..23 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+
+#---- a_body_right_after_the_parenthesis_keeps_a_space
+while (TRUE)break
+#++++
+0..12 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+  safe fix 0..12 "repeat "
+
+#==== scalar-in
+#---- in_with_one_value_warns
+x %in% "a"
+!y %in% -1
+z %in% TRUE
+#++++
+0..10 warning[scalar-in] Use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA
+  unsafe fix 0..10 "x == \"a\""
+12..21 warning[scalar-in] Use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA
+  unsafe fix 12..21 "(y == -1)"
+22..33 warning[scalar-in] Use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA
+  unsafe fix 22..33 "z == TRUE"
+
+#---- in_with_several_values_or_na_is_clean
+x %in% c("a", "b")
+x %in% NA
+x %in% values
+x %in% NULL
+#++++
+clean
+
+#==== order-subset
+#---- subset_by_own_order_warns
+x[order(x)]
+scores$value[order(scores$value, decreasing = TRUE)]
+#++++
+0..11 warning[order-subset] Use sort(x) instead of x[order(x)], which builds an index only to subset with it
+  unsafe fix 0..11 "sort(x, na.last = TRUE)"
+12..64 warning[order-subset] Use sort(x) instead of x[order(x)], which builds an index only to subset with it
+  unsafe fix 12..64 "sort(scores$value, decreasing = TRUE, na.last = TRUE)"
+
+#---- other_subsets_are_clean
+x[order(y)]
+df[order(df$a), ]
+x[order(x, y)]
+x[order(x, method = "radix")]
+#++++
+clean
+
+#==== matrix-apply
+#---- apply_with_sum_or_mean_warns
+apply(m, 1, sum)
+apply(m, 2L, mean, na.rm = TRUE)
+#++++
+0..16 warning[matrix-apply] Use rowSums(), which computes in C, instead of apply() with sum()
+  unsafe fix 0..16 "rowSums(m)"
+17..49 warning[matrix-apply] Use colMeans(), which computes in C, instead of apply() with mean()
+  unsafe fix 17..49 "colMeans(m, na.rm = TRUE)"
+
+#---- other_applies_are_clean
+apply(m, 1, max)
+apply(m, c(1, 2), sum)
+apply(m, 1, function(row) sum(row))
+apply(m, 1, sum, simplify = FALSE)
+apply(m, margin, sum)
+#++++
+clean
+
+#---- a_comment_in_the_call_keeps_the_lint_without_a_fix
+apply(m, 1, # by row
+  sum)
+#++++
+0..27 warning[matrix-apply] Use rowSums(), which computes in C, instead of apply() with sum()
+
+#==== empty-assignment
+#---- assigning_empty_braces_warns
+x <- {}
+y = { }
+z <<- {
+}
+#++++
+5..7 warning[empty-assignment] Assign NULL instead of an empty `{}`, which evaluates to NULL
+  safe fix 5..7 "NULL"
+10..11 warning[assignment-operator] Use <-, not =, for assignment
+  safe fix 10..11 "<-"
+12..15 warning[empty-assignment] Assign NULL instead of an empty `{}`, which evaluates to NULL
+  safe fix 12..15 "NULL"
+22..25 warning[empty-assignment] Assign NULL instead of an empty `{}`, which evaluates to NULL
+  safe fix 22..25 "NULL"
+
+#---- assigning_a_block_or_a_comment_is_clean
+x <- { 1 }
+y <- {
+  # filled in later
+}
+#++++
+clean
+
+#==== unnecessary-lambda
+#---- a_lambda_that_only_forwards_warns
+lapply(xs, function(x) toupper(x))
+sapply(xs, \(x) base::nchar(x))
+purrr_result <- map(xs, function(item) summary(item))
+#++++
+11..33 warning[unnecessary-lambda] Pass `toupper` itself instead of a function that only calls it
+  unsafe fix 11..33 "toupper"
+46..65 warning[unnecessary-lambda] Pass `base::nchar` itself instead of a function that only calls it
+  unsafe fix 46..65 "base::nchar"
+91..119 warning[unnecessary-lambda] Pass `summary` itself instead of a function that only calls it
+  unsafe fix 91..119 "summary"
+
+#---- lambdas_that_do_more_are_clean
+lapply(xs, function(x) toupper(x[1]))
+lapply(xs, function(x) f(x, 2))
+Map(function(x, y) f(x, y), xs, ys)
+lapply(xs, function(x = 1) f(x))
+lapply(xs, function(x) x(x))
+lapply(xs, function(x) { f(x) })
+lapply(xs, function(x) fs[[1]](x))
+lapply(xs, function(x) quote(x))
+lapply(xs, function(x) substitute(x))
+#++++
+clean
+
+#==== yoda-test
+#---- the_expected_value_first_warns
+expect_equal(2, f(x))
+expect_identical("a", g())
+expect_equal(-1L, h())
+#++++
+0..21 warning[yoda-test] Put the value under test first: testthat reports the first argument of expect_equal() as the actual value
+  unsafe fix 0..21 "expect_equal(f(x), 2)"
+22..48 warning[yoda-test] Put the value under test first: testthat reports the first argument of expect_identical() as the actual value
+  unsafe fix 22..48 "expect_identical(g(), \"a\")"
+49..71 warning[yoda-test] Put the value under test first: testthat reports the first argument of expect_equal() as the actual value
+  unsafe fix 49..71 "expect_equal(h(), -1L)"
+
+#---- the_value_under_test_first_is_clean
+expect_equal(f(x), 2)
+expect_equal(1, 1)
+expect_equal(NULL, x)
+expect_equal(2, f(x), tolerance = 1e-3)
+#++++
+clean
+
+#---- a_comment_in_the_call_keeps_the_lint_without_a_fix
+expect_equal(2, # the answer
+  f(x))
+#++++
+0..36 warning[yoda-test] Put the value under test first: testthat reports the first argument of expect_equal() as the actual value
+
+#==== nzchar
+#---- counting_characters_to_test_emptiness_warns
+nchar(x) == 0
+nchar(name) > 0L
+!nchar(y) != 0
+#++++
+0..13 warning[nzchar] Use `!nzchar(x)`, which tests for an empty string without counting characters
+  unsafe fix 0..13 "!nzchar(x)"
+14..30 warning[nzchar] Use `nzchar(name)`, which tests for an empty string without counting characters
+  unsafe fix 14..30 "nzchar(name)"
+32..45 warning[nzchar] Use `nzchar(y)`, which tests for an empty string without counting characters
+  unsafe fix 32..45 "(nzchar(y))"
+
+#---- other_counts_are_clean
+nchar(x) == 1
+nchar(x, "bytes") == 0
+0 == nchar(x)
+#++++
+clean
+
+#==== sample-int
+#---- sampling_a_sequence_from_one_warns
+sample(1:n, 2)
+sample(1L:length(x), size = 3, replace = TRUE)
+#++++
+0..14 warning[sample-int] Use sample.int(n, ...), which draws the same values without building 1:n
+  unsafe fix 0..14 "sample.int(n, 2)"
+15..61 warning[sample-int] Use sample.int(length(x), ...), which draws the same values without building 1:length(x)
+  unsafe fix 15..61 "sample.int(length(x), size = 3, replace = TRUE)"
+22..34 warning[length-sequence] `1:length(...)` is `c(1, 0)` when the vector is empty. Use seq_along()
+  unsafe fix 22..34 "seq_along(x)"
+
+#---- other_samples_are_clean
+sample(x, 2)
+sample(2:n, 1)
+sample(x = 1:n, 2)
+#++++
+clean
+
+#==== unnecessary-concatenation
+#---- combining_one_constant_or_nothing_warns
+x <- c("a")
+y <- c()
+z <- c(-1) + 1
+#++++
+5..11 warning[unnecessary-concatenation] Write `"a"` directly: c() has nothing to combine here
+  safe fix 5..11 "\"a\""
+17..20 warning[unnecessary-concatenation] Write `NULL` directly: c() has nothing to combine here
+  safe fix 17..20 "NULL"
+26..31 warning[unnecessary-concatenation] Write `-1` directly: c() has nothing to combine here
+  safe fix 26..31 "(-1)"
+
+#---- combining_values_is_clean
+c("a", "b")
+c(x)
+c(name = 1)
+quote(c())
+#++++
+clean

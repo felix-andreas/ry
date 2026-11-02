@@ -1,0 +1,33 @@
+[stdout]
+| finalized 1 
+| after 1 
+| finalized 2 
+| after 2 
+| finalized 3 
+| after 3 
+| finalized 4 
+| after 4 
+| finalized 5 
+| after 5 
+| finalized 6 
+| after 6 
+| finalized 7 
+| after 7 
+| finalized 8 
+| after 8 
+| finalized 9 
+| after 9 
+| finalized 10 
+| after 10 
+| finalized 11 
+| after 11 
+| finalized 12 
+| after 12 
+| finalized 13 
+| after 13 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

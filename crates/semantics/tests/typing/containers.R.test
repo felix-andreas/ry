@@ -331,6 +331,15 @@ f <- function(key) {
 #++++
 f: <T> fn(key: T) -> integer
 
+#---- computed_key_write_into_a_record_forgets_its_fields
+f <- function(key) {
+  globals <- list(threads = NA_integer_)
+  globals[[key]] <- "on"
+  globals[[key]]
+}
+#++++
+f: <T> fn(key: T) -> integer | character
+
 #---- replacement_call_keeps_the_type
 f <- function() {
   v <- c(1L, 2L)
@@ -413,3 +422,27 @@ f: Unknown
 g: Unknown
 16..34 error[type-mismatch] a vector cannot be indexed by `list{double}`. Expected a numeric, logical, or character index
 51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`. Expected a numeric, logical, or character index
+#---- a_field_write_into_an_untracked_named_list_adds_the_value_type
+collect <- function(gs) {
+  ret <- list()
+  for (i in seq_along(gs)) {
+    ret[[i]] <- list(pf = gs[[i]], lpi = 1)
+  }
+  ret$nlp <- 3
+  ret
+}
+#++++
+collect: <T> fn(gs: T) -> list{nlp: double} | list[named: list{pf: Unknown, lpi: double} | double]
+
+#---- a_field_written_into_an_untracked_named_list_reads_back_as_the_wider_union
+collect <- function(gs) {
+  ret <- list()
+  for (i in seq_along(gs)) {
+    ret[[i]] <- list(pf = gs[[i]], lpi = 1)
+  }
+  ret$label <- "parts"
+  ret$label + 1L
+}
+#++++
+collect: Unknown
+144..153 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | list{pf: Unknown, lpi: double}`

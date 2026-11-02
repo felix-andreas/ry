@@ -6,13 +6,18 @@
 //!
 //! The evaluator calls [`statement`] before each statement a `{` or a top-level loop runs, but
 //! only while an adapter is attached, so a program run without one pays a single `Option` check
-//! per statement. A statement without a srcref has no location and never stops. A statement is located by its srcref: the srcfile's `filename`
-//! and the srcref's first line. The program itself is parsed with one srcfile for the whole
-//! file, so its srcrefs carry the file's own line numbers.
+//! per statement. A statement without a srcref has no location and never stops. A statement is
+//! located by its srcref: the srcfile's `filename` and the srcref's first line. The program
+//! itself is parsed with one srcfile for the whole file, so its srcrefs carry the file's own line
+//! numbers. Code with no file behind it, such as console input, is shown from the srcfile's
+//! `lines`, which the client fetches with a `source` request.
+//!
+//! An adapter either launches a program (`ry debug-adapter`) or is attached to a running console
+//! ([`crate::console_server`]). Attached, ending the session detaches it and the console runs on.
 
 use {
     crate::{
-        deparse, envir, eval, interp, lower, session,
+        deparse, envir, eval, interp, lower, print, session,
         unwind::{Jump, R, Unwind},
         values::{self, global_env, length, nil, symbol_name, symbols},
     },
@@ -33,6 +38,11 @@ pub trait Transport {
     /// Sends a response or event. The transport gives it its `seq`, because the host also
     /// sends console output as `output` events that share the numbering.
     fn send(&mut self, message: Value);
+    /// Whether a person at the console's terminal drives the adapter, as at a `Browse[1]>`
+    /// prompt, rather than an editor. Such an adapter ends with the command it stopped.
+    fn is_terminal(&self) -> bool {
+        false
+    }
 }
 
 /// What the client asked to run, from its `launch` request.
@@ -65,6 +75,31 @@ pub struct Adapter {
     terminating: bool,
     /// Canonical paths by the `filename` a srcfile records, so a statement costs no syscall.
     canonical: BTreeMap<String, Option<String>>,
+    /// The srcfiles of code with no file behind it, preserved while the adapter lives; a
+    /// `sourceReference` is an index into it plus one.
+    texts: Vec<Sexp>,
+    /// Attached to a console rather than running a launched program.
+    console: bool,
+    /// Set when the client of a console session left or ended it: the adapter is dropped and the
+    /// console runs on without it.
+    detached: bool,
+}
+
+impl Drop for Adapter {
+    fn drop(&mut self) {
+        for &srcfile in &self.texts {
+            crate::heap().release(srcfile);
+        }
+    }
+}
+
+/// Where a statement is: a file on disk, or the srcfile of code with no file behind it. A text
+/// gets its `sourceReference` only when a stack trace shows it, because registering one preserves
+/// it for the adapter's life, and the statement hook sees every command typed at a console.
+#[derive(Clone, PartialEq, Eq)]
+enum Source {
+    File(String),
+    Text(Sexp),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,13 +112,20 @@ enum Mode {
     StepOver(usize),
     /// Stop at the next statement fewer than this many frames deep.
     StepOut(usize),
+    /// A closure `debug()` flagged was entered at this depth: stop at its first statement, or
+    /// give up once it returns without one.
+    FunctionEntry(usize),
 }
 
 /// The program's state while it is stopped: the frames the client may name, innermost first,
 /// and the values its variable references stand for.
 struct Stopped {
     frames: Vec<StackFrame>,
-    references: Vec<Sexp>,
+    /// Each reference's object and the expression that evaluates to it in the selected frame,
+    /// from which its children's `evaluateName`s are built.
+    references: Vec<(Sexp, Option<String>)>,
+    /// The `stopped` event's body, sent again to an editor that attaches during the stop.
+    event: Value,
 }
 
 struct StackFrame {
@@ -97,6 +139,8 @@ enum Resume {
     Stay,
     Continue(Mode),
     Terminate,
+    /// The client of a console session left: the console runs on without the adapter.
+    Detach,
 }
 
 /// Called by the evaluator before each statement with a srcref, while an adapter is attached.
@@ -105,9 +149,24 @@ pub unsafe fn statement() -> R<()> {
     with_adapter(|adapter| adapter.at_statement(None))
 }
 
-/// `browser()` with an adapter attached: stop where the call is.
+/// `browser()`: stop where the call is. With no editor attached, an interactive console stops at
+/// a `Browse[1]>` prompt, which drives an adapter of its own; a script continues, as in a
+/// non-interactive GNU R session.
 pub unsafe fn browser() -> R<()> {
+    let state = interp();
+    if state.debugger.is_none() && crate::console_server::interactive() {
+        let terminal = Box::new(crate::console_server::Browse::default());
+        state.debugger = Some(Box::new(Adapter::for_console(terminal)));
+    }
     with_adapter(|adapter| adapter.at_statement(Some("breakpoint")))
+}
+
+/// Called when a closure that `debug()` or `debugonce()` flagged is entered, `depth` frames
+/// deep: the adapter stops at the first statement inside it.
+pub unsafe fn debugged_call(depth: usize) {
+    if let Some(adapter) = interp().debugger.as_mut() {
+        adapter.mode = Mode::FunctionEntry(depth);
+    }
 }
 
 /// Called by the default error handler while an adapter is attached, before the program
@@ -127,11 +186,19 @@ unsafe fn with_adapter(body: impl FnOnce(&mut Adapter)) -> R<()> {
     let Some(mut adapter) = interp().debugger.take() else {
         return Ok(());
     };
-    if !adapter.terminating {
+    if !adapter.terminating && !adapter.detached {
         body(&mut adapter);
     }
     let terminating = adapter.terminating;
-    interp().debugger = Some(adapter);
+    match adapter.detached {
+        // A console's command unwinds once when its client terminates it; the console then
+        // runs on without the adapter.
+        true => drop(adapter),
+        // An editor that attached while this adapter was out, during a `Browse>` stop's
+        // expression, keeps its own adapter; the finished stop's adapter goes.
+        false if interp().debugger.is_some() => drop(adapter),
+        false => interp().debugger = Some(adapter),
+    }
     match terminating {
         true => Err(Unwind::Jump(Box::new(Jump::TopLevel))),
         false => Ok(()),
@@ -148,7 +215,32 @@ impl Adapter {
             break_on_error: false,
             terminating: false,
             canonical: BTreeMap::new(),
+            texts: Vec::new(),
+            console: false,
+            detached: false,
         }
+    }
+
+    /// An adapter for a console session, which the client attaches to rather than launching a
+    /// program.
+    pub fn for_console(transport: Box<dyn Transport>) -> Adapter {
+        let mut adapter = Adapter::new(transport);
+        adapter.console = true;
+        adapter
+    }
+
+    /// Whether the client of a console session left or ended it, so the adapter should go.
+    pub fn is_detached(&self) -> bool {
+        self.detached
+    }
+
+    /// Whether the console's terminal drives the adapter, which then ends with its command.
+    pub fn is_browse(&self) -> bool {
+        self.transport.is_terminal()
+    }
+
+    pub fn is_terminating(&self) -> bool {
+        self.terminating
     }
 
     /// Answers requests until the client has both launched and finished configuring
@@ -252,29 +344,43 @@ impl Adapter {
         if self.terminating {
             return;
         }
-        let srcref = interp().srcref;
-        let Some((path, line, _)) = self.location(srcref) else {
-            return;
-        };
         let depth = interp().frames.len();
-        let at_breakpoint = self
-            .breakpoints
-            .get(&path)
-            .is_some_and(|lines| lines.contains(&line));
-        let reason = forced.or_else(|| match () {
-            _ if self.pause_requested => Some("pause"),
-            _ if at_breakpoint => Some("breakpoint"),
-            _ => match self.mode {
-                Mode::Run => None,
-                Mode::Entry => Some("entry"),
-                Mode::StepIn => Some("step"),
-                Mode::StepOver(limit) => (depth <= limit).then_some("step"),
-                Mode::StepOut(limit) => (depth < limit).then_some("step"),
-            },
-        });
-        if let Some(reason) = reason {
-            self.stop(reason, None, srcref);
+        if let Mode::FunctionEntry(limit) = self.mode
+            && depth < limit
+        {
+            self.mode = Mode::Run;
         }
+        let srcref = interp().srcref;
+        // `browser()` stops even in code with no source to show, such as a function built by
+        // `eval(parse(...))` without srcrefs; other stops need a statement the client can show.
+        let reason = match (forced, self.location(srcref)) {
+            (Some(reason), _) => reason,
+            (None, None) => return,
+            (None, Some((source, line, _))) => {
+                let at_breakpoint = match &source {
+                    Source::File(path) => self
+                        .breakpoints
+                        .get(path)
+                        .is_some_and(|lines| lines.contains(&line)),
+                    Source::Text(_) => false,
+                };
+                let reason = match () {
+                    _ if self.pause_requested => Some("pause"),
+                    _ if at_breakpoint => Some("breakpoint"),
+                    _ => match self.mode {
+                        Mode::Run => None,
+                        Mode::Entry => Some("entry"),
+                        Mode::StepIn => Some("step"),
+                        Mode::StepOver(limit) => (depth <= limit).then_some("step"),
+                        Mode::StepOut(limit) => (depth < limit).then_some("step"),
+                        Mode::FunctionEntry(_) => Some("function breakpoint"),
+                    },
+                };
+                let Some(reason) = reason else { return };
+                reason
+            }
+        };
+        self.stop(reason, None, srcref);
     }
 
     unsafe fn stop(&mut self, reason: &str, text: Option<&str>, srcref: Sexp) {
@@ -285,26 +391,33 @@ impl Adapter {
         let mut frames = stack(srcref);
         // An error stops inside base R's own `stop` or `signalCondition`, which have no source
         // to show; the client lands on the innermost frame it can show instead.
-        let hidden = frames
-            .iter()
-            .take(frames.len().saturating_sub(1))
-            .take_while(|frame| self.location(frame.srcref).is_none())
-            .count();
-        frames.drain(..hidden);
-        let mut stopped = Stopped {
-            frames,
-            references: Vec::new(),
+        let hidden = match text {
+            Some(_) => frames
+                .iter()
+                .take(frames.len().saturating_sub(1))
+                .take_while(|frame| self.location(frame.srcref).is_none())
+                .count(),
+            None => 0,
         };
+        frames.drain(..hidden);
         let mut body =
             json!({ "reason": reason, "threadId": THREAD_ID, "allThreadsStopped": true });
         if let (Some(text), Some(object)) = (text, body.as_object_mut()) {
             object.insert("description".to_owned(), json!("Error"));
             object.insert("text".to_owned(), json!(text.trim_end()));
         }
-        self.event("stopped", body);
+        self.event("stopped", body.clone());
+        let mut stopped = Stopped {
+            frames,
+            references: Vec::new(),
+            event: body,
+        };
         loop {
             let Some(message) = self.transport.receive(true) else {
-                self.terminating = true;
+                match self.console {
+                    true => self.detached = true,
+                    false => self.terminating = true,
+                }
                 break;
             };
             let Some(request) = Request::of(&message) else {
@@ -318,6 +431,11 @@ impl Adapter {
                 }
                 Resume::Terminate => {
                     self.terminating = true;
+                    self.detached = self.console;
+                    break;
+                }
+                Resume::Detach => {
+                    self.detached = true;
                     break;
                 }
             }
@@ -360,8 +478,25 @@ impl Adapter {
                 self.respond(request, body);
                 Resume::Stay
             }
+            "evaluate" if request.arguments["context"] == "ryBrowse" => {
+                let body = evaluate_and_print(&request.arguments, stopped);
+                self.respond(request, body);
+                Resume::Stay
+            }
             "evaluate" => {
                 let body = evaluate(&request.arguments, stopped);
+                self.respond(request, body);
+                Resume::Stay
+            }
+            // An editor that attached during a `Browse[1]>` stop learns of the stop once it has
+            // set its breakpoints.
+            "configurationDone" => {
+                self.respond(request, Ok(json!({})));
+                self.event("stopped", stopped.event.clone());
+                Resume::Stay
+            }
+            "ryView" => {
+                let body = view_in_frame(&request.arguments, stopped);
                 self.respond(request, body);
                 Resume::Stay
             }
@@ -369,8 +504,15 @@ impl Adapter {
                 self.respond(request, Ok(json!({})));
                 Resume::Stay
             }
+            "disconnect" if self.console => {
+                self.respond(request, Ok(json!({})));
+                Resume::Detach
+            }
             "disconnect" | "terminate" => {
                 self.respond(request, Ok(json!({})));
+                if request.command == "terminate" && self.console {
+                    self.event("terminated", json!({}));
+                }
                 Resume::Terminate
             }
             _ => {
@@ -380,21 +522,31 @@ impl Adapter {
         }
     }
 
-    /// A request that arrives while the program runs, or after it ended.
-    fn answer_running(&mut self, request: &Request) {
+    /// A request that arrives while the program runs, or after it ended, or while an attached
+    /// console waits for input.
+    pub(crate) fn answer_running(&mut self, request: &Request) {
         match request.command.as_str() {
             "pause" => {
                 self.pause_requested = true;
                 self.respond(request, Ok(json!({})));
+            }
+            "disconnect" if self.console => {
+                self.detached = true;
+                self.respond(request, Ok(json!({})));
+            }
+            "terminate" if self.console => {
+                self.detached = true;
+                self.terminating = true;
+                self.respond(request, Ok(json!({})));
+                self.event("terminated", json!({}));
             }
             "disconnect" | "terminate" => {
                 self.terminating = true;
                 self.respond(request, Ok(json!({})));
             }
             "continue" => self.respond(request, Ok(json!({ "allThreadsContinued": true }))),
-            "next" | "stepIn" | "stepOut" | "stackTrace" | "scopes" | "variables" | "evaluate" => {
-                self.respond(request, Err("the program is not stopped".to_owned()))
-            }
+            "next" | "stepIn" | "stepOut" | "stackTrace" | "scopes" | "variables" | "evaluate"
+            | "ryView" => self.respond(request, Err("the program is not stopped".to_owned())),
             _ => self.answer_anytime(request),
         }
     }
@@ -402,6 +554,17 @@ impl Adapter {
     /// Requests whose answer does not depend on whether the program runs.
     fn answer_anytime(&mut self, request: &Request) {
         match request.command.as_str() {
+            // A launched program answers these in `configure`; an attached console here.
+            "initialize" => {
+                self.respond(request, Ok(capabilities()));
+                self.event("initialized", json!({}));
+            }
+            "attach" | "configurationDone" => self.respond(request, Ok(json!({}))),
+            "source" => {
+                let body = self.source(&request.arguments);
+                self.respond(request, body);
+            }
+            "ryTable" | "ryRelease" => self.respond(request, data_request(request)),
             "threads" => self.respond(
                 request,
                 Ok(json!({ "threads": [{ "id": THREAD_ID, "name": "R" }] })),
@@ -444,6 +607,25 @@ impl Adapter {
         Ok(json!({ "breakpoints": breakpoints }))
     }
 
+    /// The text of a source with no file behind it.
+    fn source(&self, arguments: &Value) -> Result<Value, String> {
+        let reference = argument_index(arguments, "sourceReference")
+            .or_else(|| {
+                arguments
+                    .pointer("/source/sourceReference")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .ok_or("source needs a `sourceReference`")?;
+        let srcfile = reference
+            .checked_sub(1)
+            .and_then(|index| self.texts.get(index))
+            .ok_or("no such source")?;
+        // SAFETY: the srcfile is preserved while the adapter lives, on the interpreter's thread.
+        let lines = unsafe { srcfile_lines(*srcfile) }.ok_or("the source has no text")?;
+        Ok(json!({ "content": lines.join("\n") }))
+    }
+
     unsafe fn stack_trace(&mut self, arguments: &Value, stopped: &Stopped) -> Value {
         let start = argument_index(arguments, "startFrame").unwrap_or(0);
         let levels = argument_index(arguments, "levels")
@@ -460,12 +642,25 @@ impl Adapter {
                 object.insert("id".to_owned(), json!(index + 1));
                 object.insert("name".to_owned(), json!(frame.name));
                 match self.location(frame.srcref) {
-                    Some((path, line, column)) => {
-                        let name = Path::new(&path)
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.clone());
-                        object.insert("source".to_owned(), json!({ "name": name, "path": path }));
+                    Some((source, line, column)) => {
+                        let source = match source {
+                            Source::File(path) => {
+                                let name = Path::new(&path)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                json!({ "name": name, "path": path })
+                            }
+                            Source::Text(srcfile) => match self.text_index(srcfile) {
+                                Some(index) => json!({
+                                    "name": self.text_name(index),
+                                    "sourceReference": index + 1,
+                                    "presentationHint": "deemphasize",
+                                }),
+                                None => json!({ "name": "<console>" }),
+                            },
+                        };
+                        object.insert("source".to_owned(), source);
                         object.insert("line".to_owned(), json!(line));
                         object.insert("column".to_owned(), json!(column));
                     }
@@ -481,8 +676,8 @@ impl Adapter {
         json!({ "stackFrames": frames, "totalFrames": stopped.frames.len() })
     }
 
-    /// The canonical path, line and column of the statement `srcref` covers.
-    unsafe fn location(&mut self, srcref: Sexp) -> Option<(String, u32, u32)> {
+    /// The source, line and column of the statement `srcref` covers.
+    unsafe fn location(&mut self, srcref: Sexp) -> Option<(Source, u32, u32)> {
         if srcref.kind() != SexpType::Integer || length(srcref) < 6 {
             return None;
         }
@@ -493,41 +688,54 @@ impl Adapter {
         let filename = values::install("filename").ok()?;
         let cell = crate::heap().frame_cell(srcfile, filename)?;
         let name = values::as_string_scalar(cell.cdr()).ok()??;
-        if name.is_empty() {
-            return None;
-        }
-        let path = self
-            .canonical
-            .entry(name)
-            .or_insert_with_key(|name| {
-                let path = Path::new(name);
-                path.is_file().then(|| canonical_or_given(path))
-            })
-            .clone()?;
+        let path = match name.is_empty() {
+            true => None,
+            false => self
+                .canonical
+                .entry(name)
+                .or_insert_with_key(|name| {
+                    let path = Path::new(name);
+                    path.is_file().then(|| canonical_or_given(path))
+                })
+                .clone(),
+        };
+        let source = match path {
+            Some(path) => Source::File(path),
+            None => Source::Text(srcfile),
+        };
         let positions = srcref.slice::<i32>();
         let line = u32::try_from(*positions.first()?).ok()?;
         let column = u32::try_from(*positions.get(4)?).ok()?;
-        Some((path, line, column))
+        Some((source, line, column))
+    }
+
+    /// The index of a srcfile with no file behind it, which must hold its `lines` to be shown.
+    unsafe fn text_index(&mut self, srcfile: Sexp) -> Option<usize> {
+        if let Some(index) = self.texts.iter().position(|&text| text == srcfile) {
+            return Some(index);
+        }
+        srcfile_lines(srcfile)?;
+        crate::heap().preserve(srcfile);
+        self.texts.push(srcfile);
+        Some(self.texts.len() - 1)
+    }
+
+    /// The name the client shows for a text source: its srcfile's `filename`, or `<console>`
+    /// for console input, which has none.
+    unsafe fn text_name(&self, index: usize) -> String {
+        let name = self.texts.get(index).and_then(|&srcfile| {
+            let filename = values::install("filename").ok()?;
+            let cell = crate::heap().frame_cell(srcfile, filename)?;
+            values::as_string_scalar(cell.cdr()).ok()?
+        });
+        match name {
+            Some(name) if !name.is_empty() => name,
+            _ => "<console>".to_owned(),
+        }
     }
 
     fn respond(&mut self, request: &Request, outcome: Result<Value, String>) {
-        let message = match outcome {
-            Ok(body) => json!({
-                "type": "response",
-                "request_seq": request.seq,
-                "success": true,
-                "command": request.command,
-                "body": body,
-            }),
-            Err(message) => json!({
-                "type": "response",
-                "request_seq": request.seq,
-                "success": false,
-                "command": request.command,
-                "message": message,
-            }),
-        };
-        self.transport.send(message);
+        self.transport.send(response(request, outcome));
     }
 
     fn event(&mut self, event: &str, body: Value) {
@@ -542,14 +750,14 @@ const THREAD_ID: u64 = 1;
 /// Variables of a long vector or list beyond this many are not listed.
 const MAX_CHILDREN: usize = 1000;
 
-struct Request {
-    seq: u64,
-    command: String,
-    arguments: Value,
+pub(crate) struct Request {
+    pub(crate) seq: u64,
+    pub(crate) command: String,
+    pub(crate) arguments: Value,
 }
 
 impl Request {
-    fn of(message: &Value) -> Option<Request> {
+    pub(crate) fn of(message: &Value) -> Option<Request> {
         if message.get("type").and_then(Value::as_str) != Some("request") {
             return None;
         }
@@ -559,6 +767,40 @@ impl Request {
             arguments: message.get("arguments").cloned().unwrap_or(Value::Null),
         })
     }
+}
+
+/// The response to `request`: its body, or the message it failed with.
+pub(crate) fn response(request: &Request, outcome: Result<Value, String>) -> Value {
+    match outcome {
+        Ok(body) => json!({
+            "type": "response",
+            "request_seq": request.seq,
+            "success": true,
+            "command": request.command,
+            "body": body,
+        }),
+        Err(message) => json!({
+            "type": "response",
+            "request_seq": request.seq,
+            "success": false,
+            "command": request.command,
+            "message": message,
+        }),
+    }
+}
+
+/// A srcfile's `lines`, when it holds them.
+unsafe fn srcfile_lines(srcfile: Sexp) -> Option<Vec<String>> {
+    let lines = crate::heap().frame_cell(srcfile, values::install("lines").ok()?)?;
+    let lines = lines.cdr();
+    if lines.kind() != SexpType::String || length(lines) == 0 {
+        return None;
+    }
+    Some(
+        (0..length(lines))
+            .map(|index| values::char_str(values::string_elt(lines, index)).into_owned())
+            .collect(),
+    )
 }
 
 fn capabilities() -> Value {
@@ -759,13 +1001,13 @@ unsafe fn scopes(arguments: &Value, stopped: &mut Stopped) -> Result<Value, Stri
     let mut scopes = vec![json!({
         "name": "Locals",
         "presentationHint": "locals",
-        "variablesReference": reference(stopped, env),
+        "variablesReference": reference(stopped, env, Some(String::new())),
         "expensive": false,
     })];
     if env != global_env() {
         scopes.push(json!({
             "name": "Global",
-            "variablesReference": reference(stopped, global_env()),
+            "variablesReference": reference(stopped, global_env(), Some(".GlobalEnv".to_owned())),
             "expensive": false,
         }));
     }
@@ -774,17 +1016,19 @@ unsafe fn scopes(arguments: &Value, stopped: &mut Stopped) -> Result<Value, Stri
 
 /// The object is rooted until the program resumes (`stop` releases its handles), because code
 /// evaluated in the debug console can drop the last other reference to it.
-unsafe fn reference(stopped: &mut Stopped, object: Sexp) -> usize {
+/// `path` is the expression for the object, empty for the selected frame's own environment.
+unsafe fn reference(stopped: &mut Stopped, object: Sexp, path: Option<String>) -> usize {
     crate::heap().root(object);
-    stopped.references.push(object);
+    stopped.references.push((object, path));
     stopped.references.len()
 }
 
 unsafe fn variables(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
     let object = argument_index(arguments, "variablesReference")
         .and_then(|reference| reference.checked_sub(1))
-        .and_then(|index| stopped.references.get(index).copied())
+        .and_then(|index| stopped.references.get(index).cloned())
         .ok_or("no such variable reference")?;
+    let (object, path) = object;
     let mut variables = Vec::new();
     if object.kind() == SexpType::Environment {
         for symbol in envir::env_symbols(object, false, true) {
@@ -795,15 +1039,29 @@ unsafe fn variables(arguments: &Value, stopped: &mut Stopped) -> Result<Value, S
             let value = if cell.has_gp(gp::ACTIVE_BINDING) {
                 variable_text(&name, "<active binding>", "active binding")
             } else {
-                variable(stopped, &name, cell.cdr())
+                // `...` and `..1` are not values an expression can name on their own.
+                let dots = name == "..."
+                    || name.strip_prefix("..").is_some_and(|rest| {
+                        !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+                    });
+                let path = path.as_deref().filter(|_| !dots).map(|path| match path {
+                    "" => quoted_name(&name),
+                    path => format!("{path}${}", quoted_name(&name)),
+                });
+                variable(stopped, &name, cell.cdr(), path)
             };
             variables.push(value);
         }
     } else if object.kind() == SexpType::List {
         let names = values::names(object);
         for index in 0..length(object).min(MAX_CHILDREN) {
-            let name = element_name(names, index).unwrap_or_else(|| format!("[[{}]]", index + 1));
-            variables.push(variable(stopped, &name, object.element(index)));
+            let element = element_name(names, index);
+            let path = path.as_deref().map(|path| match &element {
+                Some(name) => format!("{path}[[{}]]", string_literal(name)),
+                None => format!("{path}[[{}]]", index + 1),
+            });
+            let name = element.unwrap_or_else(|| format!("[[{}]]", index + 1));
+            variables.push(variable(stopped, &name, object.element(index), path));
         }
     }
     Ok(json!({ "variables": variables }))
@@ -817,7 +1075,50 @@ unsafe fn element_name(names: Sexp, index: usize) -> Option<String> {
     (!name.is_empty() && name != "NA").then_some(name)
 }
 
-unsafe fn variable(stopped: &mut Stopped, name: &str, value: Sexp) -> Value {
+/// A name as R code: backquoted unless it is syntactic.
+fn quoted_name(name: &str) -> String {
+    let mut characters = name.chars();
+    let syntactic = match characters.next() {
+        Some('.') => !name[1..].starts_with(|character: char| character.is_ascii_digit()),
+        Some(first) => first.is_alphabetic(),
+        None => false,
+    } && name
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
+        && !matches!(
+            name,
+            "if" | "else"
+                | "repeat"
+                | "while"
+                | "function"
+                | "for"
+                | "next"
+                | "break"
+                | "TRUE"
+                | "FALSE"
+                | "NULL"
+                | "Inf"
+                | "NaN"
+                | "NA"
+                | "NA_integer_"
+                | "NA_real_"
+                | "NA_character_"
+                | "NA_complex_"
+                | "in"
+        );
+    match syntactic {
+        true => name.to_owned(),
+        false => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
+    }
+}
+
+fn string_literal(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"))
+}
+
+/// `path` is the expression that evaluates to the value in the selected frame, sent as the
+/// variable's `evaluateName` so the client can watch it or open it in the data viewer.
+unsafe fn variable(stopped: &mut Stopped, name: &str, value: Sexp, path: Option<String>) -> Value {
     // An unforced promise is a lazy argument; forcing it to show it would run its code.
     let value = match value.kind() {
         SexpType::Promise if value.car() == values::unbound() => {
@@ -832,15 +1133,19 @@ unsafe fn variable(stopped: &mut Stopped, name: &str, value: Sexp) -> Value {
         _ => false,
     };
     let reference = match expandable {
-        true => reference(stopped, value),
+        true => reference(stopped, value, path.clone()),
         false => 0,
     };
-    json!({
+    let mut variable = json!({
         "name": name,
         "value": summary(value),
         "type": crate::coerce::type_name(value),
         "variablesReference": reference,
-    })
+    });
+    if let Some(path) = path {
+        variable["evaluateName"] = Value::String(path);
+    }
+    variable
 }
 
 fn variable_text(name: &str, value: &str, kind: &str) -> Value {
@@ -849,7 +1154,7 @@ fn variable_text(name: &str, value: &str, kind: &str) -> Value {
 
 /// One line that shows a value. A long vector is shown by its type and length, because
 /// deparsing a million elements to show sixty characters of them would stall the client.
-unsafe fn summary(value: Sexp) -> String {
+pub(crate) unsafe fn summary(value: Sexp) -> String {
     const LONGEST: usize = 200;
     match value.kind() {
         SexpType::Environment => {
@@ -895,14 +1200,67 @@ unsafe fn is_small(value: Sexp, budget: &mut usize) -> bool {
 /// `evaluate`: runs the expression in the selected frame, or at the top level, and shows the
 /// value. Errors come back as a failed response rather than console output.
 unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
+    let value = evaluate_in_frame(arguments, stopped)?;
+    let reference = match value.kind() {
+        SexpType::Environment => reference(stopped, value, None),
+        SexpType::List if length(value) > 0 => reference(stopped, value, None),
+        _ => 0,
+    };
+    Ok(json!({ "result": summary(value), "variablesReference": reference }))
+}
+
+/// An expression typed at a `Browse[1]>` prompt: evaluated in the selected frame and printed as
+/// the console prints a visible value at the top level.
+unsafe fn evaluate_and_print(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
+    interp().visible = true;
+    let value = evaluate_in_frame(arguments, stopped)?;
+    if interp().visible {
+        let env = match arguments.get("frameId") {
+            Some(_) => frame_of(arguments, stopped)?.env,
+            None => global_env(),
+        };
+        print::print_value_top(value, env).map_err(|unwind| match unwind {
+            Unwind::Error(failure) => failure.message,
+            _ => "printing the value was interrupted".to_owned(),
+        })?;
+    }
+    Ok(json!({ "result": "", "variablesReference": 0 }))
+}
+
+/// `ryView`: opens a data viewer on the value of an expression in the selected frame.
+unsafe fn view_in_frame(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
+    let value = evaluate_in_frame(arguments, stopped)?;
+    let title = arguments
+        .get("expression")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    crate::viewer::open(value, title)
+}
+
+/// Answers `ryTable` and `ryRelease`, which page through an open view whether or not the program
+/// is stopped.
+fn data_request(request: &Request) -> Result<Value, String> {
+    // SAFETY: requests are answered on the interpreter's thread.
+    unsafe { crate::viewer::request(&request.command, &request.arguments) }
+}
+
+/// The value of the request's `expression` in its `frameId`, or at the top level. The value is
+/// rooted until the program resumes.
+unsafe fn evaluate_in_frame(arguments: &Value, stopped: &mut Stopped) -> Result<Sexp, String> {
     let expression = arguments
         .get("expression")
         .and_then(Value::as_str)
-        .ok_or("evaluate needs an `expression`")?;
+        .ok_or("the request needs an `expression`")?;
     let env = match arguments.get("frameId") {
         Some(_) => frame_of(arguments, stopped)?.env,
         None => global_env(),
     };
+    evaluate_text(expression, env)
+}
+
+/// Evaluates `expression` in `env` for the client: an error is returned rather than written to
+/// the console, and the interpreter's error state is restored afterwards.
+pub(crate) unsafe fn evaluate_text(expression: &str, env: Sexp) -> Result<Sexp, String> {
     let state = interp();
     let shown = std::mem::replace(&mut state.show_error_messages, false);
     // Stopped on an uncaught error, the program is still inside its error handling, where a
@@ -924,14 +1282,7 @@ unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, St
     state.in_error = in_error;
     state.srcref = srcref;
     match result {
-        Ok(value) => {
-            let reference = match value.kind() {
-                SexpType::Environment => reference(stopped, value),
-                SexpType::List if length(value) > 0 => reference(stopped, value),
-                _ => 0,
-            };
-            Ok(json!({ "result": summary(value), "variablesReference": reference }))
-        }
+        Ok(value) => Ok(value),
         Err(Unwind::Error(failure)) => Err(failure.message),
         Err(Unwind::Interrupt) => Err("interrupted".to_owned()),
         // An error no handler caught ran the default handler, which records the message and

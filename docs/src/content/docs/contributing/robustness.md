@@ -81,13 +81,15 @@ queued whenever a query is cancelled.
 
 - edits, including several ranged changes in one notification, typing bursts, full-text
   replacements, emoji and CJK text, and UTF-8 or UTF-16 position encodings;
-- opening, closing and saving files, and untitled buffers;
+- opening, closing and saving files, untitled buffers, and an R Markdown document whose positions
+  count on the document's own text, not on the R script its chunks make;
 - disk changes behind the editor's back to R files, `DESCRIPTION`, `NAMESPACE`, `ry.toml`, data files
   and test files, with watcher events delayed, duplicated, and delivered in shuffled batches;
 - requests of every kind at valid and invalid positions, abandoned requests, and requests that race
   edits;
 - protocol violations, such as changing, saving or closing a document that was never opened;
-- push and pull diagnostics clients.
+- push and pull diagnostics clients, and sessions whose first actions arrive before the startup
+  warm-up has run.
 
 At random checkpoints the session lets everything settle and checks the server against a fresh one
 started on the same disk with the same open buffers:
@@ -112,7 +114,9 @@ injected IO errors is not built yet, so read failures and partial writes are not
 
 Each `crates/ry/tests/scenarios/*.scenario` file is one journey. Editor steps drive the language
 server in-process through the simulator and settle after every step; command-line steps run the real
-`ry` binary in the scenario's workspace. When a journey ends, its editor session is checked against a
+`ry` binary in the scenario's workspace. The in-process server trusts the check records that binary
+writes, as a real server trusts its own, so a journey can run `ry check` and then open the project.
+When a journey ends, its editor session is checked against a
 fresh server, exactly as a simulation checkpoint is. A scenario reads like this:
 
 ```text
@@ -136,7 +140,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | Command | Meaning |
 | --- | --- |
 | `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME` | Skip the scenario unless GNU R is installed, `libR.so` is built beside `ry` too, or GNU R has the package installed. |
-| `client pull` / `client utf8` | Start the editor as a pull-diagnostics or UTF-8 client. Must come before the first editor step. |
+| `client pull` / `client utf8` / `client cold` | Start the editor as a pull-diagnostics or UTF-8 client, or one whose first steps arrive before the startup warm-up has run. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. |
 | `remove PATH` | Delete a file, with a watcher event. |
 | `open`, `close`, `save PATH` | Buffer lifecycle. |
@@ -146,6 +150,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `format PATH` | Format the buffer and apply the edits. |
 | `expect diagnostics PATH none` / `expect diagnostics PATH "needle"` | No diagnostics, or one whose code or message contains the needle. |
 | `expect no diagnostic PATH "needle"` | No diagnostic contains the needle. |
+| `expect early diagnostics PATH "needle"` / `expect no early diagnostic PATH "needle"` | The first diagnostics the server pushed for the file do, or do not, contain the needle. |
 | `expect hover PATH "anchor" "needle"` | The hover at the anchor contains the needle. |
 | `expect definition PATH "anchor" TARGET "text"` | Goto-definition lands at the text in the target file. |
 | `expect completion PATH after "anchor" LABEL` | Completion after the anchor offers the label. |

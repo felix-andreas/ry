@@ -392,6 +392,37 @@ apply_twice <- function(path) path(path)
 apply_twice: Unknown
 30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
 
+#---- an_xml_nodeset_is_a_list_of_nodes_and_keeps_its_class_when_subset
+#namespace import(xml2)
+first_link <- function(page) xml_find_all(page, ".//a")[1]
+texts <- function(page) lapply(xml_find_all(page, ".//a"), xml_text)
+nodes_are_not_numbers <- function(page) xml_find_all(page, ".//a") + 1L
+#++++
+first_link: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> xml_nodeset
+texts: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> list[character]
+nodes_are_not_numbers: Unknown
+192..218 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[xml_node]`
+
+#---- a_json_string_fits_a_character_result_but_is_not_a_number
+#namespace import(jsonlite)
+encode_all <- function(values) vapply(values, function(x) toJSON(x), character(1))
+json_is_not_a_number <- function(x) toJSON(x) + 1L
+#++++
+encode_all: <T> fn(values: list[T] | T[]) -> character[]
+json_is_not_a_number: Unknown
+147..156 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- extends_without_a_second_class_lists_the_superclasses
+#namespace import(methods)
+superclasses <- function(name) extends(getClass(name))
+is_child <- function(name) extends(name, "Parent")
+not_a_flag <- function(name) if (extends(name)) 1L else 2L
+#++++
+superclasses: <T> fn(name: T) -> character[]
+is_child: <T> fn(name: T) -> logical
+not_a_flag: Unknown
+166..179 error[type-mismatch] expected `logical`, found `character[]`
+
 #---- a_purrr_formula_lambda_is_accepted
 library(purrr)
 total <- reduce(list(1, 2, 3), ~ .x + .y)
@@ -402,3 +433,62 @@ Any
 total: Any
 integer[]
 safe_log: fn(...: Any) -> list{result: Any, error: Any}
+
+#---- arithmetic_on_an_untyped_parameter_may_be_a_matrix
+#namespace import(quadprog)
+qp <- function(sigma) {
+  n <- nrow(sigma)
+  solve.QP(Dmat = 2 * sigma, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
+}
+#++++
+qp: <T: numeric> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
+
+#---- arithmetic_on_a_known_number_is_still_not_a_matrix
+#namespace import(quadprog)
+qp <- function(n) solve.QP(Dmat = 2 * 3, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
+#++++
+qp: Unknown
+62..67 error[type-mismatch] expected `matrix`, found `double`
+
+#---- an_untyped_value_plus_a_period_may_be_a_date
+#namespace import(lubridate)
+business_days <- function(start, days = 45L) {
+  candidates <- start + days(seq_len(days * 2L))
+  candidates[!wday(candidates) %in% c(1L, 7L)]
+}
+#++++
+business_days: <T, U: numeric> fn(start: T, [days]: U) -> Unknown
+
+#---- a_string_plus_a_period_is_still_an_error
+#namespace import(lubridate)
+later <- function() "2024-01-01" + days(1L)
+#++++
+later: Unknown
+49..72 error[type-mismatch] `+` is not defined between `character` and `Period`
+
+#---- a_sum_of_untyped_arithmetic_is_not_a_difftime
+#namespace import(quadprog)
+v <- function(w, mu) sum(w * mu) - qnorm(0.5)
+#++++
+v: fn(w: Unknown, mu: Unknown) -> Unknown
+
+#---- date_minus_untyped_arithmetic_is_still_a_date
+f <- function(x) {
+  d <- as.Date("2020-01-01") - 2 * x
+  d < as.Date("2021-01-01")
+}
+#++++
+f: <T: numeric> fn(x: T) -> logical
+
+#---- polars_members_are_typed
+library(polars)
+frame <- as_polars_df(data.frame(x = c(1, 2)))
+doubled <- frame$with_columns((pl$col("x") * 2)$alias("y"))
+summary <- doubled$select(pl$col("y")$mean())
+rows <- doubled$height
+#++++
+Any
+frame: polars_data_frame
+doubled: polars_data_frame
+summary: polars_data_frame
+rows: integer

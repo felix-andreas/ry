@@ -43,7 +43,11 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("octsize", do_octal_size),
     ("charClass", do_char_class),
     ("flushconsole", do_flush_console),
-    ("processevents", |_| Ok(nil())),
+    ("processevents", |_| {
+        // SAFETY: `process.events()` is a point where GNU R's event loop runs R handlers.
+        unsafe { crate::help_server::serve_pending()? };
+        Ok(nil())
+    }),
     ("tzcode_type", |_| unsafe { scalar_string("internal") }),
     // GNU R for Windows' console routines, for a session without its GUI: `Rterm`'s answers.
     ("winver", |_| unsafe {
@@ -93,8 +97,15 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("dataentry", |call| {
         Err(call.error("data entry cannot be used non-interactively"))
     }),
-    ("dataviewer", |call| {
-        Err(call.error("View() cannot be used non-interactively"))
+    // utils' `View()` formats the whole object before it calls this; ry's own `View()` in
+    // `tools:ry` stays lazy.
+    ("dataviewer", |call| unsafe {
+        crate::console_server::show(
+            call.arg(0),
+            &values::as_string_scalar(call.arg(1))?.unwrap_or_default(),
+        )
+        .map_err(|message| call.error(message))?;
+        Ok(nil())
     }),
     ("edit", |call| unsafe { edit(call) }),
     ("fileedit", |call| {
@@ -1346,19 +1357,26 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
 struct Cell {
     vector: Sexp,
     levels: Option<Sexp>,
+    scipen: i32,
 }
 
 impl Cell {
     unsafe fn new(vector: Sexp) -> R<Cell> {
         let levels =
             values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
-        Ok(Cell { vector, levels })
+        let scipen = crate::format::Settings::current_scipen();
+        Ok(Cell {
+            vector,
+            levels,
+            scipen,
+        })
     }
 
     /// Element `index` as text, and whether it is a string (which quoting applies to); `None`
     /// for a missing value.
     unsafe fn text(&self, index: usize, decimal: &str) -> R<Option<(String, bool)>> {
         let vector = self.vector;
+        let scipen = self.scipen;
         if index >= length(vector) {
             return Ok(None);
         }
@@ -1399,7 +1417,10 @@ impl Cell {
                 if value.is_nan() {
                     None
                 } else {
-                    Some((with_decimal(format_real_alone_scipen(value, 15)), false))
+                    Some((
+                        with_decimal(format_real_alone_scipen(value, 15, scipen)),
+                        false,
+                    ))
                 }
             }
             SexpType::Complex => {

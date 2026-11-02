@@ -16,6 +16,7 @@ pub mod types;
 
 use {
     crate::{hir::Symbol, sorted::SortedSet},
+    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -23,7 +24,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, Parse, SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
     },
@@ -526,13 +527,23 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
+    package_scheme_exists_in(db, ProjectFiles::try_get(db), stubs::stubs(db), name)
+}
+
+/// [`package_scheme_exists`] for a caller that already holds the project and the stubs.
+pub fn package_scheme_exists_in(
+    db: &dyn Db,
+    files: Option<ProjectFiles>,
+    library: Option<&stubs::StubLibrary<'_>>,
+    name: &str,
+) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
+    if files.is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
-    stubs::stubs(db).is_some_and(|library| {
+    library.is_some_and(|library| {
         library.schemes.contains_key(name)
             || library.nominals.contains(name)
             || library.known_exports.contains(name)
@@ -1374,7 +1385,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, name.as_str()), deferred),
+            None => frame_binder(db, item, types::Name::new(db, &name), deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -1473,7 +1484,7 @@ fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'db>>
     // Through the per-name projections, not the project-wide maps: a new top-level name
     // anywhere changes those maps, and reading them here would re-run every item's edges.
     let projections = |name: Symbol| {
-        let name = types::QueryName::new(db, types::Name::new(db, name.as_str()));
+        let name = types::QueryName::new(db, types::Name::new(db, &name));
         (test.then(|| test_name(db, name)), package_name(db, name))
     };
     let reads = item_interface_reads(db, item);
@@ -1541,29 +1552,35 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
+    // A green walk: the red preorder built a cursor node for every element of every item.
+    if node.kind() == SyntaxKind::FUNCTION_DEF {
+        return 0;
+    }
     let mut count = 0;
-    let mut preorder = node.preorder_with_tokens();
-    while let Some(event) = preorder.next() {
-        let rowan::WalkEvent::Enter(element) = event else {
+    let green = node.green();
+    let mut stack = vec![(node.kind(), green.children())];
+    while let Some((parent_kind, children)) = stack.last_mut() {
+        let parent_kind = *parent_kind;
+        let Some(element) = children.next() else {
+            stack.pop();
             continue;
         };
         match element {
-            SyntaxElement::Node(child) => {
-                if child.kind() == SyntaxKind::FUNCTION_DEF {
-                    preorder.skip_subtree();
+            NodeOrToken::Node(child) => {
+                let kind = RLanguage::kind_from_raw(child.kind());
+                if kind != SyntaxKind::FUNCTION_DEF {
+                    stack.push((kind, child.children()));
                 }
             }
-            SyntaxElement::Token(token) => {
-                let writes = match token.kind() {
+            NodeOrToken::Token(token) => {
+                let writes = match RLanguage::kind_from_raw(token.kind()) {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
                     | SyntaxKind::MINUS_GREATER2
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
-                    SyntaxKind::EQ => token
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR),
+                    SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
                     SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
                         token.text().trim_matches('`'),
@@ -1830,7 +1847,7 @@ fn check_item_against<'db>(
 )]
 pub fn global_scheme<'db>(db: &'db dyn Db, item: Item<'db>) -> types::TypeScheme<'db> {
     item_check(db, item)
-        .and_then(|check| check.scheme)
+        .and_then(|check| check.scheme.clone())
         .unwrap_or_else(|| types::TypeScheme::monomorphic(types::unknown(db)))
 }
 
@@ -1862,7 +1879,7 @@ fn global_scheme_recover<'db>(
 }
 
 #[salsa::tracked(
-    returns(clone),
+    returns(as_ref),
     cycle_fn = item_check_recover,
     cycle_initial = item_check_initial
 )]
@@ -1964,6 +1981,8 @@ struct SalsaGlobals<'db, 'a> {
     group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    definitions: TypeDefinitions<'db>,
+    library: Option<&'db stubs::StubLibrary<'db>>,
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
@@ -1977,24 +1996,46 @@ struct SalsaGlobals<'db, 'a> {
 /// declarations, which are visible to itself alone, shadow the project's, and the project's
 /// shadow the stubs'. A merged map per file would copy every visible definition into every
 /// file that reads one, which costs time and memory in proportion to files times types.
-#[derive(Debug, Clone, Copy)]
-pub struct TypeDefinitions {
+#[derive(Clone, Copy)]
+pub struct TypeDefinitions<'db> {
     file: SourceFile,
+    package_file: bool,
+    files: Option<ProjectFiles>,
+    library: Option<&'db stubs::StubLibrary<'db>>,
 }
 
-impl TypeDefinitions {
-    pub fn of(file: SourceFile) -> Self {
-        Self { file }
+impl std::fmt::Debug for TypeDefinitions<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypeDefinitions")
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'db> TypeDefinitions<'db> {
+    /// Fetches what every lookup needs once, because a checker asks about hundreds of names
+    /// per item and each salsa fetch records a dependency edge.
+    pub fn of(db: &'db dyn Db, file: SourceFile) -> Self {
+        Self {
+            file,
+            package_file: *file.kind(db) == DocumentKind::Package,
+            files: ProjectFiles::try_get(db),
+            library: stubs::stubs(db),
+        }
     }
 
-    pub fn get<'db>(
+    pub fn library(self) -> Option<&'db stubs::StubLibrary<'db>> {
+        self.library
+    }
+
+    pub fn get(
         self,
         db: &'db dyn Db,
         name: types::Name<'db>,
     ) -> Option<&'db annotations::NamedDefinition<'db>> {
-        let files = ProjectFiles::try_get(db);
         // A package file's definitions are the project's, unless there is no project.
-        if (files.is_none() || *self.file.kind(db) != DocumentKind::Package)
+        if (self.files.is_none() || !self.package_file)
             && let Some(definition) = file_type_definitions(db, self.file)
                 .iter()
                 .rev()
@@ -2002,12 +2043,12 @@ impl TypeDefinitions {
         {
             return Some(definition);
         }
-        if let Some(files) = files
+        if let Some(files) = self.files
             && let Some(definition) = project_type_definition(db, files, name)
         {
             return Some(definition);
         }
-        stubs::stubs(db)?.type_definitions.get(&name)
+        self.library?.type_definitions.get(&name)
     }
 }
 
@@ -2036,7 +2077,7 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
 /// sets on a plain list, which no type tracks, so arithmetic on a list may be that method.
 #[salsa::tracked]
 fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
-    let definitions = TypeDefinitions::of(file);
+    let definitions = TypeDefinitions::of(db, file);
     let tracked = |class: &String| {
         definitions
             .get(db, types::Name::new(db, class.as_str()))
@@ -2088,7 +2129,7 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
-    frame_binder_of(db, item, Symbol::new(name.text(db)), deferred)
+    FrameBinders::of(db, item).binder(Symbol::new(name.text(db)), deferred)
 }
 
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
@@ -2104,50 +2145,58 @@ fn item_frame_binders<'db>(
     let Some(naming) = item_naming(db, item) else {
         return binders;
     };
+    let frame = FrameBinders::of(db, item);
     let names = naming
         .non_locals
         .values()
         .chain(naming.quiet_reads.values())
         .chain(naming.quiet_operator_reads.iter());
     for &name in names {
-        binders.entry(name).or_insert_with(|| {
-            (
-                frame_binder_of(db, item, name, false),
-                frame_binder_of(db, item, name, true),
-            )
-        });
+        binders
+            .entry(name)
+            .or_insert_with(|| (frame.binder(name, false), frame.binder(name, true)));
     }
     binders
 }
 
-fn frame_binder_of<'db>(
-    db: &'db dyn Db,
+/// What every binder lookup of one item reads, fetched once: each salsa read records a
+/// dependency edge, and an item looks up dozens of names.
+struct FrameBinders<'db> {
     item: Item<'db>,
-    name: Symbol,
-    deferred: bool,
-) -> Option<Item<'db>> {
-    let file = *item.file(db);
-    let binders = file_binders(db, file).get(&name)?;
-    if deferred
-        && matches!(
-            *file.kind(db),
-            DocumentKind::Test | DocumentKind::TestHelper
-        )
-        && binders.iter().any(|&(_, binder)| binder == item)
-    {
-        return Some(item);
-    }
-    let visible = match deferred {
-        true => &binders[..],
-        false => {
-            let index = item_tree_positions(db, file)
+    binders: &'db FxHashMap<Symbol, Vec<(usize, Item<'db>)>>,
+    test: bool,
+    /// The item's position in its file's item tree.
+    position: usize,
+}
+
+impl<'db> FrameBinders<'db> {
+    fn of(db: &'db dyn Db, item: Item<'db>) -> FrameBinders<'db> {
+        let file = *item.file(db);
+        FrameBinders {
+            item,
+            binders: file_binders(db, file),
+            test: matches!(
+                *file.kind(db),
+                DocumentKind::Test | DocumentKind::TestHelper
+            ),
+            position: item_tree_positions(db, file)
                 .get(&item)
                 .copied()
-                .unwrap_or_else(|| item_tree(db, file).len());
-            &binders[..binders.partition_point(|&(at, _)| at < index)]
+                .unwrap_or_else(|| item_tree(db, file).len()),
         }
-    };
-    visible.last().map(|&(_, item)| item)
+    }
+
+    fn binder(&self, name: Symbol, deferred: bool) -> Option<Item<'db>> {
+        let binders = self.binders.get(&name)?;
+        if deferred && self.test && binders.iter().any(|&(_, binder)| binder == self.item) {
+            return Some(self.item);
+        }
+        let visible = match deferred {
+            true => &binders[..],
+            false => &binders[..binders.partition_point(|&(at, _)| at < self.position)],
+        };
+        visible.last().map(|&(_, item)| item)
+    }
 }
 
 impl<'db, 'a> SalsaGlobals<'db, 'a> {
@@ -2162,6 +2211,8 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             group,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            definitions: TypeDefinitions::of(db, *item.file(db)),
+            library: stubs::stubs(db),
             schemes: RefCell::default(),
             item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
@@ -2309,8 +2360,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
-        let library = stubs::stubs(self.db)?;
-        library.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 
     fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
@@ -2319,19 +2369,19 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 }
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
+    fn scheme(&self, name: Symbol, deferred: bool) -> Option<types::TypeScheme<'db>> {
         let interned = types::Name::new(self.db, name);
         if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
             return scheme.clone();
         }
-        let scheme = self.lookup_scheme(name, interned, deferred);
+        let scheme = self.lookup_scheme(name.as_str(), interned, deferred);
         self.schemes
             .borrow_mut()
             .insert((interned, deferred), scheme.clone());
         scheme
     }
 
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
+    fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool {
         let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
             || self
@@ -2339,7 +2389,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
                 .any(|binding| binding.winner.is_some() || !binding.conditional_writers.is_empty())
     }
 
-    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn earlier_binding(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
@@ -2347,7 +2397,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         Some(self.item_scheme(self.winner(interned)?))
     }
 
-    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn namespace_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return self.scheme(name, false);
         }
@@ -2359,10 +2409,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         {
             return Some(scheme);
         }
-        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name.as_str())?.last().cloned()
     }
 
-    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+    fn enclosing_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
@@ -2371,16 +2421,16 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .find_map(|layer| self.layer_scheme(layer, interned))
     }
 
-    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
-        let library = stubs::stubs(self.db)?;
+    fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+        let library = self.library?;
         match library.schemes.get(name) {
-            Some(candidates) => Some(candidates.clone()),
-            None => library.known_exports.contains(name).then(Vec::new),
+            Some(candidates) => Some(candidates),
+            None => library.known_exports.contains(name).then_some(&[]),
         }
     }
 
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
+    fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
+        let candidates = self.library?.schemes.get(name.as_str())?;
         if candidates.len() < 2 {
             return None;
         }
@@ -2389,11 +2439,11 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
-        Some(candidates.clone())
+        Some(candidates)
     }
 
-    fn type_definitions(&self) -> TypeDefinitions {
-        TypeDefinitions::of(self.file)
+    fn type_definitions(&self) -> TypeDefinitions<'db> {
+        self.definitions
     }
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
@@ -2405,7 +2455,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 }
 
@@ -2519,6 +2569,24 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
 /// registration that creates a bare-name binding (`setClass`/`setMethod` bind nothing).
 fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     use syntax::SyntaxKind;
+    // `if (!isGeneric("f")) { ...; setGeneric("f", fun) }` makes the generic only when no
+    // package made it first, so either way `f` is a function once the statement has run
+    // (kernlab's `type`).
+    if node.kind() == SyntaxKind::IF_EXPR {
+        if node
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::ELSE_KW)
+        {
+            return None;
+        }
+        let body = node.children().nth(1)?;
+        if body.kind() != SyntaxKind::BRACE_EXPR {
+            return set_generic_target(&body);
+        }
+        return body
+            .children()
+            .find_map(|statement| set_generic_target(&statement));
+    }
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
     }
@@ -2728,7 +2796,6 @@ mod tests {
             !bad_check.errors.is_empty(),
             "character into numeric parameter must report"
         );
-        drop((use_check, bad_check));
 
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());

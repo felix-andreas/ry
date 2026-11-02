@@ -283,6 +283,57 @@ fn a_strict_project_binds_pure_constants_lazily_on_both_runtimes() {
 }
 
 #[test]
+fn r6_generators_bind_lazily_and_build_the_same_classes_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let installed = Command::new("Rscript")
+        .args([
+            "-e",
+            "quit(status = !requireNamespace('R6', quietly = TRUE))",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !installed {
+        eprintln!("skipped: R6 is not installed");
+        return;
+    }
+    // `Child` inherits from a class of an earlier file, and a method calls a function that
+    // comes later, which only the method's call reads.
+    let root = package(&[
+        (
+            "DESCRIPTION",
+            "Package: counters\nVersion: 1.0\nImports: R6\n",
+        ),
+        ("NAMESPACE", "importFrom(R6, R6Class)\n"),
+        (
+            "R/a.R",
+            "Base <- R6Class(\"Base\", public = list(n = 0, add = function() { self$n <- self$n + step(); invisible(self) }))\n",
+        ),
+        (
+            "R/b.R",
+            "Child <- R6::R6Class(\"Child\", inherit = Base, public = list(twice = function() { self$add(); self$add() }))\n\
+             step <- function() 10\n",
+        ),
+    ]);
+    let probe =
+        "x <- Child$new(); x$twice(); cat(x$n, class(x), environmentName(Child$parent_env), '\\n')";
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &[probe]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("3 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("20 Child Base R6 counters"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn a_failing_statement_names_its_file_and_line() {
     if !r_available() {
         return;
@@ -450,14 +501,22 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
             files[3].1.to_owned()
         };
         files[3].1 = &second;
+        // The first lazy run saves the definitions' metadata and the second restores it.
+        let root = package(&files);
+        let cache = tempfile::tempdir().expect("temp dir");
         let mut printed = Vec::new();
-        for lazy in ["TRUE", "FALSE"] {
-            let root = package(&files);
+        for lazy in ["TRUE", "TRUE", "FALSE"] {
             let reload = format!(
                 "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
                 root.path().display().to_string()
             );
-            let output = ry_load(root.path(), &[&reload, probe]);
+            let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .arg("load")
+                .arg(root.path())
+                .args(["-e", &reload, "-e", probe])
+                .env("XDG_CACHE_HOME", cache.path())
+                .output()
+                .expect("run ry load");
             let text = text(&output);
             assert!(output.status.success(), "{text}");
             let line = text
@@ -472,8 +531,13 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
                 .to_owned();
             printed.push((text, line, summary));
         }
-        let (lazy, eager) = (&printed[0], &printed[1]);
+        let (lazy, restored, eager) = (&printed[0], &printed[1], &printed[2]);
         assert_eq!(lazy.1, eager.1, "lazy:\n{}\neager:\n{}", lazy.0, eager.0);
+        assert_eq!(
+            restored.1, eager.1,
+            "restored:\n{}\neager:\n{}",
+            restored.0, eager.0
+        );
         assert!(lazy.1.contains(expected), "{}", lazy.0);
         assert!(lazy.2.contains(lazy_summary), "{}", lazy.0);
         let statements = if uses_class { 8 } else { 7 };
@@ -484,6 +548,61 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
             "{}",
             eager.0
         );
+    }
+}
+
+#[test]
+fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_needs_it() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: squares\nVersion: 1.0\n"),
+        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "R/a.R",
+            "Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
+             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n",
+        ),
+    ]);
+    let saved = root.path().join("sq.rds");
+    let load = |lazy: &str, probe: &str| {
+        let reload = format!(
+            "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+            root.path().display().to_string()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .args(["-e", &reload, "-e", probe])
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .output()
+            .expect("run ry load");
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    load("FALSE", &format!("saveRDS(Sq(side = 3), {saved:?})"));
+    // Each probe reaches the method first through a different door: a lookup of the generic,
+    // a dispatch on an object read back from disk, which needs no class lookup, and printing.
+    for probe in [
+        "cat('probe:', existsMethod('show', 'Sq'), '\\n')".to_owned(),
+        format!("x <- readRDS({saved:?}); cat('probe: '); show(x)"),
+        "cat('probe: '); print(Sq(side = 2))".to_owned(),
+    ] {
+        let lazy = load("TRUE", &probe);
+        let eager = load("FALSE", &probe);
+        assert!(
+            lazy.contains("2 S4 definitions held back until first use"),
+            "{lazy}"
+        );
+        let line = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("probe:"))
+                .unwrap_or_else(|| panic!("no probe line in {text}"))
+                .to_owned()
+        };
+        assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
     }
 }
 

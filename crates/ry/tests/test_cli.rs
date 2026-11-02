@@ -1011,10 +1011,10 @@ fn check_analyses_r_chunks_in_a_literate_document() {
         "the chunk error is located in the original document: {rendered}"
     );
     let formatted = ry(directory.path(), &["fmt", "--check", "."]);
-    assert!(
-        !formatted.stdout.contains("1 file"),
-        "fmt must not pick up literate documents: {}",
-        formatted.stdout
+    assert_eq!(
+        formatted.code, 0,
+        "the chunks are already formatted: {}",
+        formatted.stderr
     );
 }
 
@@ -1192,25 +1192,71 @@ fn fmt_range_formats_only_the_lines_it_touches() {
 }
 
 #[test]
-fn fmt_on_a_deliberately_skipped_file_exits_clean() {
-    let directory = project(&[("report.Rmd", "# Title\n\n```{r}\nx<-1\n```\n")]);
+fn fmt_formats_only_the_r_chunks_of_a_literate_document() {
+    let document = "# Title\n\nProse  with  spaces.\n\n```{r}\nx<-1\n```\n";
+    let directory = project(&[("report.Rmd", document)]);
     for arguments in [
         vec!["fmt", "--diff", "report.Rmd"],
         vec!["fmt", "--check", "report.Rmd"],
-        vec!["fmt", "report.Rmd"],
     ] {
         let output = ry(directory.path(), &arguments);
-        assert_eq!(
-            output.code, 0,
-            "{arguments:?} should be clean: {}",
-            output.stderr
-        );
+        assert_eq!(output.code, 1, "{arguments:?}: {}", output.stderr);
     }
+    let output = ry(directory.path(), &["fmt", "report.Rmd"]);
+    assert_eq!(output.code, 0, "{}", output.stderr);
     let text = fs::read_to_string(directory.path().join("report.Rmd"))
         .expect("failed to read the document back");
+    assert_eq!(
+        text,
+        "# Title\n\nProse  with  spaces.\n\n```{r}\nx <- 1\n```\n"
+    );
+    let output = ry(directory.path(), &["fmt", "--range", "6", "report.Rmd"]);
+    assert_eq!(output.code, 2, "{}", output.stderr);
     assert!(
-        text.contains("x<-1"),
-        "the document must not be rewritten: {text}"
+        output.stderr.contains("formats whole chunks"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn check_shows_a_literate_document_with_its_prose() {
+    let directory = project(&[
+        (
+            "report.Rnw",
+            "\\begin{document}\n<<>>=\nprint(missing_value)\n@\n\\end{document}\n",
+        ),
+        ("inline.Rmd", "Größe: `r missing_inline` here.\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "report.Rnw"]);
+    assert!(
+        output.stderr.contains("<<>>=") && output.stderr.contains("@"),
+        "the snippet shows the chunk delimiters, not blanked prose: {}",
+        output.stderr
+    );
+    // Columns count UTF-16 units of the document, where `ö` and `ß` are one unit each.
+    let output = ry(
+        directory.path(),
+        &["check", "--output", "json", "inline.Rmd"],
+    );
+    assert!(
+        output.stdout.contains("\"column\":11,\"endColumn\":25"),
+        "{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn fmt_keeps_crlf_line_endings_in_a_literate_document() {
+    let document = "Prose.\r\n\r\n```{r}\r\nf <- function(a) {\r\nx<-1\r\n}\r\n```\r\n";
+    let directory = project(&[("report.Rmd", document)]);
+    let output = ry(directory.path(), &["fmt", "report.Rmd"]);
+    assert_eq!(output.code, 0, "{}", output.stderr);
+    let text = fs::read_to_string(directory.path().join("report.Rmd"))
+        .expect("failed to read the document back");
+    assert_eq!(
+        text,
+        "Prose.\r\n\r\n```{r}\r\nf <- function(a) {\r\n  x <- 1\r\n}\r\n```\r\n"
     );
 }
 

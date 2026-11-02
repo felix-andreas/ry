@@ -18,6 +18,7 @@ use {
             Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef, Ty,
             jump_target, status,
         },
+        native,
         runtime::{self, Activation, offset, outcome, reason, representation},
     },
     cranelift_codegen::{
@@ -45,6 +46,7 @@ use {
         values,
     },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::{cell::RefCell, sync::atomic::AtomicBool},
 };
 
@@ -110,6 +112,19 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
         let pointer = module.get_finalized_function(id);
         // SAFETY: the function was built with exactly this signature.
         Ok(unsafe { std::mem::transmute::<*const u8, Entry>(pointer) })
+    })
+}
+
+/// Runs `f` with the session's code module, creating it on first use.
+pub(crate) fn with_module<T>(
+    f: impl FnOnce(&mut JITModule) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    MODULE.with(|cell| {
+        let mut module_slot = cell.borrow_mut();
+        if module_slot.is_none() {
+            *module_slot = Some(new_module()?);
+        }
+        f(module_slot.as_mut().ok_or(Refusal("no code module"))?)
     })
 }
 
@@ -493,6 +508,52 @@ impl<'p, 'b> Translator<'p, 'b> {
             } => {
                 self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
             }
+            Action::NativeCall {
+                steps,
+                native,
+                args,
+                dst,
+            } => {
+                for &(step, state) in steps {
+                    self.action(position, self.plan.state(state), step)?;
+                }
+                let budget = self
+                    .call(
+                        runtime::jit_depth_budget as *const () as usize,
+                        &[],
+                        Some(I64),
+                        &[],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let mut values: SmallVec<[Value; 5]> = SmallVec::new();
+                values.push(budget);
+                for (&register, &ty) in args.iter().zip(&native.params) {
+                    values.push(self.use_register(register, ty));
+                }
+                let signature = self.builder.import_signature(native::signature(
+                    &native.params,
+                    native.result,
+                    self.call_conv,
+                ));
+                let address = self.builder.ins().iconst(I64, native.address as i64);
+                let call = self
+                    .builder
+                    .ins()
+                    .call_indirect(signature, address, &values);
+                let &[status, value] = self.builder.inst_results(call) else {
+                    return Err(Refusal("a native call without a status and a value"));
+                };
+                // Nothing the native function did is visible, so tier 0 runs the call again
+                // and reports what went wrong.
+                let failed = self.deopt(inst.pc, before.id, None, position, reason::HANDOFF);
+                let ok = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, status, native::OK);
+                self.guard(ok, failed);
+                self.def_register(dst, native.result, value);
+                self.set_visible(&before, true);
+            }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
             Action::Move { dst, src, ty } => {
                 let value = self.use_register(src, ty);
@@ -548,6 +609,71 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let next = self.next_pc(position)?;
                 let fall = self.edge(position, next)?;
                 self.builder.ins().brif(object, taken, &[], fall, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessShape { src, layout } => {
+                let value = self.load_register(src);
+                let usable = self.plain_record(value);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                let record = self.builder.create_block();
+                self.builder.ins().brif(usable, record, &[], taken, &[]);
+                self.builder.switch_to_block(record);
+                // Only a record has a layout word, so it is read after the kind check.
+                let id = self
+                    .builder
+                    .ins()
+                    .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, id, i64::from(layout));
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessTag { src, tag } => {
+                let value = self.load_register(src);
+                let found = self
+                    .call(
+                        runtime::jit_plain_tag as *const () as usize,
+                        &[I64],
+                        Some(I64),
+                        &[value],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let same = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, found, i64::from(tag));
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessLiteral { src, pattern } => {
+                self.box_reads(position, &before);
+                let value = self.load_register(src);
+                let pattern = self.builder.ins().iconst(I64, pattern.as_ptr() as i64);
+                let matched = self
+                    .call(
+                        runtime::jit_literal_matches as *const () as usize,
+                        &[I64, I64],
+                        Some(I32),
+                        &[value, pattern],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(matched, fall, &[], taken, &[]);
                 self.fill_edges()?;
                 return Ok(true);
             }
@@ -1437,15 +1563,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Intrinsic::Field { layout, index } => {
                 let record = self.load_register(args[0]);
-                let kind = self.builder.ins().uload8(I32, flags(), record, KIND);
-                let is_record =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Record as i64);
-                let bits = self.builder.ins().uload8(I32, flags(), record, FLAGS);
-                let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
-                let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
-                let usable = self.builder.ins().band(is_record, plain);
+                let usable = self.plain_record(record);
                 self.hand_off_unless(position, before, usable);
                 // Only a record has a layout word, so it is read after the kind check.
                 let id = self
@@ -2364,6 +2482,19 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     // Values.
 
+    /// Whether `value` is a record (or tuple, tag, dict or set) without a class.
+    fn plain_record(&mut self, value: Value) -> Value {
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let is_record = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Record as i64);
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+        let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
+        self.builder.ins().band(is_record, plain)
+    }
+
     fn load_register(&mut self, register: usize) -> Value {
         self.builder
             .ins()
@@ -2636,7 +2767,14 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => vec![operand(1)],
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => vec![operand(1)],
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
+        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }
