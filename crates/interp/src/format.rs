@@ -917,7 +917,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         } else {
             apply_width(&text, width, &flag)
         };
-        values::set_elt(result, index, values::mkchar(&text)?);
+        values::set_mkchar(result, index, &text)?;
     }
     Ok(result)
 }

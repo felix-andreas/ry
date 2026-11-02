@@ -395,6 +395,30 @@ pub unsafe fn mkchar_bytes(bytes: &[u8], encoding: Encoding) -> R<Sexp> {
     Ok(object)
 }
 
+/// Interns `text` as [`mkchar`] does and stores it as element `index` of the string vector
+/// `vector`, which the caller keeps rooted.
+pub unsafe fn set_mkchar(vector: Sexp, index: usize, text: &str) -> R<()> {
+    match unescape_invalid_bytes(text) {
+        Some(bytes) => set_mkchar_bytes(vector, index, &bytes, Encoding::Native),
+        None => set_mkchar_bytes(vector, index, text.as_bytes(), Encoding::Utf8),
+    }
+}
+
+/// Interns `bytes` straight into element `index` of the string vector `vector`, which the caller
+/// keeps rooted. A string stored at once needs no root handle of its own, and a handle per element
+/// would make a long result hold a second vector's worth of handles until the builtin returns.
+pub unsafe fn set_mkchar_bytes(
+    vector: Sexp,
+    index: usize,
+    bytes: &[u8],
+    encoding: Encoding,
+) -> R<()> {
+    let heap = crate::heap();
+    let charsxp = heap.mk_char(bytes, encoding)?;
+    heap.set_element(vector, index, charsxp);
+    Ok(())
+}
+
 pub unsafe fn install(name: &str) -> R<Sexp> {
     Ok(crate::heap().install(name.as_bytes())?)
 }

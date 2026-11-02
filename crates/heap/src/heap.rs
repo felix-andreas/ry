@@ -751,18 +751,11 @@ impl Heap {
         if bytes.len() > i32::MAX as usize {
             return Err(HeapError::StringTooLong);
         }
-        // One pass answers both questions. Most strings are a few bytes long, where `memchr`'s
-        // setup costs more than this loop, which the compiler vectorizes.
-        let (mut any_nul, mut high_bits) = (false, 0u8);
-        for &byte in bytes {
-            any_nul |= byte == 0;
-            high_bits |= byte;
-        }
+        let (any_nul, ascii) = scan_nul_and_ascii(bytes);
         if any_nul {
             let text = String::from_utf8_lossy(bytes).replace('\0', "\\0");
             return Err(HeapError::EmbeddedNul { text });
         }
-        let ascii = high_bits < 0x80;
         let bits = if ascii { gp::ASCII } else { encoding.gp_bits() };
         let hash = strings::hash(bytes, bits & gp::ENCODING);
         if let Some(found) = self.strings.find(hash, bytes, bits & gp::ENCODING) {
@@ -2083,4 +2076,27 @@ const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
+}
+
+/// Whether `bytes` holds a NUL byte, and whether it is all ASCII, in one pass of eight bytes at a
+/// time. Most strings are a few bytes long, where `memchr`'s setup costs more than the scan.
+fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (mut zero_bits, mut high_bits) = (0u64, 0u64);
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        let word = u64::from_le_bytes(word);
+        // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
+        zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
+        high_bits |= word;
+    }
+    let mut tail_nul = false;
+    for &byte in chunks.remainder() {
+        tail_nul |= byte == 0;
+        high_bits |= u64::from(byte);
+    }
+    (tail_nul || zero_bits != 0, high_bits & HIGHS == 0)
 }

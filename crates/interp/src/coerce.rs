@@ -171,10 +171,13 @@ unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
     if is_na_real(value) {
         Ok(na_string())
     } else {
-        values::mkchar(&crate::format::localize_decimal(
-            crate::format::format_real_alone_scipen(value, 15, scipen),
-        ))
+        values::mkchar(&real_as_text(value, scipen))
     }
+}
+
+/// A double that is not NA as `as.character` writes it.
+fn real_as_text(value: f64, scipen: i32) -> String {
+    crate::format::localize_decimal(crate::format::format_real_alone_scipen(value, 15, scipen))
 }
 
 /// Converts a vector to `kind`, keeping its attributes, as GNU R's `coerceVector` does.
@@ -545,8 +548,12 @@ pub unsafe fn coerce_atomic(
             let object = values::materialize(object)?;
             let scipen = crate::format::Settings::current_scipen();
             for index in 0..count {
-                let charsxp = real_as_charsxp(values::reals(object)[index], scipen)?;
-                values::set_elt(result, index, charsxp);
+                let value = values::reals(object)[index];
+                if is_na_real(value) {
+                    values::set_elt(result, index, na_string());
+                } else {
+                    values::set_mkchar(result, index, &real_as_text(value, scipen))?;
+                }
             }
         }
         SexpType::String => {
