@@ -184,6 +184,33 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     Ok(dll)
 }
 
+/// `dyn.unload(path)`: runs the library's `R_unload_<name>` and drops it from the loaded
+/// libraries, so `getLoadedDLLs()` and `PACKAGE =` no longer find it, and a library loaded later
+/// under the same name, such as a rebuilt one, takes its place.
+pub unsafe fn unload_library(path: &str) -> ApiResult<()> {
+    let runtime = runtime();
+    let canonical = std::fs::canonicalize(path)
+        .map(|path| platform::path_text(&path))
+        .unwrap_or_else(|_| path.to_owned());
+    let Some(index) = runtime.dlls.iter().position(|dll| dll.path == canonical) else {
+        return Err(error(format!("shared object '{canonical}' was not loaded")));
+    };
+    let unload_name = CString::new(format!(
+        "R_unload_{}",
+        runtime.dlls[index].name.replace('.', "_")
+    ))
+    .map_err(|_| error("invalid library name"))?;
+    let unload = platform::library_symbol(runtime.dlls[index].handle, &unload_name);
+    let dll: *mut Dll = &mut *runtime.dlls[index];
+    if !unload.is_null() {
+        let unload: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(unload);
+        with_native_scope(|| ry_call_init(unload, dll.cast()))?;
+    }
+    let dll = runtime.dlls.remove(index);
+    runtime.unloaded_dlls.push(dll);
+    Ok(())
+}
+
 /// A copy of the library at `path` whose libR reference names ry's runtime, or `None` when
 /// the library references no libR and loads as it is (`macho.rs` explains the rewrite).
 ///

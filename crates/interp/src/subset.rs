@@ -760,6 +760,13 @@ unsafe fn array_subset(
         } else {
             nil()
         };
+        // Unlike a vector, a dimension never stretches to a longer logical subscript.
+        if index.kind() == SexpType::Logical && length(index) > extent {
+            return Err(crate::unwind::error_in(
+                call,
+                "(subscript) logical subscript too long",
+            ));
+        }
         let (positions, _) = resolve(index, extent, names, false, call)?;
         let mut selection = Vec::with_capacity(positions.len());
         for position in positions {
@@ -1353,6 +1360,29 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
+    // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads properties.
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+        ];
+        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env)? {
+            return Ok(value);
+        }
+    }
+    if !object.has_gp(gp::S4_OBJECT) && symbol != symbols().dot_data {
+        let class = crate::dispatch::class_of(object)?;
+        return Err(call.error(format!(
+            "no applicable method for `@` applied to an object of class \"{}\"",
+            values::first_string(class).unwrap_or_default()
+        )));
+    }
     get_slot(object, symbol, call.call)
 }
 
@@ -1514,16 +1544,34 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
     let value = eval::eval(call.arg(2), call.env)?;
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+            Arg {
+                tag: symbols().value,
+                value,
+            },
+        ];
+        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env)?
+        {
+            return Ok(result);
+        }
+    }
 
     // The methods package checks the assignment against the class definition.
     if let Some(check) = interp_methods_function("checkAtAssignment")? {
-        let class = values::class_attr(object);
-        if class != nil() {
-            let name = values::scalar_string_charsxp(symbol.car())?;
-            let value_class = crate::dispatch::class_of(value)?;
-            let check_call = values::call(check, &[class, name, value_class])?;
-            eval::eval(check_call, values::base_env())?;
-        }
+        let class = crate::dispatch::class_of(object)?;
+        let name = values::scalar_string_charsxp(symbol.car())?;
+        let value_class = crate::dispatch::class_of(value)?;
+        let check_call = values::call(check, &[class, name, value_class])?;
+        eval::eval(check_call, values::base_env())?;
     }
     set_slot(object, symbol, value)
 }
@@ -1673,6 +1721,26 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             .into_iter()
             .filter(|&position| position != NA_POSITION)
             .collect();
+        // As with any assignment, the list first stretches to a longer logical subscript or past
+        // its end, padded with NULL, so `x[5] <- NULL` on two elements leaves four.
+        let stretch = if index.kind() == SexpType::Logical {
+            length(index)
+        } else {
+            0
+        };
+        let needed = remove
+            .iter()
+            .map(|&position| position + 1)
+            .max()
+            .unwrap_or(0)
+            .max(stretch);
+        let object = if needed > count {
+            grow(object, needed)?
+        } else {
+            object
+        };
+        let count = length(object);
+        let names = values::names(object);
         let kept: Vec<usize> = (0..count)
             .filter(|position| !remove.contains(position))
             .collect();
@@ -1824,19 +1892,31 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .into_iter()
         .filter(|&position| position != NA_POSITION)
         .collect();
-    if positions.is_empty() {
+    // A logical subscript longer than the vector stretches it to the subscript's length, even
+    // where the trailing flags are FALSE or select nothing at all.
+    let stretch = if index.kind() == SexpType::Logical {
+        length(index)
+    } else {
+        0
+    };
+    if positions.is_empty() && stretch <= count {
         return Ok(result);
     }
-    if value_count == 0 {
+    if !positions.is_empty() && value_count == 0 {
         return Err(crate::unwind::error_in(call, "replacement has length zero"));
     }
-    if !positions.len().is_multiple_of(value_count) {
+    if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
         conditions::warning_call(
             call,
             "number of items to replace is not a multiple of replacement length",
         )?;
     }
-    let needed = positions.iter().copied().max().map_or(0, |max| max + 1);
+    let needed = positions
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max| max + 1)
+        .max(stretch);
     if needed > count {
         result = grow(result, needed)?;
         if names != nil() || !new_names.is_empty() {
@@ -3011,7 +3091,9 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
 unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mut items: Vec<(String, Sexp)> = Vec::new();
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
+    // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
+    // names, which `names()` exposes but `attributes()` does not.
+    if object.kind() == SexpType::Pairlist {
         let names = values::pairlist_names(object)?;
         if names != nil() {
             items.push(("names".into(), names));

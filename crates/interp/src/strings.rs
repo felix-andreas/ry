@@ -288,6 +288,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
         if starts.is_empty() || stops.is_empty() {
             return Err(error("invalid substring arguments"));
         }
+        let mut memo = values::StringMemo::default();
         for index in 0..count {
             let start = starts[index % starts.len()];
             let stop = stops[index % stops.len()];
@@ -304,7 +305,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 if first == 0 && last == bytes.len() {
                     set_elt(result, index, charsxp);
                 } else {
-                    values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Native)?;
+                    set_elt(result, index, memo.mk_char(&bytes[first..last])?);
                 }
                 continue;
             }
@@ -2986,13 +2987,9 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 atom = None;
             }
             '*' | '+' | '?' => match atom {
-                // POSIX takes a repetition operator with nothing to repeat literally.
-                None => {
-                    output.push('\\');
-                    output.push(character);
-                    atom = Some(start);
-                    quantified = false;
-                }
+                // TRE drops a repetition operator with nothing to repeat, at the start of the
+                // pattern or right after `(`, `|` or `^`: `grepl("+ab", "xab")` is `TRUE`.
+                None => {}
                 Some(_) => {
                     output.push(character);
                     quantified = true;
