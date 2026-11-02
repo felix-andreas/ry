@@ -833,7 +833,12 @@ impl<'db> InferenceTable<'db> {
                 ..
             } = self.entry(self.find(*var))
         {
-            return self.unify(db, *element, actual).is_ok();
+            let snapshot = self.snapshot();
+            if self.unify(db, *element, actual).is_ok() {
+                return true;
+            }
+            self.rollback(snapshot);
+            return false;
         }
         if let (TyKind::Rigid(name), TyKind::Vector(element) | TyKind::NamedVector(element)) =
             (actual.kind(db), expected.kind(db))
@@ -917,9 +922,10 @@ impl<'db> InferenceTable<'db> {
                         return false;
                     }
                 }
-                // An open member goes last and binds only when it can: after `x <- list(x)` on
-                // one path, `list{U}` binds the target's element to `U`, and `U` itself cannot
-                // then become a list of itself, which R never asks of it.
+                // An open member goes last and binds only when it can, and is accepted either
+                // way: it is a value the body never constrained, so nothing shows it cannot
+                // fit. After `x <- list(x)` on one path, `list{U}` binds the target's element to
+                // `U`, and `U` itself cannot then become a list of itself, which R never asks.
                 let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
                     members.iter().copied().partition(|&member| {
                         matches!(

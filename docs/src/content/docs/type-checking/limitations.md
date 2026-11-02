@@ -20,8 +20,15 @@ section lists the places where ry reports correct code instead.
   receives an object.
 - **Packages without a [stub](/type-checking/stubs).** Their names are `Unknown`, and attaching one
   switches off unresolved-name reports for the whole project.
-- **`$` on an atomic vector in a project that defines a `$` method.** A classed vector may carry
+- **`$` on an atomic vector in a package that defines a `$` method.** A classed vector may carry
   that method, so the read is `Unknown` instead of an error.
+- **Some paths a test elsewhere in the body rules out.** A list member beside a number in
+  arithmetic, a list or `NULL` beside an operand of unknown type, the `NULL` of a computed list
+  field used as a `:` endpoint, and the logical member in the false branch of `isTRUE()` or
+  `isFALSE()` are not reported, because correct R usually guards them in ways ry cannot follow.
+- **A placeholder local.** A variable whose only visible value is `NULL` or a bare `NA`, filled
+  later by `assign()` or `<<-`, is not checked where it is passed as an argument or tested as a
+  condition.
 - **A project's own `%op%` operators**, because one may quote its right operand instead of
   evaluating it, as magrittr's `%>%` does.
 

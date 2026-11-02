@@ -939,3 +939,28 @@ fn a_reference_class_edit_rechecks_only_methods_whose_member_answers_change() {
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["Sheet", "Workbook"]);
 }
+
+#[test]
+fn an_edit_that_keeps_the_dollar_methods_rechecks_no_dollar_reader() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "helper <- function() 1L\n`$.vs` <- function(x, name) name\n",
+        "weights <- function() c(1L, 2L)$weight\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(
+        files[0],
+        "helper <- function() 2L\n`$.vs` <- function(x, name) name\n".to_owned(),
+    );
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["helper"]);
+
+    db.edit(files[0], "helper <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    assert!(
+        db.checked_since().contains(&"weights".to_owned()),
+        "removing the last `$` method rechecks a reader of `$` on an atomic vector"
+    );
+}

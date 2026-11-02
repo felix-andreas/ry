@@ -1929,7 +1929,7 @@ impl Worker {
                         lsp_types::Url::from_file_path(self.workspace_root.join("R"))
                             .unwrap_or_else(|_| self.document_uri(&self.workspace_root)),
                     ),
-                    pattern: "*.[rR]".to_owned(),
+                    pattern: "*.[rRsSq]".to_owned(),
                 }),
                 kind: None,
             },

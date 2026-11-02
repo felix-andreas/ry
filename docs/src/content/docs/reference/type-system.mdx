@@ -1605,11 +1605,6 @@ members.
 - `(integer | double) > 0L` is `logical`.
 - `(integer | character) + 1L` is a type error, because the `character` member is not numeric.
 
-Two arithmetic exceptions keep correlated paths from being reported. A list-shaped member (a list,
-record, or tuple without an arithmetic method) beside a numeric member is skipped, because a test
-elsewhere in the body usually rules that path out, as in mgcv's `offset` that is a number or a
-`list` of terms. A list or `NULL` operand beside an `Unknown` or `Any` operand is not reported
-either, because the other operand may be a class whose method accepts it, as ggplot2's `+` does.
 - `(integer | NULL) + 1L` is `integer`. R's arithmetic and comparison give an empty vector for a
   `NULL` operand rather than failing, so a `NULL` member is accepted and contributes nothing to the
   result, and `(character | NULL) == "a"` is `logical`. A class member dispatches its declared
@@ -1618,6 +1613,12 @@ either, because the other operand may be a class whose method accepts it, as ggp
 - `rec$a` on `list{a: integer} | list{a: character}` is `integer | character`. A member that lacks
   the field changes the result, as [indexing](#indexing) describes.
 - A `for` loop over `integer[] | character[]` binds its variable as `integer | character`.
+
+Two arithmetic exceptions keep correlated paths from being reported. A list-shaped member (a list,
+record, or tuple without an arithmetic method) beside a numeric member is skipped, because a test
+elsewhere in the body usually rules that path out, as in mgcv's `offset` that is a number or a
+`list` of terms. A list or `NULL` operand beside an `Unknown` or `Any` operand is not reported
+either, because the other operand may be a class whose method accepts it, as ggplot2's `+` does.
 
 #### Conditions
 
@@ -1667,8 +1668,8 @@ On a nominal whose class declares a `$` method, in a stub or in the project (`$.
 `@type request`), `x$name` types as that method's result instead, because R dispatches the read to
 the method before it looks at the representation. The same holds for `[.class` and `[[.class`.
 
-When the project defines any `$` method at all, `$` on an atomic vector is `Unknown` rather than an
-error, because a classed atomic vector (an igraph vertex sequence, say) can carry that method under
+When the package's `R/` files, or the file being checked, define any `$` method at all, `$` on an
+atomic vector is `Unknown` rather than an error, because a classed atomic vector (an igraph vertex sequence, say) can carry that method under
 a class the checker does not track.
 
 Every element of `NULL` is `NULL` in R, so `NULL$name`, `NULL[["name"]]`, and `NULL[1]` are `NULL`.
@@ -1950,10 +1951,11 @@ may be `double`, so `1:TRUE` is `integer[]` and `1:n` on `n` of type `integer | 
 counts as `integer` here, matching what R does at run time, so `1:10` is `integer[]` and `1.5:3L` is
 `double[]`.
 
-R rejects a `NULL` endpoint, and so does the checker, except for an endpoint read from a list field
-(`b$off[i]`) whose `NULL` member is one path of the function that built the list. Such a field is
+R rejects a `NULL` endpoint, and so does the checker, except for an endpoint read through a `$`
+field of a value the body computed (`b$off[i]`, with `b` returned by a call). Such a field is
 typically filled under a flag, as in mgcv's `off`, and read only by callers that set the flag, so
-its `NULL` member is dropped. A local or a value indexed directly keeps its `NULL`.
+its `NULL` member is dropped. A local, a value indexed directly, and a field of a parameter keep
+their `NULL`, so `cfg$off:3L` on a parameter `cfg: list{off: integer | NULL}` is reported.
 
 Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
 rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and

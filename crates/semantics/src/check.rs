@@ -7476,16 +7476,24 @@ impl<'db> Checker<'db, '_> {
             // known to be too long. An endpoint read from a list field that is only sometimes
             // `NULL` is used where the code has ruled that out: mgcv's basis fills `off` only
             // when a `penalty` flag is set, and callers read `b$off[i]:...` only after passing
-            // it. A local or an element read straight from a value stays checked.
+            // it. A local, an element read straight from a value, and a field of a parameter,
+            // whose `NULL` the declaration admits, stay checked.
             let field_read = {
                 let mut expression = operand;
+                let mut through_field = false;
                 loop {
                     match &self.module.expression(expression).kind {
-                        ExpressionKind::Field { .. } => break true,
+                        ExpressionKind::Field {
+                            at: false, target, ..
+                        } => {
+                            through_field = true;
+                            expression = *target;
+                        }
                         ExpressionKind::Index { target, .. } => expression = *target,
-                        _ => break false,
+                        _ => break,
                     }
                 }
+                through_field && !self.binds_parameter(expression)
             };
             let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
                 TyKind::Union(members) if field_read => members
