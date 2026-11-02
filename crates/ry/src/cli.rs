@@ -21,8 +21,9 @@ use {
             derive_from_syntax, project_fold_shares,
         },
         metadata::{
-            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            OS_TYPE, PackageMetadata, attached_union, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -1095,28 +1096,45 @@ pub(crate) fn read_project_stubs(
         .collect()
 }
 
-/// Package documents first (in `Collate` order when declared, then by path), then
-/// scripts. The server, `check`, and the stats agree on it, so the last-writer-wins
-/// symbol index selects the same winners everywhere.
+/// Package documents first, then scripts. Package files follow a load's order
+/// (`loader::collate_code_files`): the `Collate` field's files, then the rest with those of `R/`
+/// before those of a subdirectory, each by path. A load never runs the other operating system's
+/// subdirectory (`R/windows/` on Unix), so its files come first, where every loaded definition
+/// of the same name overrides them. The server, `check`, and the stats agree on this order, so
+/// the last-writer-wins symbol index selects the same winners everywhere, and the winner is the
+/// definition a load leaves bound.
 pub(crate) fn project_order<'a>(
     root: &'a Path,
     collate: &'a [String],
-) -> impl Fn(&Path) -> (bool, usize, String) + 'a {
+) -> impl Fn(&Path) -> (bool, bool, usize, bool, String) + 'a {
     let r_path = root.join("R");
+    let other_os = if OS_TYPE == "unix" { "windows" } else { "unix" };
     let collate_rank: HashMap<&str, usize> = collate
         .iter()
         .enumerate()
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
     move |path| {
-        let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+        // A `Collate` entry is a path relative to `R/`, such as `unix/a.R`.
+        let relative = path
+            .strip_prefix(&r_path)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        let rank = relative
+            .as_deref()
+            .and_then(|relative| collate_rank.get(relative))
             .copied()
             .unwrap_or(usize::MAX);
+        let in_other_os = relative
+            .as_deref()
+            .is_some_and(|relative| relative.starts_with(&format!("{other_os}/")));
         (
-            !path.starts_with(&r_path),
+            relative.is_none(),
+            !in_other_os,
             rank,
+            relative
+                .as_deref()
+                .is_some_and(|relative| relative.contains('/')),
             path.strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()

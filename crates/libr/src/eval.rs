@@ -24,7 +24,7 @@ use {
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
-        native::Interface,
+        native::{Interface, foreign_context},
         unwind::park,
     },
     std::{
@@ -571,23 +571,32 @@ impl crate::boundary::Handout for Option<Sexp> {
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
+        foreign_context(call.call, || dot_call(call, RoutineKind::Call))
     }),
     builtin(".External", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
+        foreign_context(call.call, || dot_call(call, RoutineKind::External))
     }),
     // GNU R lets `.External2` keep whatever visibility its native code last evaluated with,
     // which is how magrittr's pipe forwards `invisible()`.
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
+    builtin(".External2", -1, |call| unsafe {
+        foreign_context(call.call, || dot_external2(call))
+    })
+    .keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+        })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+        })
     }),
-    builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
+    builtin(".C", -1, |call| unsafe {
+        foreign_context(call.call, || dot_c(call, RoutineKind::C))
+    }),
     builtin(".Fortran", -1, |call| unsafe {
-        dot_c(call, RoutineKind::Fortran)
+        foreign_context(call.call, || dot_c(call, RoutineKind::Fortran))
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
