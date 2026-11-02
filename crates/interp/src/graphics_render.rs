@@ -444,6 +444,17 @@ pub fn render_files(
                 postscript_document(&drawing.pages, size, paper, landscape, false, title);
             return Ok(vec![document]);
         }
+        // Cairo's svg surface exists from the moment the device opens, so GNU R writes an
+        // empty document for a device that never drew.
+        Format::Svg if drawing.pages.is_empty() => {
+            let page = Page {
+                background: TRANSPARENT_WHITE as Colour,
+                items: Vec::new(),
+            };
+            return Ok(vec![
+                svg_document(&page, &drawing.definitions, size).into_bytes(),
+            ]);
+        }
         _ => {}
     }
     let mut files = Vec::with_capacity(drawing.pages.len());

@@ -254,7 +254,8 @@ pub fn run(options: &Options) -> Result<Vec<Render>, GalleryError> {
                 (_, None) => Outcome::RyFailed("not rendered".to_string()),
                 (_, Some(entry)) if !entry.ok() => Outcome::RyFailed(entry.status.clone()),
                 _ => match device.as_str() {
-                    "agg" | "png" => compare_png_files(&path(&gnu_r_dir), &path(&ry_dir)),
+                    "agg" => compare_png_files(&path(&gnu_r_dir), &path(&ry_dir), 0),
+                    "png" => compare_png_files(&path(&gnu_r_dir), &path(&ry_dir), 1),
                     "pdf" if rasterize_pdf => compare_pdf_files(&path(&gnu_r_dir), &path(&ry_dir)),
                     _ => Outcome::Rendered,
                 },
@@ -311,10 +312,10 @@ pub fn render_report(renders: &[Render]) -> String {
     report
 }
 
-/// Compares two PNG files pixel by pixel.
-pub fn compare_png_files(expected: &Path, actual: &Path) -> Outcome {
+/// Compares two PNG files pixel by pixel, with `slack` as in [`compare_images`].
+pub fn compare_png_files(expected: &Path, actual: &Path, slack: u32) -> Outcome {
     match (read_png(expected), read_png(actual)) {
-        (Ok(expected), Ok(actual)) => compare_images(&expected, &actual),
+        (Ok(expected), Ok(actual)) => compare_images(&expected, &actual, slack),
         (Err(error), _) | (_, Err(error)) => Outcome::Unreadable(error),
     }
 }
@@ -327,7 +328,12 @@ pub struct Image {
     pub rgb: Vec<u8>,
 }
 
-pub fn compare_images(expected: &Image, actual: &Image) -> Outcome {
+/// Compares two images of the same size. With a `slack` of 0 each pixel is compared with the
+/// pixel at the same place. With a larger slack a pixel counts as differing only when no pixel
+/// within `slack` pixels in the other image comes close to it, in both directions: two
+/// rasterizers antialias a dense tangle of thin lines differently, which moves coverage by a
+/// pixel without changing what is drawn.
+pub fn compare_images(expected: &Image, actual: &Image, slack: u32) -> Outcome {
     if (expected.width, expected.height) != (actual.width, actual.height) {
         return Outcome::Unreadable(format!(
             "sizes differ: {}x{} under GNU R, {}x{} under ry",
@@ -338,17 +344,39 @@ pub fn compare_images(expected: &Image, actual: &Image) -> Outcome {
     if pixels == 0 {
         return Outcome::Unreadable("empty image".to_string());
     }
-    let mut differing = 0usize;
-    let mut inexact = 0usize;
-    for (left, right) in expected.rgb.chunks_exact(3).zip(actual.rgb.chunks_exact(3)) {
-        let largest = left
-            .iter()
+    let distance = |left: &[u8], right: &[u8]| {
+        left.iter()
             .zip(right)
             .map(|(a, b)| a.abs_diff(*b))
             .max()
-            .unwrap_or(0);
-        differing += usize::from(largest > 64);
-        inexact += usize::from(largest > 0);
+            .unwrap_or(0)
+    };
+    let (width, height) = (expected.width as usize, expected.height as usize);
+    let slack = slack as usize;
+    fn pixel(image: &Image, x: usize, y: usize) -> &[u8] {
+        let start = (y * image.width as usize + x) * 3;
+        image.rgb.get(start..start + 3).unwrap_or(&[0, 0, 0])
+    }
+    let matched_nearby = |from: &Image, to: &Image, x: usize, y: usize| {
+        let wanted = pixel(from, x, y);
+        (y.saturating_sub(slack)..=(y + slack).min(height - 1)).any(|near_y| {
+            (x.saturating_sub(slack)..=(x + slack).min(width - 1))
+                .any(|near_x| distance(wanted, pixel(to, near_x, near_y)) <= 64)
+        })
+    };
+    let mut differing = 0usize;
+    let mut inexact = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            let largest = distance(pixel(expected, x, y), pixel(actual, x, y));
+            inexact += usize::from(largest > 0);
+            differing += usize::from(
+                largest > 64
+                    && (slack == 0
+                        || !matched_nearby(expected, actual, x, y)
+                        || !matched_nearby(actual, expected, x, y)),
+            );
+        }
     }
     Outcome::Compared(Comparison {
         differing: differing as f64 / pixels as f64,
@@ -405,7 +433,7 @@ fn compare_pdf_files(expected: &Path, actual: &Path) -> Outcome {
         }
     };
     match (rasterize(expected), rasterize(actual)) {
-        (Ok(expected), Ok(actual)) => compare_png_files(&expected, &actual),
+        (Ok(expected), Ok(actual)) => compare_png_files(&expected, &actual, 1),
         (Err(error), _) | (_, Err(error)) => Outcome::Unreadable(error),
     }
 }

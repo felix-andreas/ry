@@ -46,7 +46,7 @@ enum Command {
         /// How many figures to sample (default: every figure).
         #[arg(long)]
         count: Option<usize>,
-        /// Figures to render instead of a sample, as `file:figure`, such as `base:persp`.
+        /// Figures to render instead of a sample, as `file:figure`, such as `base:persp_surface`.
         #[arg(long, value_delimiter = ',')]
         figures: Vec<String>,
         /// The devices, comma separated: `agg`, `png`, `pdf` and `svg`.

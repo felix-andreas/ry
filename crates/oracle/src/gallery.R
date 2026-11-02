@@ -27,8 +27,9 @@ render <- function(code, scope, device, path) {
   open_device(device, path)
   on.exit(while (dev.cur() > 1) dev.off())
   shown <- withVisible(eval(code, new.env(parent = scope)))
-  if (shown$visible && (inherits(shown$value, "trellis") || inherits(shown$value, "ggplot")))
-    print(shown$value)
+  # Auto-print a visible value as the top level would: lattice, ggplot2 and xts (and so the
+  # PerformanceAnalytics charts built on it) draw only when their result is printed.
+  if (shown$visible) invisible(capture.output(print(shown$value)))
   invisible(dev.off())
 }
 

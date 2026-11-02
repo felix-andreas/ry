@@ -2306,14 +2306,18 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
-  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
-    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - plotmath lays out as GNU R's does, but symbol-font glyphs are measured with Helvetica's AFM
+    on the built-in devices (GNU R uses the Symbol AFM), Hershey fonts fall back to ordinary
+    text, and the Adobe symbol conversions pass text through.
   - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
     points); open splines match GNU R value for value.
   - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
     (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
   - Bitmap pages are written when the device closes rather than per page.
-  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+  - The plot gallery (`oracle gallery`) leaves small agg residuals: `pa_risk_return` (0.22% of
+    pixels, above the 0.2% tolerance), `pch_table` (the join at pch 11's apex), and
+    `ts_decomposition` (rotated side-2 axis labels one pixel off).
+  - GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug

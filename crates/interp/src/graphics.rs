@@ -3844,7 +3844,7 @@ unsafe fn draw_persp_axis(
 
 /// `C_dendwindow(n, merge, height, hang, labels, ...)`: the plot window of a dendrogram of
 /// `n` merges, its leaves at 1 to `n + 1` and its heights from the lowest hanging leaf to the
-/// root. GNU R also leaves room below for the leaf labels, which ry does not measure.
+/// root, with room below for the longest leaf label, measured as GNU R measures it.
 unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
     let tree = dendrogram_arguments(call, false)?;
     let merges = tree.heights.len();

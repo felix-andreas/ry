@@ -374,6 +374,8 @@ JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, 
 and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
+engines and compares the images ([Corpus and oracle](/contributing/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
 in a debug build. `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup`
 from the first allocation, which takes about seven seconds on an empty script in a debug build.
