@@ -3559,9 +3559,13 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     if items.is_empty() {
         return Ok(nil());
     }
-    let mut kind = SexpType::Logical;
+    // Starting below raw, so that binding only raw vectors gives a raw matrix.
+    let mut kind = SexpType::Nil;
     for arg in &items {
         kind = coerce::higher_type(kind, arg.value.kind());
+    }
+    if kind == SexpType::Nil {
+        kind = SexpType::Logical;
     }
     // The extent along the bound dimension.
     let mut extent = 0usize;

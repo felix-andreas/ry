@@ -2332,15 +2332,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
   packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
   oracle cases; what is left:
-  - Built-in devices ignore raster interpolation and draw a raster as one quadrilateral per cell.
-  - The raster devices composite `saturate` as `add`, which tiny-skia lacks.
   - Raster compositing allocates a canvas-sized layer for every mark drawn with an operator other
     than `over` and two per group use, re-renders a mask whenever the clip and mask pair changes,
     and renders a definition again at every use, so a chain of groups that each use the one before
     twice is exponential (`draw_items`, `coverage` in `graphics_render.rs`). Layers sized to the
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
-  - `svg()` paints nothing beyond a tiling pattern with `extend = "pad"`, where cairo repeats the
-    tile's edge pixels.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.
   - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey

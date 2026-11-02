@@ -2335,6 +2335,21 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     groups, as cairo does.
   - Glyph callbacks read the font file R names and draw nothing when it cannot be read, matching
     GNU R's pdf device, which is silent there.
+  - A raster is one `Mark::Image` (pixels plus a placement mapping the unit square to inches),
+    not a quadrilateral per cell. PDF writes an image XObject with an `/SMask` when any pixel is
+    translucent and `/Interpolate true` when interpolating. PostScript writes an `image` with the
+    alpha dropped and, when interpolating, resamples to the placement's size in points with GNU
+    R's sixteenth-step bilinear filter, so the hex data is byte-identical to GNU R's. The bitmap
+    devices sample bilinearly (interpolating) or nearest with a pixel-centre coverage mask, as
+    cairo does; edge pixels' anti-aliased coverage differs from cairo's by a few levels.
+  - `svg()` marks a non-interpolated image `image-rendering:pixelated`, where cairo emits no
+    hint and browsers blur the cells; this is a deliberate improvement. An interpolated image is
+    upsampled before embedding, as cairo does.
+  - A tiling pattern with `extend = "pad"` or `"none"` in `svg()` is a cell large enough to cover
+    the page, holding the tile plus its eight edge and corner strips (one point wide) stretched
+    outward; the strips overlap the tile, which is drawn last, so renderers show no seams.
+  - tiny-skia has no `saturate`, so `draw_items` composites it by hand on premultiplied pixels:
+    `dst + src * min(1, (1 - Da) / Sa)`, which matches cairo's pixels exactly.
 - **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
   `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
   offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
