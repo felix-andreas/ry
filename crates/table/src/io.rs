@@ -19,15 +19,21 @@
 use {
     crate::{
         Error, Result, Table,
-        convert::{categorical_to_factor, string_to_factor},
+        convert::{categorical_codes_to_factor, categorical_to_factor, string_to_factor},
     },
     memmap2::{Mmap, UncheckedAdvice},
     polars::prelude::{
         BooleanChunked, CategoricalPhysical, Categories, ChunkedArray, Column, CsvEncoding,
-        CsvReadOptions, DataFrame, DataType, Float64Type, Int32Type, IntoColumn, NullValues,
-        PlSmallStr, PolarsDataType, Schema as PolarsSchema, SerReader, Series,
+        CsvReadOptions, DataFrame, DataType, Float64Chunked, Float64Type, Int32Chunked, Int32Type,
+        IntoColumn, IntoSeries, NullValues, PlSmallStr, PolarsDataType, Schema as PolarsSchema,
+        SerReader, Series, UInt32Chunked,
     },
-    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    polars_arrow::{
+        array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+        bitmap::{Bitmap, MutableBitmap},
+        datatypes::ArrowDataType,
+        types::NativeType,
+    },
     rayon::prelude::*,
     sniff::{ColumnType as TextColumn, Guess, Layout},
     std::{
@@ -190,9 +196,10 @@ fn read_bytes(
     Ok(table)
 }
 
-/// Parses the file slice by slice with the sniffed types, then joins each column's pieces, one
-/// column at a time so that only one column is ever held twice. A factor's column numbers its
-/// strings with one mapping across the slices, so the codes of every slice agree.
+/// Parses the file slice by slice with the sniffed types, appending each slice's columns to the
+/// table's final column buffers before the next slice is parsed, so the file is never held as
+/// parsed pieces and a copy of them. A factor's column numbers its strings with one mapping
+/// across the slices, so the codes of every slice agree and are renumbered into levels in place.
 fn read_sliced(
     bytes: &[u8],
     layout: &Layout,
@@ -206,27 +213,153 @@ fn read_sliced(
         Some(_) => vec![0..bytes.len()],
         None => slices(bytes, slice_bytes),
     };
-    let mut pieces: Vec<std::vec::IntoIter<Column>> = Vec::with_capacity(ranges.len());
-    for (index, range) in ranges.into_iter().enumerate() {
+    let mut builders: Vec<(PlSmallStr, Builder)> = Vec::new();
+    let mut height = 0;
+    for (index, range) in ranges.iter().enumerate() {
         let header = index == 0 && layout.header;
         let frame = parse(&bytes[range.clone()], layout, options, &schema, header)?;
-        pieces.push(frame.into_columns().into_iter());
-        release(range)?;
-    }
-    let width = pieces.first().map_or(0, ExactSizeIterator::len);
-    let mut columns: Vec<Column> = Vec::with_capacity(width);
-    for _ in 0..width {
-        let mut parts = pieces.iter_mut().filter_map(Iterator::next);
-        let Some(mut column) = parts.next() else {
-            break;
-        };
-        for part in parts {
-            column.append_owned(part)?;
+        if index == 0 {
+            // The rows still to come are estimated from the first slice's bytes per row. A
+            // reservation the file does not fill is never touched, so it costs no memory.
+            let rows = frame.height() * bytes.len() / range.len().max(1);
+            let reserve = rows + rows / 8 + 1024;
+            builders = frame
+                .columns()
+                .iter()
+                .map(|column| (column.name().clone(), Builder::new(column.dtype(), reserve)))
+                .collect();
         }
-        columns.push(column.rechunk());
+        height += frame.height();
+        for ((_, builder), column) in builders.iter_mut().zip(frame.into_columns()) {
+            builder.append(column)?;
+        }
+        release(range.clone())?;
     }
-    let height = columns.first().map_or(0, Column::len);
-    type_columns(DataFrame::new(height, columns)?, layout, false)
+    let columns: Vec<Column> = builders
+        .into_par_iter()
+        .map(|(name, builder)| builder.finish(name, layout))
+        .collect::<Result<_>>()?;
+    Ok(DataFrame::new(height, columns)?)
+}
+
+/// One column's final buffer while a file is read slice by slice. A validity bitmap is made only
+/// once a missing value turns up.
+enum Builder {
+    Integer(Vec<i32>, Option<MutableBitmap>),
+    Double(Vec<f64>, Option<MutableBitmap>),
+    /// A `Categorical` column's codes, all numbered by the mapping its dtype holds.
+    Codes(DataType, Vec<u32>, Option<MutableBitmap>),
+    /// Text, kept as Polars' chunks until the column is typed from all of its values.
+    Text(Option<Column>),
+}
+
+impl Builder {
+    fn new(dtype: &DataType, rows: usize) -> Builder {
+        match dtype {
+            DataType::Int32 => Builder::Integer(Vec::with_capacity(rows), None),
+            DataType::Float64 => Builder::Double(Vec::with_capacity(rows), None),
+            DataType::Categorical(..) => {
+                Builder::Codes(dtype.clone(), Vec::with_capacity(rows), None)
+            }
+            _ => Builder::Text(None),
+        }
+    }
+
+    fn append(&mut self, column: Column) -> Result<()> {
+        match self {
+            Builder::Integer(values, validity) => {
+                for array in column.i32()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Double(values, validity) => {
+                for array in column.f64()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Codes(_, values, validity) => {
+                let physical = column.as_materialized_series().to_physical_repr();
+                for array in physical.u32()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Text(text) => match text {
+                Some(text) => {
+                    text.append_owned(column)?;
+                }
+                None => *text = Some(column),
+            },
+        }
+        Ok(())
+    }
+
+    fn finish(self, name: PlSmallStr, layout: &Layout) -> Result<Column> {
+        Ok(match self {
+            Builder::Integer(values, validity) => Int32Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::Int32, values.into(), bitmap(validity)),
+            )
+            .into_column(),
+            Builder::Double(values, validity) => Float64Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::Float64, values.into(), bitmap(validity)),
+            )
+            .into_column(),
+            Builder::Codes(dtype, values, validity) => match (&dtype, bitmap(validity)) {
+                (DataType::Categorical(_, mapping), None) => {
+                    categorical_codes_to_factor(name, mapping, values, None)?.into_column()
+                }
+                // A column with a missing value stays categorical, to be read again as text.
+                (_, validity) => {
+                    let codes = UInt32Chunked::with_chunk(
+                        name,
+                        PrimitiveArray::new(ArrowDataType::UInt32, values.into(), validity),
+                    )
+                    .into_series()
+                    .cast(&dtype.to_physical())?;
+                    // SAFETY: every code was numbered by the mapping `dtype` holds.
+                    unsafe { codes.from_physical_unchecked(&dtype) }?.into_column()
+                }
+            },
+            Builder::Text(text) => {
+                let column = match text {
+                    Some(text) => text.rechunk(),
+                    None => Column::new_empty(name, &DataType::String),
+                };
+                let declared = layout
+                    .columns
+                    .iter()
+                    .find(|sniffed| sniffed.name == column.name().as_str())
+                    .map(|sniffed| sniffed.kind);
+                type_text_column(column, declared)?
+            }
+        })
+    }
+}
+
+/// Appends an array's values and validity to a column's buffers.
+fn extend<T: NativeType>(
+    values: &mut Vec<T>,
+    validity: &mut Option<MutableBitmap>,
+    array: &PrimitiveArray<T>,
+) {
+    let before = values.len();
+    values.extend_from_slice(array.values());
+    match (validity.as_mut(), array.validity()) {
+        (Some(bits), Some(valid)) => bits.extend_from_bitmap(valid),
+        (Some(bits), None) => bits.extend_constant(array.len(), true),
+        (None, Some(valid)) if valid.unset_bits() > 0 => {
+            let mut bits = MutableBitmap::with_capacity(values.capacity());
+            bits.extend_constant(before, true);
+            bits.extend_from_bitmap(valid);
+            *validity = Some(bits);
+        }
+        (None, _) => {}
+    }
+}
+
+fn bitmap(validity: Option<MutableBitmap>) -> Option<Bitmap> {
+    validity.and_then(|bits| bits.into())
 }
 
 /// Row-aligned byte ranges of about `slice_bytes` each, covering `bytes`. A range ends just

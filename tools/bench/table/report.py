@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Runs the table benchmark under data.table, as R code on ry's DataFrame, and on the ry engine from
 Rust, one engine after the other so they never share the CPU, and prints a Markdown table of the
-faster of each question's two runs. With --write, the table replaces the one between the
+faster of each question's two runs and of each engine's peak resident memory. With --write, the table replaces the one between the
 `bench-table:<rows>` markers in docs/src/content/docs/contributing/design/r-runtime.md.
 
 The data is generated on first use. data.table must be installed in the library named by
@@ -58,13 +58,15 @@ def main():
         ("ry, from Rust", [rust_driver(), str(data), *(["--groupby-only"] if only else [])]),
     ]
     results = {}
+    peaks = {}
     for name, command in engines:
         print(f"== {name}", file=sys.stderr, flush=True)
-        output = subprocess.run(command, env=env, capture_output=True, text=True, cwd=root)
-        sys.stderr.write(output.stdout)
-        if output.returncode != 0:
-            sys.exit(f"{name} failed:\n{output.stderr}")
-        results[name] = parse(output.stdout)
+        stdout, status, peak = run(command, env)
+        sys.stderr.write(stdout)
+        if status != 0:
+            sys.exit(f"{name} failed with status {status}")
+        results[name] = parse(stdout)
+        peaks[name] = peak
 
     questions = list(results["data.table"])
     lines = ["| Question | " + " | ".join(results) + " |", "|---|" + "---|" * len(results)]
@@ -82,12 +84,24 @@ def main():
                 mismatches.append(f"{question}: {name} gives {checksum:.6e}, data.table {reference:.6e}")
         lines.append(f"| {LABELS.get(question, question)} | " + " | ".join(cells) + " |")
     lines.append("| total | " + " | ".join(f"{total:.2f}" for total in totals.values()) + " |")
+    lines.append("| peak memory (GB) | " + " | ".join(f"{peaks[name]:.1f}" for name in results) + " |")
     table = "\n".join(lines)
     print(table)
     if mismatches:
         sys.exit("checksums differ:\n" + "\n".join(mismatches))
     if args.write:
         write(args.rows, table)
+
+
+def run(command, env):
+    """Runs one engine and returns its output, its exit status, and its peak resident memory in
+    GB. `wait4` reports the peak of this child alone, where `getrusage` would give the largest
+    of every engine run so far."""
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, text=True, cwd=root)
+    stdout = process.stdout.read()
+    _, status, usage = os.wait4(process.pid, 0)
+    process.returncode = os.waitstatus_to_exitcode(status)
+    return stdout, process.returncode, usage.ru_maxrss / 1e6
 
 
 def prepare(data, rows, only, env):

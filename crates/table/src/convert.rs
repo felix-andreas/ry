@@ -14,8 +14,9 @@ use {
     foldhash::fast::FixedState,
     hashbrown::HashTable,
     polars::prelude::{
-        BooleanChunked, DataType, Float64Chunked, FrozenCategories, Int32Chunked, IntoSeries,
-        NewChunkedArray, PlSmallStr, PolarsError, Series, StringChunked, UInt32Chunked,
+        BooleanChunked, CategoricalMapping, DataType, Float64Chunked, FrozenCategories,
+        Int32Chunked, IntoSeries, NewChunkedArray, PlSmallStr, PolarsError, Series, StringChunked,
+        UInt32Chunked,
     },
     polars_arrow::{
         array::{Array, PrimitiveArray, Utf8ViewArray},
@@ -315,16 +316,20 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
         })
         .collect();
     let distinct: Vec<&str> = locals.into_iter().flatten().collect();
-    factor_from_codes(
-        series.name().clone(),
-        &distinct,
-        rows,
-        |row| match partition_of[row] {
+    let codes: Vec<u32> = (0..rows)
+        .into_par_iter()
+        .map(|row| match partition_of[row] {
             // A missing row's code is masked by the validity bitmap, so any level stands in for
             // it.
             u8::MAX => 0,
             partition => offsets[partition as usize] + local_codes[row].load(Ordering::Relaxed),
-        },
+        })
+        .collect();
+    drop(local_codes);
+    factor_from_codes(
+        series.name().clone(),
+        &distinct,
+        codes,
         array.validity().cloned(),
     )
 }
@@ -339,38 +344,47 @@ pub fn categorical_to_factor(series: &Series) -> Result<Series> {
             found: series.dtype().to_string(),
         });
     };
-    let distinct = (0..mapping.num_cats_upper_bound())
-        .map(|code| {
-            mapping.cat_to_str(code as u32).ok_or_else(|| {
-                Error::Polars(PolarsError::ComputeError(
-                    format!("category {code} of `{}` has no string", series.name()).into(),
-                ))
-            })
-        })
-        .collect::<Result<Vec<&str>>>()?;
     let physical = series.to_physical_repr().cast(&DataType::UInt32)?.rechunk();
     let codes = physical.u32()?;
     let empty = PrimitiveArray::<u32>::new_empty(ArrowDataType::UInt32);
     let array = codes.downcast_iter().next().unwrap_or(&empty);
-    let values = array.values();
-    factor_from_codes(
+    categorical_codes_to_factor(
         series.name().clone(),
-        &distinct,
-        array.len(),
-        |row| values[row],
+        mapping,
+        array.values().as_slice().to_vec(),
         array.validity().cloned(),
     )
 }
 
-/// The factor whose levels are `distinct` sorted in byte order, where `code(row)` is the
-/// position of the row's string in `distinct` (anything for a row `validity` marks missing). The
+/// The factor of a `Categorical` column given as its `mapping` and its rows' `codes`, which are
+/// renumbered into level order in place.
+pub fn categorical_codes_to_factor(
+    name: PlSmallStr,
+    mapping: &CategoricalMapping,
+    codes: Vec<u32>,
+    validity: Option<Bitmap>,
+) -> Result<Series> {
+    let distinct = (0..mapping.num_cats_upper_bound())
+        .map(|code| {
+            mapping.cat_to_str(code as u32).ok_or_else(|| {
+                Error::Polars(PolarsError::ComputeError(
+                    format!("category {code} of `{name}` has no string").into(),
+                ))
+            })
+        })
+        .collect::<Result<Vec<&str>>>()?;
+    factor_from_codes(name, &distinct, codes, validity)
+}
+
+/// The factor whose levels are `distinct` sorted in byte order, where `codes[row]` is the
+/// position of the row's string in `distinct` (anything for a row `validity` marks missing), and
+/// is renumbered into level order in place. The
 /// strings sort by a 16-byte prefix key, falling back to the whole string only on a tie, and
 /// Polars builds its categories while the codes are renumbered into level order.
 fn factor_from_codes(
     name: PlSmallStr,
     distinct: &[&str],
-    rows: usize,
-    code: impl Fn(usize) -> u32 + Sync,
+    mut codes: Vec<u32>,
     validity: Option<Bitmap>,
 ) -> Result<Series> {
     let mut order: Vec<(u128, u32)> = distinct
@@ -387,13 +401,12 @@ fn factor_from_codes(
     for (position, (_, index)) in order.iter().enumerate() {
         rank[*index as usize] = position as u32;
     }
-    let (categories, codes) = join(
+    let (categories, ()) = join(
         || FrozenCategories::new(order.iter().map(|(_, index)| distinct[*index as usize])),
-        || -> Vec<u32> {
-            (0..rows)
-                .into_par_iter()
-                .map(|row| rank.get(code(row) as usize).copied().unwrap_or(0))
-                .collect()
+        || {
+            codes
+                .par_iter_mut()
+                .for_each(|code| *code = rank.get(*code as usize).copied().unwrap_or(0));
         },
     );
     let dtype = DataType::from_frozen_categories(categories?);
