@@ -74,6 +74,9 @@ local({
 
   function(root, filter, reporter, watch) {
     package <- read.dcf(file.path(root, "DESCRIPTION"), fields = "Package")[[1L]]
+    # As `devtools::test()`: a developer's run is not a CRAN check, so a missing package is an
+    # error rather than a skip, and `skip_on_cran()` tests run.
+    if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
     selected <- function() {
       files <- test_files(root)
       if (is.null(filter)) files else files[grepl(filter, basename(files))]
