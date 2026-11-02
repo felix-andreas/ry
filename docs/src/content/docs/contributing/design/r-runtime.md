@@ -852,18 +852,18 @@ rows the peak is q10, whose answer has nearly one group per row, and ry stays be
 <!-- bench-table:5e7-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.790 | 0.183 | 0.177 |
-| groupby q2: `sum(v1)` by `id1, id2` | 1.031 | 0.166 | 0.149 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.389 | 0.600 | 0.730 |
-| groupby q4: three means by `id4` | 1.746 | 0.681 | 0.661 |
-| groupby q5: three sums by `id6` | 1.502 | 0.809 | 0.665 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.072 | 0.891 | 0.812 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 4.898 | 0.556 | 0.410 |
-| groupby q8: the two largest `v3` by `id6` | 3.757 | 1.768 | 1.538 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.298 | 0.324 | 0.316 |
-| groupby q10: `sum(v3)`, count by all six ids | 12.993 | 4.396 | 4.288 |
-| total | 34.48 | 10.37 | 9.75 |
-| peak memory (GB) | 6.6 | 7.3 | 7.4 |
+| groupby q1: `sum(v1)` by `id1` | 0.779 | 0.136 | 0.150 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.892 | 0.170 | 0.159 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.210 | 0.697 | 0.707 |
+| groupby q4: three means by `id4` | 1.600 | 0.597 | 0.608 |
+| groupby q5: three sums by `id6` | 1.272 | 0.643 | 0.726 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.128 | 0.679 | 0.799 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.136 | 0.458 | 0.409 |
+| groupby q8: the two largest `v3` by `id6` | 3.389 | 1.395 | 1.491 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.197 | 0.349 | 0.295 |
+| groupby q10: `sum(v3)`, count by all six ids | 10.210 | 4.093 | 4.119 |
+| total | 30.81 | 9.22 | 9.46 |
+| peak memory (GB) | 6.6 | 7.1 | 5.9 |
 <!-- /bench-table:5e7-groupby -->
 
 <!-- bench-table:1e8-groupby -->
