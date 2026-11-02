@@ -299,6 +299,36 @@ action: Add inferred type annotations for the whole file
 completion (3): total_name, total_count, .__S3MethodsTable__.
 hint @193 -> character
 
+#---- overloads_accept_any_parameter_type
+squares <- function(values) {
+  positions <- seq_along(values)
+  lapply(se$0(values), function(i) i^2)
+}
+#++++
+hover 72..74: se
+hover-definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed se from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(X: list[named: T], FUN: fn(T) -> double, ...: Any) -> list[named: double] (active)
+parameters: [X: list[named: T]] | FUN: fn(T) -> double | ...: Any
+signature: <T, U> fn(X: list[T] | T[] | formula | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+parameters: [X: list[T] | T[] | formula | NULL] | FUN: fn(T) -> U | ...: Any
+action: Add inferred type annotation for `squares`
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> list[named: double]"
+action: Add inferred type annotations for the whole file
+  edit 19..19 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> list[named: double]"
+completion (82): seq_along, se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+hint @19<T>
+hint @26: T
+hint @27 -> list[named: double]
+hint @41: integer[]
+hint @84FUN =
+
 #---- unknown_types_keep_their_order
 count_rows <- function(x) nrow(x)
 count_names <- function(x) names(x)

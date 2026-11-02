@@ -6263,28 +6263,18 @@ fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Op
                 else {
                     continue;
                 };
-                // The declared scheme, not the call's instance: the instance already took its
-                // parameter types from the argument being typed.
-                let check = item_check(db, position.item)?;
+                // The declared schemes, not the call's instance: the instance already took its
+                // parameter types from the argument being typed. Every overload counts, since the
+                // argument picks the overload only once it is written.
                 let naming = item_naming(db, position.item).as_ref()?;
                 if !naming.non_locals.contains_key(callee) {
                     return None;
                 }
-                let scheme = referenced_scheme(
-                    db,
-                    ProjectFiles::try_get(db)?,
-                    &callee_name(hir, *callee)?,
-                    check,
-                    *callee,
-                )?;
-                let TyKind::Function(function) = scheme.body.kind(db) else {
-                    return None;
+                let name = callee_name(hir, *callee)?;
+                let schemes = match declaring_item(db, ProjectFiles::try_get(db)?, &name) {
+                    Some(item) => vec![global_scheme(db, item)],
+                    None => stubs(db)?.schemes.get(name.as_str())?.to_vec(),
                 };
-                // An inferred parameter type says how the body uses the value, not what callers
-                // pass.
-                if function.inferred {
-                    return None;
-                }
                 let names: Vec<Option<Symbol>> = arguments
                     .iter()
                     .map(|argument| hir.argument_name(argument))
@@ -6297,17 +6287,34 @@ fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Op
                     })
                     .collect();
                 let arena = Bump::new();
-                return match argument_targets(db, &arena, function, &shapes).get(index)? {
-                    Some(ArgumentTarget::Positional(slot)) => {
-                        function.positional.get(*slot).copied()
+                let mut expected = Vec::with_capacity(schemes.len());
+                for scheme in &schemes {
+                    let TyKind::Function(function) = scheme.body.kind(db) else {
+                        return None;
+                    };
+                    // An inferred parameter type says how the body uses the value, not what
+                    // callers pass.
+                    if function.inferred {
+                        return None;
                     }
-                    Some(ArgumentTarget::Named(slot)) => {
-                        function.named.get(*slot).map(|parameter| parameter.ty)
-                    }
-                    Some(ArgumentTarget::Rest) => {
-                        function.variadic.as_ref().map(|rest| rest.element)
-                    }
-                    _ => None,
+                    let parameter =
+                        match argument_targets(db, &arena, function, &shapes).get(index)? {
+                            Some(ArgumentTarget::Positional(slot)) => {
+                                function.positional.get(*slot).copied()
+                            }
+                            Some(ArgumentTarget::Named(slot)) => {
+                                function.named.get(*slot).map(|parameter| parameter.ty)
+                            }
+                            Some(ArgumentTarget::Rest) => {
+                                function.variadic.as_ref().map(|rest| rest.element)
+                            }
+                            _ => None,
+                        };
+                    expected.push(parameter?);
+                }
+                return match expected.as_slice() {
+                    [single] => Some(*single),
+                    _ => Some(Ty::new(db, TyKind::Union(expected))),
                 };
             }
             _ => {}
