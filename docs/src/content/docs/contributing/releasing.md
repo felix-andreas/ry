@@ -32,8 +32,9 @@ git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pendin
 ```
 
 `.github/pending/workflows/release.yml` becomes the release workflow, and
-`.github/pending/workflows/ci.yml` replaces the live CI workflow. CI runs on every push to main and
-every pull request, and on any ref when started by hand from the Actions tab.
+`.github/pending/workflows/ci.yml` replaces the live CI workflow. CI runs only when started by hand
+(from the Actions tab, on any ref), not on pushes or pull requests. The orchestrating agent starts it
+on main at its hourly check when main has new commits.
 
 ## Credentials
 

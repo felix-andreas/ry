@@ -49,7 +49,9 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check.
+behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
+but only when started by hand: the orchestrating agent starts it on main at its hourly check when
+main has new commits, so a push or a pull request gets no CI run of its own.
 
 ### Blessing expectations
 

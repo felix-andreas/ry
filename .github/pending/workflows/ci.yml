@@ -3,13 +3,12 @@
 #
 #   git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
 #
-# The job runs what `just gate` runs, one recipe per step so a failure names its stage.
+# The job runs what `just gate` runs, one recipe per step so a failure names its stage. It runs only
+# when started by hand (user decision): the orchestrating agent starts it on main at its hourly
+# check when main has new commits.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:

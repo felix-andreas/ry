@@ -6272,7 +6272,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
 - **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R 4.3.3 is installed because the runtime's suites skip without an installation, which would leave the runtime untested; 4.3.3 is the oldest version the runtime supports and the one the suites are run against locally. The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
-- **Impact.** CI covers every crate except `zed_ry` (wasm), on every push to main and every pull request, and on any ref when started by hand (`workflow_dispatch`).
+- **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
+- **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
 
 ## Alias cycles are reported at the declaration, and short names get narrow suggestions
 
