@@ -1,0 +1,16 @@
+[stdout]
+| [1] "attempt to use zero-length variable name"
+| [1] "all attributes must have names [2 does not]"
+| [1] "attributes must be named"
+| [1] "attributes must be a list or NULL"
+| $class
+| [1] "keep"
+| 
+| List of 1
+|  $ : NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

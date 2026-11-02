@@ -511,7 +511,7 @@ pub unsafe extern "C" fn R_CheckUserInterrupt() {
     }
     if R_interrupts_pending.get() != 0 {
         R_interrupts_pending.set(0);
-        raise(Unwind::Interrupt);
+        raise(interp::conditions::signal_interrupt());
     }
     if let Err(unwind) = interp::unwind::poll_interrupt() {
         raise(unwind);
@@ -522,7 +522,7 @@ pub unsafe extern "C" fn R_CheckUserInterrupt() {
 pub unsafe extern "C" fn Rf_onintr() {
     if R_interrupts_suspended.get() == 0 {
         R_interrupts_pending.set(0);
-        raise(Unwind::Interrupt);
+        raise(interp::conditions::signal_interrupt());
     }
 }
 
