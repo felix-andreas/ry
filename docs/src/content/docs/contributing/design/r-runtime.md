@@ -563,7 +563,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower.
+  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  type on every formal, compiles on its first entry instead: the declared types seed the type
+  feedback of the instructions that have not run yet, and the guards on them stay. When even the
+  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
+  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
+  the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -609,8 +614,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
-  call still enters through tier 0's call path and allocates a frame and forced promises), the use
-  of static types as early profiles, and freeing the machine code of invalidated bodies.
+  call still enters through tier 0's call path and allocates a frame and forced promises), result
+  types for builtins and for subscripts, which the early profiles of the next section need to cover
+  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -619,7 +625,8 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 can compile it on the first hot loop instead of after warmup. The guards stay.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
+  inline annotations reach the runtime; `#:` comments are invisible to it.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry

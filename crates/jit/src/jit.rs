@@ -22,6 +22,7 @@ use {
     bumpalo::Bump,
     heap::object::{Header, Sexp, SexpType, gp},
     interp::{
+        annotations,
         bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
         heap, interp,
         unwind::{R, error},
@@ -99,9 +100,58 @@ pub fn install_mode(mode: Mode) {
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
-        let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
-        let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get), false)?;
+        let counters = values::ints(machine.code.cdr().element(PROFILE));
+        let entries = counters[profile::ENTRIES];
+        let compiled = if entries >= ENTRY_LIMIT.with(Cell::get) {
+            compiled_for(machine, true, false)?
+        } else if entries == 1 && counters[profile::TIER_STATE] == 0 && fully_typed(machine) {
+            first_call(machine)?
+        } else {
+            compiled_for(machine, false, false)?
+        };
         run(machine, compiled, 0)
+    }
+}
+
+/// Whether every formal of the running closure carries a checked annotation. Such a closure
+/// compiles at its first call, because its signature gives the types the profile would
+/// otherwise have to collect.
+unsafe fn fully_typed(machine: &Machine<'_>) -> bool {
+    unsafe {
+        machine.function.kind() == SexpType::Closure
+            && annotations::declared_formals(
+                machine.function.car(),
+                machine.code.cdr().element(bytecode::SOURCE),
+            )
+            .1
+    }
+}
+
+/// Compiles a fully typed closure at its first call. A body that still needs a type only
+/// running it can show (the result of an untyped call, say) is refused as cold here without
+/// counting against it, so it then tiers up like any other body once it is hot.
+unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
+    unsafe {
+        let result = compile(machine, true);
+        let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
+        match result {
+            Ok(compiled) => {
+                counters[profile::TIER_STATE] = 1;
+                Some(compiled)
+            }
+            Err(Refusal(reason)) => {
+                if std::env::var_os("RY_JIT_LOG").is_some() {
+                    eprintln!(
+                        "jit: not compiling {} at its first call: {reason}",
+                        describe(machine.code)
+                    );
+                }
+                if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
+                    counters[profile::TIER_STATE] = -1;
+                }
+                None
+            }
+        }
     }
 }
 

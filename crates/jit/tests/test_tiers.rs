@@ -505,6 +505,70 @@ fn formal_shadows_enclosing_function() {
     });
 }
 
+#[test]
+fn fully_typed_closure_compiles_at_its_first_call() {
+    // The signature stands in for the profile, so the first call runs compiled code, and a
+    // call whose values the declared types do not predict still gets tier 0's answer.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let cases = [
+            (
+                "ft <- function(x: double, y: double) -> double x * y + 1",
+                "ft(2, 3)",
+                "7",
+                Some(true),
+            ),
+            (
+                "fi <- function(x: double) -> double x * 2",
+                "fi(2L)",
+                "4",
+                None,
+            ),
+            (
+                "fv <- function(v: double[], k: integer) -> double v[2L] * k",
+                "fv(c(1, 2.5), 2L)",
+                "5",
+                Some(true),
+            ),
+            (
+                "fe <- function(x: double) -> double x + 1",
+                "fe(\"a\")",
+                "error",
+                None,
+            ),
+            (
+                "fu <- function(x: double, y) -> double x + y",
+                "fu(1, 2)",
+                "3",
+                Some(false),
+            ),
+        ];
+        let mut outcomes = Vec::new();
+        for (index, (definition, call, _, _)) in cases.iter().enumerate() {
+            run(definition);
+            let outcome = run(call);
+            let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
+            let function = lower::parse_text(&name, "<test>")
+                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+            let compiled = function.is_ok_and(|function| {
+                function.cdr().kind() == heap::object::SexpType::Bytecode
+                    && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
+            });
+            outcomes.push((outcome, compiled));
+        }
+        jit::install_mode(Mode::Off);
+        for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
+        {
+            assert_eq!(outcome, *expected, "{definition}; {call}");
+            // A call the seeds mispredict deoptimizes and discards the code, so only the others
+            // say whether the first call compiled.
+            if let Some(eager) = eager {
+                assert_eq!(compiled, *eager, "{definition}; {call}");
+            }
+        }
+    });
+}
+
 /// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
 /// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
 /// starts from its own profile and compiles from the second call on.
