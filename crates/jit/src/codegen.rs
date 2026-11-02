@@ -518,7 +518,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 entry,
                 dst,
             } => {
-                self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
+                self.direct_call(position, before, steps, function, call, args, entry, dst)?;
             }
             Action::NativeCall {
                 steps,
@@ -640,7 +640,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 effect,
                 objects,
                 dst,
-            } => self.step(position, &before, effect, &objects, dst)?,
+            } => self.step(position, &before, effect, objects, dst)?,
             Action::Branch => {
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let label = self.edge(position, target)?;
@@ -809,7 +809,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 args,
                 result,
             } => {
-                self.intrinsic(position, &before, intrinsic, dst, &args, result)?;
+                self.intrinsic(position, &before, intrinsic, dst, args, result)?;
                 self.set_visible(&before, true);
             }
             Action::Return { src } => {

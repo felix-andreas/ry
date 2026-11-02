@@ -1817,7 +1817,7 @@ pub fn compile(home: &Path, package: &Path, libraries: &[PathBuf]) -> Result<()>
     paths.push(home.join("library"));
     let built = compile_in(home, package, &name, &description, &paths, &target);
     let removed = fs::remove_dir_all(&target).map_err(io_error(&target));
-    built.and_then(|_| removed)
+    built.and(removed)
 }
 
 /// Runs the `configure` script of the source tree `build` and compiles its `src/`, returning the

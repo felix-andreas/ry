@@ -2046,6 +2046,36 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **A replacement call is built as GNU R builds it, with separate arguments.** Each level's call
+  names the symbol `*tmp*` (`` `[<-`(`*tmp*`, i, value = v) ``, getters `` `*tmp*`[["a"]] ``), and
+  `apply_call` receives that call plus a separate argument list of forced promises: the object
+  promise's code is `*tmp*`, the value promise's is the right-hand side at the first level and the
+  value at later ones. So `sys.call()` and `substitute(value)` in a method match GNU R, and
+  `substitute` unwraps a chain of promises. A forced promise deparses as its code; GNU R's
+  bytecode shows the right-hand side expression at every level inside compiled code (`value =
+  vals[[v]]`), which ry's AST form does not copy.
+- **Which call a replacement error names is chosen per message.** `Interp::assignment_call` maps the
+  generated call to the reported one: the whole assignment at the first level, and `` names(x) <-
+  `*vtmp*` `` for a later level, built eagerly because call resolution cannot fail. `error`/
+  `error_in` resolve to it (GNU R's `error()`), while `unwind::errorcall` and `generated_call`
+  keep the generated call, for the messages GNU R raises with `errorcall()`: the out-of-bounds
+  `[<-` matrix subscript, vectorIndex, and "no such index at level N". Only a builtin
+  replacement is mapped: a closure such as `` `f<-` `` reports its own frame call
+  (`` `f<-`(`*tmp*`, value = 1) ``), as in GNU R.
+- **`*tmp*` is answered from a side table, not bound.** GNU R binds `*tmp*` in the assignment's
+  environment for the duration, so a replacement closure can evaluate `sys.call()[[2]]` in
+  `parent.frame()`. ry pushes `(env, value)` onto `Interp::tmp_values` instead, and `find_var`
+  consults it only when a lookup of `*tmp*` finds no binding. Defining and removing a binding per
+  complex assignment would bump the heap's binding epoch twice and invalidate every global lookup
+  cache inside a loop like `for (i in s) x[i] <- i`, and it would make `*tmp*` count a reference
+  to the target, forcing a copy. `exists("*tmp*")` and `ls()` therefore do not see it.
+- **"Not subsettable" errors are `notSubsettableError` conditions** with GNU R's `object` field
+  (`subset.rs`'s `not_subsettable`), naming the type as `typeof` does (`builtin`, `special`), and
+  `$`/`$<-` on a function or symbol raise them too.
+- **Out-of-bounds subscripts are classed conditions.** `subset.rs`'s `out_of_bounds` signals
+  `subscriptOutOfBoundsError` through `conditions::classed_error`, with GNU R's `object`,
+  `subscript` (1-based dimension, `NA` for a vector subscript or a numeric `[` subscript) and
+  `index` (the failing element for `[`, the whole vector of a recursive `[[`) fields.
 - **Top-level task callbacks live in libr's C, behind two interpreter hooks**
   (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
   through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
@@ -2416,6 +2446,21 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     groups, as cairo does.
   - Glyph callbacks read the font file R names and draw nothing when it cannot be read, matching
     GNU R's pdf device, which is silent there.
+  - A raster is one `Mark::Image` (pixels plus a placement mapping the unit square to inches),
+    not a quadrilateral per cell. PDF writes an image XObject with an `/SMask` when any pixel is
+    translucent and `/Interpolate true` when interpolating. PostScript writes an `image` with the
+    alpha dropped and, when interpolating, resamples to the placement's size in points with GNU
+    R's sixteenth-step bilinear filter, so the hex data is byte-identical to GNU R's. The bitmap
+    devices sample bilinearly (interpolating) or nearest with a pixel-centre coverage mask, as
+    cairo does; edge pixels' anti-aliased coverage differs from cairo's by a few levels.
+  - `svg()` marks a non-interpolated image `image-rendering:pixelated`, where cairo emits no
+    hint and browsers blur the cells; this is a deliberate improvement. An interpolated image is
+    upsampled before embedding, as cairo does.
+  - A tiling pattern with `extend = "pad"` or `"none"` in `svg()` is a cell large enough to cover
+    the page, holding the tile plus its eight edge and corner strips (one point wide) stretched
+    outward; the strips overlap the tile, which is drawn last, so renderers show no seams.
+  - tiny-skia has no `saturate`, so `draw_items` composites it by hand on premultiplied pixels:
+    `dst + src * min(1, (1 - Da) / Sa)`, which matches cairo's pixels exactly.
 - **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
   `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
   offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
@@ -3192,7 +3237,7 @@ first lines R had already read, leaving R mid-command.
 
 ## Corpus package tests: compatibility details that are easy to get wrong
 
-- **Hashed frames list in GNU R's order.** `ls()`, `as.list(env)` and `mget` over a hashed environment follow GNU R's bucket order, and packages' snapshot tests record that order. `heap::env::Frame::listed_cells` replays GNU R's table instead of storing one: buckets from the PJW hash, an insert prepends to its bucket, and when the count passes 0.85 of the size the table grows to `size * 1.2 + 1` and rehashes in bucket order, resetting the count to the occupied buckets. The global environment is hashed from its creation, as in GNU R. Replaying keeps the frame's own storage the single source of truth, at the cost of rebuilding the order on each listing, which only listing functions pay.
+- **Hashed frames list in GNU R's order.** `ls()`, `as.list(env)` and `mget` over a hashed environment follow GNU R's bucket order, and packages' snapshot tests record that order. The order depends on the frame's whole history, because GNU R's table never shrinks on `rm()` and its chain counter (`HASHPRI`, `env.profile`'s `nchains`) falls only when a bucket empties, so replaying the inserts of the live bindings cannot reproduce it once anything has been removed. A hashed frame therefore keeps GNU R's chained table itself (`heap::env::HashTable`, boxed beside the frame), updated on every insert, removal and compaction: buckets from the PJW hash of the name, an insert prepends and counts one (GNU R's `R_HashSet` counts every insert, since its empty-chain test runs after the scan), and past 0.85 of the size the table grows to `size * 1.2 + 1`, moving buckets in ascending order and recounting occupied buckets. The table is the single source of truth for listing and `env.profile`; lookups still go through the address-keyed index. The global environment is hashed from its creation, as in GNU R. `crates/heap/tests/test_frames.rs` checks it against a plain model.
 - **String encodings.** Strings intern by pointer, and `mkchar` marks non-ASCII text UTF-8. `Encoding<-` and `iconv` mark text that is valid UTF-8 as UTF-8 even when asked for "unknown", because the session is UTF-8 and a second pointer for the same text would make `==` fail (desc's `read_dcf` broke on duplicate fields). Latin-1 strings stay a separate pointer, and `==` compares them by text through `values::same_text`; `match()` and `unique()` do not yet (`backlog.md`).
 - **A sink's connection is a GC root** (`connections::Table::trace`), because GNU R preserves the connection object while output goes to it, and the collector otherwise finalized and closed it under `capture.output`.
 - **S4 dispatch on an unsupplied argument dispatches on NULL**, as GNU R's `GetObject` does, even when the argument has a default (`dispatch::dispatch_object`).
@@ -4171,9 +4216,9 @@ check` releases its trees once, and memoized records are compact" below).
 - **`inherits()` follows `class()`**: an object with no class attribute inherits from the implicit
   class `class()` reports (`matrix`/`array`, else the basic class), not the dispatch chain, so
   `inherits(1L, "numeric")` is `FALSE`, as in GNU R. It compares bytes and allocates nothing.
-- **Listing a hashed frame replays GNU R's table through flat head and next arrays**, and callers
+- **A hashed frame's table is flat head and next arrays indexed by slot**, and callers
   that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
-  `Heap::bound_symbols`, which skips the replay.
+  `Heap::bound_symbols`, which skips the walk.
 - **`step` is inlined into the dispatch loop** and reads the activation through a `Decoded` struct
   (code, constants, caches, feedback pointer), so a simple instruction costs no call; type
   feedback writes through a raw pointer that is null when no tier is collecting it. This cut
@@ -4850,7 +4895,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes. On x86_64 the slice loops (`long_double::add_all`, `add_differences`, `add_products`, behind `sum`, `mean`, `var`, `cov`, `cor` and `List.sum`) run on the x87 unit through inline assembly, which rounds identically because System V leaves x87 precision control at 64 bits; the software model is about 10x slower (13 ns an element) and stays the fallback on other targets and on Windows, whose x64 CRT sets x87 precision to 53 bits, and for values outside the x87 exponent range.
 - **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
-- **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change small. It is not lossless: a string that already holds a real U+F780..U+F7FF character is indistinguishable from an invalid byte and prints as `\xNN` (backlog: byte strings).
+- **Invalid UTF-8 bytes** survive text processing as private-use code points (`U+10FF00 + byte`, one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. The heap itself keeps a string's exact bytes and its encoding flag (`gp::BYTES`, `LATIN1`, `UTF8`), so the stand-ins exist only while `interp` handles a string as a Rust `str`. Carrying bytes through every string builtin instead would touch about 230 `char_str`/`string_at` readers, for no observable gain, because the range is the tail of the last private-use plane: a genuine character there is the one thing the scheme misreads (it becomes a byte when text holding it is interned again). The earlier range, `U+F780..U+F7FF`, sat where symbol fonts map glyphs, so it moved.
+- **A string declared as bytes is refused where GNU R translates it.** `values::refuse_bytes` raises "translating strings with \"bytes\" encoding is not allowed" for a non-ASCII bytes string in the builtins whose GNU R code calls `translateChar`: case changes, `chartr`, `sprintf`, `make.names`, `abbreviate`, string `sort`/`order` with more than one element, and `as.vector(mode = "symbol")`. `nchar` raises its own "not computable in \"bytes\" encoding" messages. Functions GNU R runs on the bytes (`paste`, `substr`, `strsplit`, `format`, `useBytes` regex) keep working (`oracle/cases/strings__bytes_encoding.R`).
 - **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
 - **Scripts run as console input**: one top-level expression at a time, with `stdin()` reading the rest of the script, because GNU R's tests read data from their own source that way.
 - **Message sinks and abort restarts**: `sink(type = "message")` diverts every stderr writer, reaching top level invokes an R-level `abort` restart, and messages are cut to `warning.length`.
@@ -4885,7 +4931,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **An S4 value assigned into a non-list vector** goes through `as.vector` (which dispatches) before `[<-`; into a list it is embedded with GNU R's "implicit list embedding of S4 objects is deprecated" warning.
 - **`zeroin2` reports a precision after hitting the iteration limit**: the bracket width `|c - b|`, not -1, so `uniroot`'s `estim.prec` matches GNU R on non-converged searches.
 - **JIT function speculation skips frame-bound symbols**: a call of a symbol the frame can bind (a formal or a local assignment) is never speculated from the enclosure, because a formal holding a function shadows a global of the same name (`uniroot(f, ...)` with a global `f`). Pinned by `formal_shadows_enclosing_function` in `crates/jit/tests/test_tiers.rs`.
-- **One implementation where two were written in parallel.** `sum` over doubles totals each argument in the long double model, rounds it to a double, and adds it to a long double total, which is what GNU R's observed results across arguments need; main's compensated sum was removed. Parse data comes from `crates/interp/src/parse_data.rs`, which replays GNU R's lexer contexts, instead of a second builder in `lower.rs`. A frame's hash chains are replayed in one place (`Frame::hash_chains` in `crates/heap/src/env.rs`), which both `env.profile` and the listing order read. Graphics devices keep the graphics engine's implementations.
+- **One implementation where two were written in parallel.** `sum` over doubles totals each argument in the long double model, rounds it to a double, and adds it to a long double total, which is what GNU R's observed results across arguments need; main's compensated sum was removed. Parse data comes from `crates/interp/src/parse_data.rs`, which replays GNU R's lexer contexts, instead of a second builder in `lower.rs`. A hashed frame's chains live in one place (`HashTable` in `crates/heap/src/env.rs`), which both `env.profile` and the listing order read. Graphics devices keep the graphics engine's implementations.
 - **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`contributing/corpus-and-oracle.md`) is the regression check.
 
 ## A fix says whether it may be applied unseen

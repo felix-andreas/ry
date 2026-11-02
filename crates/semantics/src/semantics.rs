@@ -1484,7 +1484,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, &name), deferred),
+            None => frame_binder(db, item, types::Name::new(db, name), deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -2180,7 +2180,7 @@ struct SalsaGlobals<'db, 'a> {
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
-    item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
+    item_frame_binders: OnceCell<&'db ItemFrameBinders<'db>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
     package_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
     test_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
@@ -2330,11 +2330,11 @@ fn frame_binder<'db>(
 /// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
 /// which interned a key and kept a memo, and its value still changes only when a binder of
 /// one of the item's own names does.
+/// Each symbol bound in an item's frame, with its immediate and deferred binders.
+type ItemFrameBinders<'db> = FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
+
 #[salsa::tracked(returns(ref))]
-fn item_frame_binders<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-) -> FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)> {
+fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders<'db> {
     let mut binders = FxHashMap::default();
     let Some(naming) = item_naming(db, item) else {
         return binders;

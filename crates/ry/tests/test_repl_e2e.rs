@@ -1366,7 +1366,7 @@ fn start_attachable_console(
         .stderr(Stdio::piped())
         .spawn()
         .expect("start ry run");
-    let mut input = child.stdin.take().expect("stdin");
+    let input = child.stdin.take().expect("stdin");
     let registry = (0..300)
         .find_map(|_| {
             let found = fs::read_dir(temporary)
@@ -1421,8 +1421,7 @@ fn an_editor_attaches_to_a_running_console() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let script = project.path().join("f.R");
     fs::write(&script, "g <- function(x) {\n  y <- x + 1\n  y * 2\n}\n").expect("write f.R");
-    let (mut child, mut input, mut client) =
-        start_attachable_console(project.path(), temporary.path());
+    let (child, mut input, mut client) = start_attachable_console(project.path(), temporary.path());
 
     client.send("initialize", serde_json::json!({ "adapterID": "ry" }));
     client.until(|message| message["event"] == "initialized");
@@ -1742,111 +1741,4 @@ fn browser_stops_at_a_prompt_an_editor_can_take_over() {
     assert!(status.success(), "{stdout}");
     assert!(stdout.contains("an editor attached"), "{stdout}");
     assert!(stdout.contains("still running"), "{stdout}");
-}
-
-/// Hovers `df` and completes `df$` in a file of `project` through `ry server`, which finds the
-/// console running there. Returns the hover's text and the completion labels from the console.
-#[cfg(unix)]
-fn ask_language_server(
-    project: &std::path::Path,
-    temporary: &std::path::Path,
-) -> (String, Vec<String>) {
-    use std::{io::Write, process::Stdio};
-    let text = "summary(df)\ndf$\n";
-    let file = project.join("analysis.R");
-    fs::write(&file, text).expect("write analysis.R");
-    let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("server")
-        .current_dir(project)
-        .env("TMPDIR", temporary)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start ry server");
-    let mut writer = server.stdin.take().expect("stdin");
-    let mut reader = std::io::BufReader::new(server.stdout.take().expect("stdout"));
-    let mut send = |message: serde_json::Value| {
-        let body = message.to_string();
-        write!(writer, "Content-Length: {}\r\n\r\n{body}", body.len())
-            .expect("write to the server");
-        writer.flush().expect("flush");
-    };
-    let root = url_of(project);
-    let uri = url_of(&file);
-    send(
-        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": { "rootUri": root, "capabilities": {} } }),
-    );
-    let receive = |reader: &mut std::io::BufReader<std::process::ChildStdout>, id: u64| loop {
-        let message = read_framed(reader);
-        if message["id"] == id && message.get("method").is_none() {
-            return message;
-        }
-    };
-    receive(&mut reader, 1);
-    send(serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
-    send(
-        serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-        "textDocument": { "uri": uri, "languageId": "r", "version": 1, "text": text } } }),
-    );
-    send(
-        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
-        "textDocument": { "uri": uri }, "position": { "line": 0, "character": 9 } } }),
-    );
-    let hover = receive(&mut reader, 2);
-    send(
-        serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "textDocument/completion", "params": {
-        "textDocument": { "uri": uri }, "position": { "line": 1, "character": 3 } } }),
-    );
-    let completion = receive(&mut reader, 3);
-    send(serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown" }));
-    receive(&mut reader, 4);
-    send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
-    drop(send);
-    server.wait().expect("the server exits");
-    let hover = hover["result"]["contents"]["value"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    let columns = completion["result"]["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| {
-            item["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.ends_with("(console)"))
-        })
-        .filter_map(|item| item["label"].as_str().map(str::to_owned))
-        .collect();
-    (hover, columns)
-}
-
-#[cfg(unix)]
-fn url_of(path: &std::path::Path) -> String {
-    format!(
-        "file://{}",
-        fs::canonicalize(path).expect("the path exists").display()
-    )
-}
-
-#[cfg(unix)]
-fn read_framed(reader: &mut impl std::io::BufRead) -> serde_json::Value {
-    let mut length = 0;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read a header");
-        assert!(!line.is_empty(), "the server closed its output");
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some(value) = line.strip_prefix("Content-Length:") {
-            length = value.trim().parse().expect("a length");
-        }
-    }
-    let mut body = vec![0; length];
-    std::io::Read::read_exact(reader, &mut body).expect("read a body");
-    serde_json::from_slice(&body).expect("JSON")
 }

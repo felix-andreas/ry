@@ -196,6 +196,7 @@ pub fn lint_levels_mut(config: &mut LintConfig) -> Vec<(&'static str, &mut LintL
             &mut config.unnecessary_concatenation,
         ),
         ("line-length", &mut config.line_length),
+        ("data-table", &mut config.data_table),
     ]
 }
 
@@ -1625,7 +1626,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -2000,12 +2001,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match &*node_text(&margin) {
+    let prefix = match &*node_text(margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match &*node_text(&function) {
+    let suffix = match &*node_text(function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -2028,7 +2029,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
+        (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
@@ -2136,7 +2137,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(&*node_text(&rhs), "0" | "0L") {
+    if !matches!(&*node_text(rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2597,7 +2598,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {

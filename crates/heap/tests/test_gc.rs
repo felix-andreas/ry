@@ -481,7 +481,7 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
                 text: "a\\0b".into()
             })
         );
-        for bytes in [&b"0123\0567abcdefgh"[..], b"abcdefgh01234\0"] {
+        for bytes in [&b"0123\x00567abcdefgh"[..], b"abcdefgh01234\0"] {
             assert!(
                 matches!(
                     heap.mk_char(bytes, Encoding::Native),

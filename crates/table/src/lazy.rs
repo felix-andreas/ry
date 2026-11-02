@@ -812,8 +812,8 @@ fn join(
                 let joined = layout
                     .iter()
                     .find(|column| match column.condition {
-                        Some(index) => &left_on[index] == name,
-                        None => column.side == query::Side::I && &column.source == name,
+                        Some(index) => left_on[index] == name,
+                        None => column.side == query::Side::I && column.source == name,
                     })
                     .ok_or_else(|| Error::NoColumn(name.to_string()))?;
                 select.push((name.clone(), Expr::Column(joined.name.clone())));
