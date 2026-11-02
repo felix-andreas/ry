@@ -62,7 +62,12 @@ pub unsafe fn show(object: heap::object::Sexp, title: &str) -> Result<(), String
 /// Requests any connection may send, answered with R code allowed to run.
 unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
     match request.command.as_str() {
-        "ryGlobals" => Ok(crate::viewer::globals()),
+        "ryGlobals" => {
+            let mark = crate::heap().handle_mark();
+            let globals = crate::viewer::globals();
+            crate::heap().release_handles(mark);
+            Ok(globals)
+        }
         "ryView" => {
             let expression = request
                 .arguments
@@ -121,6 +126,8 @@ mod platform {
     static ARRIVED: Condvar = Condvar::new();
     static CONNECTIONS: Mutex<BTreeMap<u64, Connection>> = Mutex::new(BTreeMap::new());
     static SERVER: Mutex<Option<Server>> = Mutex::new(None);
+    /// The prompt's input, when it arrived while code run for a request was stopped.
+    static STASHED_INPUT: Mutex<Option<Option<String>>> = Mutex::new(None);
     /// The connection that owns the debugger, while one is attached.
     static DEBUG_CONNECTION: Mutex<Option<u64>> = Mutex::new(None);
 
@@ -288,6 +295,16 @@ mod platform {
         if lock(&SERVER).is_none() {
             return read();
         }
+        // A command a client terminated unwinds at its next statement; one that ended first must
+        // not take the stale adapter into the next command.
+        let state = interp();
+        if state
+            .debugger
+            .as_ref()
+            .is_some_and(|adapter| adapter.is_detached())
+        {
+            state.debugger = None;
+        }
         std::thread::scope(|scope| {
             let reader = std::thread::Builder::new()
                 .name("ry-console-input".to_owned())
@@ -296,7 +313,11 @@ mod platform {
                 return None;
             }
             loop {
-                match pop(true) {
+                let event = match lock(&STASHED_INPUT).take() {
+                    Some(input) => Some(Event::Input(input)),
+                    None => pop(true),
+                };
+                match event {
                     Some(Event::Input(input)) => {
                         // Requests answered while idle set the flag too; with nothing left to
                         // answer it would only cost the next command a spurious poll.
@@ -364,7 +385,7 @@ mod platform {
             return;
         }
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
-            debug_request(&request);
+            debug_request(&request, false);
             if request.command == "attach" {
                 reload_packages();
             }
@@ -390,7 +411,7 @@ mod platform {
         if request.command == "initialize" {
             initialize(connection, &request);
         } else if *lock(&DEBUG_CONNECTION) == Some(connection) {
-            debug_request(&request);
+            debug_request(&request, true);
         } else if request.command == "rySubscribe" {
             if let Some(target) = lock(&CONNECTIONS).get_mut(&connection) {
                 target.subscribed = true;
@@ -414,16 +435,18 @@ mod platform {
         drop(owner);
         let transport = Box::new(ConsoleTransport { connection });
         interp().debugger = Some(Box::new(Adapter::for_console(transport)));
-        debug_request(request);
+        debug_request(request, false);
     }
 
-    unsafe fn debug_request(request: &Request) {
+    /// `running` says a command is running, which a `terminate` must unwind: the adapter then
+    /// stays until the command's next statement, where `with_adapter` unwinds and drops it.
+    unsafe fn debug_request(request: &Request, running: bool) {
         let state = interp();
         let Some(adapter) = state.debugger.as_mut() else {
             return;
         };
         adapter.answer_running(request);
-        if adapter.is_detached() {
+        if adapter.is_detached() && !(running && adapter.is_terminating()) {
             // Dropping the adapter drops its transport, which frees the debug connection.
             state.debugger = None;
         }
@@ -481,6 +504,9 @@ mod platform {
                     Some(Event::Closed(connection)) => {
                         lock(&CONNECTIONS).remove(&connection);
                     }
+                    // A line typed while a request's code is stopped waits for the prompt; the
+                    // stop itself must not end, or the debugger would take it for a hang-up.
+                    Some(Event::Input(input)) if wait => *lock(&STASHED_INPUT) = Some(input),
                     Some(Event::Input(input)) => {
                         lock(&EVENTS).push_front(Event::Input(input));
                         return None;

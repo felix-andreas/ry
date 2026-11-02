@@ -87,8 +87,10 @@ Other editors can launch the same debugger as `ry debug-adapter`, a
 input and output. Its launch arguments are `program` (the script), `args`, `stopOnEntry`, `prelude`
 (R code run first, such as `load_all("."); library(testthat)`) and `testName` (run only the
 `test_that()` block with that description). To attach to a console instead, connect to the Unix
-socket named in `$TMPDIR/ry-<uid>/console-<pid>.json` and send an `attach` request; the same
-connection answers `ryView` and `ryTable` requests for the data viewer.
+socket named in `$TMPDIR/ry-<uid>/console-<pid>.json` and send `initialize` and then `attach`, as
+to any debug adapter. The data viewer's `ryView` and `ryTable` requests go to the debugger
+connection while the program is stopped, and to a second connection while the console waits for
+input.
 
 ## Settings
 

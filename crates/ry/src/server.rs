@@ -76,7 +76,8 @@ use {
         time::{Duration, Instant},
     },
     syntax::{
-        SyntaxElement, TextRange, TextSize, is_syntactic_name,
+        SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenAtOffset,
+        is_syntactic_name,
         literate::{is_literate_extension, r_regions, r_source_of_literate},
     },
     tokio::{runtime::Handle, sync::oneshot},
@@ -2170,7 +2171,18 @@ impl LanguageServer for ServerState {
             } else {
                 Vec::new()
             };
-            let live = console_value(worker, &text, usize::from(offset));
+            let names_global = worker
+                .cancellable(|worker| {
+                    names_a_console_global(
+                        &semantics::parse(&worker.db, file).syntax_node(),
+                        offset,
+                        hover.as_ref().and_then(|hover| hover.definition.as_ref()),
+                    )
+                })
+                .unwrap_or(false);
+            let live = names_global
+                .then(|| console_value(worker, &text, usize::from(offset)))
+                .flatten();
             if hover.is_none()
                 && let Some(live) = live
             {
@@ -3209,8 +3221,31 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     }
 }
 
-/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
-/// label, which puts `break` ahead of the local the user is about to type.
+/// Whether the name at `offset` can refer to a variable of the console's global environment: an
+/// identifier, not a word in a string or comment, and not a function's own local, which only
+/// shares the name with a global.
+fn names_a_console_global(
+    root: &SyntaxNode,
+    offset: TextSize,
+    definition: Option<&HoverDefinition>,
+) -> bool {
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::Single(token) => token,
+        TokenAtOffset::Between(left, right) => match right.kind() == SyntaxKind::IDENT {
+            true => right,
+            false => left,
+        },
+        TokenAtOffset::None => return false,
+    };
+    if token.kind() != SyntaxKind::IDENT {
+        return false;
+    }
+    let in_function = token
+        .parent_ancestors()
+        .any(|node| node.kind() == SyntaxKind::FUNCTION_DEF);
+    !(in_function && matches!(definition, Some(HoverDefinition::Local { .. })))
+}
+
 /// The live value of the variable at `offset` in the workspace's running console, as hover text.
 fn console_value(worker: &mut Worker, text: &str, offset: usize) -> Option<String> {
     let (name, owner) = identifier_at(text, offset)?;
@@ -3304,6 +3339,8 @@ fn console_completions(
     }
 }
 
+/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
+/// label, which puts `break` ahead of the local the user is about to type.
 fn convert_completion_item(
     item: CompletionItem,
     rank: usize,

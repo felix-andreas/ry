@@ -15,12 +15,17 @@ use {
         collections::BTreeMap,
         io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
 /// How long a request to the console may take before the editor gives up on it.
 const TIMEOUT: Duration = Duration::from_millis(150);
+
+/// How long an answer stays fresh, and how long the link waits after finding no console before
+/// it looks again. Typing fires a hover or completion per keystroke, and each must not cost a
+/// round trip that walks the whole global environment, nor a scan of the registry directory.
+const FRESH: Duration = Duration::from_secs(2);
 
 /// One variable of the console's global environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +41,8 @@ pub struct Global {
 pub struct ConsoleLink {
     workspace: Option<PathBuf>,
     connection: Option<Connection>,
+    /// The last answer and when it came, or when the last lookup found nothing (`None`).
+    last: Option<(Instant, Option<BTreeMap<String, Global>>)>,
 }
 
 impl ConsoleLink {
@@ -45,21 +52,31 @@ impl ConsoleLink {
         ConsoleLink {
             workspace: workspace.map(|path| path.canonicalize().unwrap_or(path.to_path_buf())),
             connection: None,
+            last: None,
         }
     }
 
     /// The console's global variables by name, or `None` when no console runs in the workspace
     /// or it did not answer in time.
-    pub fn globals(&mut self) -> Option<BTreeMap<String, Global>> {
-        let body = self.request("ryGlobals", json!({}))?;
-        let globals = body.get("globals")?.as_array()?;
-        Some(
-            globals
-                .iter()
-                .filter_map(global_of)
-                .map(|global| (global.name.clone(), global))
-                .collect(),
-        )
+    pub fn globals(&mut self) -> Option<&BTreeMap<String, Global>> {
+        if self
+            .last
+            .as_ref()
+            .is_none_or(|(when, _)| when.elapsed() >= FRESH)
+        {
+            let globals = self.request("ryGlobals", json!({})).and_then(|body| {
+                let globals = body.get("globals")?.as_array()?;
+                Some(
+                    globals
+                        .iter()
+                        .filter_map(global_of)
+                        .map(|global| (global.name.clone(), global))
+                        .collect(),
+                )
+            });
+            self.last = Some((Instant::now(), globals));
+        }
+        self.last.as_ref()?.1.as_ref()
     }
 
     fn request(&mut self, command: &str, arguments: Value) -> Option<Value> {

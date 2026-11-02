@@ -88,11 +88,13 @@ impl Drop for Adapter {
     }
 }
 
-/// Where a statement is: a file on disk, or the index of a text in [`Adapter::texts`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where a statement is: a file on disk, or the srcfile of code with no file behind it. A text
+/// gets its `sourceReference` only when a stack trace shows it, because registering one preserves
+/// it for the adapter's life, and the statement hook sees every command typed at a console.
+#[derive(Clone, PartialEq, Eq)]
 enum Source {
     File(String),
-    Text(usize),
+    Text(Sexp),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +215,10 @@ impl Adapter {
     /// Whether the client of a console session left or ended it, so the adapter should go.
     pub fn is_detached(&self) -> bool {
         self.detached
+    }
+
+    pub fn is_terminating(&self) -> bool {
+        self.terminating
     }
 
     /// Answers requests until the client has both launched and finished configuring
@@ -602,11 +608,14 @@ impl Adapter {
                                     .unwrap_or_else(|| path.clone());
                                 json!({ "name": name, "path": path })
                             }
-                            Source::Text(index) => json!({
-                                "name": self.text_name(index),
-                                "sourceReference": index + 1,
-                                "presentationHint": "deemphasize",
-                            }),
+                            Source::Text(srcfile) => match self.text_index(srcfile) {
+                                Some(index) => json!({
+                                    "name": self.text_name(index),
+                                    "sourceReference": index + 1,
+                                    "presentationHint": "deemphasize",
+                                }),
+                                None => json!({ "name": "<console>" }),
+                            },
                         };
                         object.insert("source".to_owned(), source);
                         object.insert("line".to_owned(), json!(line));
@@ -649,7 +658,7 @@ impl Adapter {
         };
         let source = match path {
             Some(path) => Source::File(path),
-            None => Source::Text(self.text_index(srcfile)?),
+            None => Source::Text(srcfile),
         };
         let positions = srcref.slice::<i32>();
         let line = u32::try_from(*positions.first()?).ok()?;
@@ -987,7 +996,12 @@ unsafe fn variables(arguments: &Value, stopped: &mut Stopped) -> Result<Value, S
             let value = if cell.has_gp(gp::ACTIVE_BINDING) {
                 variable_text(&name, "<active binding>", "active binding")
             } else {
-                let path = path.as_deref().map(|path| match path {
+                // `...` and `..1` are not values an expression can name on their own.
+                let dots = name == "..."
+                    || name.strip_prefix("..").is_some_and(|rest| {
+                        !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+                    });
+                let path = path.as_deref().filter(|_| !dots).map(|path| match path {
                     "" => quoted_name(&name),
                     path => format!("{path}${}", quoted_name(&name)),
                 });
@@ -1043,6 +1057,10 @@ fn quoted_name(name: &str) -> String {
                 | "Inf"
                 | "NaN"
                 | "NA"
+                | "NA_integer_"
+                | "NA_real_"
+                | "NA_character_"
+                | "NA_complex_"
                 | "in"
         );
     match syntactic {

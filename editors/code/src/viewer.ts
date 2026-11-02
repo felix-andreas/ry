@@ -7,6 +7,7 @@
 // with millions of rows costs one page, and it closes the view with `ryRelease` when the panel
 // closes.
 
+import * as crypto from "crypto"
 import * as fs from "fs"
 import * as net from "net"
 import * as os from "os"
@@ -140,7 +141,13 @@ export class ConsoleConnection implements DataSource, Disposable {
       if (this.buffer.length < end + 4 + length) {
         return
       }
-      const message = JSON.parse(this.buffer.subarray(end + 4, end + 4 + length).toString("utf8"))
+      let message
+      try {
+        message = JSON.parse(this.buffer.subarray(end + 4, end + 4 + length).toString("utf8"))
+      } catch {
+        this.socket.destroy()
+        return
+      }
       this.buffer = this.buffer.subarray(end + 4 + length)
       this.dispatch(message)
     }
@@ -166,7 +173,7 @@ export function openViewer(source: DataSource, view: View): WebviewPanel {
     enableScripts: true,
     retainContextWhenHidden: false,
   })
-  const nonce = Math.random().toString(36).slice(2)
+  const nonce = crypto.randomBytes(16).toString("base64")
   panel.webview.html = viewerHtml(view, nonce, panel.webview.cspSource)
   panel.webview.onDidReceiveMessage(async (message) => {
     if (message.type !== "page") {
@@ -244,6 +251,9 @@ function viewerHtml(view: View, nonce: string, cspSource: string): string {
   element("next").onclick = () => go(start + view.pageSize)
   element("last").onclick = () => go(lastStart)
   window.addEventListener("message", ({ data: message }) => {
+    // After quick clicks, a slow answer for a page the user already left must not replace the
+    // page they are on.
+    if (message.type === "page" && message.start !== start) return
     if (message.type === "error") {
       element("error").textContent = message.message
       return

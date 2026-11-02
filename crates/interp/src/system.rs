@@ -398,9 +398,6 @@ fn temp_dir() -> String {
     }
 }
 
-/// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
-/// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
-/// Unix base R finds programs with `command -v` in R code instead.
 /// `.ry_view(x, title)`, behind ry's `View()`: opens a lazy view of `x` in the editors connected
 /// to the console. Only the rows an editor scrolls to are ever formatted.
 unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
@@ -409,6 +406,9 @@ unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
     Ok(call.arg(0))
 }
 
+/// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
+/// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
+/// Unix base R finds programs with `command -v` in R code instead.
 unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let result = map_strings(call, |name| {
@@ -3086,6 +3086,7 @@ unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
+    crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;
     drop(std::io::stdout().flush());
@@ -3556,8 +3557,6 @@ thread_local! {
     static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
-/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
-/// unless that is `NULL`.
 /// The function `debug()` and its relatives flag: their first argument, or the function a
 /// string names. The flags only take effect on closures, but GNU R accepts any function.
 unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
@@ -3572,6 +3571,8 @@ unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
+/// unless that is `NULL`.
 unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
     let state = call.arg(0);
     let previous = TRACING.with(|tracing| tracing.get());

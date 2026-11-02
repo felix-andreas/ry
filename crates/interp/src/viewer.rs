@@ -16,7 +16,8 @@ use {
         coerce, eval, frame, interp, lower,
         unwind::{Jump, R, Unwind},
         values::{
-            self, base_env, class_attr, global_env, length, nil, scalar_integer, symbol_name,
+            self, base_env, class_attr, get_attr, global_env, length, nil, scalar_integer,
+            symbol_name, symbols,
         },
     },
     heap::object::{Sexp, SexpType, gp},
@@ -136,7 +137,8 @@ pub unsafe fn request(command: &str, arguments: &Value) -> Result<Value, String>
 }
 
 /// The global environment's bindings, for an editor's completion and hover. Promises are not
-/// forced and active bindings are not called, so listing them runs no R code.
+/// forced, active bindings are not called, and shapes are read from attributes, so listing them
+/// runs no R code: a hover must never dispatch to a user's `dim` method or hit a `browser()`.
 pub unsafe fn globals() -> Value {
     let env = global_env();
     let mut bindings = Vec::new();
@@ -206,7 +208,15 @@ unsafe fn describe(object: Sexp, shape: Shape) -> R<(usize, Value)> {
             (table.height(), Value::Array(columns))
         }
         Shape::DataFrame => {
-            let rows = values::as_integer_scalar(run("nrow(x)", object, None)?).max(0) as usize;
+            let row_names = get_attr(object, symbols().row_names);
+            let rows = match crate::stats_models::compact_row_count(row_names) {
+                Some(rows) => rows,
+                None if row_names == nil() => match length(object) {
+                    0 => 0,
+                    _ => length(object.element(0)),
+                },
+                None => length(row_names),
+            };
             let names = values::names(object);
             let columns = (0..length(object))
                 .map(|index| {
@@ -223,7 +233,11 @@ unsafe fn describe(object: Sexp, shape: Shape) -> R<(usize, Value)> {
                 dims.first().copied().unwrap_or(0),
                 dims.get(1).copied().unwrap_or(0),
             );
-            let names = run("colnames(x)", object, None)?;
+            let dimnames = get_attr(object, symbols().dimnames);
+            let names = match dimnames.kind() == SexpType::List && length(dimnames) == 2 {
+                true => dimnames.element(1),
+                false => nil(),
+            };
             let kind = coerce::type_name(object).to_owned();
             let columns = (0..count)
                 .map(|index| {

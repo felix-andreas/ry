@@ -147,7 +147,6 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
     Ok(formatter.out)
 }
 
-/// Shared with the coverage-guided `fuzz/` targets so the contract has one home.
 /// The edits that format each R chunk of a literate document (`.Rmd`, `.qmd`, `.Rnw`): the
 /// byte range of a chunk's code and its formatted text, for the chunks that change. Prose and
 /// fences are never touched. A chunk whose fence is indented (inside a list item) is left alone,
@@ -186,6 +185,7 @@ pub fn format_literate(document: &str, config: Config) -> Result<String, FormatE
     Ok(formatted)
 }
 
+/// Shared with the coverage-guided `fuzz/` targets so the contract has one home.
 pub fn check_format_invariants(input: &str) {
     let first = format(input, Config::default());
     let again = format(input, Config::default());
