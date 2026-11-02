@@ -3118,3 +3118,17 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
   mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
   (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
+- The checker's working maps now live in a pooled bump arena and its names are interned
+  (`decisions.md`, "The item check's working maps live in a pooled bump arena"), which took the
+  finance bench from 19.35 M to 15.39 M mimalloc calls and 23.22 G to 22.31 G instructions. The
+  1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
+  self cost. What is left is structural:
+  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
+    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
+    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
+    node array per file, children as index ranges) would remove both.
+  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
+    queries remove.
+  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
+    times on the slice), which a small-buffer type would absorb.

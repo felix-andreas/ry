@@ -5313,6 +5313,34 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
 
+## The item check's working maps live in a pooled bump arena
+
+- **Previous shape.** Every `Checker` built a dozen `FxHashMap`s and `FxHashSet`s on the global
+  heap (expression annotations, binding types, superassign seeds, read slots and the rest), so
+  each item check paid their growth and their frees. Call arguments carried names as `String`,
+  S3 method names were built with `format!`, `substitute_rigid` took a hash map and memoized every
+  type it visited, and several hot syntax queries (top-level definitions, annotation token scans,
+  the duplicate-argument lint) built red nodes and owned strings to answer a yes-or-no question.
+- **Weakness.** All of it is per-item or per-call allocation whose lifetime is one item check or
+  one query, which is exactly what the data-oriented rule says should come from an arena.
+- **Target shape.**
+  - The checker's maps are `hashbrown` maps allocated in a `bumpalo::Bump` (`ArenaMap`,
+    `ArenaSet` in `crates/semantics/src/check.rs`). The arenas live in a per-thread pool; it is a
+    stack, not one arena, because an item check can start a nested check (a callee's interface)
+    while its own arena is live. An arena is reset, not freed, when its check returns, so a
+    thread reuses the same chunks for every item.
+  - Call argument names are `Symbol`, overload and namespace lookups take `Symbol`, and S3
+    method names are spelled in a per-thread buffer before interning (`method_symbol`).
+  - `substitute_rigid` takes a slice of bindings and memoizes only types larger than 64 nodes,
+    where sharing actually repeats work.
+  - `top_level_definition`, the annotation token scans and the duplicate-argument prescan read
+    the green tree directly; the full argument list is built only when a name repeats.
+- **Impact.** On the whole finance bench (`ry check --no-cache`), callgrind went from 23.22 G to
+  22.31 G instructions and mimalloc calls from 19.35 M to 15.39 M, with byte-identical findings. Committed
+  memory rose about 24 MiB from the pooled arenas and pre-sized resolution caches. The remaining
+  allocations are rowan's red and green nodes, salsa's memo bookkeeping and scattered `Vec`
+  growth (`backlog.md`, "Check cache follow-ups").
+
 ## One-shot checks record coarse dependencies
 
 - **Previous shape.** `ry check --no-cache` ran on the same database shape as the language server:

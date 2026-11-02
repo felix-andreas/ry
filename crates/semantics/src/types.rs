@@ -680,7 +680,13 @@ pub fn map_child_types<'db>(
         return ty;
     }
     let mut children = mapped.into_iter();
-    match mapped_kind(db, ty, &mut |child| children.next().unwrap_or(child)) {
+    let rebuilt = mapped_kind(db, ty, &mut |child| children.next().unwrap_or(child));
+    // `for_each_child` and `mapped_kind` must visit the same children in the same order.
+    debug_assert!(
+        children.next().is_none(),
+        "mapped_kind visited fewer children than for_each_child"
+    );
+    match rebuilt {
         Some(kind) => Ty::new(db, kind),
         None => ty,
     }
