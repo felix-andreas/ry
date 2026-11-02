@@ -3,6 +3,7 @@
 file DESCRIPTION
 | Package: ledger
 | Version: 0.1.0
+| Imports: R6
 file NAMESPACE
 | export(balance)
 file tests/testthat/test-ledger.R
@@ -23,6 +24,17 @@ file R/ledger.R
 | }
 |
 | audit <- function(entries) ledger::balance(entries) + stats::median(entries)
+file R/pool.R
+| Pool <- R6::R6Class("Pool", public = list(
+|   take = function(count, wait = TRUE) count,
+|   drain = function() self$take(3, wait = FALSE)
+| ))
+|
+| matches <- function(text) str_detect(text, "a")
+file explore.R
+| library(stats)
+| counts <- str_count(c("a", "b"), "a")
+| print(counts)
 
 open R/ledger.R
 
@@ -86,3 +98,17 @@ expect diagnostics R/ledger.R "Use TRUE, not T"
 fix R/ledger.R "flag" "Apply all safe fixes"
 expect buffer R/ledger.R "flag <- TRUE"
 expect buffer R/ledger.R "c(balanse, 0)"
+
+# An R6 method shows the parameters its definition spells.
+open R/pool.R
+expect signature R/pool.R after "self$take(3, " "[wait = TRUE]"
+
+# A name that only a package the project does not import exports can be qualified with it.
+expect diagnostics R/pool.R "I could not resolve `str_detect`"
+fix R/pool.R "str_detect" "Qualify as `stringr::str_detect`"
+expect buffer R/pool.R "stringr::str_detect(text"
+
+# In a script, the same name can instead attach the package, next to the other attachments.
+open explore.R
+fix explore.R "str_count" "Add `library(stringr)`"
+expect buffer explore.R "library(stats)\nlibrary(stringr)\ncounts"

@@ -242,8 +242,8 @@ mod imp {
     }
 
     /// Expands each pattern with the C library's `glob(3)`, marking directories with a trailing
-    /// slash when `mark` is set. `Err` is the out-of-memory condition `glob` reports.
-    pub fn glob(patterns: &[String], mark: bool) -> Result<GlobMatches, ()> {
+    /// slash when `mark` is set. `None` is the out-of-memory condition `glob` reports.
+    pub fn glob(patterns: &[String], mark: bool) -> Option<GlobMatches> {
         // SAFETY: `buffer` is zeroed before the first call, extended by each call with
         // GLOB_APPEND, and freed once on every path out.
         unsafe {
@@ -262,7 +262,7 @@ mod imp {
                     0 => appended = true,
                     libc::GLOB_NOSPACE => {
                         libc::globfree(&mut buffer);
-                        return Err(());
+                        return None;
                     }
                     libc::GLOB_ABORTED => read_error = true,
                     _ => {}
@@ -280,7 +280,7 @@ mod imp {
                 Vec::new()
             };
             libc::globfree(&mut buffer);
-            Ok(GlobMatches { paths, read_error })
+            Some(GlobMatches { paths, read_error })
         }
     }
 
@@ -444,6 +444,8 @@ mod imp {
     }
 
     /// The file of the library that holds `address`.
+    // `dladdr` only looks the address up in the loader's tables and never reads through it.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn library_path(address: *const c_void) -> Option<String> {
         // SAFETY: dladdr fills the zeroed struct and leaves `dli_fname` pointing into the
         // loader's own storage.
@@ -737,7 +739,7 @@ mod imp {
 
     /// Expands each pattern with the `glob` crate, writing forward slashes as GNU R does on
     /// Windows.
-    pub fn glob(patterns: &[String], mark: bool) -> Result<GlobMatches, ()> {
+    pub fn glob(patterns: &[String], mark: bool) -> Option<GlobMatches> {
         let mut paths = Vec::new();
         let mut read_error = false;
         for pattern in patterns {
@@ -757,7 +759,7 @@ mod imp {
                 }
             }
         }
-        Ok(GlobMatches { paths, read_error })
+        Some(GlobMatches { paths, read_error })
     }
 
     /// The current user's profile directory; another user's home is not known.

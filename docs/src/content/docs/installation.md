@@ -88,8 +88,20 @@ usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it r
 If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
 searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
 
-From 0.4.0-beta on, the release archives hold `ry` and ry's runtime (`libR.so`, `libR.dylib` or
-`R.dll`). Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The
+Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) runs in the BLAS and LAPACK your GNU R
+uses, loaded the first time code needs them. ry looks for `libblas.so.3` and `liblapack.so.3` on
+the system's library path first, then in the directories GNU R's `etc/Makeconf` records in
+`BLAS_LIBS` and `LAPACK_LIBS` (which is how it finds them on NixOS), then for GNU R's own
+`lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every place it searched;
+start ry with `LD_LIBRARY_PATH` set to a directory that holds `liblapack.so.3` and
+`libblas.so.3`. On macOS the fallback is Accelerate, and on Windows the libraries are R's own
+`bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
+installs links the same libraries, because ry's R home takes `BLAS_LIBS` and `LAPACK_LIBS` from
+GNU R's `Makeconf`.
+
+From 0.4.0-beta on, the release archives hold `ry`, ry's runtime (`libR.so`, `libR.dylib` or
+`R.dll`), and `ry-rcmd`, which `ry load` uses to compile a package's `src/`. Keep them in the same
+directory, or put the runtime and `ry-rcmd` together in `../lib/ry/` relative to `ry`. The
 Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
 `ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves

@@ -7129,8 +7129,11 @@ const MAX_COUNT_CELLS: f64 = (1u64 << 27) as f64;
 thread_local! {
     /// The last Mann-Whitney table, because vectorised calls repeat the same `m` and `n` and
     /// a table costs `O(m n (m + n))` to build.
-    static WILCOX_CACHE: RefCell<Option<((usize, usize), Rc<[f64]>)>> = const { RefCell::new(None) };
+    static WILCOX_CACHE: RefCell<Option<WilcoxTable>> = const { RefCell::new(None) };
 }
+
+/// A Mann-Whitney count table and the sample sizes `(m, n)` it was built for.
+type WilcoxTable = ((usize, usize), Rc<[f64]>);
 
 /// The number of ways the Mann-Whitney statistic of samples of sizes `m` and `n` takes each
 /// value from 0 to `m n`: the coefficients of the Gaussian binomial `[m + n choose m]_q`,

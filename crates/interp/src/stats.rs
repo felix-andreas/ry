@@ -476,8 +476,8 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
                     .collect();
                 let statistic = pair_statistic(
-                    &x_data[i],
-                    &y_data[j],
+                    x_data[i],
+                    y_data[j],
                     &used,
                     correlate,
                     kendall,
@@ -1192,7 +1192,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
         loop {
             let mut rest = candidate;
             for &factor in &factors {
-                while rest % factor as u64 == 0 {
+                while rest.is_multiple_of(factor as u64) {
                     rest /= factor as u64;
                 }
             }
@@ -1240,7 +1240,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
         })
         .collect();
     if overflow {
-        call.warning(&format!(
+        call.warning(format!(
             "nextn() found no solution < {} = INT_MAX (the maximal integer); pass '0+ n' instead of 'n'",
             i32::MAX
         ))?;
@@ -1832,7 +1832,8 @@ unsafe fn ksmooth(call: &NativeCall<'_>) -> R<Sexp> {
     let mut fitted = Vec::with_capacity(points.len());
     for &point in &points {
         let (mut numerator, mut denominator) = (0.0, 0.0);
-        for i in first..n {
+        let start = first;
+        for i in start..n {
             if x[i] < point - cutoff {
                 first = i;
             } else {
@@ -2076,8 +2077,8 @@ unsafe fn bw_den(call: &NativeCall<'_>) -> R<Sexp> {
     let mut counts = vec![0.0; bins];
     for i in 1..x.len() {
         let first = (x[i] / width) as i64;
-        for j in 0..i {
-            let second = (x[j] / width) as i64;
+        for &other in &x[..i] {
+            let second = (other / width) as i64;
             let bin = (first - second).unsigned_abs() as usize;
             if bin < bins {
                 counts[bin] += 1.0;
@@ -2478,7 +2479,7 @@ unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
     if do_seasonal {
         season[..period].copy_from_slice(&s[..period]);
     }
-    for i in start - 1..length_x {
+    for (i, &observation) in x[..length_x].iter().enumerate().skip(start - 1) {
         let i0 = i + 2 - start;
         let s0 = i0 + period - 1;
         let mut forecast = level[i0 - 1] + if do_trend { trend[i0 - 1] } else { 0.0 };
@@ -2494,12 +2495,12 @@ unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
         } else {
             forecast *= seasonal_term;
         }
-        let residual = x[i] - forecast;
+        let residual = observation - forecast;
         sse += residual * residual;
         let deseasonalized = if additive {
-            x[i] - seasonal_term
+            observation - seasonal_term
         } else {
-            x[i] / seasonal_term
+            observation / seasonal_term
         };
         level[i0] = alpha * deseasonalized + (1.0 - alpha) * (level[i0 - 1] + trend[i0 - 1]);
         if do_trend {
@@ -2507,9 +2508,9 @@ unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
         }
         if do_seasonal {
             let observed = if additive {
-                x[i] - level[i0]
+                observation - level[i0]
             } else {
-                x[i] / level[i0]
+                observation / level[i0]
             };
             season[s0] = gamma * observed + (1.0 - gamma) * seasonal_term;
         }
@@ -3076,7 +3077,7 @@ unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
     let mut deviations = vec![0.0; max_iterations];
     let mut last = 0usize;
     let mut converged = false;
-    for iteration in 0..max_iterations {
+    for (iteration, deviation) in deviations.iter_mut().enumerate() {
         let mut largest = 0.0_f64;
         for (margin, (indices, size)) in marginal_index.iter().enumerate() {
             let mut fitted = vec![0.0; *size];
@@ -3094,7 +3095,7 @@ unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
                 };
             }
         }
-        deviations[iteration] = largest;
+        *deviation = largest;
         last = iteration + 1;
         if largest < tolerance {
             converged = true;
@@ -3390,8 +3391,8 @@ fn loess_estimate(
             .sum();
         if spread.sqrt() > 0.001 * range {
             slope /= spread;
-            for j in left..=right {
-                weights[j] *= slope * (j as f64 - mean) + 1.0;
+            for (weight, j) in weights[left..=right].iter_mut().zip(left..) {
+                *weight *= slope * (j as f64 - mean) + 1.0;
             }
         }
     }

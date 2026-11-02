@@ -284,6 +284,8 @@ pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
             "Inf".into()
         };
     }
+    // GNU R's `encodeReal0` writes a negative zero as a positive one.
+    let value = if value == 0.0 { 0.0 } else { value };
     if format.exponent == 0 {
         let text = format!("{:.*}", format.decimals, value);
         // `-0` prints as `0`.
@@ -577,6 +579,11 @@ fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
 
 /// The display width of text in a terminal.
 pub fn display_width(text: &str) -> usize {
+    // Control characters take no columns, so only printable ASCII can skip the per-character
+    // width lookup.
+    if text.bytes().all(|byte| (0x20..0x7F).contains(&byte)) {
+        return text.len();
+    }
     text.chars()
         .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
         .sum()
@@ -911,113 +918,122 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let flag = values::require_string(call.arg(5), "flag")?;
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
-    // Two buffers serve every element, so a million numbers cost no per-element allocation.
-    let mut text = String::new();
     let mut padded = String::new();
+    let mut number = String::new();
+    // Rounded numbers repeat, so their strings go through the call's memo.
+    let mut memo = values::StringMemo::default();
+    let character = mode == "character";
+    let integer = mode == "integer";
+    let left_justify = width < 0 || flag.contains('-');
+    let width = width.unsigned_abs() as usize;
     for index in 0..count {
-        text.clear();
-        if mode == "character" {
-            text.push_str(&values::string_at(vector, index).unwrap_or_default());
+        let element;
+        let text: &str = if character {
+            element = values::string_at(vector, index).unwrap_or_default();
+            &element
         } else {
+            number.clear();
             let value = crate::subset::numeric_element(vector, index);
-            write_c_format(&mut text, value, &format, digits, &flag, mode == "integer")
-                .map_err(|_| error("formatC could not format a number"))?;
-        }
+            c_format_into(&mut number, value, &format, digits, &flag, integer);
+            &number
+        };
+        let shortfall = width.saturating_sub(display_width(text));
         // GNU R writes an `fg` zero as a bare "0", whatever the width.
-        if format == "fg" && text == "0" {
-            values::set_mkchar(result, index, &text)?;
-        } else {
-            write_width(&mut padded, &text, width, &flag);
-            values::set_mkchar(result, index, &padded)?;
+        if shortfall == 0 || (format == "fg" && text == "0") {
+            store_string(result, index, text, &mut memo)?;
+            continue;
         }
+        padded.clear();
+        if left_justify {
+            padded.push_str(text);
+            padded.extend(std::iter::repeat_n(' ', shortfall));
+        } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
+            let (sign, digits) = match text.strip_prefix('-') {
+                Some(rest) => ("-", rest),
+                None => ("", text),
+            };
+            padded.push_str(sign);
+            padded.extend(std::iter::repeat_n('0', shortfall));
+            padded.push_str(digits);
+        } else {
+            padded.extend(std::iter::repeat_n(' ', shortfall));
+            padded.push_str(text);
+        }
+        store_string(result, index, &padded, &mut memo)?;
     }
     Ok(result)
 }
 
-/// `text` padded to `width` into `out`: on the right for a `-` flag or a negative width, with
-/// zeros after the sign for a `0` flag on a number, and on the left otherwise.
-fn write_width(out: &mut String, text: &str, width: i32, flag: &str) {
-    out.clear();
-    let left_justify = width < 0 || flag.contains('-');
-    let width = width.unsigned_abs() as usize;
-    let current = display_width(text);
-    if current >= width {
-        out.push_str(text);
-    } else if left_justify {
-        out.push_str(text);
-        out.extend(std::iter::repeat_n(' ', width - current));
-    } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
-        let (sign, digits) = match text.strip_prefix('-') {
-            Some(rest) => ("-", rest),
-            None => ("", text),
-        };
-        out.push_str(sign);
-        out.extend(std::iter::repeat_n('0', width - current));
-        out.push_str(digits);
+unsafe fn store_string(
+    vector: Sexp,
+    index: usize,
+    text: &str,
+    memo: &mut values::StringMemo<'_>,
+) -> R<()> {
+    if text.is_ascii() {
+        values::set_elt(vector, index, memo.mk_char(text.as_bytes())?);
+        Ok(())
     } else {
-        out.extend(std::iter::repeat_n(' ', width - current));
-        out.push_str(text);
+        values::set_mkchar(vector, index, text)
     }
 }
 
 /// One number in C `printf` style: `d`, `f`, `e`, `E`, `g`, `G`, `fg`.
 pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool) -> String {
     let mut text = String::new();
-    match write_c_format(&mut text, value, format, digits, flag, integer) {
-        Ok(()) => text,
-        // Writing into a `String` cannot fail; an empty result would show the impossible case.
-        Err(std::fmt::Error) => String::new(),
-    }
+    c_format_into(&mut text, value, format, digits, flag, integer);
+    text
 }
 
-/// [`c_format`] appended to `out`.
-fn write_c_format(
+/// [`c_format`] appended to `out`, so a loop over many numbers reuses one buffer.
+pub fn c_format_into(
     out: &mut String,
     value: f64,
     format: &str,
     digits: i32,
     flag: &str,
     integer: bool,
-) -> std::fmt::Result {
+) {
     if is_na_real(value) {
         out.push_str("NA");
-        return Ok(());
+        return;
     }
     if value.is_nan() {
         out.push_str("NaN");
-        return Ok(());
+        return;
     }
     if value.is_infinite() {
         out.push_str(if value < 0.0 { "-Inf" } else { "Inf" });
-        return Ok(());
+        return;
     }
     if flag.contains('+') && value >= 0.0 {
         out.push('+');
     } else if flag.contains(' ') && value >= 0.0 {
         out.push(' ');
     }
-    // formatC negates `digits` for a `#` flag, so a negative count is still the precision;
-    // only NULL digits (sent as NA) leaves C's default.
-    let precision = (digits != NA_INTEGER).then_some(digits.unsigned_abs() as usize);
+    // formatC turns a negative `digits` into the default before it gets here, and negates
+    // `digits` itself only to ask `fg` to keep trailing zeros, so every other format reads the
+    // magnitude, as GNU R's C code does.
+    let precision = digits.unsigned_abs() as usize;
+    // Writing to a `String` cannot fail, so the `fmt::Result`s below carry nothing.
     match format {
-        "d" => write!(out, "{}", value.round() as i64)?,
+        "d" => {
+            write!(out, "{}", value.round() as i64).ok();
+        }
         "f" => {
-            let decimals = precision.unwrap_or(6);
-            if !write_fixed_fast(out, value, decimals) {
-                write!(out, "{:.*}", decimals, value)?;
+            if !fixed_fast(out, value, precision) {
+                write!(out, "{:.*}", precision, value).ok();
             }
         }
-        "e" => out.push_str(&scientific_text(value, precision.unwrap_or(6))),
-        "E" => out.push_str(&scientific_text(value, precision.unwrap_or(6)).to_uppercase()),
-        // formatC passes a negative `digits` to ask `fg` to keep trailing zeros.
+        "e" => out.push_str(&scientific_text(value, precision)),
+        "E" => out.push_str(&scientific_text(value, precision).to_uppercase()),
         "fg" => out.push_str(&fixed_significant(
             value,
-            digits.unsigned_abs().max(1) as usize,
+            precision.max(1),
             digits < 0 || flag.contains('#'),
         )),
         "g" | "G" => {
-            let significant = precision.unwrap_or(6).max(1);
-            let text = c_general(value, significant, flag.contains('#'));
+            let text = c_general(value, precision.max(1), flag.contains('#'));
             if format == "G" {
                 out.push_str(&text.to_uppercase());
             } else {
@@ -1026,49 +1042,72 @@ fn write_c_format(
         }
         _ => {
             if integer {
-                write!(out, "{}", value as i64)?;
+                write!(out, "{}", value as i64).ok();
             } else {
-                out.push_str(&c_general(value, precision.unwrap_or(6).max(1), false));
+                out.push_str(&c_general(value, precision.max(1), false));
             }
         }
     }
-    Ok(())
 }
 
-/// C's `%.{decimals}f` of `value` from its scaled, rounded integer, which is several times faster
-/// than exact decimal conversion. Below 2^40 the product `value * 10^decimals` is within 2^-13 of
-/// the exact one, so its rounding is the exact rounding unless the fraction lies within 2^-10 of a
-/// half; then, or out of range, this writes nothing and returns false.
-fn write_fixed_fast(out: &mut String, value: f64, decimals: usize) -> bool {
-    const POWERS: [f64; 10] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
-    let Some(&power) = POWERS.get(decimals) else {
+/// C's `%.*f` for a value whose scaled magnitude stays below 2^52, appended to `out`; false,
+/// with `out` untouched, for any other value. The digits are the exact binary value rounded to
+/// `precision` decimals, half to even, as glibc's `printf` rounds: `fma` recovers the exact
+/// error of the scaled product, so the sign of the distance to the half decides the rounding
+/// without the arbitrary-precision path general formatting takes.
+fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
+    const POWERS: [f64; 16] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+    ];
+    let Some(&power) = POWERS.get(precision) else {
         return false;
     };
-    let scaled = value.abs() * power;
-    if !(scaled < (1_u64 << 40) as f64) {
+    let magnitude = value.abs();
+    let scaled = magnitude * power;
+    if scaled.is_nan() || scaled >= 4_503_599_627_370_496.0 {
         return false;
     }
-    let floor = scaled.floor();
-    if ((scaled - floor) - 0.5).abs() < 1.0 / 1024.0 {
-        return false;
+    // `scaled + error` is the exact product, since 10^precision is exact for these powers.
+    let error = magnitude.mul_add(power, -scaled);
+    let whole = scaled.floor();
+    // Below 2^52 the fraction and the half subtract exactly, and adding `error` rounds once,
+    // which keeps the sign of the true distance to the half. A product that rounded up to a
+    // whole number has a tiny negative true fraction, which still rounds to `whole`.
+    let distance = (scaled - whole - 0.5) + error;
+    let mut digits = whole as u64;
+    if distance > 0.0 || (distance == 0.0 && digits % 2 == 1) {
+        digits += 1;
     }
-    // Below 2^40 with at most nine decimals, the digits fit in 23 places, a whole part included.
-    let mut buffer = [b'0'; 24];
-    let mut rounded = scaled.round() as u64;
-    let mut start = buffer.len();
-    while rounded > 0 || buffer.len() - start <= decimals {
-        start -= 1;
-        buffer[start] = b'0' + (rounded % 10) as u8;
-        rounded /= 10;
+    let mut buffer = [0u8; 20];
+    let mut cursor = buffer.len();
+    let mut rest = digits;
+    loop {
+        cursor -= 1;
+        buffer[cursor] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
     }
+    let written = &buffer[cursor..];
+    // C keeps the sign of any negative value, including one that rounds to zero.
     if value.is_sign_negative() {
         out.push('-');
     }
-    let point = buffer.len() - decimals;
-    out.extend(buffer[start..point].iter().map(|&digit| digit as char));
-    if decimals > 0 {
-        out.push('.');
-        out.extend(buffer[point..].iter().map(|&digit| digit as char));
+    if written.len() <= precision {
+        out.push('0');
+        if precision > 0 {
+            out.push('.');
+            out.extend(std::iter::repeat_n('0', precision - written.len()));
+            out.extend(written.iter().map(|&byte| byte as char));
+        }
+    } else {
+        let (integral, fraction) = written.split_at(written.len() - precision);
+        out.extend(integral.iter().map(|&byte| byte as char));
+        if precision > 0 {
+            out.push('.');
+            out.extend(fraction.iter().map(|&byte| byte as char));
+        }
     }
     true
 }
@@ -1078,12 +1117,9 @@ fn write_fixed_fast(out: &mut String, value: f64, decimals: usize) -> bool {
 /// `keep_zeros` is C's `#` flag: trailing zeros stay, and the decimal point stays even with no
 /// digits after it.
 pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
-    if value == 0.0 {
-        return match (keep_zeros, significant) {
-            (false, _) => "0".into(),
-            (true, 0 | 1) => "0.".into(),
-            (true, significant) => format!("0.{}", "0".repeat(significant - 1)),
-        };
+    if value == 0.0 && !keep_zeros {
+        // C keeps the sign of a negative zero.
+        return if value.is_sign_negative() { "-0" } else { "0" }.into();
     }
     let text = format!("{:.*e}", significant.saturating_sub(1), value.abs());
     let exponent: i32 = text
@@ -1284,4 +1320,64 @@ pub fn format_g(value: f64) -> String {
         )
     };
     String::from_utf8_lossy(&buffer[..written.clamp(0, 63) as usize]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_fast;
+
+    /// The fast path against the exact formatter: random magnitudes across the whole range it
+    /// accepts, exact ties at every precision, and the neighbours of decimal halves.
+    #[test]
+    fn fixed_fast_matches_exact_formatting() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut values = vec![
+            0.0,
+            -0.0,
+            0.5,
+            1.5,
+            2.5,
+            -2.5,
+            0.125,
+            2.675,
+            1e-300,
+            4503599627370495.5,
+        ];
+        for _ in 0..200_000 {
+            let bits = next();
+            let scale = 10f64.powi((bits % 34) as i32 - 18);
+            values.push(((bits >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * scale);
+        }
+        for numerator in -4000i64..4000 {
+            for shift in [1, 2, 3, 4, 6, 10] {
+                values.push(numerator as f64 / f64::from(1u32 << shift));
+            }
+            for power in [1e1, 1e2, 1e3, 1e5] {
+                let half = (numerator as f64 + 0.5) / power;
+                values.extend([
+                    half,
+                    f64::from_bits(half.to_bits() + 1),
+                    f64::from_bits(half.to_bits() - 1),
+                ]);
+            }
+        }
+        for value in values {
+            for precision in 0..16 {
+                let mut fast = String::new();
+                if fixed_fast(&mut fast, value, precision) {
+                    assert_eq!(
+                        fast,
+                        format!("{value:.precision$}"),
+                        "{value:e} at {precision}"
+                    );
+                }
+            }
+        }
+    }
 }

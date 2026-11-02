@@ -367,6 +367,7 @@ fn rank(codes: &mut [u64]) -> u64 {
     THREAD_POOL.install(|| {
         (0..chunks).into_par_iter().for_each(|index| {
             let mut rank = firsts[index];
+            #[allow(clippy::needless_range_loop)]
             for position in index * chunk..((index + 1) * chunk).min(height) {
                 if position > 0 && code_at(position) != code_at(position - 1) {
                     rank += 1;

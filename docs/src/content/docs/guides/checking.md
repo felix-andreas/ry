@@ -37,9 +37,11 @@ keeps one of them), `pkg::name` where the package does not export `name`, and a 
 imports or exports a name that does not exist.
 
 Every file outside `R/` is analyzed on its own, seeing its own definitions plus the package's.
-`source()` is not followed, so a function from a sourced file is reported as unresolved where you
-call it, and as unused where you define it. Moving shared helpers
-into `R/` makes them visible to every script.
+A script also sees the top-level definitions of every file it `source()`s by a literal path, and of
+the files those source in turn. The path is tried relative to the sourcing file's directory, then
+relative to the project root, where R usually runs. A sourced file reports no unused assignments,
+because the script that sources it is what reads them. A computed path such as
+`source(file.path(dir, "utils.R"))` is not followed, so its names stay unresolved.
 
 Files directly under `tests/testthat/` see the package's definitions and the `helper-*.R` and
 `setup-*.R` files' definitions, but add nothing to the package, so a variable a test assigns never

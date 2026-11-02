@@ -4,7 +4,7 @@
 //! package never touches the library.
 
 use {
-    ide::PackageTarget,
+    ide::{Formal, PackageTarget, function_formals},
     rdb::{PackageSource, find_package, library_paths, package_source, topic_documentation},
     std::{
         collections::HashMap,
@@ -14,6 +14,9 @@ use {
         sync::Arc,
     },
 };
+
+/// Bytes of a generated definition read to find its parameter list.
+const FORMALS_WINDOW: usize = 4096;
 
 pub struct InstalledPackages {
     library: Vec<PathBuf>,
@@ -54,6 +57,18 @@ impl InstalledPackages {
             let range = source.definitions.get(&target.name)?.clone();
             Some((source, range))
         })
+    }
+
+    /// The parameters of the function the name is bound to, read from its generated source.
+    pub fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+        let (source, range) = self.definition(target)?;
+        // The definition's `function(...)` header comes first, so a bounded window parses it
+        // without reading a long body; a body cut mid-expression only adds parse errors after it.
+        let mut end = (range.start + FORMALS_WINDOW).min(source.text.len());
+        while !source.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        function_formals(source.text.get(range.start..end)?)
     }
 
     /// The help page of the package that defines the name, as Markdown, with the package named.

@@ -1069,7 +1069,7 @@ unsafe fn line_search(
         }
         // nlm replaces a non-finite value by the largest double. Either one only shrinks the
         // step, because the interpolating models would overflow on it.
-        if !(*fpls < f64::MAX) {
+        if fpls.is_nan() || *fpls >= f64::MAX {
             lambda *= 0.1;
             first_backtrack = true;
             continue;

@@ -709,6 +709,7 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         return Err(error("invalid 'mode' argument"));
     };
     if kind == SexpType::Symbol {
+        values::refuse_bytes(object)?;
         let text = values::as_string_scalar(object)?
             .ok_or_else(|| error("invalid type/length (symbol/0) in vector allocation"))?;
         return values::install(&text);
@@ -721,6 +722,11 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
     }
     let result = if object.kind() == kind {
         object
+    } else if kind == SexpType::Pairlist && object.kind().is_atomic() {
+        // GNU R makes one cell per element, tagged by the element's name.
+        let list = coerce_vector(object, SexpType::List)?;
+        crate::heap().root(list);
+        coerce_vector(list, kind)?
     } else {
         coerce_vector(object, kind)?
     };
@@ -923,9 +929,8 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).map(|result| {
+        return factor_as_character(object).inspect(|&result| {
             values::clear_attributes(result);
-            result
         });
     }
     let result = match object.kind() {

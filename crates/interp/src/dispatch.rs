@@ -1168,9 +1168,9 @@ unsafe fn group_dispatch(
                     || name == "+.Date"
                     || (minus && (name == "-.POSIXt" || name == "-.Date"))
             };
-            if left.method == right.method {
-                (0, 0)
-            } else if right_name == "Ops.difftime" && date_arithmetic(&left_name, true) {
+            if left.method == right.method
+                || (right_name == "Ops.difftime" && date_arithmetic(&left_name, true))
+            {
                 (0, 0)
             } else if left_name == "Ops.difftime" && date_arithmetic(&right_name, false) {
                 (1, 1)
@@ -1397,8 +1397,9 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
         return Ok(None);
     }
     let promised = promised_args(call, args)?;
-    if methods != nil() {
-        let arguments = eval::args_pairlist(&promised)?;
+    if methods != nil()
+        && let Some(arguments) = crate::methods::signature_arguments(&promised, generic)?
+    {
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
             // The default method of an internal generic such as `as.vector` stands for the

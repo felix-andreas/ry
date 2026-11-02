@@ -222,6 +222,8 @@ fn read_sliced(
     release: &dyn Fn(Range<usize>) -> std::io::Result<()>,
 ) -> Result<DataFrame> {
     let schema = schema(layout, options, false);
+    // One range spanning the file is the intended value, not a mistyped `(0..n).collect()`.
+    #[allow(clippy::single_range_in_vec_init)]
     let ranges = match options.rows {
         // A leading `head` reads only the first rows, so it parses the file whole.
         Some(_) => vec![0..bytes.len()],
@@ -391,6 +393,8 @@ fn bitmap(validity: Option<MutableBitmap>) -> Option<Bitmap> {
 fn slices(bytes: &[u8], slice_bytes: usize, separator: u8) -> Vec<Range<usize>> {
     let stretches = bytes.len().div_ceil(slice_bytes).max(1);
     if stretches == 1 {
+        // One range spanning the file is the intended value, not a mistyped `(0..n).collect()`.
+        #[allow(clippy::single_range_in_vec_init)]
         return vec![0..bytes.len()];
     }
     let ends: Vec<[Quoting; 3]> = (0..stretches)

@@ -3463,7 +3463,10 @@ struct FileDevice {
 enum Stream {
     Plain(PlainFile),
     Inflate(Inflate),
-    Deflate { encoder: Encoder, position: u64 },
+    Deflate {
+        encoder: Box<Encoder>,
+        position: u64,
+    },
 }
 
 /// A compressing writer for each format the compressed file connections write.
@@ -3913,7 +3916,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
             }
         };
         return Ok(Stream::Deflate {
-            encoder,
+            encoder: Box::new(encoder),
             position: 0,
         });
     }

@@ -581,12 +581,12 @@ pub unsafe fn add_device_named(dd: *mut GEDevDesc, name: &str, file: Option<&str
 /// before calling this.
 pub unsafe fn add_device_from_dot_device(dd: *mut GEDevDesc) -> R<()> {
     let value = eval::find_var(values::symbols().dot_device, values::base_env())?;
-    let device = dd.cast::<EngineDevice>();
-    if (&(*device).name).is_empty() {
-        (*device).name =
+    let device = &mut *dd.cast::<EngineDevice>();
+    if device.name.is_empty() {
+        device.name =
             values::first_string(value).map_or_else(String::new, |name| name.into_owned());
         let path = values::get_attr(value, values::install("filepath")?);
-        (*device).file = values::first_string(path).map(|file| file.into_owned());
+        device.file = values::first_string(path).map(|file| file.into_owned());
     }
     add_device(dd)
 }

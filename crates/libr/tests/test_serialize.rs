@@ -39,7 +39,7 @@ struct Session {
 fn session() -> Session {
     let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let heap = &mut runtime().heap;
-    heap.policy_mut().stress = GcStress::Off;
+    heap.update_policy(|policy| policy.stress = GcStress::Off);
     Session {
         mark: heap.handle_mark(),
         _lock: lock,
@@ -49,7 +49,7 @@ fn session() -> Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let heap = &mut runtime().heap;
-        heap.policy_mut().stress = GcStress::Off;
+        heap.update_policy(|policy| policy.stress = GcStress::Off);
         heap.release_handles(self.mark);
     }
 }
@@ -607,7 +607,9 @@ fn random_objects_round_trip() {
         let mark = runtime().heap.handle_mark();
         let mut generator = Generator::new(seed);
         if seed % 16 == 15 {
-            runtime().heap.policy_mut().stress = GcStress::EveryAllocation;
+            runtime()
+                .heap
+                .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
         }
         let object = unsafe { generator.object(4) };
         for (format, version) in FORMATS {
@@ -628,7 +630,9 @@ fn random_objects_round_trip() {
                 assert!(same, "seed {seed} {format:?}: the object changed");
             }
         }
-        runtime().heap.policy_mut().stress = GcStress::Off;
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = GcStress::Off);
         runtime().heap.release_handles(mark);
     }
 }
@@ -862,10 +866,14 @@ fn corrupted_streams_fail_cleanly() {
             }
         }
         if iteration % 64 == 63 {
-            runtime().heap.policy_mut().stress = GcStress::EveryAllocation;
+            runtime()
+                .heap
+                .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
         }
         let outcome = std::panic::catch_unwind(|| unsafe { check_unserialize_input(&bytes) });
-        runtime().heap.policy_mut().stress = GcStress::Off;
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = GcStress::Off);
         assert!(
             outcome.is_ok(),
             "iteration {iteration} panicked on {}",
