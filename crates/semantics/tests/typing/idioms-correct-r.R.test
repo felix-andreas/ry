@@ -2340,3 +2340,17 @@ grid <- function(n, tails = c(0.1, 0.1)) {
 }
 #++++
 grid: <T, U> fn(n: T, [tails]: U) -> Any
+
+#---- a_range_endpoint_that_is_only_sometimes_null_is_used_where_it_exists
+# mgcv fills `off` only under its `penalty` flag, and reads it only after passing the flag.
+basis <- function(n, penalty = TRUE) {
+  if (penalty) off <- 1 else off <- NULL
+  list(off = off)
+}
+span <- function(n) {
+  b <- basis(n, penalty = TRUE)
+  b$off[1]:(b$off[1] + n - 1)
+}
+#++++
+basis: <T, U> fn([n]: T, [penalty]: U) -> list{off: double | NULL}
+span: <T: numeric> fn(n: T) -> double[]

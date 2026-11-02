@@ -7463,8 +7463,26 @@ impl<'db> Checker<'db, '_> {
             let resolved = self.structural(inferred);
             // R takes a logical endpoint as a number, and a vector endpoint by its first element.
             // A vector type carries no length, so only a literal `c()` of several elements is
-            // known to be too long.
+            // known to be too long. An endpoint read from a list field that is only sometimes
+            // `NULL` is used where the code has ruled that out: mgcv's basis fills `off` only
+            // when a `penalty` flag is set, and callers read `b$off[i]:...` only after passing
+            // it. A local or an element read straight from a value stays checked.
+            let field_read = {
+                let mut expression = operand;
+                loop {
+                    match &self.module.expression(expression).kind {
+                        ExpressionKind::Field { .. } => break true,
+                        ExpressionKind::Index { target, .. } => expression = *target,
+                        _ => break false,
+                    }
+                }
+            };
             let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
+                TyKind::Union(members) if field_read => members
+                    .iter()
+                    .copied()
+                    .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+                    .collect(),
                 TyKind::Union(members) => members.clone(),
                 _ => vec![resolved],
             };

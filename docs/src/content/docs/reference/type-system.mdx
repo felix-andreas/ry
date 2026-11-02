@@ -1948,6 +1948,11 @@ may be `double`, so `1:TRUE` is `integer[]` and `1:n` on `n` of type `integer | 
 counts as `integer` here, matching what R does at run time, so `1:10` is `integer[]` and `1.5:3L` is
 `double[]`.
 
+R rejects a `NULL` endpoint, and so does the checker, except for an endpoint read from a list field
+(`b$off[i]`) whose `NULL` member is one path of the function that built the list. Such a field is
+typically filled under a flag, as in mgcv's `off`, and read only by callers that set the flag, so
+its `NULL` member is dropped. A local or a value indexed directly keeps its `NULL`.
+
 Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
 rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and
 `seq(1, 10, by = 2)` are `double[]`. A project that defines its own `seq` gets its own typing.
