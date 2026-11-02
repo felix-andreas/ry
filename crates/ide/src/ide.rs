@@ -5312,7 +5312,7 @@ fn expression_target<'db>(
             return Some(Target::Global(info.name.to_string()));
         }
         return Some(Target::Slot {
-            item: item,
+            item,
             binding: *binding,
         });
     }

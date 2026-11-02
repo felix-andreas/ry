@@ -53,6 +53,15 @@ struct View {
     order: Option<Order>,
 }
 
+/// Drops every view's cached order, so the next page sorts and filters the object as it is now.
+pub fn forget_orders() {
+    VIEWS.with(|views| {
+        for view in &mut views.borrow_mut().open {
+            view.order = None;
+        }
+    });
+}
+
 /// A view's rows as one search and sort leave them: the zero-based row numbers, in the order
 /// they are shown.
 struct Order {

@@ -58,8 +58,12 @@ pub fn install_reader(reader: Reader) {
 
 /// Whether input comes from an interactive console, so `browser()` has a prompt to stop at.
 pub fn interactive() -> bool {
-    INTERACTIVE.load(Ordering::Relaxed)
+    INTERACTIVE.load(Ordering::Relaxed) && !SERVING_REQUEST.load(Ordering::Relaxed)
 }
+
+/// Set while R code runs for an editor's request at the idle prompt. A `browser()` there has no
+/// prompt of its own: the top-level read owns the terminal, and the editor waits for its answer.
+static SERVING_REQUEST: AtomicBool = AtomicBool::new(false);
 
 /// Reads with the reader on this thread, for a console with no socket.
 fn read_directly(prompt: &str) -> Option<String> {
@@ -93,6 +97,9 @@ pub unsafe fn read_line(prompt: &str) -> Option<String> {
     {
         state.debugger = None;
     }
+    // A command may have changed a viewed object in place, so its sorted and filtered rows are
+    // derived again on the next page.
+    crate::viewer::forget_orders();
     platform::read_line(prompt)
 }
 
@@ -348,8 +355,8 @@ impl Transport for Browse {
 mod platform {
     use {
         super::{
-            Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, Transport, answer_plain,
-            lock, read_directly, response,
+            Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, SERVING_REQUEST, Transport,
+            answer_plain, lock, read_directly, response,
         },
         crate::{interp, unwind::INTERRUPT_REQUESTED},
         serde_json::{Value, json},
@@ -404,11 +411,14 @@ mod platform {
     struct Asked {
         prompt: Option<String>,
         outstanding: bool,
+        /// The prompt the input thread last showed.
+        shown: String,
     }
 
     static ASKED: Mutex<Asked> = Mutex::new(Asked {
         prompt: None,
         outstanding: false,
+        shown: String::new(),
     });
     static ASKED_CHANGED: Condvar = Condvar::new();
     static INPUT_THREAD: AtomicBool = AtomicBool::new(false);
@@ -640,6 +650,13 @@ mod platform {
     fn ask(prompt: &str) {
         let mut asked = lock(&ASKED);
         if asked.outstanding {
+            // The line still owed was asked for at another prompt, such as a `Browse[1]>` stop
+            // an editor took over; the terminal must show which prompt the line now answers.
+            if asked.shown != prompt {
+                asked.shown = prompt.to_owned();
+                drop(asked);
+                crate::write_console(format!("\n{prompt}").as_bytes(), false);
+            }
             return;
         }
         asked.prompt = Some(prompt.to_owned());
@@ -675,6 +692,7 @@ mod platform {
                     }
                 }
             };
+            asked.shown = prompt.clone();
             drop(asked);
             push(Event::Input(read(&prompt)));
         }
@@ -690,10 +708,9 @@ mod platform {
             match event {
                 Event::Request(connection, message) => busy_request(connection, message),
                 Event::Closed(connection) => closed(connection),
-                Event::Input(input) => {
-                    lock(&EVENTS).push_front(Event::Input(input));
-                    return;
-                }
+                // A line typed while a command runs waits for the next prompt, and the requests
+                // behind it are still answered.
+                Event::Input(input) => *lock(&STASHED_INPUT) = Some(input),
             }
         }
     }
@@ -744,7 +761,9 @@ mod platform {
             send(connection, response(&request, Ok(json!({}))));
             return;
         }
+        let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
         let outcome = answer_plain(&request);
+        SERVING_REQUEST.store(serving, Ordering::Relaxed);
         send(connection, response(&request, outcome));
     }
 
@@ -850,13 +869,10 @@ mod platform {
                     Some(Event::Closed(connection)) => {
                         lock(&CONNECTIONS).remove(&connection);
                     }
-                    // A line typed while a request's code is stopped waits for the prompt; the
-                    // stop itself must not end, or the debugger would take it for a hang-up.
-                    Some(Event::Input(input)) if wait => *lock(&STASHED_INPUT) = Some(input),
-                    Some(Event::Input(input)) => {
-                        lock(&EVENTS).push_front(Event::Input(input));
-                        return None;
-                    }
+                    // A typed line waits for the next prompt: a stop must not end on it, or the
+                    // debugger would take it for a hang-up, and between statements the editor's
+                    // requests behind it must still be answered.
+                    Some(Event::Input(input)) => *lock(&STASHED_INPUT) = Some(input),
                 }
             }
         }

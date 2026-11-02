@@ -194,6 +194,9 @@ unsafe fn with_adapter(body: impl FnOnce(&mut Adapter)) -> R<()> {
         // A console's command unwinds once when its client terminates it; the console then
         // runs on without the adapter.
         true => drop(adapter),
+        // An editor that attached while this adapter was out, during a `Browse>` stop's
+        // expression, keeps its own adapter; the finished stop's adapter goes.
+        false if interp().debugger.is_some() => drop(adapter),
         false => interp().debugger = Some(adapter),
     }
     match terminating {
