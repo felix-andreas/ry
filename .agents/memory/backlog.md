@@ -208,6 +208,10 @@ false classes, largest first:
 
 ### Other open checker items found on the corpus
 
+- **A flag-selected return stops at the first guard.** `flag_return` in `crates/semantics/src/check.rs`
+  reads only the first `if (flag) return(...)` on a parameter, so a second flag guard later in the
+  body falls back to the union of every return. Low priority: no corpus or fresh-sample report
+  depends on it.
 - **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
   on as a placeholder, but the same signature declared reports the call, so the round-trip test
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
