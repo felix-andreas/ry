@@ -1602,7 +1602,9 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else if value.kind() == SexpType::Object {
         conditions::warning_call(call, "implicit list embedding of S4 objects is deprecated")?;
     }
-    let value = if value.kind() == SexpType::Pairlist {
+    // GNU R assigns a call's elements, as it does a pairlist's, so `f[2] <- quote(g(h))` stores
+    // the symbol `g`.
+    let value = if matches!(value.kind(), SexpType::Pairlist | SexpType::Language) {
         if !matches!(
             object.kind(),
             SexpType::List
@@ -1623,9 +1625,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
         let list = values::pairlist_to_list(object)?;
         let result = subassign(list, indices, value, call)?;
-        // A call stays a call, but a pairlist becomes a list, as in GNU R.
+        // A call stays a call with its attributes (a formula keeps its class and environment),
+        // but a pairlist becomes a list, as in GNU R.
         return if object.kind() == SexpType::Language {
-            values::list_to_pairlist(result, SexpType::Language)
+            let rebuilt = values::list_to_pairlist(result, SexpType::Language)?;
+            values::copy_attributes(object, rebuilt)?;
+            Ok(rebuilt)
         } else {
             Ok(result)
         };

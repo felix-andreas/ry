@@ -2611,7 +2611,11 @@ impl CompileErrors {
 enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
     Literal(memmem::Finder<'static>),
-    Pattern(Rc<Regex>),
+    /// `fresh_start` as in [`Translation`], here and in `Automaton`.
+    Pattern {
+        regex: Rc<Regex>,
+        fresh_start: bool,
+    },
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
     /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
@@ -2626,6 +2630,7 @@ enum Matcher {
         first: meta::Regex,
         longest: meta::Regex,
         shortest: bool,
+        fresh_start: bool,
     },
     /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does. Every match reuses `locations`,
     /// because fresh capture locations carry fresh match data, and with it a JIT stack of the
@@ -2698,11 +2703,18 @@ impl Matcher {
                         first,
                         longest,
                         shortest: translated.minimal,
+                        fresh_start: translated.fresh_start,
                     },
-                    _ => Matcher::Pattern(regex),
+                    _ => Matcher::Pattern {
+                        regex,
+                        fresh_start: translated.fresh_start,
+                    },
                 }
             }
-            Ok(regex) => Matcher::Pattern(Rc::new(regex)),
+            Ok(regex) => Matcher::Pattern {
+                regex: Rc::new(regex),
+                fresh_start: translated.fresh_start,
+            },
             Err(reason) => {
                 return Err(match errors {
                     CompileErrors::Quoted => {
@@ -2724,6 +2736,10 @@ impl Matcher {
 
     /// The first match at or after byte `from`, as a byte range.
     fn find_at(&self, text: &str, from: usize) -> R<Option<(usize, usize)>> {
+        if from > 0 && self.fresh_start() {
+            let found = self.find_at(&text[from..], 0)?;
+            return Ok(found.map(|(start, end)| (start + from, end + from)));
+        }
         match self {
             Matcher::Literal(finder) => {
                 let haystack = &text.as_bytes()[from..];
@@ -2748,7 +2764,7 @@ impl Matcher {
                 };
                 Ok(start.map(|start| (from + start, from + start + needle.len())))
             }
-            Matcher::Pattern(regex) => regex
+            Matcher::Pattern { regex, .. } => regex
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
@@ -2779,6 +2795,15 @@ impl Matcher {
 
     /// The first match at or after byte `from` with its capture groups; group 0 is the match.
     fn captures_at(&self, text: &str, from: usize) -> R<Option<Groups>> {
+        if from > 0 && self.fresh_start() {
+            let groups = self.captures_at(&text[from..], 0)?;
+            return Ok(groups.map(|groups| {
+                groups
+                    .into_iter()
+                    .map(|group| group.map(|(start, end)| (start + from, end + from)))
+                    .collect()
+            }));
+        }
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
             Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
@@ -2803,7 +2828,7 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
                     .captures_from_pos(text, from)
                     .map_err(matching_error)?
@@ -2844,11 +2869,20 @@ impl Matcher {
         }
     }
 
+    fn fresh_start(&self) -> bool {
+        match self {
+            Matcher::Pattern { fresh_start, .. } | Matcher::Automaton { fresh_start, .. } => {
+                *fresh_start
+            }
+            Matcher::Literal(_) | Matcher::Perl { .. } => false,
+        }
+    }
+
     /// The number of capture groups, not counting the whole match.
     fn group_count(&self) -> usize {
         match self {
             Matcher::Literal(_) => 0,
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
             Matcher::Perl { regex, .. } => regex.captures_len().saturating_sub(1),
@@ -2859,7 +2893,7 @@ impl Matcher {
     fn group_names(&self) -> Vec<String> {
         match self {
             Matcher::Literal(_) => Vec::new(),
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => regex
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => regex
                 .capture_names()
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
@@ -2937,12 +2971,20 @@ pub(crate) struct Translation {
     /// first end it reaches, so the whole match is the shortest one at the leftmost start, and
     /// even a greedy `.*` in such a pattern matches as little as it can.
     minimal: bool,
+    /// Whether every search after the first should see its start as the start of the text, which
+    /// is how TRE runs the follow-on searches of `gsub` and `gregexpr`: `\b`, `\B`, `\<` and `\>`
+    /// then see no character before that start (`gsub("\\b", "|", "ab")` is `"|a|b|"`), while
+    /// `^` still cannot match there. Only patterns without `^` qualify, since searching from a
+    /// fresh start would let `^` match too.
+    fresh_start: bool,
 }
 
 pub(crate) fn translate(pattern: &str) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
     let mut problem = None;
     let mut minimal = false;
+    let mut word_assertion = false;
+    let mut start_anchor = false;
     let mut output = String::with_capacity(pattern.len() + 8);
     // In POSIX syntax `.` matches a newline too.
     output.push_str("(?s)");
@@ -2962,6 +3004,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         let start = output.len();
         match character {
             '\\' => {
+                word_assertion |= matches!(chars.get(index + 1), Some('b' | 'B' | '<' | '>'));
                 index = translate_escape(&chars, index, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
@@ -3102,6 +3145,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 quantified = false;
             }
             '^' | '$' => {
+                start_anchor |= character == '^';
                 output.push(character);
                 atom = None;
             }
@@ -3117,6 +3161,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         pattern: output,
         problem,
         minimal,
+        fresh_start: word_assertion && !start_anchor,
     }
 }
 
@@ -3151,7 +3196,18 @@ fn translate_escape(
         return next;
     }
     match escaped {
-        'b' | 'B' | 'n' | 't' | 'r' | 'f' | 'v' | '1'..='9' | '<' | '>' => {
+        // TRE's `\b` matches at the start and the end of the subject whatever the characters
+        // there are, so `regexpr("\\b", " ")` is 1.
+        'b' => {
+            output.push_str(r"(?:\A|\z|\b)");
+            next
+        }
+        // Its `\B` never matches at either end.
+        'B' => {
+            output.push_str(r"(?:(?!\A)(?!\z)\B)");
+            next
+        }
+        'n' | 't' | 'r' | 'f' | 'v' | '1'..='9' | '<' | '>' => {
             output.push('\\');
             output.push(escaped);
             next
