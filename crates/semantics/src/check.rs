@@ -7659,9 +7659,28 @@ impl<'db> Checker<'db, '_> {
                 let mut parts = Vec::with_capacity(members.len());
                 let mut open = Vec::new();
                 let mut dispatches = false;
+                // R rejects arithmetic on an unclassed list, so beside a numeric member a list
+                // member is a path that a correlated test rules out, as in mgcv's
+                // `offset <- if (nlp > 1) as.list(...) else 0` read as a number only when
+                // `nlp == 1`.
+                let numeric_beside = members
+                    .iter()
+                    .any(|&member| numeric_operand_parts(self.db, member).is_some());
                 for &member in members {
                     if let Some(part) = numeric_operand_parts(self.db, member) {
                         parts.push(part);
+                        continue;
+                    }
+                    if numeric_beside
+                        && matches!(
+                            member.kind(self.db),
+                            TyKind::List(_)
+                                | TyKind::NamedList(_)
+                                | TyKind::Tuple(_)
+                                | TyKind::Record(_)
+                        )
+                        && !self.declares_arithmetic(member)
+                    {
                         continue;
                     }
                     match self.classify_numeric_operand(member) {

@@ -1513,11 +1513,10 @@ p_dist <- function(q, valueOnly = TRUE) {
   valueOnly <- prob > 1
   if (valueOnly) prob else list(value = prob)
 }
-gap <- function(x) p_dist(x) - 1
+gap <- function(x) p_dist(x)
 #++++
 p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
-gap: Unknown
-149..158 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | list{value: double}`
+gap: <T: numeric> fn(x: T) -> double | list{value: double}
 
 #---- an_inferred_logical_callback_parameter_takes_numbers
 # gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
@@ -2291,3 +2290,12 @@ generator_funs$new <- function() {
 #++++
 generator_funs: list{}
 fn() -> character
+
+#---- a_list_member_beside_a_number_is_a_path_a_correlated_test_rules_out
+# mgcv keeps one offset per predictor as a list, and a bare number when there is one.
+predict_fit <- function(nlp, x) {
+  offset <- if (nlp > 1) as.list(rep(0, nlp)) else 0
+  if (nlp > 1) offset[[1]] + x else x + offset
+}
+#++++
+predict_fit: <T, U: numeric> fn(nlp: T, x: U) -> Unknown
