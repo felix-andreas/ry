@@ -1473,7 +1473,9 @@ impl<'a> NodeRef<'a> {
     }
 
     /// Every element under this one, this one included, in preorder, tokens included.
-    pub fn descendants_with_tokens(self) -> impl Iterator<Item = ElementRef<'a>> + use<'a> {
+    pub fn descendants_with_tokens(
+        self,
+    ) -> impl DoubleEndedIterator<Item = ElementRef<'a>> + use<'a> {
         let tree = self.tree;
         (self.index..tree.end(self.index)).map(move |index| element_ref(tree, index))
     }

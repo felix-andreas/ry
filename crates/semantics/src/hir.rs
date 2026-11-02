@@ -13,7 +13,7 @@ use {
         sync::{LazyLock, Mutex},
     },
     syntax::{
-        ElementRef, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ElementRef, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenRef,
         ast::{is_expression_kind, name_text},
     },
     thin_vec::ThinVec,
@@ -1743,11 +1743,28 @@ fn significant_range_of(node: NodeRef<'_>) -> TextRange {
 
 /// Where the last token that is neither trivia nor inside an `ANNOTATION` ends.
 fn significant_end(node: NodeRef<'_>) -> Option<TextSize> {
-    node.children().rev().find_map(|child| match child {
-        ElementRef::Token(token) => (!token.kind().is_trivia()).then_some(token.range().end()),
-        ElementRef::Node(child) if child.kind() == SyntaxKind::ANNOTATION => None,
-        ElementRef::Node(child) => significant_end(child),
-    })
+    // Scanned back from the last element in preorder: the first token that qualifies is the
+    // answer, and only it pays for the walk up to `node`.
+    let in_annotation = |token: TokenRef<'_>| {
+        let mut current = token.parent();
+        while let Some(parent) = current
+            && parent != node
+        {
+            if parent.kind() == SyntaxKind::ANNOTATION {
+                return true;
+            }
+            current = parent.parent();
+        }
+        false
+    };
+    node.descendants_with_tokens()
+        .rev()
+        .find_map(|element| match element {
+            ElementRef::Token(token) if !token.kind().is_trivia() && !in_annotation(token) => {
+                Some(token.range().end())
+            }
+            _ => None,
+        })
 }
 
 /// The name a `NAME` node spells, read from its first token.
