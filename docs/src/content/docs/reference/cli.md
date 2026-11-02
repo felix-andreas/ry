@@ -211,9 +211,12 @@ documentation blocks of each file are cached in ry's cache directory, so a run p
 the files whose content changed. The finished Rd text of every topic is cached too, so after an
 edit only the topics that can have changed are rebuilt: those with a block in an edited file, those
 that inherit from them (`@inheritParams` and the other `@inherit` tags) or share a `@family` with
-them, and, every time, the package topic and any topic built from a block ry cannot track (one that
-documents data or an S4 or R6 object, or uses `@eval`, `@template`, `@example`, `@describeIn` or
-`@includeRmd`). Every other topic is written from the cache. Finally, the steps of roxygen2 that
+them, and, every time, the package topic and any topic built from a block ry cannot track. A block
+is tracked only when it documents a function defined right below it under a name without a dot (a
+dotted name may become an S3 method when another file adds a generic) and uses none of the tags
+that read other files or the namespace: `@eval`, `@evalRd`, `@evalNamespace`, `@template`,
+`@templateVar`, `@example`, `@includeRmd`, `@describeIn`, `@method`, `@exportS3Method` and
+`@R6method`. Every other topic is written from the cache. Finally, the steps of roxygen2 that
 take time quadratic in the number of topics (collecting them, ordering them for `@inherit`, and
 finding them by name) run in linear time.
 

@@ -704,6 +704,14 @@ memoization), resident bytes per line, and the p50 and p95 latency from a keystr
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
+`cargo test --release`, `cargo bench` and `just perf` build with the `bench` profile, which keeps
+`opt-level = 3` but uses thin local LTO and 16 codegen units, because a fat-LTO link of a test
+binary that pulls in libr or polars needs more memory than a 16 GB machine has. Shipped binaries and
+every benchmark number in the docs come from `cargo build --release`, which keeps fat LTO, so a
+budget measured under `cargo test --release` can be slightly slower than a release binary. Debug
+builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which keeps backtraces
+symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
+
 ## Guidelines
 
 - Add or tighten a fixture before writing a parser-local or crate-local unit test.

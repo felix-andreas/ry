@@ -534,21 +534,34 @@ pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
     let rcmd = if beside.is_file() {
         beside
     } else {
-        std::env::current_exe().map_err(io_error(&beside))?
+        std::env::current_exe().map_err(io_error(Path::new("the running executable")))?
     };
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|directory| !directory.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+    let cache = cache_directory()
         .ok_or_else(|| {
             Error::Package(
-                "ry's R home lives in a cache directory, and neither XDG_CACHE_HOME nor HOME is set"
+                "ry's R home lives in a cache directory, and none of XDG_CACHE_HOME, LOCALAPPDATA \
+                 (on Windows) or HOME is set"
                     .into(),
             )
         })?
         .join("ry")
         .join("home");
     cached_home(&cache, libr, &rcmd, gnu_r_home)
+}
+
+/// The user's cache directory: `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, then
+/// `~/.cache`. ry's extracted runtime and its R homes both live here, so they must agree.
+pub fn cache_directory() -> Option<PathBuf> {
+    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    variable("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| variable("LOCALAPPDATA"))
+                .flatten()
+                .map(PathBuf::from)
+        })
+        .or_else(|| variable("HOME").map(|home| Path::new(&home).join(".cache")))
 }
 
 /// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
@@ -586,7 +599,7 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     let staging = cache.join(format!(
         ".{}-{}",
         home.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        staging_suffix()
     ));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
@@ -612,13 +625,15 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     )
     .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
     if let Err(error) = assembled {
-        // The assembly error is the one to report. A staging directory left behind is named by
-        // this process's id and removed first by the next assembly under that id.
+        // The assembly error is the one to report; a staging directory left behind wastes disk
+        // but is never mistaken for a home.
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The runtime a home was built for, so a home for a rebuilt `libR` replaces the old one.
-    let source = libr.display().to_string();
+    // The runtime and front end a home was built for, so a home for a rebuilt `libR` replaces
+    // the old one. Two copies of `ry` that share one extracted runtime keep a home each, since a
+    // home in use by the other copy must not be pruned.
+    let source = format!("{}\n{}", libr.display(), rcmd.display());
     write(&staging.join(".libr"), &source)?;
     match fs::rename(&staging, &home) {
         Ok(()) => {
@@ -1482,6 +1497,16 @@ pub fn install(
 }
 
 /// The FNV-1a hash of `bytes`, which names a cached home the same way in every build of ry.
+/// A name part unique to this process and moment, for staging files and directories that are
+/// renamed into place. The process id alone is not enough: containers sharing a cache volume
+/// often run with the same process id.
+pub fn staging_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos());
+    format!("{}-{nanos:09}", std::process::id())
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)

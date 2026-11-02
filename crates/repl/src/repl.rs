@@ -449,7 +449,7 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
         .files
         .first()
         .ok_or_else(|| ReplError("the runtime embedded in ry is empty".to_owned()))?;
-    let cache = runtime_cache_directory().ok_or_else(|| {
+    let cache = rcmd::cache_directory().ok_or_else(|| {
         ReplError(
             "ry extracts its runtime into a cache directory, and none of XDG_CACHE_HOME, \
              LOCALAPPDATA or HOME is set; set one, or RY_LIBR to ry's runtime"
@@ -477,7 +477,7 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
         if file.name != library.name && complete(&path, file) {
             continue;
         }
-        let staging = directory.join(format!(".{}.{}", file.name, std::process::id()));
+        let staging = directory.join(format!(".{}.{}", file.name, rcmd::staging_suffix()));
         let bytes = zstd::decode_all(file.compressed).map_err(|error| failed(&path, error))?;
         let written = fs::write(&staging, &bytes).and_then(|()| {
             #[cfg(unix)]
@@ -505,18 +505,4 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
         }
     }
     Ok(library_path)
-}
-
-/// `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, then `~/.cache`.
-fn runtime_cache_directory() -> Option<PathBuf> {
-    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    variable("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            cfg!(windows)
-                .then(|| variable("LOCALAPPDATA"))
-                .flatten()
-                .map(PathBuf::from)
-        })
-        .or_else(|| variable("HOME").map(|home| Path::new(&home).join(".cache")))
 }
