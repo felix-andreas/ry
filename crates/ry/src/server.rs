@@ -1963,7 +1963,7 @@ impl Worker {
         }
         apply_suppressions(document_diagnostics(&self.db, file, &self.config), text)
             .into_iter()
-            .filter(|diagnostic| ide::has_quick_fix(diagnostic))
+            .filter(ide::has_quick_fix)
             .collect()
     }
 
