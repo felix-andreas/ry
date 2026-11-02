@@ -104,6 +104,15 @@ fn main() -> ExitCode {
         );
     }
 
+    if let Command::Document {
+        path,
+        roclets,
+        runtime,
+    } = &cli.command
+    {
+        return run_document(path, roclets, *runtime);
+    }
+
     if let Command::DebugAdapter = &cli.command {
         return run_debug_adapter();
     }
@@ -184,6 +193,7 @@ fn main() -> ExitCode {
         | Command::Repl { .. }
         | Command::Load { .. }
         | Command::Test { .. }
+        | Command::Document { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -342,8 +352,6 @@ fn run_debug_adapter() -> ExitCode {
     runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
-/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
-/// it, and exits with the session's status.
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
 fn run_test(
     path: &Path,
@@ -371,6 +379,31 @@ fn run_test(
     run_load(path, &[run], None, runtime)
 }
 
+/// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
+fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    let roclets = if roclets.is_empty() {
+        "NULL".to_owned()
+    } else {
+        let quoted: Vec<String> = roclets.iter().map(|roclet| load::r_string(roclet)).collect();
+        format!("c({})", quoted.join(", "))
+    };
+    let run = format!(
+        "({driver})({root}, {roclets})",
+        driver = include_str!("document.R").trim_end(),
+        root = load::r_string(&root.to_string_lossy()),
+    );
+    run_load(path, &[run], None, runtime)
+}
+
+/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
+/// it, and exits with the session's status.
 fn run_load(
     path: &Path,
     expressions: &[String],

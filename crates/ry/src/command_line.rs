@@ -172,6 +172,22 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
     },
+    /// Generate a package's documentation with roxygen2, as `devtools::document()` does
+    ///
+    /// The package is loaded lazily, as `ry load` does, so roxygen2 reads the code without a
+    /// full load. The output files are the ones `devtools::document()` writes.
+    Document {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// A roxygen2 roclet to run, such as `rd` or `namespace` (repeatable; default: the
+        /// package's own, which are `collate`, `namespace` and `rd` unless it sets them)
+        #[arg(long = "roclet")]
+        roclets: Vec<String>,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
     /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
     ///
     /// The client launches an R script, which runs on ry's runtime with breakpoints,
