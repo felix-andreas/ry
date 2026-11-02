@@ -169,3 +169,16 @@ constant: blended <- blend(1)
 effect: mixed <- mix(1)
 constant: qualified <- alpha::mix(1)
 29..35 error[strict] strict mode: this calls `mix`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- r6_generators_built_from_their_arguments_alone
+#~~~~ R/main.R
+Base <- R6::R6Class("Base", public = list(n = 0, add = function(k) self$n + k))
+Child <- R6Class("Child", inherit = Base, private = list(tags = c("a", "b")), lock_objects = FALSE)
+Stamped <- R6::R6Class("Stamped", public = list(at = Sys.time()))
+Other <- other::R6Class("Other")
+#++++
+== R/main.R
+generator: Base <- R6::R6Class("Base", public = list(n = 0, add = function(k) self$n + k))
+generator: Child <- R6Class("Child", inherit = Base, private = list(tags = c("a", "b")), lock_objects = FALSE)
+definition: Stamped <- R6::R6Class("Stamped", public = list(at = Sys.time()))
+definition: Other <- other::R6Class("Other")
