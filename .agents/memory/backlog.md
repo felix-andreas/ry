@@ -2192,7 +2192,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - `.Internal(inspect(x))` is missing.
+  - Passed before the merge of the PCRE2 work with main's parallel runtime fixes and fail after
+    it (`--installed`; first failures in `.corpus/tests/summary-installed.md`): fs (`file_copy`
+    into another directory), purrr (`compose` dots), tibble (`[<-` with a matrix), pillar, plyr
+    (`names<-` on an immutable data frame), cachem (disk cache `set`), sessioninfo (subprocess
+    exit), randtoolbox (`test-WELL.R`), PerformanceAnalytics (tinytest), Matrix (`lengths` of a
+    `which` result). Bisect against the two parents of the merge first.
+  - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
+    `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
+    `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
   - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
     that hard-codes an id would differ (none in the corpus does).
   - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
@@ -2218,8 +2226,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - POSIX rule strings in `TZ` (`"EST5"`, `"JST-9"`, `"<+03>-3"`) and daylight rules after 2100.
     - `strptime` input: `%%` skipping blanks, no warning for an out-of-range `%z`, and
       `format`/`strptime` do not recycle the format.
-    - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
-      reports an error; quantified lookarounds and lookarounds in non-capturing groups.
+    - The fancy-regex backtrack limit is unbounded, so a catastrophic POSIX pattern can hang.
     - `iconv(sub = , "ASCII//TRANSLIT")`.
   - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
     `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
@@ -2227,6 +2234,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     `anova`, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's
     error message for `hashfile(NA)`, openssl's bignum "not valid integer", jose's `grepRaw`,
     Rdpack's bibliography, and a long-path error in rprojroot.
+  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
+    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
     may not be a real one.
   - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
@@ -2261,7 +2270,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
-- **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`prmatrix`,
   `format.Date`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
@@ -2273,8 +2282,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
 - **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
-- **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
-  interpreter's `.Internal(inspect)` and subsetting.
+- **ALTREP `Extract_subset`** is registered but subsetting does not call it yet.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.

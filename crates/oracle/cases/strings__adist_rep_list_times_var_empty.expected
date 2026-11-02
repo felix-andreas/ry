@@ -1,0 +1,46 @@
+[stdout]
+| [1] "a" "a" "b"
+|      [,1] [,2] [,3]
+|      [,1]
+| [1,]    3
+|   r  
+| p 3 6
+| q 7 1
+| attr(,"counts")
+| , , ins
+| 
+|   r  
+| p 1 0
+| q 4 0
+| 
+| , , del
+| 
+|   r  
+| p 0 4
+| q 0 1
+| 
+| , , sub
+| 
+|   r  
+| p 2 2
+| q 3 0
+| 
+| attr(,"trafos")
+|   r                 
+| p "SMMMSMI" "SSDDDD"
+| q "SSSIIII" "MMD"   
+|      [,1] [,2]
+| [1,]    0    1
+| [2,]    1    0
+|      [,1]
+| [1,]    1
+| [2,]   NA
+| [1] TRUE
+| [1] TRUE
+| [1] "(len=6, tl=0) 1.5,2,3,4,5,..."
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "(len=6, tl=0) 1.5,2,3,4,5,..."
