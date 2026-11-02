@@ -3663,6 +3663,24 @@ fn dcast_names_columns_as_r_spells_the_values() {
 }
 
 #[test]
+fn dcast_orders_dates_and_puts_an_na_label_first() {
+    let d = frame(vec![
+        ("day", RVector::Date(vec![19725.0, 19724.0, 19725.0])),
+        ("c", ints(&[2, NA_INTEGER, 1])),
+        ("v", doubles(&[1.5, 2.5, 3.5])),
+    ]);
+    let cast = ops::dcast(&d, &["day"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
+    let mut wide = output_table(cast);
+    assert_eq!(
+        wide.schema().to_string(),
+        "DataFrame{day: Date, NA: double[], 1: double[], 2: double[]}"
+    );
+    assert_eq!(get(&mut wide, "day"), RVector::Date(vec![19724.0, 19725.0]));
+    assert_eq!(Read(get(&mut wide, "NA")), doubles(&[2.5, NA_REAL]));
+    assert_eq!(Read(get(&mut wide, "2")), doubles(&[NA_REAL, 1.5]));
+}
+
+#[test]
 fn nafill_fills_nan_like_na() {
     let gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
     let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
@@ -3846,9 +3864,9 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
                 2 * u8::from(values[row] != NA_INTEGER)
             }
             RVector::Factor { codes, .. } => 2 * u8::from(codes[row] != NA_INTEGER),
-            RVector::Double(values) if is_na_real(values[row]) => 0,
-            RVector::Double(values) if values[row].is_nan() => 1,
-            RVector::Double(_) => 2,
+            RVector::Double(values) | RVector::Date(values) if is_na_real(values[row]) => 0,
+            RVector::Double(values) | RVector::Date(values) if values[row].is_nan() => 1,
+            RVector::Double(_) | RVector::Date(_) => 2,
             RVector::Character(values) => 2 * u8::from(values[row].is_some()),
         }
     };
@@ -3859,7 +3877,7 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
     let ordering = match vector {
         RVector::Logical(values) | RVector::Integer(values) => values[left].cmp(&values[right]),
         RVector::Factor { codes, .. } => codes[left].cmp(&codes[right]),
-        RVector::Double(values) => values[left]
+        RVector::Double(values) | RVector::Date(values) => values[left]
             .partial_cmp(&values[right])
             .unwrap_or(Ordering::Equal),
         RVector::Character(values) => values[left]
@@ -3941,6 +3959,7 @@ fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
         RVector::Logical(values) => RVector::Logical(rows.iter().map(|row| values[*row]).collect()),
         RVector::Integer(values) => RVector::Integer(rows.iter().map(|row| values[*row]).collect()),
         RVector::Double(values) => RVector::Double(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Date(values) => RVector::Date(rows.iter().map(|row| values[*row]).collect()),
         RVector::Character(values) => {
             RVector::Character(rows.iter().map(|row| values[*row].clone()).collect())
         }

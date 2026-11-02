@@ -849,7 +849,7 @@ group-by questions alone, because the `:=` loop that adds 100 columns needs more
 machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At 1e8
 rows the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
 
-<!-- bench-table:5e7 -->
+<!-- bench-table:5e7-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
 | groupby q1: `sum(v1)` by `id1` | 0.790 | 0.183 | 0.177 |
@@ -864,9 +864,9 @@ rows the peak is q10, whose answer has nearly one group per row, and ry stays be
 | groupby q10: `sum(v3)`, count by all six ids | 12.993 | 4.396 | 4.288 |
 | total | 34.48 | 10.37 | 9.75 |
 | peak memory (GB) | 6.6 | 7.3 | 7.4 |
-<!-- /bench-table:5e7 -->
+<!-- /bench-table:5e7-groupby -->
 
-<!-- bench-table:1e8 -->
+<!-- bench-table:1e8-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
 | groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
@@ -881,7 +881,7 @@ rows the peak is q10, whose answer has nearly one group per row, and ry stays be
 | groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
 | total | 69.22 | 22.42 | 20.81 |
 | peak memory (GB) | 13.7 | 13.4 | 12.6 |
-<!-- /bench-table:1e8 -->
+<!-- /bench-table:1e8-groupby -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
@@ -919,6 +919,43 @@ two runs is 0.086 s against 0.10 s) and every other helper is faster than on GNU
 (1e8 rows) needs more than the 15 GB of memory the measuring machine has, because `rbindlist(list(x,
 x))` alone holds 15 GB of columns.
 
+
+### Real code: the benchmark modules
+
+The three benchmark code bases each have a module built on data.table (`tables` in data science,
+`market_data` in finance, `trials` in biostatistics). Their templates carry a DataFrame variant
+next to the data.table code, and the typed program uses it, so the typed module is ordinary ry
+code that checks clean in strict mode. `just bench-frames` generates both variants from one seed,
+strict-checks the typed one, runs each module's functions end to end on the same inputs (the
+driver is `tools/bench/frames/driver.R`), and refuses the result if any step's checksum differs.
+Each cell is a step's faster run in seconds; memory is each engine's peak resident size.
+
+<!-- bench-frames:start -->
+10,000,000 rows:
+
+| Step | data.table on GNU R | data.table on ry | DataFrame on ry, typed |
+|---|---:|---:|---:|
+| `tables`: `make_events` | 1.714 | 1.245 | 1.601 |
+| `tables`: `summarise_groups` | 0.547 | 0.425 | 0.433 |
+| `tables`: `add_features` | 3.734 | 3.643 | 1.727 |
+| `tables`: `join_labels` | 1.301 | 1.586 | 0.255 |
+| `tables`: `reshape_wide` | 0.318 | 0.358 | 0.429 |
+| `market_data`: `fetch_prices` | 1.193 | 0.724 | 1.249 |
+| `market_data`: `latest_prices` | 1.129 | 0.818 | 0.393 |
+| `market_data`: `to_wide` | 2.590 | 2.589 | 0.884 |
+| `market_data`: `read_reference` | 0.653 | 0.678 | 0.590 |
+| `trials`: `enrol` | 1.023 | 0.514 | 0.647 |
+| `trials`: `visit_schedule` | 4.274 | 3.370 | 1.488 |
+| `trials`: `visits_per_month` | 1.898 | 1.797 | 1.929 |
+| total | 20.37 | 17.75 | 11.62 |
+| peak memory (GB) | 1.53 | 2.29 | 2.24 |
+<!-- bench-frames:end -->
+
+The typed program wins where the engine does the work (windows, joins, pivots, grouped
+aggregation) and loses a little where a step mostly builds R vectors and hands them over. Building
+a DataFrame copies each column into the engine, where `data.table()` keeps R's vectors, which is
+most of the gap in `make_events`, `fetch_prices` and `enrol`; `visits_per_month` spends its time in
+`lubridate::floor_date` on both sides.
 
 ## 8. Typing integration
 

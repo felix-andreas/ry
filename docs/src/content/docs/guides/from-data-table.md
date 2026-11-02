@@ -187,6 +187,19 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 4:     us     5   2.0    10.0
 ```
 
+## Windows, ranks, reshaping and dates
+
+| data.table | DataFrame |
+| --- | --- |
+| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = col("x") / Expr.over(Expr.sum(col("x")), "g"))` |
+| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(col("x"), descending = TRUE), "g"))` |
+| `dcast(dt, g ~ k, value.var = "x", fun.aggregate = sum)` | `DataFrame.pivot(df, on = "k", index = "g", values = "x", agg = "sum")` |
+| `CJ`-style pairing, or `dt[, .(v = 1:n), by = .(id)]` | `DataFrame.join(df, DataFrame(v = 1:n), how = "cross")` |
+| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = col("day") + 28L)` |
+| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = col("due") - col("day"))` |
+
+[Working with DataFrames](/guides/dataframes/#windows-and-ranks) shows each with its output.
+
 ## Finding the data.table code
 
 Set the `data-table` lint to `"warn"` in `ry.toml` to have `ry check` and the editor mark each call

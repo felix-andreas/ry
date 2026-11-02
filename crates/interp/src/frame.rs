@@ -34,7 +34,8 @@ use {
         ColumnType, Table,
         convert::{self, RVector, is_na_real},
         polars::prelude::{
-            Column, DataFrame, DataType, IntoColumn, IntoLazy, ParquetWriter, PlSmallStr, col,
+            Column, DataFrame, DataType, IntoColumn, IntoLazy, NewChunkedArray, ParquetWriter,
+            PlSmallStr, StringChunked, col,
         },
         query::{
             self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
@@ -412,6 +413,16 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
 
 /// `value` as a column of `height` rows, recycling a single value.
 unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Column> {
+    let value = values::materialize(value)?;
+    // Borrowing each element's text skips the owned copy `column_contents` would make, which
+    // dominates building a frame from a long character vector.
+    if value.kind() == SexpType::String && length(value) == height {
+        let strings = StringChunked::from_iter_options(
+            PlSmallStr::from(name),
+            (0..height).map(|index| values::string_at(value, index)),
+        );
+        return Ok(strings.into_column());
+    }
     let Some(contents) = column_contents(value)? else {
         return Err(error_in(
             call,

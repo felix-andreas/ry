@@ -3,9 +3,9 @@
 //! checksum`), so the two outputs line up row by row. Loading is not timed, and every question
 //! runs twice.
 //!
-//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only]`, where the
-//! directory holds the CSV files `tools/bench/table/datagen.R` writes. `--groupby-only` runs only
-//! the ten group-by questions.
+//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only]`,
+//! where the directory holds the CSV files `tools/bench/table/datagen.R` writes. `--groupby-only`
+//! runs only the ten group-by questions, and `--joins-only` only the five join questions.
 
 mod allocator;
 
@@ -36,13 +36,15 @@ fn main() -> ExitCode {
         .skip(1)
         .find(|argument| !argument.starts_with("--"))
     else {
-        eprintln!("usage: db_benchmark <data-dir> [--groupby-only]");
+        eprintln!("usage: db_benchmark <data-dir> [--groupby-only | --joins-only]");
         return ExitCode::FAILURE;
     };
-    let groupby_only = env::args()
-        .skip(1)
-        .any(|argument| argument == "--groupby-only");
-    match run(&PathBuf::from(dir), groupby_only) {
+    let only = env::args().skip(1).find_map(|argument| match argument.as_str() {
+        "--groupby-only" => Some(Only::Groupby),
+        "--joins-only" => Some(Only::Joins),
+        _ => None,
+    });
+    match run(&PathBuf::from(dir), only) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("db_benchmark: {error}");
@@ -51,16 +53,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(dir: &Path, groupby_only: bool) -> Result<()> {
+/// The part of the benchmark a run is limited to.
+#[derive(Clone, Copy, PartialEq)]
+enum Only {
+    Groupby,
+    Joins,
+}
+
+fn run(dir: &Path, only: Option<Only>) -> Result<()> {
     println!(
         "# ry table engine on polars 0.55, {} threads",
         polars_threads()
     );
-    groupby(dir, groupby_only)?;
-    if groupby_only {
+    if only != Some(Only::Joins) {
+        groupby(dir, only == Some(Only::Groupby))?;
+    }
+    if only == Some(Only::Groupby) {
         return Ok(());
     }
     joins(dir)?;
+    if only == Some(Only::Joins) {
+        return Ok(());
+    }
     rolling_join(dir)
 }
 

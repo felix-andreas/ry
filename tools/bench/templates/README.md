@@ -24,7 +24,9 @@ Header lines, all before the code:
 In the typed program (`generate.py --typed`), a run of `#:= CODE` lines replaces, one for one,
 the lines right after it. That is how a template uses ry's records, tuples and tags where the
 untyped program, which must run under GNU R, keeps plain lists: the untyped program drops every
-`#:` line, so both programs draw the same instances.
+`#:` line, so both programs draw the same instances. The `tables`, `market_data` and `trials`
+templates use it the same way for DataFrames in place of data.table, and `just bench-frames` times
+both variants of those modules end to end.
 
 `@ID@` is always available and is unique per instance across the package, so every function
 name must end in `@ID@` (or contain it). Top-level `name <- function` and `name <- R6::R6Class`

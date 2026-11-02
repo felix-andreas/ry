@@ -5,11 +5,13 @@
 # Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
 # compatibility, because they measure in-place updates, which the Polars-style API does not do.
 #
-# Usage: ry run ry.R <data-dir> [groupby]   (`groupby` runs only the ten group-by questions)
+# Usage: ry run ry.R <data-dir> [groupby | joins]   (`groupby` runs only the ten group-by questions,
+#   `joins` only the five join questions)
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]
-groupby_only <- identical(args[2], "groupby")
+# "groupby" or "joins" limits the run to those questions.
+part <- if (length(args) > 1L) args[[2]] else "all"
 cat("# ry DataFrame\n")
 
 read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), strings_as_factors = factors)
@@ -42,50 +44,54 @@ time_question <- function(question, expr) {
   }
 }
 
-x <- read("groupby.csv")
-sum_of <- function(name) col(name) |> Expr.sum()
-mean_of <- function(name) col(name) |> Expr.mean()
-by <- function(...) DataFrame.group_by(x, ...)
-time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
-time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
-time_question("groupby q3", by("id3") |> GroupBy.agg(sum_of("v1"), mean_of("v3")))
-time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
-time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
-time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
-  median_v3 = col("v3") |> Expr.median(),
-  sd_v3 = col("v3") |> Expr.std()
-))
-time_question("groupby q7", by("id3") |> GroupBy.agg(
-  range_v1_v2 = (col("v1") |> Expr.max()) - (col("v2") |> Expr.min())
-))
-time_question("groupby q8", DataFrame.lazy(x) |>
-  LazyFrame.sort("v3", descending = TRUE) |>
-  LazyFrame.group_by("id6") |>
-  LazyGroupBy.agg(largest2_v3 = col("v3") |> Expr.head(2L)) |>
-  LazyFrame.collect())
-time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(col("v1"), col("v2"))^2))
-time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
-  sum_of("v3"),
-  count = Expr.len()
-))
+if (part != "joins") {
+  x <- read("groupby.csv")
+  sum_of <- function(name) col(name) |> Expr.sum()
+  mean_of <- function(name) col(name) |> Expr.mean()
+  by <- function(...) DataFrame.group_by(x, ...)
+  time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
+  time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
+  time_question("groupby q3", by("id3") |> GroupBy.agg(sum_of("v1"), mean_of("v3")))
+  time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
+  time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
+  time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
+    median_v3 = col("v3") |> Expr.median(),
+    sd_v3 = col("v3") |> Expr.std()
+  ))
+  time_question("groupby q7", by("id3") |> GroupBy.agg(
+    range_v1_v2 = (col("v1") |> Expr.max()) - (col("v2") |> Expr.min())
+  ))
+  time_question("groupby q8", DataFrame.lazy(x) |>
+    LazyFrame.sort("v3", descending = TRUE) |>
+    LazyFrame.group_by("id6") |>
+    LazyGroupBy.agg(largest2_v3 = col("v3") |> Expr.head(2L)) |>
+    LazyFrame.collect())
+  time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(col("v1"), col("v2"))^2))
+  time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
+    sum_of("v3"),
+    count = Expr.len()
+  ))
 
-if (!groupby_only) {
-  # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
-  time_question("update full", {
-    for (step in 1:100) x[, v3 := v3 * 1.000001]
-    x[, .(v3 = sum(v3))]
-  })
-  time_question("update subset", {
-    for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
-    x[, .(v1 = sum(v1))]
-  })
-  time_question("update add", {
-    for (step in 1:100) x[, paste0("added", step) := v2 * step]
-    x[, .(added100 = sum(added100))]
-  })
+  if (part == "all") {
+    # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
+    time_question("update full", {
+      for (step in 1:100) x[, v3 := v3 * 1.000001]
+      x[, .(v3 = sum(v3))]
+    })
+    time_question("update subset", {
+      for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
+      x[, .(v1 = sum(v1))]
+    })
+    time_question("update add", {
+      for (step in 1:100) x[, paste0("added", step) := v2 * step]
+      x[, .(added100 = sum(added100))]
+    })
+  }
   rm(x)
   invisible(gc())
+}
 
+if (part != "groupby") {
   x <- read("join_x.csv")
   small <- read("join_small.csv")
   medium <- read("join_medium.csv")
@@ -97,7 +103,9 @@ if (!groupby_only) {
   time_question("join q5", DataFrame.join(x, big, on = "id3"))
   rm(x, small, medium, big)
   invisible(gc())
+}
 
+if (part == "all") {
   prices <- read("rolljoin_prices.csv", factors = FALSE)
   trades <- read("rolljoin_trades.csv", factors = FALSE)
   time_question("rolljoin keyed", DataFrame.join_asof(trades, prices, on = "time", by = "ticker"))
