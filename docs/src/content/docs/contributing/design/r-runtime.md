@@ -1080,7 +1080,7 @@ Each step ends with something real running, and each one is a large, whole chang
    Magick++. Two package-test rates are tracked, both counting only the packages whose
    tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
    ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
-   (`.corpus/ry-library`, `oracle packages --installed`), it passes 126 of 164 (76.8%). The rest
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 135 of 164 (82.3%). The rest
    fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime

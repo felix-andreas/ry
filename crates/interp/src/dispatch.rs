@@ -1394,8 +1394,9 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
         return Ok(None);
     }
     let promised = promised_args(call, args)?;
-    if methods != nil() {
-        let arguments = eval::args_pairlist(&promised)?;
+    if methods != nil()
+        && let Some(arguments) = crate::methods::signature_arguments(&promised, generic)?
+    {
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
             // The default method of an internal generic such as `as.vector` stands for the

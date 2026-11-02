@@ -716,6 +716,11 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
     }
     let result = if object.kind() == kind {
         object
+    } else if kind == SexpType::Pairlist && object.kind().is_atomic() {
+        // GNU R makes one cell per element, tagged by the element's name.
+        let list = coerce_vector(object, SexpType::List)?;
+        crate::heap().root(list);
+        coerce_vector(list, kind)?
     } else {
         coerce_vector(object, kind)?
     };
