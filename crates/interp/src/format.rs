@@ -568,7 +568,9 @@ fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
 
 /// The display width of text in a terminal.
 pub fn display_width(text: &str) -> usize {
-    if text.is_ascii() {
+    // Control characters take no columns, so only printable ASCII can skip the per-character
+    // width lookup.
+    if text.bytes().all(|byte| (0x20..0x7F).contains(&byte)) {
         return text.len();
     }
     text.chars()
@@ -917,6 +919,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             let value = crate::subset::numeric_element(vector, index);
             c_format(value, &format, digits, &flag, mode == "integer")
         };
+        let left_justify = width < 0 || flag.contains('-');
         let width = width.unsigned_abs() as usize;
         let shortfall = width.saturating_sub(display_width(&text));
         // GNU R writes an `fg` zero as a bare "0", whatever the width.
@@ -925,7 +928,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         padded.clear();
-        if flag.contains('-') {
+        if left_justify {
             padded.push_str(&text);
             padded.extend(std::iter::repeat_n(' ', shortfall));
         } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {

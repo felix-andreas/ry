@@ -1602,6 +1602,26 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             .into_iter()
             .filter(|&position| position != NA_POSITION)
             .collect();
+        // As with any assignment, the list first stretches to a longer logical subscript or past
+        // its end, padded with NULL, so `x[5] <- NULL` on two elements leaves four.
+        let stretch = if index.kind() == SexpType::Logical {
+            length(index)
+        } else {
+            0
+        };
+        let needed = remove
+            .iter()
+            .map(|&position| position + 1)
+            .max()
+            .unwrap_or(0)
+            .max(stretch);
+        let object = if needed > count {
+            grow(object, needed)?
+        } else {
+            object
+        };
+        let count = length(object);
+        let names = values::names(object);
         let kept: Vec<usize> = (0..count)
             .filter(|position| !remove.contains(position))
             .collect();
