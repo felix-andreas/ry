@@ -18,7 +18,7 @@ f <- function(x) {
 #++++
 action Inline variable `twice`
   f <- function(x) {
-    (x * 2) + (x * 2)
+    x * 2 + x * 2
   }
 
 #---- call_with_several_reads_is_refused

@@ -406,6 +406,27 @@ impl Simulation {
         self.track(future)
     }
 
+    /// Asks for the code actions over the selection `range`, limited to the `only` kinds when
+    /// the client names some, as an editor's refactor menu does.
+    pub fn code_action(
+        &mut self,
+        uri: &Url,
+        range: lsp_types::Range,
+        only: Option<Vec<lsp_types::CodeActionKind>>,
+    ) -> RequestId {
+        let future = json(self.state.code_action(lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier::new(uri.clone()),
+            range,
+            context: lsp_types::CodeActionContext {
+                only,
+                ..lsp_types::CodeActionContext::default()
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+        }));
+        self.track(future)
+    }
+
     /// The client gave up on a request (`$/cancelRequest`): its response is dropped, but the
     /// job it queued still runs, as it does over a real connection.
     pub fn abandon(&mut self, id: RequestId) {

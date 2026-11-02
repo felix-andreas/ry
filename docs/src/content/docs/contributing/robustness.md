@@ -166,6 +166,8 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect lens PATH "anchor" "title"` | A code lens on the anchor's line has that title, after resolving it. |
 | `expect token PATH "anchor" CLASS` | The semantic token at the anchor has that type, with modifiers as `+name` (`function+defaultLibrary`). |
 | `fix PATH "anchor" TITLE` | Apply the quick fix with that title at the anchor. |
+| `refactor PATH "selection" TITLE` | Select the first occurrence of the text and apply the code action with that title. |
+| `expect [no] action PATH "selection" KIND TITLE` | Asking for the code actions of that kind (`refactor.extract`, or `all`) over the selection does, or does not, offer the title. |
 | `debug start PATH [entry] [prelude "R"] [test "name"] [break N \| break FILE:N]...` | Launch `ry debug-adapter` on the script, with breakpoints in it or in another file. |
 | `debug continue` / `next` / `step-in` / `step-out` / `disconnect` / `evaluate "expr"` | Drive the debug session. |
 | `expect stopped REASON at N` / `expect stack "f@2 g@7"` / `expect variable NAME "value"` | The next stop, its frames, and a variable of the top frame. |

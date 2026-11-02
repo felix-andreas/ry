@@ -18,6 +18,7 @@ use {
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize,
         ast::BinaryExpr,
+        infix_binding_power,
     },
 };
 
@@ -1235,10 +1236,30 @@ fn needs_parentheses(value: &SyntaxNode, read: &SyntaxNode) -> bool {
     let alone = match parent.kind() {
         ARGUMENT | PAREN_EXPR => true,
         kind if is_statement_container(kind) => true,
-        BINARY_EXPR => is_assignment(&parent) && !is_assignment_target(&parent, read),
+        BINARY_EXPR if is_assignment(&parent) => !is_assignment_target(&parent, read),
+        // `a - b * c` keeps `b * c` together, so inlining `b * c` there needs no parentheses.
+        BINARY_EXPR if value.kind() == BINARY_EXPR && !is_assignment(value) => {
+            let (Some((parent_operator, (parent_left, parent_right))), Some((_, (left, right)))) =
+                (binary_operator(&parent), binary_operator(value))
+            else {
+                return true;
+            };
+            if read.text_range().end() <= parent_operator.start() {
+                parent_left < right
+            } else {
+                left >= parent_right
+            }
+        }
         _ => false,
     };
     !alone
+}
+
+/// The operator of a binary expression, with the range it covers and its binding powers.
+fn binary_operator(node: &SyntaxNode) -> Option<(TextRange, (u8, u8))> {
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find_map(|token| Some((token.text_range(), infix_binding_power(token.kind())?)))
 }
 
 /// `base`, or `base` with the first numeric suffix that nothing in the file or the project's

@@ -11,8 +11,8 @@ use {
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId,
-            PatternKind, Symbol,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
+            NameSite, PatId, PatternKind, Symbol, UnaryOperator,
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
@@ -25,7 +25,7 @@ use {
             stub_declaration, stubs,
         },
         types::{
-            Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
+            Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
             contains_inference_var,
         },
     },
@@ -2361,13 +2361,13 @@ pub fn completion_with(
 
     let usage = Usage::of(db, files, file, offset);
     if let Some(items) = tag_completions(db, files, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
     if let Some(items) = pattern_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
     if let Some(items) = literal_field_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
 
     // Resolving a scheme can type-check its item, so call shapes are filled in only for the
@@ -2515,7 +2515,45 @@ pub fn completion_with(
         .chars()
         .next()
     }) == Some('(');
-    let mut result = finish_completions(items, &query, &usage, called)?;
+    let expected = expected_type(db, file, offset);
+    let global_items: HashMap<&str, Option<Item<'_>>> = match expected {
+        Some(_) => {
+            let mut first_writers = HashMap::with_capacity(globals.len());
+            for &(name, item) in &globals {
+                first_writers.entry(name).or_insert(item);
+            }
+            first_writers
+        }
+        None => HashMap::new(),
+    };
+    let mismatches = |item: &CompletionItem| {
+        let Some(expected) = expected else {
+            return false;
+        };
+        let name = item.label.trim_matches('`');
+        let candidate = match item.source {
+            CompletionSource::Global => match global_items.get(name) {
+                Some(Some(item)) => global_scheme(db, *item).body,
+                _ => return false,
+            },
+            CompletionSource::Stdlib => {
+                match stubs(db).and_then(|library| library.schemes.get(name)?.first()) {
+                    Some(scheme) => scheme.body,
+                    None => return false,
+                }
+            }
+            _ => return false,
+        };
+        let produced = match (called, candidate.kind(db)) {
+            // An inferred result is how the body happens to end, too loose to rule a name out.
+            (_, TyKind::Function(function)) if function.inferred => return false,
+            (true, TyKind::Function(function)) => function.ret,
+            (true, _) => return false,
+            (false, _) => candidate,
+        };
+        type_mismatch(db, produced, expected)
+    };
+    let mut result = finish_completions(items, &query, &usage, called, &mismatches)?;
     let mut unresolved: HashMap<&str, usize> = result
         .items
         .iter()
@@ -4795,7 +4833,7 @@ fn string_subscript_completion(
             )
         })
         .collect();
-    finish_completions(items, query, &Usage::none(), false)
+    finish_completions(items, query, &Usage::none(), false, &|_| false)
 }
 
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
@@ -4925,7 +4963,7 @@ fn annotation_completion(
                 ..CompletionItem::new(label, CompletionKind::Variable, source)
             }),
     );
-    finish_completions(items, query, &Usage::none(), false)
+    finish_completions(items, query, &Usage::none(), false, &|_| false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6102,13 +6140,14 @@ fn finish_completions(
     query: &str,
     usage: &Usage<'_>,
     called: bool,
+    mismatches: &dyn Fn(&CompletionItem) -> bool,
 ) -> Option<CompletionResult> {
     let labels: HashSet<&str> = if called {
         items.iter().map(|item| item.label.as_str()).collect()
     } else {
         HashSet::new()
     };
-    let mut ranked: Vec<(Option<MatchScore>, u8, UseRank, usize)> = {
+    let mut ranked: Vec<(Option<MatchScore>, u8, bool, UseRank, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
         items
             .iter()
@@ -6135,19 +6174,20 @@ fn finish_completions(
                 Some((
                     search_match(&item.label, query),
                     item.source.group(called),
+                    mismatches(item),
                     (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
                 ))
             })
             .collect()
     };
-    let order = |left: &(Option<MatchScore>, u8, UseRank, usize),
-                 right: &(Option<MatchScore>, u8, UseRank, usize)| {
-        let (Some(left_item), Some(right_item)) = (items.get(left.3), items.get(right.3)) else {
-            return left.3.cmp(&right.3);
+    let order = |left: &(Option<MatchScore>, u8, bool, UseRank, usize),
+                 right: &(Option<MatchScore>, u8, bool, UseRank, usize)| {
+        let (Some(left_item), Some(right_item)) = (items.get(left.4), items.get(right.4)) else {
+            return left.4.cmp(&right.4);
         };
-        (left.0, left.1, left.2)
-            .cmp(&(right.0, right.1, right.2))
+        (left.0, left.1, left.2, left.3)
+            .cmp(&(right.0, right.1, right.2, right.3))
             .then(left_item.source.cmp(&right_item.source))
             .then_with(|| {
                 left_item
@@ -6167,7 +6207,7 @@ fn finish_completions(
     let mut slots: Vec<Option<CompletionItem>> = items.into_iter().map(Some).collect();
     let items: Vec<CompletionItem> = ranked
         .into_iter()
-        .filter_map(|(_, _, _, index)| slots.get_mut(index).and_then(Option::take))
+        .filter_map(|(_, _, _, _, index)| slots.get_mut(index).and_then(Option::take))
         .collect();
     (!items.is_empty()).then_some(CompletionResult {
         items,
@@ -6177,6 +6217,185 @@ fn finish_completions(
 
 /// S3 methods last, then calls and spellings, both descending.
 type UseRank = (bool, Reverse<u32>, Reverse<u32>);
+
+/// The type the expression being typed at `offset` should have, where the code around it says:
+/// the condition of an `if` or `while` and an operand of `!`, `&&` or `||` take a logical, and an
+/// argument takes the type its global or library callee declares, in an annotation or a stub, for
+/// the parameter it fills.
+/// The expression is the name the cursor is in or, when that name is called, the call.
+fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Option<Ty<'db>> {
+    let position = position_in_item(db, file, offset)?;
+    let hir = item_hir(db, position.item).as_ref()?;
+    let name = hir
+        .expression_ids()
+        .filter(|&id| {
+            matches!(hir.kind(id), ExpressionKind::NameRef(_))
+                && hir.range(id).contains_inclusive(position.relative)
+        })
+        .min_by_key(|&id| hir.range(id).len())?;
+    let target = hir
+        .expression_ids()
+        .find(|&id| matches!(hir.kind(id), ExpressionKind::Call { callee, .. } if *callee == name))
+        .unwrap_or(name);
+    let logical = || Some(Ty::new(db, TyKind::Scalar(Atomic::Logical)));
+    for id in hir.expression_ids() {
+        match hir.kind(id) {
+            ExpressionKind::If { condition, .. } | ExpressionKind::While { condition, .. }
+                if *condition == target =>
+            {
+                return logical();
+            }
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } if *operand == target => return logical(),
+            ExpressionKind::Binary {
+                operator: BinaryOperator::And2 | BinaryOperator::Or2,
+                lhs,
+                rhs,
+                ..
+            } if *lhs == target || *rhs == target => return logical(),
+            ExpressionKind::Call { callee, arguments } => {
+                let arguments = &hir[arguments];
+                let Some(index) = arguments
+                    .iter()
+                    .position(|argument| argument.value == Some(target))
+                else {
+                    continue;
+                };
+                // The declared scheme, not the call's instance: the instance already took its
+                // parameter types from the argument being typed.
+                let check = item_check(db, position.item)?;
+                let naming = item_naming(db, position.item).as_ref()?;
+                if !naming.non_locals.contains_key(callee) {
+                    return None;
+                }
+                let scheme = referenced_scheme(
+                    db,
+                    ProjectFiles::try_get(db)?,
+                    &callee_name(hir, *callee)?,
+                    check,
+                    *callee,
+                )?;
+                let TyKind::Function(function) = scheme.body.kind(db) else {
+                    return None;
+                };
+                // An inferred parameter type says how the body uses the value, not what callers
+                // pass.
+                if function.inferred {
+                    return None;
+                }
+                let names: Vec<Option<Symbol>> = arguments
+                    .iter()
+                    .map(|argument| hir.argument_name(argument))
+                    .collect();
+                let shapes: Vec<ArgumentShape> = names
+                    .iter()
+                    .map(|name| ArgumentShape {
+                        name: name.as_deref(),
+                        forwards_dots: false,
+                    })
+                    .collect();
+                let arena = Bump::new();
+                return match argument_targets(db, &arena, function, &shapes).get(index)? {
+                    Some(ArgumentTarget::Positional(slot)) => {
+                        function.positional.get(*slot).copied()
+                    }
+                    Some(ArgumentTarget::Named(slot)) => {
+                        function.named.get(*slot).map(|parameter| parameter.ty)
+                    }
+                    Some(ArgumentTarget::Rest) => {
+                        function.variadic.as_ref().map(|rest| rest.element)
+                    }
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether `actual` is known not to fit `expected`, compared by kind of value only: a logical,
+/// integer, double, character, complex or raw vector, a list, a function, a table, ry's native
+/// values, or a named type. R widens logical to integer to double, and a condition takes any
+/// number, so those fit. Anything the comparison cannot see through, such as a type variable or
+/// a named type against a different kind, is not a mismatch.
+fn type_mismatch<'db>(db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
+    let (mut actual_shapes, mut expected_shapes) = (Vec::new(), Vec::new());
+    if !value_shapes(db, actual, &mut actual_shapes)
+        || !value_shapes(db, expected, &mut expected_shapes)
+    {
+        return false;
+    }
+    let fits = |actual: ValueShape, expected: ValueShape| match (actual, expected) {
+        (ValueShape::Atomic(actual), ValueShape::Atomic(expected)) => {
+            actual == expected
+                || matches!(
+                    (actual, expected),
+                    (
+                        Atomic::Logical,
+                        Atomic::Integer | Atomic::Double | Atomic::Complex
+                    ) | (
+                        Atomic::Integer,
+                        Atomic::Double | Atomic::Complex | Atomic::Logical
+                    ) | (Atomic::Double, Atomic::Complex | Atomic::Logical)
+                )
+        }
+        (ValueShape::Frame, ValueShape::List) => true,
+        (actual, expected) => actual == expected,
+    };
+    let fits_one = actual_shapes.iter().any(|&actual| {
+        expected_shapes
+            .iter()
+            .any(|&expected| fits(actual, expected))
+    });
+    !fits_one
+        && !actual_shapes
+            .iter()
+            .chain(&expected_shapes)
+            .any(|shape| matches!(shape, ValueShape::Named(_) | ValueShape::Null))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueShape<'db> {
+    Atomic(Atomic),
+    List,
+    Function,
+    Null,
+    Frame,
+    Native,
+    Named(Name<'db>),
+}
+
+/// Pushes the kinds of value `ty` may be, and returns false when one of them is not known.
+fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'db>>) -> bool {
+    let shape = match ty.kind(db) {
+        TyKind::Scalar(atomic) => ValueShape::Atomic(*atomic),
+        TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
+            TyKind::Scalar(atomic) => ValueShape::Atomic(*atomic),
+            _ => return false,
+        },
+        TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
+            ValueShape::List
+        }
+        TyKind::NativeTuple(_) | TyKind::NativeRecord(_) | TyKind::Tag(..) | TyKind::OtherTags => {
+            ValueShape::Native
+        }
+        TyKind::Frame(..) => ValueShape::Frame,
+        TyKind::Function(_) => ValueShape::Function,
+        TyKind::Null => ValueShape::Null,
+        TyKind::Named(name, _) => ValueShape::Named(*name),
+        TyKind::Union(members) => {
+            return members
+                .iter()
+                .all(|member| value_shapes(db, *member, shapes));
+        }
+        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => return false,
+    };
+    shapes.push(shape);
+    true
+}
 
 /// How often a name is spelled, for ranking: across the project, in the current file, and in
 /// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the

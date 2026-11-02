@@ -2708,7 +2708,10 @@ const EQ_ASSIGN_BP: u8 = 10;
 const LEFT_ASSIGN_BP: u8 = 8;
 const HELP_BP: u8 = 2;
 
-fn infix_binding_power(kind: SyntaxKind) -> Option<(u8, u8)> {
+/// How tightly an infix operator binds its left and right operands: an operand stays with the
+/// operator whose power on its side is higher. Editors use it to parenthesize only where an
+/// inserted expression would otherwise regroup.
+pub fn infix_binding_power(kind: SyntaxKind) -> Option<(u8, u8)> {
     let (left, right) = match kind {
         QUESTION => (HELP_BP, HELP_BP + 1),
         LESS_MINUS | LESS2_MINUS | COLON_EQ => (LEFT_ASSIGN_BP, LEFT_ASSIGN_BP),
