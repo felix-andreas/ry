@@ -1490,7 +1490,11 @@ unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
     if !list.kind().is_vector() || list.is_object() {
         return Ok(None);
     }
-    crate::subset::subset2(list, &[i], Some(true), element).map(Some)
+    let value = crate::subset::subset2(list, &[i], Some(true), element)?;
+    // An empty argument taken from a call, as in `lapply(as.list(quote(f(a, ))), FUN)`, reaches
+    // `FUN` as a promise whose value is the empty symbol, which `FUN` can inspect; bound
+    // directly, it would make `FUN`'s argument missing.
+    Ok((value != values::missing_arg()).then_some(value))
 }
 
 /// What every element [`plain_element`] takes from `list` is known to share: its storage type,
