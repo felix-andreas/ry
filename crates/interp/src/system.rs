@@ -15,7 +15,7 @@ use {
     },
     heap::{
         GcStress,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
     std::{
@@ -25,6 +25,7 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
     internal("pcre_config", 0, |_| unsafe {
@@ -44,10 +45,28 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| Ok(nil())).invisible(),
-    internal("undebug", 1, |_| Ok(nil())).invisible(),
-    internal("debugonce", 3, |_| Ok(nil())).invisible(),
-    internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
+    internal("debug", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_DEBUG, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("undebug", 1, |call| unsafe {
+        let function = debugged_function(call)?;
+        if !function.has_gp(gp::CLOSURE_DEBUG) {
+            crate::conditions::warning_call(call.call, "argument is not being debugged")?;
+        }
+        function.set_gp_bits(gp::CLOSURE_DEBUG, false);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("debugonce", 3, |call| unsafe {
+        debugged_function(call)?.set_gp_bits(gp::CLOSURE_STEP, true);
+        Ok(nil())
+    })
+    .invisible(),
+    internal("isdebugged", 1, |call| unsafe {
+        scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
+    }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
     internal("browserText", 1, |call| {
@@ -382,6 +401,14 @@ fn temp_dir() -> String {
 /// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
 /// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
 /// Unix base R finds programs with `command -v` in R code instead.
+/// `.ry_view(x, title)`, behind ry's `View()`: opens a lazy view of `x` in the editors connected
+/// to the console. Only the rows an editor scrolls to are ever formatted.
+unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
+    let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
+    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    Ok(call.arg(0))
+}
+
 unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let result = map_strings(call, |name| {
@@ -3531,6 +3558,20 @@ thread_local! {
 
 /// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
 /// unless that is `NULL`.
+/// The function `debug()` and its relatives flag: their first argument, or the function a
+/// string names. The flags only take effect on closures, but GNU R accepts any function.
+unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
+    let mut function = call.arg(0);
+    if function.kind() == SexpType::String && length(function) == 1 {
+        let name = values::as_string_scalar(function)?.unwrap_or_default();
+        function = crate::eval::find_fun(values::install(&name)?, call.env)?;
+    }
+    match function.kind() {
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => Ok(function),
+        _ => Err(call.error("argument must be a function")),
+    }
+}
+
 unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
     let state = call.arg(0);
     let previous = TRACING.with(|tracing| tracing.get());

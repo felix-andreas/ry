@@ -1513,6 +1513,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         interp::session::run_text(startup, "<startup>");
     }
     let mut buffer = vec![0u8; 64 * 1024];
+    interp::console_server::start();
     interp::session::run_console(
         |prompt| {
             use std::io::Write;
@@ -1524,29 +1525,39 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
             }
             // A prompt never holds a NUL, so the empty fallback is unreachable.
             let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-            let mut input = Vec::new();
-            // A line longer than the buffer arrives in several chunks; only the last one ends the
-            // line, and the text is decoded once it is whole, so no character is split.
-            loop {
-                if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-                    return (!input.is_empty())
-                        .then(|| String::from_utf8_lossy(&input).into_owned());
+            let buffer = &mut buffer;
+            // The input is read on a helper thread while the console answers an editor's
+            // requests, which need the interpreter's thread.
+            interp::console_server::read_while_serving(move || {
+                let mut input = Vec::new();
+                // A line longer than the buffer arrives in several chunks; only the last one
+                // ends the line, and the text is decoded once it is whole, so no character is
+                // split.
+                loop {
+                    // SAFETY: `read` is the host's reader, which may run on any thread.
+                    if unsafe { read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) }
+                        == 0
+                    {
+                        return (!input.is_empty())
+                            .then(|| String::from_utf8_lossy(&input).into_owned());
+                    }
+                    let end = buffer
+                        .iter()
+                        .position(|&byte| byte == 0)
+                        .unwrap_or(buffer.len());
+                    input.extend_from_slice(&buffer[..end]);
+                    // A reader may stop one byte short of the contract's limit, so a chunk is
+                    // taken as cut off whenever it comes within two bytes of the buffer's end.
+                    if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                        return Some(String::from_utf8_lossy(&input).into_owned());
+                    }
+                    prompt = std::ffi::CString::default();
                 }
-                let end = buffer
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(buffer.len());
-                input.extend_from_slice(&buffer[..end]);
-                // A reader may stop one byte short of the contract's limit, so a chunk is taken as
-                // cut off whenever it comes within two bytes of the buffer's end.
-                if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                    return Some(String::from_utf8_lossy(&input).into_owned());
-                }
-                prompt = std::ffi::CString::default();
-            }
+            })
         },
         false,
     );
+    interp::console_server::finish();
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0

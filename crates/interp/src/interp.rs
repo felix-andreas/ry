@@ -32,6 +32,7 @@ pub mod bytecode;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
+pub mod console_server;
 pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
@@ -86,6 +87,7 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
+pub mod viewer;
 
 pub use crate::unwind::{Jump, RError};
 use {

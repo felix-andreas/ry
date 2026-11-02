@@ -93,8 +93,15 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("dataentry", |call| {
         Err(call.error("data entry cannot be used non-interactively"))
     }),
-    ("dataviewer", |call| {
-        Err(call.error("View() cannot be used non-interactively"))
+    // utils' `View()` formats the whole object before it calls this; ry's own `View()` in
+    // `tools:ry` stays lazy.
+    ("dataviewer", |call| unsafe {
+        crate::console_server::show(
+            call.arg(0),
+            &values::as_string_scalar(call.arg(1))?.unwrap_or_default(),
+        )
+        .map_err(|message| call.error(message))?;
+        Ok(nil())
     }),
     ("edit", |call| unsafe { edit(call) }),
     ("fileedit", |call| {
