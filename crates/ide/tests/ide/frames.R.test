@@ -65,6 +65,8 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+action: Rewrite `:=` with `DataFrame.with_columns`
+  edit 57..85 -> "sales <- sales |> DataFrame.with_columns(tax = col(\"amount\") * 0.2)"
 completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -79,6 +81,8 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+action: Rewrite `:=` with `DataFrame.with_columns`
+  edit 57..117 -> "sales <- sales |> DataFrame.with_columns(tax = col(\"amount\") * 0.2, net = col(\"amount\") * 0.8)"
 completion: none
 hint @5: DataFrame{team: character[], amount: double[]}
 

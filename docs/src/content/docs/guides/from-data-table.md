@@ -9,8 +9,9 @@ column or a sum of a text column is reported before the query runs. You can move
 time, because `as.DataFrame(dt)` converts a `data.table` and `as.data.table(df)` converts back,
 keeping every column's type.
 
-Each section below shows a data.table idiom and then its DataFrame equivalent, with the output of
-`ry run`. The examples share one table:
+ry can do most of the rewriting for you, as [Rewriting automatically](#rewriting-automatically)
+shows. Each section below shows a data.table idiom and then its DataFrame equivalent, with the
+output of `ry run`. The examples share one table:
 
 ```r
 sales <- DataFrame(
@@ -196,3 +197,62 @@ DataFrame equivalent:
 [lint]
 data-table = "warn"
 ```
+
+## Rewriting automatically
+
+The editor offers each rewrite in this guide as a code action, on the `data-table` lint's warning
+and on any query, `:=`, `fread()` or `setorder()` it can translate, along with one action that
+rewrites the whole file. From the command line, `ry migrate data-table` prints the rewrites as a
+diff, and `--write` applies them:
+
+```r
+library(data.table)
+sales <- fread("sales.csv")
+totals <- sales[units > 2L, .(units = sum(units), n = .N), by = region]
+sales[, revenue := units * price]
+setorder(sales, region, -units)
+```
+
+```text
+$ ry migrate data-table --write report.R
+applied 4 rewrites in 1 file
+```
+
+```r
+library(data.table)
+sales <- DataFrame.read_csv("sales.csv")
+totals <- sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum(), n = Expr.len())
+sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+sales <- sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
+```
+
+Delete `library(data.table)` once nothing in the file needs it, and run `ry fmt` to break the long
+chains over several lines.
+
+A query is rewritten only when the checker types its table as a data.table or a DataFrame, so
+`values[values > 2]` on a vector is left alone. Inside the brackets, a bare name is a column when
+the checker knows the table's columns and the name is one of them. When the columns are not known,
+a name is a column unless it is a variable in scope or a name the project defines, a base constant such as
+`pi` or `letters`, or one of data.table's own symbols such as `.SD`. That rule matches data.table,
+which also looks a name up among the columns first.
+
+Anything without an exact equivalent is left as it is rather than rewritten approximately:
+
+- a query on row numbers (`dt[1:2]`), a column read as a vector (`dt[, units]`), or a `j` that mixes
+  per-row columns with aggregations;
+- an aggregation other than `sum`, `mean`, `median`, `min`, `max`, `sd`, `var`, `first`, `last`
+  and `.N`, such as `uniqueN()`;
+- `:=` inside a function, with `by =`, or removing a column with `NULL`, because the rewrite assigns
+  the result to the table's own name and a function's caller would no longer see the change;
+- `dt[i, col := value]` unless the checker knows the columns: a new column takes `NA` in the other
+  rows, and an existing one is rewritten only for a constant of the column's own type;
+- a join after `setkey()`, since finding the key needs the order the statements run in, and a join
+  on `on =` whose tables share a non-key column, which data.table names `i.col` and
+  `DataFrame.join` names `col_right`;
+- `fread()` of a literal path that does not end in `.csv`, or with any argument other than the path
+  and `stringsAsFactors`, and `data.table()` with `key`, `keep.rownames`, `check.names` or
+  `stringsAsFactors`.
+
+Two differences remain after a rewrite. The DataFrame aggregations skip missing values, so
+`sum(units)` over a column with an `NA` gives a number instead of `NA`. `DataFrame.sort` places
+missing values last, where `setorder()` places them first.

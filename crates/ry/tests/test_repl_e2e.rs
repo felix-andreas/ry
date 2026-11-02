@@ -947,6 +947,18 @@ const FRAME_TYPES: &[(&str, &str)] = &[
         "sales |> DataFrame.lazy() |> LazyFrame.filter(col(\"units\") > 4L) |> LazyFrame.collect()",
         "DataFrame{team: character[], amount: double[], units: integer[]}",
     ),
+    (
+        "DataFrame.with_columns(sales, share = col(\"amount\") / Expr.over(Expr.sum(col(\"amount\")), \"team\"), place = Expr.rank(col(\"amount\")))",
+        "DataFrame{team: character[], amount: double[], units: integer[], share: double[], place: integer[]}",
+    ),
+    (
+        "DataFrame.with_columns(visits, due = col(\"day\") + 28L, waited = col(\"day\") - col(\"day\"))",
+        "DataFrame{id: integer[], day: Date, due: Date, waited: integer[]}",
+    ),
+    (
+        "DataFrame.join(visits, labels, how = \"cross\")",
+        "DataFrame{id: integer[], day: Date, team: character[], label: character[]}",
+    ),
 ];
 
 #[test]
@@ -957,6 +969,7 @@ fn frame_types_agree_between_the_checker_and_the_runtime() {
     let mut script = String::from(
         "sales <- DataFrame(team = c(\"a\", \"b\", \"a\"), amount = c(1, 2, 3), units = c(4L, 5L, 6L))\n\
          labels <- DataFrame(team = c(\"a\", \"b\"), label = c(\"A\", \"B\"))\n\
+         visits <- DataFrame(id = 1:2, day = as.Date(\"2024-01-01\") + 0:1)\n\
          type_of <- function(x) {\n\
            schema <- DataFrame.schema(x)\n\
            paste0(\"DataFrame{\", paste(names(schema), schema, sep = \": \", collapse = \", \"), \"}\")\n\

@@ -1785,6 +1785,7 @@ fn type_name(dtype: &DataType) -> &'static str {
         Some(ColumnType::Double) => "double",
         Some(ColumnType::Character) => "character",
         Some(ColumnType::Factor) => "factor",
+        Some(ColumnType::Date) => "Date",
         None => "unsupported",
     }
 }

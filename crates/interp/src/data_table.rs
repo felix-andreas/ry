@@ -782,6 +782,10 @@ unsafe fn import_column(column: &SubjectColumn) -> R<(Series, Option<ImportedCod
             to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
             None,
         ),
+        ColumnType::Date => (
+            to_series(name, RVector::Date(values::reals(vector).to_vec()))?,
+            None,
+        ),
         ColumnType::Character => {
             // R interns its strings, so equal strings are one CHARSXP, and numbering the
             // distinct CHARSXPs numbers the rows by string without comparing any. The number

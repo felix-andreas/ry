@@ -914,7 +914,12 @@ pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
             Expr::Column(temporary(index))
         }
         Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Na(_) => expr.clone(),
-        Expr::Character(_) | Expr::Column(_) | Expr::Head(..) => return None,
+        Expr::Character(_)
+        | Expr::Date(_)
+        | Expr::Column(_)
+        | Expr::Head(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => return None,
         Expr::Unary(op, arg) => Expr::Unary(*op, Box::new(rewrite(arg, aggregates)?)),
         Expr::Binary(op, left, right) => Expr::Binary(
             *op,

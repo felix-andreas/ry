@@ -19,6 +19,7 @@ use {
         conditions, eval,
         format::{Settings, display_width, format_real_common, format_real_with},
         heap, interp, scope,
+        system::civil_from_days,
         unwind::{R, Unwind, error, error_in},
         values::{
             self, char_str, install, is_nil, length, list_vector, missing_arg, na_string, nil,
@@ -364,6 +365,11 @@ unsafe fn r_vector(vector: RVector) -> R<Sexp> {
             set_attr(vector, symbols().class, scalar_string("factor")?)?;
             vector
         }
+        RVector::Date(items) => {
+            let vector = values::real_vector(&items)?;
+            set_attr(vector, symbols().class, scalar_string("Date")?)?;
+            vector
+        }
     })
 }
 
@@ -382,7 +388,22 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
                 levels,
             }
         }
+        SexpType::Integer if values::inherits(value, "Date") => RVector::Date(
+            values::ints(value)
+                .iter()
+                .map(|day| {
+                    if *day == NA_INTEGER {
+                        convert::NA_REAL
+                    } else {
+                        f64::from(*day)
+                    }
+                })
+                .collect(),
+        ),
         SexpType::Integer => RVector::Integer(values::ints(value).to_vec()),
+        SexpType::Real if values::inherits(value, "Date") => {
+            RVector::Date(values::reals(value).to_vec())
+        }
         SexpType::Real => RVector::Double(values::reals(value).to_vec()),
         SexpType::String => RVector::Character(values::strings(value)),
         _ => return Ok(None),
@@ -430,6 +451,7 @@ fn recycle(contents: RVector, height: usize) -> Option<RVector> {
         RVector::Logical(items) => RVector::Logical(vec![items[0]; height]),
         RVector::Integer(items) => RVector::Integer(vec![items[0]; height]),
         RVector::Double(items) => RVector::Double(vec![items[0]; height]),
+        RVector::Date(items) => RVector::Date(vec![items[0]; height]),
         RVector::Character(items) => RVector::Character(vec![items[0].clone(); height]),
         RVector::Factor { codes, levels } => RVector::Factor {
             codes: vec![codes[0]; height],
@@ -1037,6 +1059,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
             ColumnType::Double => "<num>",
             ColumnType::Character => "<char>",
             ColumnType::Factor => "<fctr>",
+            ColumnType::Date => "<Date>",
         };
         let cell_width = cells
             .iter()
@@ -1111,6 +1134,16 @@ unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
                 })
                 .collect()
         }
+        ColumnType::Date => values::reals(vector)
+            .iter()
+            .map(|&days| {
+                if days.is_nan() {
+                    return "<NA>".to_string();
+                }
+                let (year, month, day) = civil_from_days(days.floor() as i64);
+                format!("{year:04}-{month:02}-{day:02}")
+            })
+            .collect(),
     })
 }
 
@@ -2414,6 +2447,21 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
         return None;
     }
     Some(match value.kind() {
+        SexpType::Real | SexpType::Integer if values::inherits(value, "Date") => {
+            let days = if value.kind() == SexpType::Integer {
+                match values::ints(value)[0] {
+                    NA_INTEGER => f64::NAN,
+                    day => f64::from(day),
+                }
+            } else {
+                values::reals(value)[0]
+            };
+            if days.is_nan() || days.abs() >= f64::from(i32::MAX) {
+                Expr::Na(ColumnType::Date)
+            } else {
+                Expr::Date(days.floor() as i32)
+            }
+        }
         SexpType::Logical => match values::ints(value)[0] {
             NA_INTEGER => Expr::Na(ColumnType::Logical),
             flag => Expr::Logical(flag != 0),
