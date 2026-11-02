@@ -929,3 +929,562 @@ fn leaf(rng: &mut SplitMix64) -> String {
     ];
     leaves[rng.below(leaves.len())].to_owned()
 }
+
+/// A scalar of the stdlib fuzz model: `None` is `NA`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Scalar {
+    Int(Option<i32>),
+    Dbl(Option<f64>),
+    Lgl(Option<bool>),
+}
+
+/// What a callback-taking library call gives in the model: a value, or an error.
+#[derive(Clone, PartialEq, Debug)]
+enum Model {
+    Scalar(Scalar),
+    List(Vec<Scalar>),
+    Found(Option<Scalar>),
+    Error,
+}
+
+#[test]
+fn fuzz_stdlib_traversals_agree_with_model() {
+    // Random lists (integer, double, mixed, with `NA` and values near the integer limit) through
+    // every library traversal the JIT compiles into a loop, each checked against a model of the
+    // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
+    // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
+    // is not one) must still end where the model says. `STDLIB_FUZZ_SEED` replays one case.
+    let base = std::env::var("STDLIB_FUZZ_SEED")
+        .ok()
+        .and_then(|seed| seed.parse::<u64>().ok());
+    let iterations = if base.is_some() {
+        1
+    } else {
+        fuzz_iterations(300)
+    };
+    let base = base.unwrap_or(0x5eed_0000);
+    with_interpreter(|| {
+        let mut errors = 0;
+        for case in 0..iterations {
+            let seed = base.wrapping_add(case as u64);
+            let mut rng = SplitMix64(seed);
+            let (call, model) = stdlib_case(&mut rng);
+            // The model's value is rendered as R source, and what that evaluates to is the
+            // value both tiers must give.
+            let wanted = match &model {
+                Model::Error => "error".to_owned(),
+                // SAFETY: the interpreter is installed.
+                value => unsafe { run(&render(value)) },
+            };
+            let body = call;
+            errors += usize::from(model == Model::Error);
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled) = unsafe { outcomes(4_000_000 + case, &body, "()") };
+            let replay = format!(
+                "replay with STDLIB_FUZZ_SEED={seed} cargo test -p jit --test test_tiers fuzz_stdlib"
+            );
+            assert_eq!(reference, wanted, "tier 0 on {body}\n{replay}");
+            for (run, outcome) in compiled.iter().enumerate() {
+                assert_eq!(
+                    outcome,
+                    &wanted,
+                    "compiled call {} on {body}\n{replay}",
+                    run + 1
+                );
+            }
+        }
+        eprintln!("{errors} of {iterations} stdlib cases expected an error");
+        assert!(errors * 2 < iterations.max(2), "too many failing cases");
+    });
+}
+
+/// A random library traversal call and what the model says it gives.
+fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
+    let items = random_items(rng);
+    let all_int = items.iter().all(|item| matches!(item, Scalar::Int(_)));
+    let has_na = items.iter().any(|&item| is_na(item));
+    let list = if rng.chance(1, 25) {
+        // Not a list: the library's own argument error.
+        let rendered: Vec<String> = items.iter().map(|&item| scalar(item)).collect();
+        return (
+            format!(
+                "List.walk(c({}), 0, function(acc, x) acc + x)",
+                rendered.join(", ")
+            ),
+            Model::Error,
+        );
+    } else {
+        render(&Model::List(items.clone()))
+    };
+    let initial = if rng.chance(1, 2) {
+        Scalar::Int(Some(0))
+    } else {
+        Scalar::Dbl(Some(0.0))
+    };
+    let threshold = if rng.chance(1, 2) {
+        Scalar::Int(Some(rng.below(40) as i32))
+    } else {
+        Scalar::Dbl(Some(rng.below(160) as f64 / 4.0 - 10.0))
+    };
+    let (init, limit) = (scalar(initial), scalar(threshold));
+    let forwards: Vec<usize> = (0..items.len()).collect();
+    let backwards: Vec<usize> = (0..items.len()).rev().collect();
+    let add = |acc: Scalar, x: Scalar| arith(acc, x, '+');
+    match rng.below(14) {
+        0 => {
+            let (name, order) = if rng.chance(1, 2) {
+                ("walk", &forwards)
+            } else {
+                ("walk_backwards", &backwards)
+            };
+            if rng.chance(1, 2) {
+                let model = fold(&items, order, initial, |acc, x, _| Ok(add(acc, x)));
+                (
+                    format!("List.{name}({list}, {init}, function(acc, x) acc + x)"),
+                    model,
+                )
+            } else {
+                let model = fold(&items, order, initial, |acc, x, _| {
+                    Ok(add(arith(acc, Scalar::Dbl(Some(0.5)), '*'), x))
+                });
+                (
+                    format!("List.{name}({list}, {init}, function(acc, x) acc * 0.5 + x)"),
+                    model,
+                )
+            }
+        }
+        1 => {
+            let model = fold(&items, &forwards, initial, |acc, x, i| {
+                Ok(add(acc, arith(x, Scalar::Int(Some(i as i32 + 1)), '*')))
+            });
+            (
+                format!("List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * i)"),
+                model,
+            )
+        }
+        2 => {
+            let (start, text) = random_start(rng, items.len());
+            let model = match start {
+                Some(start) => fold(
+                    &items,
+                    &forwards[start.min(items.len())..],
+                    initial,
+                    |acc, x, _| Ok(add(acc, x)),
+                ),
+                None => Model::Error,
+            };
+            (
+                format!("List.walk_from({list}, {text}, {init}, function(acc, x) acc + x)"),
+                model,
+            )
+        }
+        3 => {
+            let (name, order, start) = match rng.below(3) {
+                0 => ("walk_until".to_owned(), forwards.clone(), String::new()),
+                1 => (
+                    "walk_backwards_until".to_owned(),
+                    backwards.clone(),
+                    String::new(),
+                ),
+                _ => {
+                    let (start, text) = random_start(rng, items.len());
+                    match start {
+                        Some(start) => (
+                            "walk_from_until".to_owned(),
+                            forwards[start.min(items.len())..].to_vec(),
+                            format!("{text}, "),
+                        ),
+                        None => {
+                            return (
+                                format!(
+                                    "List.walk_from_until({list}, {text}, {init}, function(acc, x) :Continue(acc + x))"
+                                ),
+                                Model::Error,
+                            );
+                        }
+                    }
+                }
+            };
+            let model = walk_until(&items, &order, initial, |acc, x, _| {
+                Ok(match truth(compare(acc, threshold))? {
+                    true => (true, acc),
+                    false => (false, add(acc, x)),
+                })
+            });
+            (
+                format!(
+                    "List.{name}({list}, {start}{init}, function(acc, x) if (acc > {limit}) :Break(acc) else :Continue(acc + x))"
+                ),
+                model,
+            )
+        }
+        4 => {
+            let model = walk_until(&items, &forwards, initial, |acc, x, i| {
+                Ok(match i as f64 + 1.0 > number(threshold) {
+                    true => (true, acc),
+                    false => (false, add(acc, x)),
+                })
+            });
+            (
+                format!(
+                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (i > {limit}) :Break(acc) else :Continue(acc + x) }})"
+                ),
+                model,
+            )
+        }
+        5 => {
+            let (text, mapped): (String, Result<Vec<Scalar>, ()>) = match rng.below(4) {
+                0 => (
+                    format!("x * {limit}"),
+                    Ok(items.iter().map(|&x| arith(x, threshold, '*')).collect()),
+                ),
+                1 => (
+                    format!("x + {limit}"),
+                    Ok(items.iter().map(|&x| arith(x, threshold, '+')).collect()),
+                ),
+                2 => (
+                    format!("x > {limit}"),
+                    Ok(items.iter().map(|&x| compare(x, threshold)).collect()),
+                ),
+                _ => (
+                    format!("if (x > {limit}) x else {init}"),
+                    items
+                        .iter()
+                        .map(|&x| {
+                            Ok(if truth(compare(x, threshold))? {
+                                x
+                            } else {
+                                initial
+                            })
+                        })
+                        .collect(),
+                ),
+            };
+            let model = mapped.map_or(Model::Error, Model::List);
+            (format!("List.map({list}, function(x) {text})"), model)
+        }
+        6 => {
+            let mapped = items
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| arith(x, Scalar::Int(Some(i as i32 + 1)), '*'))
+                .collect();
+            (
+                format!("List.map_with_index({list}, function(x, i) x * i)"),
+                Model::List(mapped),
+            )
+        }
+        7 if all_int && !has_na && !items.is_empty() => {
+            // Integer and double keys are one key type, so the keys are distinct integers and
+            // the values the list's elements.
+            let mut dict = "Dict.empty()".to_owned();
+            for (at, &value) in items.iter().enumerate() {
+                dict = format!("Dict.insert({dict}, {}L, {})", at + 1, scalar(value));
+            }
+            let model = fold(&items, &forwards, initial, |acc, x, i| {
+                Ok(add(acc, arith(Scalar::Int(Some(i as i32 + 1)), x, '*')))
+            });
+            (
+                format!("Dict.walk({dict}, {init}, function(acc, k, v) acc + k * v)"),
+                model,
+            )
+        }
+        8 if !has_na && (all_int || items.iter().all(|item| matches!(item, Scalar::Dbl(_)))) => {
+            let mut distinct: Vec<Scalar> = Vec::new();
+            for &item in &items {
+                if !distinct.contains(&item) {
+                    distinct.push(item);
+                }
+            }
+            let order: Vec<usize> = (0..distinct.len()).collect();
+            let model = walk_until(&distinct, &order, initial, |acc, x, _| {
+                Ok(match truth(compare(acc, threshold))? {
+                    true => (true, acc),
+                    false => (false, add(acc, x)),
+                })
+            });
+            (
+                format!(
+                    "Set.walk_until(Set.from_list({list}), {init}, function(acc, x) if (acc > {limit}) :Break(acc) else :Continue(acc + x))"
+                ),
+                model,
+            )
+        }
+        _ => {
+            let modulus = rng.below(5) + 2;
+            let remainder = rng.below(modulus);
+            let (text, predicate): (String, Box<dyn Fn(Scalar) -> Scalar>) =
+                if all_int && rng.chance(1, 2) {
+                    (
+                        format!("x %% {modulus}L == {remainder}L"),
+                        Box::new(move |x| match x {
+                            Scalar::Int(Some(x)) => {
+                                Scalar::Lgl(Some(x.rem_euclid(modulus as i32) == remainder as i32))
+                            }
+                            _ => Scalar::Lgl(None),
+                        }),
+                    )
+                } else {
+                    (
+                        format!("x > {limit}"),
+                        Box::new(move |x| compare(x, threshold)),
+                    )
+                };
+            let answers = |order: &[usize]| -> Vec<(usize, Scalar)> {
+                order.iter().map(|&at| (at, predicate(items[at]))).collect()
+            };
+            let (name, model) = match rng.below(9) {
+                0 | 1 => {
+                    let keep = rng.chance(1, 2);
+                    let mut kept = Vec::new();
+                    let mut model = None;
+                    for (at, answer) in answers(&forwards) {
+                        match truth(answer) {
+                            Ok(passes) if passes == keep => kept.push(items[at]),
+                            Ok(_) => {}
+                            Err(()) => model = Some(Model::Error),
+                        }
+                        if model.is_some() {
+                            break;
+                        }
+                    }
+                    let name = if keep { "keep_if" } else { "drop_if" };
+                    (name, model.unwrap_or(Model::List(kept)))
+                }
+                2 => (
+                    "any",
+                    search(
+                        &answers(&forwards),
+                        true,
+                        |_| Model::Scalar(Scalar::Lgl(Some(true))),
+                        Model::Scalar(Scalar::Lgl(Some(false))),
+                    ),
+                ),
+                3 => (
+                    "all",
+                    search(
+                        &answers(&forwards),
+                        false,
+                        |_| Model::Scalar(Scalar::Lgl(Some(false))),
+                        Model::Scalar(Scalar::Lgl(Some(true))),
+                    ),
+                ),
+                4 => {
+                    let mut count = 0;
+                    let mut model = None;
+                    for (_, answer) in answers(&forwards) {
+                        match truth(answer) {
+                            Ok(passes) => count += i32::from(passes),
+                            Err(()) => {
+                                model = Some(Model::Error);
+                                break;
+                            }
+                        }
+                    }
+                    (
+                        "count_if",
+                        model.unwrap_or(Model::Scalar(Scalar::Int(Some(count)))),
+                    )
+                }
+                choice => {
+                    let last = choice >= 7;
+                    let index = choice % 2 == 0;
+                    let order = if last { &backwards } else { &forwards };
+                    let model = search(
+                        &answers(order),
+                        true,
+                        |at| match index {
+                            true => Model::Found(Some(Scalar::Int(Some(at as i32 + 1)))),
+                            false => Model::Found(Some(items[at])),
+                        },
+                        Model::Found(None),
+                    );
+                    let name = match (last, index) {
+                        (false, false) => "find_first",
+                        (false, true) => "find_first_index",
+                        (true, false) => "find_last",
+                        (true, true) => "find_last_index",
+                    };
+                    (name, model)
+                }
+            };
+            (format!("List.{name}({list}, function(x) {text})"), model)
+        }
+    }
+}
+
+/// Up to 24 numbers: integers, doubles or a mix, now and then `NA` or an integer near the limit,
+/// which overflows when added.
+fn random_items(rng: &mut SplitMix64) -> Vec<Scalar> {
+    let length = rng.below(25);
+    let kind = rng.below(3);
+    let with_na = rng.chance(1, 4);
+    let large = rng.chance(1, 8);
+    (0..length)
+        .map(|_| {
+            let int = kind == 0 || (kind == 2 && rng.chance(1, 2));
+            if with_na && rng.chance(1, 8) {
+                return if int {
+                    Scalar::Int(None)
+                } else {
+                    Scalar::Dbl(None)
+                };
+            }
+            match int {
+                true if large && rng.chance(1, 3) => {
+                    Scalar::Int(Some(i32::MAX - rng.below(100) as i32))
+                }
+                true => Scalar::Int(Some(rng.below(80) as i32 - 20)),
+                false => Scalar::Dbl(Some(rng.below(320) as f64 / 4.0 - 20.0)),
+            }
+        })
+        .collect()
+}
+
+/// A `walk_from` start position: a whole number, or now and then one the library refuses.
+fn random_start(rng: &mut SplitMix64, length: usize) -> (Option<usize>, String) {
+    let start = rng.below(length + 4);
+    match rng.below(6) {
+        0 => (None, format!("{start}.5")),
+        1 => (
+            start.checked_sub(1).filter(|_| start > 0),
+            format!("{start}L"),
+        ),
+        2 => (Some(start), format!("{}", start + 1)),
+        _ => (Some(start), format!("{}L", start + 1)),
+    }
+}
+
+fn fold(
+    items: &[Scalar],
+    order: &[usize],
+    initial: Scalar,
+    step: impl Fn(Scalar, Scalar, usize) -> Result<Scalar, ()>,
+) -> Model {
+    let mut state = initial;
+    for &at in order {
+        match step(state, items[at], at) {
+            Ok(next) => state = next,
+            Err(()) => return Model::Error,
+        }
+    }
+    Model::Scalar(state)
+}
+
+fn walk_until(
+    items: &[Scalar],
+    order: &[usize],
+    initial: Scalar,
+    step: impl Fn(Scalar, Scalar, usize) -> Result<(bool, Scalar), ()>,
+) -> Model {
+    let mut state = initial;
+    for &at in order {
+        match step(state, items[at], at) {
+            Ok((broke, next)) => {
+                state = next;
+                if broke {
+                    break;
+                }
+            }
+            Err(()) => return Model::Error,
+        }
+    }
+    Model::Scalar(state)
+}
+
+/// Stops at the first answer equal to `stop`, an `NA` answer being an error.
+fn search(
+    answers: &[(usize, Scalar)],
+    stop: bool,
+    stopped: impl Fn(usize) -> Model,
+    otherwise: Model,
+) -> Model {
+    for &(at, answer) in answers {
+        match truth(answer) {
+            Ok(passes) if passes == stop => return stopped(at),
+            Ok(_) => {}
+            Err(()) => return Model::Error,
+        }
+    }
+    otherwise
+}
+
+fn is_na(value: Scalar) -> bool {
+    matches!(
+        value,
+        Scalar::Int(None) | Scalar::Dbl(None) | Scalar::Lgl(None)
+    )
+}
+
+/// A number as a double, `NaN` for `NA`.
+fn number(value: Scalar) -> f64 {
+    match value {
+        Scalar::Int(Some(x)) => f64::from(x),
+        Scalar::Dbl(Some(x)) => x,
+        Scalar::Lgl(Some(x)) => f64::from(u8::from(x)),
+        _ => f64::NAN,
+    }
+}
+
+/// R's `+`, `-` and `*`: integer when both sides are, with overflow giving `NA`.
+fn arith(left: Scalar, right: Scalar, operator: char) -> Scalar {
+    match (left, right) {
+        (Scalar::Int(a), Scalar::Int(b)) => Scalar::Int(a.zip(b).and_then(|(a, b)| {
+            let value = match operator {
+                '+' => a.checked_add(b),
+                '-' => a.checked_sub(b),
+                _ => a.checked_mul(b),
+            };
+            value.filter(|&value| value != i32::MIN)
+        })),
+        _ if is_na(left) || is_na(right) => Scalar::Dbl(None),
+        _ => {
+            let (a, b) = (number(left), number(right));
+            Scalar::Dbl(Some(match operator {
+                '+' => a + b,
+                '-' => a - b,
+                _ => a * b,
+            }))
+        }
+    }
+}
+
+fn compare(left: Scalar, right: Scalar) -> Scalar {
+    if is_na(left) || is_na(right) {
+        return Scalar::Lgl(None);
+    }
+    Scalar::Lgl(Some(number(left) > number(right)))
+}
+
+/// A condition's value, an `NA` one being an error.
+fn truth(value: Scalar) -> Result<bool, ()> {
+    match value {
+        Scalar::Lgl(Some(flag)) => Ok(flag),
+        _ => Err(()),
+    }
+}
+
+fn scalar(value: Scalar) -> String {
+    match value {
+        Scalar::Int(Some(x)) => format!("{x}L"),
+        Scalar::Int(None) => "NA_integer_".to_owned(),
+        Scalar::Dbl(Some(x)) => format!("{x:?}"),
+        Scalar::Dbl(None) => "NA_real_".to_owned(),
+        Scalar::Lgl(Some(true)) => "TRUE".to_owned(),
+        Scalar::Lgl(Some(false)) => "FALSE".to_owned(),
+        Scalar::Lgl(None) => "NA".to_owned(),
+    }
+}
+
+fn render(model: &Model) -> String {
+    match model {
+        Model::Scalar(value) => scalar(*value),
+        Model::List(items) => {
+            let rendered: Vec<String> = items.iter().map(|&item| scalar(item)).collect();
+            format!("list({})", rendered.join(", "))
+        }
+        Model::Found(Some(value)) => format!(":Ok({})", scalar(*value)),
+        Model::Found(None) => ":Err(:NotFound)".to_owned(),
+        Model::Error => "stop(\"the model fails\")".to_owned(),
+    }
+}

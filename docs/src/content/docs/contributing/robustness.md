@@ -192,7 +192,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases | no panic, identical bytes on a second render, one file per page; GNU R's warnings and capabilities |
 | Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
 | C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |
-| JIT | `test_tiers`; differential fuzzing with `RY_JIT=force` | tier 0, GNU R |
+| JIT | `test_tiers`; random lists through every library traversal the JIT loops (`test_tiers` `fuzz_stdlib_traversals_agree_with_model`, `STDLIB_FUZZ_SEED`); differential fuzzing with `RY_JIT=force` | tier 0, GNU R; a Rust model of the library traversals |
 | Table engine | `table` property tests; `cargo fuzz` `csv` | the eager implementation; the sniffer's promised columns |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
