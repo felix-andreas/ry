@@ -3,11 +3,10 @@
 //! Text is processed as UTF-8. Positions that R reports, such as `regexpr`'s, count characters
 //! unless `useBytes = TRUE` asks for bytes.
 //!
-//! Regular expressions run on `fancy-regex`, which adds backreferences and lookaround to the
-//! `regex` crate's engine. R's two dialects, POSIX extended expressions as TRE reads them (the
-//! default) and PCRE (`perl = TRUE`), are translated into its syntax first ([`translate_regex`]),
-//! because the dialects disagree on bracket expressions, on what `\w` and `[[:alpha:]]` match,
-//! and on which characters are special.
+//! `perl = TRUE` patterns run on PCRE2, compiled as GNU R compiles them. POSIX extended patterns
+//! (R's default, which GNU R runs on TRE) run on `fancy-regex` and `regex-automata` after a
+//! translation into their syntax ([`translate_regex`]), because TRE disagrees with them on
+//! bracket expressions, on what `\w` and `[[:alpha:]]` match, and on which characters are special.
 
 use {
     crate::{
@@ -28,6 +27,7 @@ use {
         strings::Encoding,
     },
     memchr::memmem,
+    pcre2::bytes::{Regex as PerlRegex, RegexBuilder as PerlRegexBuilder},
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{borrow::Cow, cell::RefCell, rc::Rc},
@@ -73,19 +73,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("regexec", 5, do_regexec),
 ];
 
-/// Translates an R regular expression into the syntax of the `regex` crate, which
-/// `fancy-regex` extends. `extended` selects POSIX extended syntax as TRE reads it (R's
-/// default); otherwise the pattern is PCRE, as `perl = TRUE` reads it.
+/// Translates a POSIX extended regular expression, as TRE reads it (R's default), into the
+/// syntax of the `regex` crate, which `fancy-regex` extends.
 ///
 /// The translation never fails: a construct with no equivalent is passed through, so that
 /// compiling the result reports it.
-pub fn translate_regex(pattern: &str, extended: bool) -> String {
-    let syntax = if extended {
-        Syntax::Extended
-    } else {
-        Syntax::Perl
-    };
-    translate(pattern, syntax).pattern
+pub fn translate_regex(pattern: &str) -> String {
+    translate(pattern).pattern
 }
 
 unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
@@ -181,11 +175,7 @@ unsafe fn paste(
             }
         }
         let encoding = encoding_of(&parts);
-        set_elt(
-            result,
-            row,
-            values::mkchar_bytes(&join(&parts, encoding), encoding)?,
-        );
+        values::set_mkchar_bytes(result, row, &join(&parts, encoding), encoding)?;
     }
     let Some(collapse) = collapse else {
         return Ok(result);
@@ -199,11 +189,7 @@ unsafe fn paste(
     }
     let encoding = encoding_of(&parts);
     let collapsed = alloc(SexpType::String, 1)?;
-    set_elt(
-        collapsed,
-        0,
-        values::mkchar_bytes(&join(&parts, encoding), encoding)?,
-    );
+    values::set_mkchar_bytes(collapsed, 0, &join(&parts, encoding), encoding)?;
     Ok(collapsed)
 }
 
@@ -310,15 +296,23 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
                 set_elt(result, index, na_string());
                 continue;
             }
+            // The intern table marks ASCII strings, whose characters are bytes, so the span needs no decoding.
+            if charsxp.has_gp(gp::ASCII) {
+                let bytes = charsxp.bytes();
+                let first = (start.max(1) as usize - 1).min(bytes.len());
+                let last = (stop.max(0) as usize).min(bytes.len()).max(first);
+                if first == 0 && last == bytes.len() {
+                    set_elt(result, index, charsxp);
+                } else {
+                    values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Native)?;
+                }
+                continue;
+            }
             if Encoding::of(charsxp) == Encoding::Bytes {
                 let bytes = charsxp.bytes();
                 let first = (start.max(1) as usize - 1).min(bytes.len());
                 let last = (stop.max(0) as usize).min(bytes.len()).max(first);
-                set_elt(
-                    result,
-                    index,
-                    values::mkchar_bytes(&bytes[first..last], Encoding::Bytes)?,
-                );
+                values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Bytes)?;
                 continue;
             }
             let text = values::char_str(charsxp);
@@ -326,7 +320,7 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
             if first == 0 && last == text.len() {
                 set_elt(result, index, charsxp);
             } else {
-                set_elt(result, index, values::mkchar(&text[first..last])?);
+                values::set_mkchar(result, index, &text[first..last])?;
             }
         }
     }
@@ -386,7 +380,7 @@ unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
                 edited.push(character);
             }
         }
-        set_elt(result, index, values::mkchar(&edited)?);
+        values::set_mkchar(result, index, &edited)?;
     }
     Ok(result)
 }
@@ -461,8 +455,10 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
         let vector = heap.alloc_vector(SexpType::String, pieces.len() as isize)?;
         heap.set_element(result, index, vector);
         for (position, &(start, end)) in pieces.iter().enumerate() {
-            let charsxp = if forced_bytes {
-                regex_result(&text[start..end], true)?
+            // With `useBytes`, the text carries a stand-in character for each byte past ASCII,
+            // which `regex_result` turns back into the byte.
+            let charsxp = if use_bytes {
+                regex_result(&text[start..end], forced_bytes)?
             } else {
                 heap.mk_char(&text.as_bytes()[start..end], Encoding::Utf8)?
             };
@@ -623,7 +619,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                 }
             }
         }
-        set_elt(result, row, values::mkchar(&text)?);
+        values::set_mkchar(result, row, &text)?;
     }
     let unused = used.iter().filter(|&&used| !used).count();
     if unused > 0 {
@@ -1183,6 +1179,9 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
     if x.kind() != SexpType::String {
         return Err(error("non-character argument"));
     }
+    if all_ascii(x) {
+        return change_ascii_case(x, upper);
+    }
     map_strings(x, |text| {
         Some(
             text.chars()
@@ -1190,6 +1189,46 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
                 .collect(),
         )
     })
+}
+
+/// Whether every non-missing string of `x` is ASCII, where case mapping is a byte map.
+unsafe fn all_ascii(x: Sexp) -> bool {
+    (0..length(x)).all(|index| {
+        let charsxp = x.element(index);
+        charsxp == na_string() || charsxp.has_gp(gp::ASCII)
+    })
+}
+
+unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
+    let count = length(x);
+    let result = alloc(SexpType::String, count)?;
+    let mut buffer = Vec::new();
+    for index in 0..count {
+        let charsxp = x.element(index);
+        let bytes = charsxp.bytes();
+        let changes = |byte: &u8| {
+            if upper {
+                byte.is_ascii_lowercase()
+            } else {
+                byte.is_ascii_uppercase()
+            }
+        };
+        if charsxp == na_string() || !bytes.iter().any(changes) {
+            set_elt(result, index, charsxp);
+            continue;
+        }
+        buffer.clear();
+        buffer.extend(bytes.iter().map(|byte| {
+            if upper {
+                byte.to_ascii_uppercase()
+            } else {
+                byte.to_ascii_lowercase()
+            }
+        }));
+        values::set_mkchar_bytes(result, index, &buffer, Encoding::Native)?;
+    }
+    values::copy_attributes(x, result)?;
+    Ok(result)
 }
 
 /// `towupper` and `towlower` map one character to one character, so a character whose case
@@ -1294,7 +1333,7 @@ unsafe fn do_strtrim(call: &Call<'_>) -> R<Sexp> {
         if end == text.len() {
             set_elt(result, index, charsxp);
         } else {
-            set_elt(result, index, values::mkchar(&text[..end])?);
+            values::set_mkchar(result, index, &text[..end])?;
         }
     }
     values::copy_attributes(x, result)?;
@@ -1356,11 +1395,11 @@ unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
         if repeat < 0 {
             return Err(error("invalid 'times' value"));
         }
-        set_elt(
+        values::set_mkchar(
             result,
             index,
-            values::mkchar(&values::char_str(charsxp).repeat(repeat as usize))?,
-        );
+            &values::char_str(charsxp).repeat(repeat as usize),
+        )?;
     }
     if text_count >= times_count {
         let names = get_attr(x, symbols().names);
@@ -1550,7 +1589,7 @@ unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
             warned = true;
         }
         let abbreviation = abbreviate(&text, minimum.max(0) as usize, use_classes);
-        set_elt(result, index, values::mkchar(&abbreviation)?);
+        values::set_mkchar(result, index, &abbreviation)?;
     }
     Ok(result)
 }
@@ -1689,11 +1728,7 @@ unsafe fn do_raw_to_char(call: &Call<'_>) -> R<Sexp> {
             } else {
                 std::slice::from_ref(&byte)
             };
-            set_elt(
-                result,
-                index,
-                values::mkchar_bytes(piece, Encoding::Native)?,
-            );
+            values::set_mkchar_bytes(result, index, piece, Encoding::Native)?;
         }
         return Ok(result);
     }
@@ -2155,7 +2190,7 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         }
         None
     } else {
-        let text = translate_byte_regex(&String::from_utf8_lossy(&needle));
+        let text = translate_regex(&String::from_utf8_lossy(&needle));
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
         let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
             call.error(format!(
@@ -2586,6 +2621,8 @@ enum Matcher {
         longest: meta::Regex,
         shortest: bool,
     },
+    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
+    Perl(Rc<PerlRegex>),
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2606,12 +2643,12 @@ impl Matcher {
         if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
             return Ok(matcher);
         }
-        let syntax = if options.perl {
-            Syntax::Perl
-        } else {
-            Syntax::Extended
-        };
-        let translated = translate(pattern, syntax);
+        if options.perl {
+            let matcher = compile_perl(pattern, options.ignore_case)?;
+            remember(key, &matcher);
+            return Ok(matcher);
+        }
+        let translated = translate(pattern);
         let build = |longest: bool| {
             if let Some(problem) = translated.problem {
                 return Err(problem.to_owned());
@@ -2628,13 +2665,9 @@ impl Matcher {
         };
         // POSIX picks the longest of the matches that start leftmost. The engine cannot do that
         // for every pattern (lazy quantifiers, for one), and those fall back to PCRE's rule.
-        let (compiled, longest) = if options.perl {
-            (build(false), false)
-        } else {
-            match build(true) {
-                Ok(regex) => (Ok(regex), true),
-                Err(_) => (build(false), false),
-            }
+        let (compiled, longest) = match build(true) {
+            Ok(regex) => (Ok(regex), true),
+            Err(_) => (build(false), false),
         };
         let automaton = |kind: MatchKind| {
             meta::Regex::builder()
@@ -2660,10 +2693,6 @@ impl Matcher {
             }
             Ok(regex) => Matcher::Pattern(Rc::new(regex)),
             Err(reason) => {
-                if options.perl {
-                    warning(format!("PCRE pattern compilation error\n\t'{reason}'"))?;
-                    return Err(error(format!("invalid regular expression '{pattern}'")));
-                }
                 return Err(match errors {
                     CompileErrors::Quoted => {
                         warning(format!("TRE pattern compilation error '{reason}'"))?;
@@ -2678,12 +2707,7 @@ impl Matcher {
                 });
             }
         };
-        PATTERN_CACHE.with_borrow_mut(|cache| {
-            if cache.len() >= PATTERN_CACHE_SIZE {
-                cache.clear();
-            }
-            cache.insert(key, matcher.clone());
-        });
+        remember(key, &matcher);
         Ok(matcher)
     }
 
@@ -2715,6 +2739,10 @@ impl Matcher {
                     .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
+            Matcher::Perl(regex) => regex
+                .find_at(text.as_bytes(), from)
+                .map(|found| found.map(|found| (found.start(), found.end())))
+                .map_err(perl_matching_error),
         }
     }
 
@@ -2730,19 +2758,17 @@ impl Matcher {
                 shortest: true,
                 ..
             } => {
-                let Some((start, end)) = self.find_at(text, from)? else {
-                    return Ok(None);
-                };
+                // Only a plain find minimizes over the top-level alternatives. With submatches
+                // GNU R's TRE keeps the leftmost-first match: `sub("(a).*?Z|(a)(.*?)Y", ...)`
+                // takes the first alternative even though the second ends sooner.
                 let mut captures = first.create_captures();
-                first.search_captures(
-                    &Input::new(text).range(start..end).anchored(Anchored::Yes),
-                    &mut captures,
-                );
+                first.search_captures(&Input::new(text).range(from..), &mut captures);
+                if !captures.is_match() {
+                    return Ok(None);
+                }
                 Ok(Some(
-                    std::iter::once(Some((start, end)))
-                        .chain((1..captures.group_len()).map(|group| {
-                            captures.get_group(group).map(|span| (span.start, span.end))
-                        }))
+                    (0..captures.group_len())
+                        .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
                         .collect(),
                 ))
             }
@@ -2763,6 +2789,17 @@ impl Matcher {
                         .collect(),
                 ))
             }
+            Matcher::Perl(regex) => {
+                let mut locations = regex.capture_locations();
+                let found = regex
+                    .captures_read_at(&mut locations, text.as_bytes(), from)
+                    .map_err(perl_matching_error)?;
+                Ok(found.map(|_| {
+                    (0..locations.len())
+                        .map(|group| locations.get(group))
+                        .collect()
+                }))
+            }
         }
     }
 
@@ -2773,6 +2810,7 @@ impl Matcher {
             Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
+            Matcher::Perl(regex) => regex.captures_len().saturating_sub(1),
         }
     }
 
@@ -2785,11 +2823,64 @@ impl Matcher {
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
                 .collect(),
+            Matcher::Perl(regex) => regex
+                .capture_names()
+                .iter()
+                .skip(1)
+                .map(|name| name.clone().unwrap_or_default())
+                .collect(),
+        }
+    }
+}
+
+fn remember(key: (String, bool, bool), matcher: &Matcher) {
+    PATTERN_CACHE.with_borrow_mut(|cache| {
+        if cache.len() >= PATTERN_CACHE_SIZE {
+            cache.clear();
+        }
+        cache.insert(key, matcher.clone());
+    });
+}
+
+/// Compiles a `perl = TRUE` pattern as GNU R's `R_pcre2_prepare` does: UTF mode, caseless when
+/// asked, and JIT-compiled when PCRE2 supports it. Text is always valid UTF-8 here, so UTF mode
+/// is right even for ASCII input, where it makes no difference.
+unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
+    let mut builder = PerlRegexBuilder::new();
+    builder
+        .utf(true)
+        .caseless(ignore_case)
+        .jit_if_available(true)
+        // GNU R's default `R_PCRE_JIT_STACK_MAXSIZE`, 64 MB; PCRE2's own 32 KB fails on a
+        // long subject such as 5,000 repeats of `(a|b)+`.
+        .max_jit_stack_size(Some(64 * 1024 * 1024));
+    match builder.build(pattern) {
+        Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
+        Err(failure) => {
+            // The crate prefixes PCRE2's message with its own text, which GNU R does not print.
+            // GNU R prints the message and the rest of the pattern from the error's byte offset.
+            let offset = failure.offset().unwrap_or(0);
+            let text = failure.to_string();
+            let message = text
+                .strip_prefix(&format!(
+                    "PCRE2: error compiling pattern at offset {offset}: "
+                ))
+                .or_else(|| text.strip_prefix("PCRE2: error compiling pattern: "))
+                .unwrap_or(&text);
+            let rest = pattern.get(offset..).unwrap_or_default();
+            warning(format!(
+                "PCRE pattern compilation error\n\t'{message}'\n\tat '{rest}'"
+            ))?;
+            Err(error(format!("invalid regular expression '{pattern}'")))
         }
     }
 }
 
 fn matching_error(failure: fancy_regex::Error) -> crate::unwind::Unwind {
+    error(format!("regular expression matching failed: {failure}"))
+}
+
+fn perl_matching_error(failure: pcre2::Error) -> crate::unwind::Unwind {
     error(format!("regular expression matching failed: {failure}"))
 }
 
@@ -2807,46 +2898,20 @@ pub(crate) struct Translation {
     minimal: bool,
 }
 
-pub(crate) fn translate(pattern: &str, syntax: Syntax) -> Translation {
+pub(crate) fn translate(pattern: &str) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
-    let dialect = Dialect {
-        syntax,
-        unicode: syntax == Syntax::Extended || declares_ucp(&chars),
-    };
-    translate_dialect(&chars, dialect)
-}
-
-/// A POSIX pattern for `grepRaw`, which GNU R compiles with TRE's byte interface, so its
-/// classes cover ASCII only.
-pub fn translate_byte_regex(pattern: &str) -> String {
-    let chars: Vec<char> = pattern.chars().collect();
-    let dialect = Dialect {
-        syntax: Syntax::Extended,
-        unicode: false,
-    };
-    translate_dialect(&chars, dialect).pattern
-}
-
-fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
-    let syntax = dialect.syntax;
     let mut problem = None;
     let mut minimal = false;
-    let mut output = String::with_capacity(chars.len() + 8);
-    if syntax == Syntax::Extended {
-        // In POSIX syntax `.` matches a newline too.
-        output.push_str("(?s)");
-    }
+    let mut output = String::with_capacity(pattern.len() + 8);
+    // In POSIX syntax `.` matches a newline too.
+    output.push_str("(?s)");
     // TRE runs a pattern with approximate-matching settings on its approximate matcher, which
     // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
-    let approximate = syntax == Syntax::Extended
-        && (0..chars.len()).any(|index| {
-            (index == 0 || chars[index - 1] != '\\')
-                && approximate_settings(&chars, index).is_some()
-        });
-    // Where each open group starts in `output`, and whether it is a lookaround assertion.
-    let mut groups: Vec<(usize, bool, bool)> = Vec::new();
-    // Where the assertion that just closed starts, while a quantifier may still apply to it.
-    let mut assertion: Option<usize> = None;
+    let approximate = (0..chars.len()).any(|index| {
+        (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
+    });
+    // Where each open group starts in `output`, and whether it captures.
+    let mut groups: Vec<(usize, bool)> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
@@ -2854,37 +2919,23 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
     while index < chars.len() {
         let character = chars[index];
         let start = output.len();
-        let quantifiable_assertion = assertion.take();
         match character {
             '\\' => {
-                index = translate_escape(&chars, index, dialect, &mut output, &mut problem);
+                index = translate_escape(&chars, index, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
             }
             '[' => {
-                index = translate_class(&chars, index, dialect, &mut output, &mut problem);
+                index = translate_class(&chars, index, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
-                continue;
-            }
-            '(' if syntax == Syntax::Perl && chars.get(index + 1) == Some(&'?') => {
-                let (next, opens_group) = translate_group_prefix(&chars, index, &mut output);
-                if opens_group {
-                    let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
-                        || (chars.get(index + 2) == Some(&'<')
-                            && matches!(chars.get(index + 3), Some('=' | '!')));
-                    groups.push((start, lookaround, false));
-                }
-                atom = None;
-                quantified = false;
-                index = next;
                 continue;
             }
             // TRE reads `(?:...)` as a group that does not capture, `(?i)` or `(?i:...)` as a
             // case-insensitive region and `(?#...)` as a comment, as PCRE does, and rejects
             // every other `(?` construct.
-            '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
+            '(' if chars.get(index + 1) == Some(&'?') => {
                 if chars.get(index + 2) == Some(&'#') {
                     index = (index..chars.len())
                         .find(|&position| chars[position] == ')')
@@ -2897,7 +2948,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
                         if close == ':' {
-                            groups.push((start, false, false));
+                            groups.push((start, false));
                         }
                         atom = None;
                         quantified = false;
@@ -2906,51 +2957,34 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     }
                     _ => {
                         problem.get_or_insert("Invalid regexp");
-                        groups.push((start, false, false));
+                        groups.push((start, false));
                         output.push('(');
                         atom = None;
                         quantified = false;
                     }
                 }
             }
-            '(' if syntax == Syntax::Perl && chars.get(index + 1) == Some(&'*') => {
-                index = translate_verb(&chars, index, &mut output);
-                continue;
-            }
             '(' => {
-                groups.push((start, false, true));
+                groups.push((start, true));
                 // TRE matches a minimal repetition followed by a capture group as PCRE does.
                 minimal = false;
                 output.push('(');
                 atom = None;
                 quantified = false;
             }
-            // TRE reads a `)` that closes no group as a literal.
-            ')' if groups.is_empty() && syntax == Syntax::Extended => {
-                output.push_str(r"\)");
-                atom = Some(start);
-                assertion = None;
-                quantified = false;
-            }
+            // TRE takes a `)` that closes no group as a literal.
             ')' => {
-                output.push(')');
-                let (group_start, lookaround, _) = groups.pop().unwrap_or((start, false, false));
-                atom = Some(group_start);
-                assertion = lookaround.then_some(group_start);
+                match groups.pop() {
+                    Some((group_start, _)) => {
+                        output.push(')');
+                        atom = Some(group_start);
+                    }
+                    None => {
+                        output.push_str("\\)");
+                        atom = Some(start);
+                    }
+                }
                 quantified = false;
-            }
-            // PCRE obeys a repeated assertion at most once, and one that may repeat zero times
-            // can never fail the match, so it is dropped; fancy-regex refuses either.
-            '*' | '+' | '?' if quantifiable_assertion.is_some() => {
-                if character != '+'
-                    && let Some(assertion_start) = quantifiable_assertion
-                {
-                    output.truncate(assertion_start);
-                    atom = None;
-                }
-                if matches!(chars.get(index + 1), Some('?' | '+')) {
-                    index += 1;
-                }
             }
             '|' => {
                 output.push('|');
@@ -2958,25 +2992,20 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
             }
             '*' | '+' | '?' => match atom {
                 // POSIX takes a repetition operator with nothing to repeat literally.
-                None if syntax == Syntax::Extended => {
+                None => {
                     output.push('\\');
                     output.push(character);
                     atom = Some(start);
                     quantified = false;
                 }
-                _ => {
+                Some(_) => {
                     output.push(character);
                     quantified = true;
-                    let modifier = chars.get(index + 1).copied();
-                    if approximate && modifier == Some('?') {
-                        index += 1;
-                    } else if modifier == Some('?')
-                        || (syntax == Syntax::Perl && modifier == Some('+'))
-                    {
-                        minimal |= syntax == Syntax::Extended
-                            && modifier == Some('?')
-                            && !groups.iter().any(|&(_, _, capturing)| capturing);
-                        output.extend(modifier);
+                    if chars.get(index + 1) == Some(&'?') {
+                        if !approximate {
+                            minimal |= !groups.iter().any(|&(_, capturing)| capturing);
+                            output.push('?');
+                        }
                         index += 1;
                     }
                 }
@@ -2992,7 +3021,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                 }
                 continue;
             }
-            '{' => match (parse_interval(&chars, index, syntax), atom) {
+            '{' => match (parse_interval(&chars, index), atom) {
                 (Some((interval, next)), Some(atom_start)) => {
                     if quantified {
                         // `x{2}{3}` repeats the repetition, which the `regex` crate only
@@ -3005,15 +3034,14 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     index = next;
                     if chars.get(index) == Some(&'?') {
                         if !approximate {
-                            minimal |= syntax == Syntax::Extended
-                                && !groups.iter().any(|&(_, _, capturing)| capturing);
+                            minimal |= !groups.iter().any(|&(_, capturing)| capturing);
                             output.push('?');
                         }
                         index += 1;
                     }
                     continue;
                 }
-                (None, _) if syntax == Syntax::Extended => {
+                (None, _) => {
                     // TRE rejects a malformed interval, which the engine would read literally.
                     problem.get_or_insert(if chars[index..].contains(&'}') {
                         "Invalid contents of {}"
@@ -3022,7 +3050,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     });
                     output.push('{');
                 }
-                _ => {
+                (Some(_), None) => {
                     output.push_str("\\{");
                     atom = Some(start);
                     quantified = false;
@@ -3053,148 +3081,56 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Syntax {
-    /// POSIX extended syntax as TRE reads it in a UTF-8 locale.
-    Extended,
-    Perl,
-}
-
-/// A syntax, and whether its classes (`\w`, `[[:alpha:]]`) are Unicode classes. TRE's always
-/// are; PCRE's are ASCII, as R compiles it, unless the pattern starts with `(*UCP)`.
-#[derive(Clone, Copy)]
-struct Dialect {
-    syntax: Syntax,
-    unicode: bool,
-}
-
-/// Whether the pattern's leading PCRE options include `(*UCP)`.
-fn declares_ucp(chars: &[char]) -> bool {
-    let mut index = 0;
-    while chars.get(index) == Some(&'(') && chars.get(index + 1) == Some(&'*') {
-        let Some(close) = (index..chars.len()).find(|&cursor| chars[cursor] == ')') else {
-            return false;
-        };
-        if chars[index + 2..close].iter().copied().eq("UCP".chars()) {
-            return true;
-        }
-        index = close + 1;
-    }
-    false
-}
-
 /// What TRE's `\s` and `[[:space:]]` match: glibc's `iswspace`, which leaves out the
 /// non-breaking spaces.
 const POSIX_SPACE: &str =
     r"\t\n\x0B\f\r \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{3000}";
 const POSIX_BLANK: &str = r"\t \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}";
-/// PCRE's ASCII classes.
-const UNICODE_WORD: &str = r"\p{Alphabetic}\p{Nd}_";
-const PERL_DIGIT: &str = "0-9";
-const PERL_WORD: &str = "0-9A-Za-z_";
-const PERL_SPACE: &str = r"\t\n\x0B\f\r ";
-const PERL_HORIZONTAL_SPACE: &str =
-    r"\t \xA0\x{1680}\x{180E}\x{2000}-\x{200A}\x{202F}\x{205F}\x{3000}";
-const PERL_VERTICAL_SPACE: &str = r"\n\x0B\f\r\x{85}\x{2028}\x{2029}";
+const WORD: &str = r"\p{Alphabetic}\p{Nd}_";
+/// TRE's `\d` is ASCII even though its other classes follow the locale.
+const DIGIT: &str = "0-9";
 
 /// Translates the escape at `index` (outside a bracket expression) and returns the index after
 /// it.
 fn translate_escape(
     chars: &[char],
     index: usize,
-    dialect: Dialect,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
-    let syntax = dialect.syntax;
     let Some(&escaped) = chars.get(index + 1) else {
-        if syntax == Syntax::Extended {
-            problem.get_or_insert("Trailing backslash");
-        }
+        problem.get_or_insert("Trailing backslash");
         // The compiler rejects a trailing backslash too.
         output.push('\\');
         return index + 1;
     };
     let next = index + 2;
-    if let Some(class) = escape_class(escaped, dialect) {
+    if let Some(class) = escape_class(escaped) {
         output.push('[');
         output.push_str(&class);
         output.push(']');
         return next;
     }
-    match (syntax, escaped) {
-        // Without `(*UCP)` PCRE's word boundary looks at ASCII word characters only, and the
-        // engine's own `\b` cannot be limited to ASCII.
-        (Syntax::Perl, 'b') if !dialect.unicode => {
-            output.push_str(&format!(
-                "(?:(?<=[{PERL_WORD}])(?![{PERL_WORD}])|(?<![{PERL_WORD}])(?=[{PERL_WORD}]))"
-            ));
-            next
-        }
-        (Syntax::Perl, 'B') if !dialect.unicode => {
-            output.push_str(&format!(
-                "(?:(?<=[{PERL_WORD}])(?=[{PERL_WORD}])|(?<![{PERL_WORD}])(?![{PERL_WORD}]))"
-            ));
-            next
-        }
-        (_, 'b' | 'B' | 'n' | 't' | 'r' | 'f' | 'v' | '1'..='9')
-        | (Syntax::Extended, '<' | '>') => {
+    match escaped {
+        'b' | 'B' | 'n' | 't' | 'r' | 'f' | 'v' | '1'..='9' | '<' | '>' => {
             output.push('\\');
             output.push(escaped);
             next
         }
-        (_, 'e') => {
+        'e' => {
             output.push_str(r"\x1B");
             next
         }
-        (_, 'a') => {
+        'a' => {
             output.push_str(r"\x07");
             next
         }
-        (_, 'x') => {
+        'x' => {
             let (point, end) = hex_escape(chars, next);
             output.push_str(&format!(r"\x{{{point:X}}}"));
             end
         }
-        // TRE quotes \Q...\E as PCRE does.
-        (_, 'Q') => {
-            let mut cursor = next;
-            while cursor < chars.len() {
-                if chars[cursor] == '\\' && chars.get(cursor + 1) == Some(&'E') {
-                    return cursor + 2;
-                }
-                output.push_str(&regex::escape(chars[cursor].encode_utf8(&mut [0; 4])));
-                cursor += 1;
-            }
-            cursor
-        }
-        (Syntax::Perl, 'E') => next,
-        (Syntax::Perl, 'c') => match chars.get(next) {
-            Some(&control) => {
-                output.push_str(&format!(
-                    r"\x{{{:X}}}",
-                    (control.to_ascii_uppercase() as u32) ^ 0x40
-                ));
-                next + 1
-            }
-            None => {
-                output.push_str(r"\c");
-                next
-            }
-        },
-        (Syntax::Perl, '0') => {
-            let (point, end) = octal_escape(chars, next, 2);
-            output.push_str(&format!(r"\x{{{point:X}}}"));
-            end
-        }
-        (Syntax::Perl, 'g' | 'k') => translate_backreference(chars, index, output),
-        (Syntax::Perl, 'p' | 'P' | 'N' | 'o') => copy_delimited_escape(chars, index, output),
-        (Syntax::Perl, character) if character.is_ascii_alphanumeric() => {
-            output.push('\\');
-            output.push(character);
-            next
-        }
-        (_, character) => {
+        character => {
             output.push_str(&regex::escape(character.encode_utf8(&mut [0; 4])));
             next
         }
@@ -3202,23 +3138,11 @@ fn translate_escape(
 }
 
 /// The class contents an escape such as `\d` stands for, written to sit inside brackets.
-fn escape_class(escaped: char, dialect: Dialect) -> Option<String> {
-    let contents = match (
-        escaped.to_ascii_lowercase(),
-        dialect.syntax,
-        dialect.unicode,
-    ) {
-        // TRE's `\d` is ASCII even though its other classes follow the locale.
-        ('d', Syntax::Extended, _) | ('d', Syntax::Perl, false) => PERL_DIGIT,
-        ('d', Syntax::Perl, true) => r"\p{Nd}",
-        ('w', _, true) => UNICODE_WORD,
-        ('w', _, false) => PERL_WORD,
-        ('s', Syntax::Extended, true) => POSIX_SPACE,
-        ('s', Syntax::Extended, false) => PERL_SPACE,
-        ('s', Syntax::Perl, true) => r"\s",
-        ('s', Syntax::Perl, false) => PERL_SPACE,
-        ('h', Syntax::Perl, _) => PERL_HORIZONTAL_SPACE,
-        ('v', Syntax::Perl, _) => PERL_VERTICAL_SPACE,
+fn escape_class(escaped: char) -> Option<String> {
+    let contents = match escaped.to_ascii_lowercase() {
+        'd' => DIGIT,
+        'w' => WORD,
+        's' => POSIX_SPACE,
         _ => return None,
     };
     Some(if escaped.is_ascii_uppercase() {
@@ -3226,76 +3150,6 @@ fn escape_class(escaped: char, dialect: Dialect) -> Option<String> {
     } else {
         contents.to_owned()
     })
-}
-
-/// Rewrites PCRE's backreference forms (`\g1`, `\g-1`, `\g{name}`, `\k{name}`) as `\k<...>`,
-/// because the engine reads `\g` as an Oniguruma subroutine call and knows no braced `\k`.
-/// PCRE's own subroutine calls, `\g<name>` and `\g'name'`, are copied unchanged.
-fn translate_backreference(chars: &[char], index: usize, output: &mut String) -> usize {
-    let cursor = index + 2;
-    let reference: String = match chars.get(cursor) {
-        Some('{') => match chars[cursor + 1..]
-            .iter()
-            .position(|character| *character == '}')
-        {
-            Some(length) => chars[cursor + 1..cursor + 1 + length].iter().collect(),
-            None => return copy_delimited_escape(chars, index, output),
-        },
-        Some(character)
-            if chars[index + 1] == 'g' && (character.is_ascii_digit() || *character == '-') =>
-        {
-            let digits = chars[cursor + 1..]
-                .iter()
-                .take_while(|character| character.is_ascii_digit())
-                .count();
-            if *character == '-' && digits == 0 {
-                return copy_delimited_escape(chars, index, output);
-            }
-            chars[cursor..cursor + 1 + digits].iter().collect()
-        }
-        _ => return copy_delimited_escape(chars, index, output),
-    };
-    output.push_str(&format!(r"\k<{reference}>"));
-    match chars.get(cursor) {
-        Some('{') => cursor + reference.chars().count() + 2,
-        _ => cursor + reference.chars().count(),
-    }
-}
-
-/// Copies an escape with a delimited argument (`\p{L}`, `\k<name>`, `\g{-1}`) or a short one
-/// (`\pL`, `\g1`) unchanged.
-fn copy_delimited_escape(chars: &[char], index: usize, output: &mut String) -> usize {
-    output.push('\\');
-    output.push(chars[index + 1]);
-    let mut cursor = index + 2;
-    let closer = match chars.get(cursor) {
-        Some('{') => '}',
-        Some('<') => '>',
-        Some('\'') => '\'',
-        Some(_) => {
-            output.push(chars[cursor]);
-            cursor += 1;
-            while let Some(&digit) = chars
-                .get(cursor)
-                .filter(|character| character.is_ascii_digit())
-            {
-                output.push(digit);
-                cursor += 1;
-            }
-            return cursor;
-        }
-        None => return cursor,
-    };
-    output.push(chars[cursor]);
-    cursor += 1;
-    while let Some(&character) = chars.get(cursor) {
-        output.push(character);
-        cursor += 1;
-        if character == closer {
-            break;
-        }
-    }
-    cursor
 }
 
 /// Reads the code point of `\xhh` or `\x{hhhh}`, starting after the `x`.
@@ -3330,28 +3184,11 @@ fn hex_escape(chars: &[char], start: usize) -> (u32, usize) {
     (value, cursor)
 }
 
-fn octal_escape(chars: &[char], start: usize, limit: usize) -> (u32, usize) {
-    let mut value = 0;
-    let mut cursor = start;
-    while cursor < start + limit {
-        let Some(digit) = chars
-            .get(cursor)
-            .and_then(|character| character.to_digit(8))
-        else {
-            break;
-        };
-        value = value * 8 + digit;
-        cursor += 1;
-    }
-    (value, cursor)
-}
-
 /// Translates a bracket expression starting at `index` and returns the index after it. An
 /// unterminated one is left unterminated, so that compiling it fails.
 fn translate_class(
     chars: &[char],
     index: usize,
-    dialect: Dialect,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3368,12 +3205,12 @@ fn translate_class(
             return cursor + 1;
         }
         first = false;
-        let (item, next) = class_item(chars, cursor, dialect, problem);
+        let (item, next) = class_item(chars, cursor, problem);
         let range_end = match item {
             ClassItem::Literal(_) if chars.get(next) == Some(&'-') => chars
                 .get(next + 1)
                 .filter(|&&end| end != ']')
-                .map(|_| class_item(chars, next + 1, dialect, problem)),
+                .map(|_| class_item(chars, next + 1, problem)),
             _ => None,
         };
         match (item, range_end) {
@@ -3393,10 +3230,7 @@ fn translate_class(
             }
         }
     }
-    problem.get_or_insert(match dialect.syntax {
-        Syntax::Extended => "Missing ']'",
-        Syntax::Perl => "missing terminating ] for character class",
-    });
+    problem.get_or_insert("Missing ']'");
     cursor
 }
 
@@ -3409,75 +3243,28 @@ enum ClassItem {
 fn class_item(
     chars: &[char],
     index: usize,
-    dialect: Dialect,
     problem: &mut Option<&'static str>,
 ) -> (ClassItem, usize) {
-    let syntax = dialect.syntax;
     let character = chars[index];
     if character == '['
         && let Some((kind, name, end)) = bracket_term(chars, index)
     {
-        let set = match (kind, posix_class(&name, dialect)) {
+        let set = match (kind, posix_class(&name)) {
             (':', Some(set)) => set,
             (':', None) => {
-                problem.get_or_insert(match syntax {
-                    Syntax::Extended => "Unknown character class name",
-                    Syntax::Perl => "unknown POSIX class name",
-                });
+                problem.get_or_insert("Unknown character class name");
                 String::new()
             }
-            // Neither R engine supports equivalence classes or collating symbols.
+            // TRE supports neither equivalence classes nor collating symbols.
             _ => {
-                problem.get_or_insert(match syntax {
-                    Syntax::Extended => "Unknown collating element",
-                    Syntax::Perl => "POSIX collating elements are not supported",
-                });
+                problem.get_or_insert("Unknown collating element");
                 String::new()
             }
         };
         return (ClassItem::Set(set), end);
     }
-    if character != '\\' || syntax == Syntax::Extended {
-        // In POSIX brackets a backslash is an ordinary character.
-        return (ClassItem::Literal(character), index + 1);
-    }
-    let Some(&escaped) = chars.get(index + 1) else {
-        return (ClassItem::Literal('\\'), index + 1);
-    };
-    let next = index + 2;
-    if let Some(class) = escape_class(escaped, dialect) {
-        return (ClassItem::Set(class), next);
-    }
-    match escaped {
-        'n' => (ClassItem::Literal('\n'), next),
-        't' => (ClassItem::Literal('\t'), next),
-        'r' => (ClassItem::Literal('\r'), next),
-        'f' => (ClassItem::Literal('\x0C'), next),
-        'v' => (ClassItem::Literal('\x0B'), next),
-        'a' => (ClassItem::Literal('\x07'), next),
-        'e' => (ClassItem::Literal('\x1B'), next),
-        'b' => (ClassItem::Literal('\x08'), next),
-        'x' => {
-            let (point, end) = hex_escape(chars, next);
-            (
-                ClassItem::Literal(char::from_u32(point).unwrap_or('\u{FFFD}')),
-                end,
-            )
-        }
-        '0' => {
-            let (point, end) = octal_escape(chars, next, 2);
-            (
-                ClassItem::Literal(char::from_u32(point).unwrap_or('\0')),
-                end,
-            )
-        }
-        'p' | 'P' => {
-            let mut copied = String::new();
-            let end = copy_delimited_escape(chars, index, &mut copied);
-            (ClassItem::Set(copied), end)
-        }
-        other => (ClassItem::Literal(other), next),
-    }
+    // In POSIX brackets a backslash is an ordinary character.
+    (ClassItem::Literal(character), index + 1)
 }
 
 /// Reads `[:name:]`, `[=c=]` or `[.c.]` at `index`: the delimiter, the name, and the index
@@ -3499,19 +3286,15 @@ fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
     None
 }
 
-/// The class contents for `[:name:]`, or `None` for an unknown name. In a Unicode dialect the
-/// classes follow the Unicode properties, as glibc's do in a UTF-8 locale; otherwise they are
-/// ASCII, which the `regex` crate's own `[:name:]` classes match.
-fn posix_class(name: &str, dialect: Dialect) -> Option<String> {
+/// The class contents for `[:name:]`, or `None` for an unknown name. The classes follow the
+/// Unicode properties, as glibc's do in a UTF-8 locale.
+fn posix_class(name: &str) -> Option<String> {
     const NAMES: &[&str] = &[
         "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
         "upper", "xdigit", "word",
     ];
     if !NAMES.contains(&name) {
         return None;
-    }
-    if !dialect.unicode {
-        return Some(format!("[:{name}:]"));
     }
     Some(
         match name {
@@ -3527,7 +3310,7 @@ fn posix_class(name: &str, dialect: Dialect) -> Option<String> {
             "print" => r"\P{C}",
             "graph" => r"[^\p{C}\p{Z}]",
             "xdigit" => "0-9A-Fa-f",
-            _ => UNICODE_WORD,
+            _ => WORD,
         }
         .to_owned(),
     )
@@ -3540,106 +3323,6 @@ fn push_class_literal(output: &mut String, character: char) {
     output.push(character);
 }
 
-/// Translates a PCRE group opener `(?...` at `index`. Returns the index after it and whether it
-/// opens a group (a comment or a bare flag setting does not).
-fn translate_group_prefix(chars: &[char], index: usize, output: &mut String) -> (usize, bool) {
-    let after = index + 2;
-    let read_name = |start: usize, closer: char| -> Option<(String, usize)> {
-        let end = (start..chars.len()).find(|&cursor| chars[cursor] == closer)?;
-        Some((chars[start..end].iter().collect(), end + 1))
-    };
-    match chars.get(after).copied() {
-        Some('#') => {
-            let end = (after..chars.len())
-                .find(|&cursor| chars[cursor] == ')')
-                .map_or(chars.len(), |end| end + 1);
-            (end, false)
-        }
-        Some(':' | '=' | '!' | '>' | '|') => {
-            output.push_str("(?");
-            output.push(chars[after]);
-            (after + 1, true)
-        }
-        Some('<') if matches!(chars.get(after + 1), Some('=' | '!')) => {
-            output.push_str("(?<");
-            output.push(chars[after + 1]);
-            (after + 2, true)
-        }
-        Some(opener @ ('<' | '\'' | 'P'))
-            if opener != 'P' || chars.get(after + 1) == Some(&'<') =>
-        {
-            let (start, closer) = match opener {
-                '<' => (after + 1, '>'),
-                '\'' => (after + 1, '\''),
-                _ => (after + 2, '>'),
-            };
-            match read_name(start, closer) {
-                Some((name, end)) => {
-                    output.push_str(&format!("(?P<{name}>"));
-                    (end, true)
-                }
-                None => {
-                    output.push_str("(?");
-                    (after, true)
-                }
-            }
-        }
-        _ => {
-            let mut cursor = after;
-            while chars.get(cursor).is_some_and(|character| {
-                character.is_ascii_alphabetic() || *character == '-' || *character == '^'
-            }) {
-                cursor += 1;
-            }
-            let flags: String = chars[after..cursor].iter().collect();
-            match chars.get(cursor) {
-                Some(':') => {
-                    output.push_str(&format!("(?{flags}:"));
-                    (cursor + 1, true)
-                }
-                Some(')') => {
-                    output.push_str(&format!("(?{flags})"));
-                    (cursor + 1, false)
-                }
-                _ => {
-                    // `(?P=name)`, `(?R)`, `(?1)` and the like: passed through for the engine.
-                    output.push_str("(?");
-                    (after, true)
-                }
-            }
-        }
-    }
-}
-
-/// Drops a PCRE start-of-pattern option such as `(*UCP)` that the translation already accounts
-/// for, and passes any other verb through for the engine to accept or reject.
-fn translate_verb(chars: &[char], index: usize, output: &mut String) -> usize {
-    let close = (index..chars.len()).find(|&cursor| chars[cursor] == ')');
-    if let Some(close) = close {
-        let verb: String = chars[index + 2..close].iter().collect();
-        if matches!(
-            verb.as_str(),
-            "UTF"
-                | "UTF8"
-                | "UCP"
-                | "CR"
-                | "LF"
-                | "CRLF"
-                | "ANYCRLF"
-                | "ANY"
-                | "NO_START_OPT"
-                | "NO_AUTO_POSSESS"
-                | "NO_JIT"
-        ) {
-            return close + 1;
-        }
-    }
-    output.push_str("(*");
-    index + 2
-}
-
-/// Reads an interval `{m}`, `{m,}` or `{m,n}` at `index` into the `regex` crate's form, with
-/// POSIX's `{,n}` written as `{0,n}`. Returns `None` when the brace does not start an interval.
 /// TRE's approximate-matching settings at a `{`, such as `{+}`, `{-2}` or `{~1,+2}`: each
 /// item is one of `+`, `-`, `#` or `~` with an optional count. Returns the index after the
 /// closing brace and whether the settings allow no errors (no `~` limit, or `~0`).
@@ -3667,7 +3350,9 @@ fn approximate_settings(chars: &[char], index: usize) -> Option<(usize, bool)> {
     }
 }
 
-fn parse_interval(chars: &[char], index: usize, syntax: Syntax) -> Option<(String, usize)> {
+/// Reads an interval `{m}`, `{m,}` or `{m,n}` at `index` into the `regex` crate's form, with
+/// POSIX's `{,n}` written as `{0,n}`. Returns `None` when the brace does not start an interval.
+fn parse_interval(chars: &[char], index: usize) -> Option<(String, usize)> {
     let mut cursor = index + 1;
     let minimum = read_number(chars, &mut cursor);
     let mut maximum = None;
@@ -3679,8 +3364,7 @@ fn parse_interval(chars: &[char], index: usize, syntax: Syntax) -> Option<(Strin
     if chars.get(cursor) != Some(&'}') {
         return None;
     }
-    if syntax == Syntax::Extended
-        && let (Some(minimum), Some(maximum)) = (minimum, maximum)
+    if let (Some(minimum), Some(maximum)) = (minimum, maximum)
         && minimum > maximum
     {
         return None;
@@ -3689,7 +3373,7 @@ fn parse_interval(chars: &[char], index: usize, syntax: Syntax) -> Option<(Strin
         (Some(minimum), false, _) => format!("{{{minimum}}}"),
         (Some(minimum), true, None) => format!("{{{minimum},}}"),
         (Some(minimum), true, Some(maximum)) => format!("{{{minimum},{maximum}}}"),
-        (None, true, Some(maximum)) if syntax == Syntax::Extended => format!("{{0,{maximum}}}"),
+        (None, true, Some(maximum)) => format!("{{0,{maximum}}}"),
         _ => return None,
     };
     Some((text, cursor + 1))
@@ -3701,9 +3385,10 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 }
 
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
-/// arguments.
+/// arguments. A classed character vector is already text and is used as it is, which matters
+/// for vctrs, whose `as.character` method refuses a class with no cast to character.
 unsafe fn as_character(value: Sexp, env: Sexp) -> R<Sexp> {
-    if value.is_object() {
+    if value.is_object() && value.kind() != SexpType::String {
         let function = values::install("as.character")?;
         let call = values::call(function, &[eval::quote_value(value)?])?;
         let converted = eval::eval(call, env)?;
@@ -3759,7 +3444,7 @@ unsafe fn map_strings(x: Sexp, edit: impl Fn(&str) -> Option<String>) -> R<Sexp>
         let text = values::char_str(charsxp);
         match edit(&text) {
             Some(edited) if edited == *text => set_elt(result, index, charsxp),
-            Some(edited) => set_elt(result, index, values::mkchar(&edited)?),
+            Some(edited) => values::set_mkchar(result, index, &edited)?,
             None => set_elt(result, index, na_string()),
         }
     }

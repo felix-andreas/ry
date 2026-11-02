@@ -64,6 +64,7 @@ tokio-util = { version = "0.7.15", features = ["compat"] }
 [profile.dev.package]
 "*".debug = false
 similar.opt-level = 3
+rowan.opt-level = 3
 tree-sitter.opt-level = 3
 tree-sitter-r.opt-level = 3
 # The JIT compiles while the program runs, so an unoptimized code generator makes debug runs of
@@ -77,6 +78,10 @@ cranelift-control.opt-level = 3
 cranelift-jit.opt-level = 3
 cranelift-module.opt-level = 3
 regalloc2.opt-level = 3
+# Collection stress and the oracle's collection torture collect on every allocation, so an
+# unoptimized collector makes those runs in a debug build take minutes per case. Debug assertions
+# and overflow checks stay on.
+heap.opt-level = 2
 
 [profile.release]
 strip = true

@@ -1,5 +1,5 @@
-# nlm follows the Dennis-Schnabel algorithm, so iteration counts and codes match GNU R;
-# numeric results are rounded because difference gradients differ in the last digits.
+# nlm follows the Dennis-Schnabel algorithm, so iteration counts, codes and iterates match GNU R;
+# stats__uncmin_quadpack.R compares them at full precision.
 banana <- function(x) 100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2
 fit <- nlm(banana, c(-1.2, 1), hessian = TRUE)
 print(round(fit$estimate, 5)); print(fit$code); print(fit$iterations)

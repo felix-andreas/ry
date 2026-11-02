@@ -10,7 +10,7 @@ use {
 
 #[derive(Debug, Parser)]
 // Clap defaults to the package name, `ry-lang`; the command is `ry`.
-#[command(name = "ry", version, after_help = experimental_features_help())]
+#[command(name = "ry", version, after_help = EXPERIMENTAL_FEATURES_HELP)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -50,6 +50,11 @@ pub enum Command {
         /// the nearest spelling of a misspelled name
         #[arg(long, default_value_t = false, requires = "fix")]
         unsafe_fixes: bool,
+        /// Write the inferred type of each unannotated top-level function and binding as its
+        /// annotation, inline or as a `#:` comment as `[check] inline-annotations` says, then
+        /// report what remains
+        #[arg(long, default_value_t = false)]
+        annotate: bool,
         /// Check every file again instead of reusing the findings recorded in `.ry_cache/`
         /// for files that did not change
         #[arg(long, default_value_t = false)]
@@ -66,6 +71,10 @@ pub enum Command {
         /// Show diff instead of modifying files; exit with error if changes needed
         #[arg(long, default_value_t = false)]
         diff: bool,
+        /// Format only the lines this range touches, in a single file: `LINE`, `START-END`, or
+        /// `LINE:COLUMN-LINE:COLUMN`, counting from 1
+        #[arg(long, value_name = "RANGE")]
+        range: Option<crate::cli::FormatRange>,
         /// Print verbose output
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
@@ -139,6 +148,29 @@ pub enum Command {
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
+    },
+    /// Run a package's testthat tests against the package loaded from source, lazily
+    ///
+    /// The package loads as with `ry load`, and the files in `tests/testthat` run as with
+    /// `devtools::test()`. The exit status is 0 when every test passed and 1 when one failed.
+    /// With `--watch`, every edit reloads only what changed and reruns the tests it can affect
+    /// first, then the rest.
+    Test {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run only the test files whose names match this regular expression
+        #[arg(long)]
+        filter: Option<String>,
+        /// A testthat reporter by name, such as `progress`, `summary` or `junit`
+        #[arg(long)]
+        reporter: Option<String>,
+        /// Keep running, and rerun tests after every edit
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
     },
     /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
     ///
@@ -297,14 +329,7 @@ fn session_mode(session: &SessionArguments, load_package: bool) -> Mode {
     }
 }
 
-fn experimental_features_help() -> String {
-    let features = crate::config::ExperimentalFeatures::KNOWN
-        .iter()
-        .map(|feature| format!("            {}: {}", feature.name, feature.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Global options:\n      --experimental-features <FEATURES>\n          \
-         Enable experimental features (space-separated, or \"all\" for every one):\n{features}"
-    )
-}
+const EXPERIMENTAL_FEATURES_HELP: &str = "Global options:
+      --experimental-features <FEATURES>
+          Enable experimental features (space-separated, or \"all\" for every one).
+          No feature is experimental right now. A name is ignored with a warning.";

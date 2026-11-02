@@ -1,0 +1,37 @@
+# A package configured for lintr keeps its lint choices under ry without a ry.toml.
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file R/ledger.R
+| balance_of <- function(entries) {
+|   # total <- sum(entries)
+|   if (any(is.na(entries))) return(NA_real_)
+|   return(sum(entries))
+| }
+file .lintr
+| linters: linters_with_defaults(
+|     commented_code_linter = NULL,
+|     any_is_na_linter()
+|   )
+| encoding: "UTF-8"
+
+run ry check
+expect exit 1
+expect stderr "any-is-na"
+expect stderr "redundant-return"
+expect stderr lacks "commented-code"
+
+# ry.toml wins wherever it sets a level.
+file ry.toml
+| [lint]
+| redundant-return = "off"
+
+run ry check
+expect exit 1
+expect stderr "any-is-na"
+expect stderr lacks "redundant-return"
+
+run ry check --fix
+expect exit 0
+expect file R/ledger.R "if (anyNA(entries)) return(NA_real_)"

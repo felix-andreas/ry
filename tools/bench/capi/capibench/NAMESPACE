@@ -1,0 +1,2 @@
+useDynLib(capibench, .registration = TRUE)
+export(bench)

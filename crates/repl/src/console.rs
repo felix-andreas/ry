@@ -21,7 +21,6 @@ use {
     },
     std::{
         borrow::Cow,
-        cell::RefCell,
         collections::VecDeque,
         ffi::{c_char, c_int, c_uchar},
         fs,
@@ -30,7 +29,7 @@ use {
         path::PathBuf,
         slice,
         sync::{
-            Arc, Mutex, PoisonError,
+            Arc, Mutex, MutexGuard, PoisonError,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
@@ -184,8 +183,8 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
         pending.extend(script.into_bytes());
         pending.push_back(b'\n');
     }
-    CONSOLE.with(|slot| {
-        *slot.borrow_mut() = Some(Console {
+    {
+        *lock_console() = Some(Console {
             editor,
             pending,
             typeahead: VecDeque::new(),
@@ -200,14 +199,16 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             piped: !stdin().is_terminal(),
             banner,
         });
-    });
+    }
     Ok(())
 }
 
-// R calls the hooks only on its one thread and never nests read-console calls
-// inside our borrow, so a thread-local `RefCell` suffices.
-thread_local! {
-    static CONSOLE: RefCell<Option<Console>> = const { RefCell::new(None) };
+// ry's console reads on a helper thread while the interpreter answers an editor's requests, so
+// the console is not tied to the thread that installed it. Reads never nest.
+static CONSOLE: Mutex<Option<Console>> = Mutex::new(None);
+
+fn lock_console() -> MutexGuard<'static, Option<Console>> {
+    CONSOLE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 type SharedSessionCompleter = Arc<Mutex<Box<dyn SessionCompleter>>>;
@@ -293,8 +294,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
     // nothing to report it to.
     stdout().flush().ok();
     let capacity = length.max(2) as usize - 2;
-    CONSOLE.with(|console| {
-        let mut slot = console.borrow_mut();
+    {
+        let mut slot = lock_console();
         let Some(console) = slot.as_mut() else {
             return 0;
         };
@@ -416,7 +417,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         }
         unsafe { *buffer.add(written) = 0 };
         1
-    })
+    }
 }
 
 /// Splits typed-ahead text into the lines that run at the coming prompts and the unfinished

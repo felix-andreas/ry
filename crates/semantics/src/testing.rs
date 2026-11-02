@@ -33,7 +33,7 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
         let Some(check) = item_check(db, item) else {
             continue;
         };
-        let Some(scheme) = check.scheme else {
+        let Some(scheme) = &check.scheme else {
             continue;
         };
         let mut renderer = TypeRenderer::default();
@@ -190,6 +190,7 @@ pub struct ProbeDatabase {
     storage: salsa::Storage<Self>,
     splice_cache: Arc<SpliceCache>,
     executed: Arc<Mutex<Vec<String>>>,
+    one_shot: bool,
 }
 
 impl Default for ProbeDatabase {
@@ -209,6 +210,7 @@ impl Default for ProbeDatabase {
             }))),
             splice_cache: Arc::default(),
             executed,
+            one_shot: false,
         }
     }
 }
@@ -221,9 +223,22 @@ impl Db for ProbeDatabase {
     fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
     }
+
+    fn one_shot(&self) -> bool {
+        self.one_shot
+    }
 }
 
 impl ProbeDatabase {
+    /// A probe for a host that checks once and never edits, like `RootDatabase::one_shot`.
+    pub fn one_shot() -> ProbeDatabase {
+        ProbeDatabase {
+            splice_cache: Arc::new(SpliceCache::disabled()),
+            one_shot: true,
+            ..ProbeDatabase::default()
+        }
+    }
+
     pub fn project(&self, sources: &[&str]) -> Vec<SourceFile> {
         let files: Vec<SourceFile> = sources
             .iter()

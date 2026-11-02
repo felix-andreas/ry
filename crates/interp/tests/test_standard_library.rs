@@ -75,6 +75,17 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.to_vector(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
     ("List.single(\"a\")", "[[1]]\n[1] \"a\"\n\n"),
     ("List.to_vector(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
+    ("List.to_vector(List.range(2L, 5L))", "[1] 2 3 4 5\n"),
+    ("List.to_vector(List.range(-1, 1))", "[1] -1  0  1\n"),
+    ("List.range(3L, 2L)", "list()\n"),
+    (
+        "List.keep_if_try(xs, function(x) :Ok(x > 1L))",
+        ":Ok(list(3L, 2L))\n",
+    ),
+    (
+        "List.keep_if_try(xs, function(x) if (x == 1L) :Err(:One) else :Ok(TRUE))",
+        ":Err(:One)\n",
+    ),
     ("List.to_vector(List.reverse(xs))", "[1] 2 1 3\n"),
     (
         "List.to_vector(List.join(list(list(1L), list(), list(2L, 3L))))",
@@ -271,6 +282,14 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.sqrt_checked(-1)", ":Err(:SqrtOfNegative)\n"),
     ("Num.log_checked(1)", ":Ok(0)\n"),
     ("Num.log_checked(0)", ":Err(:LogNeedsPositive)\n"),
+    // No library function returns `NaN`: a checked operation returns `:Err(:Undefined)`.
+    ("Num.add_checked(Inf, -Inf)", ":Err(:Undefined)\n"),
+    ("Num.mul_checked(0, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_checked(Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_trunc_checked(Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.div_ceil_checked(-Inf, Inf)", ":Err(:Undefined)\n"),
+    ("Num.rem_checked(Inf, 2)", ":Err(:Undefined)\n"),
+    ("Num.add_checked(Inf, 1)", ":Ok(Inf)\n"),
     // Dict.
     ("Dict.empty()", "Dict.empty()\n"),
     (
@@ -388,6 +407,29 @@ const PRINTS: &[(&str, &str)] = &[
     (
         "{ h <- function(d, k) { each <- function(x) Dict.insert(x, k, 1); d <- each(d); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:4) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(d), Dict.len(keep)) }; f() }",
         "[1] 5 4\n",
+    ),
+    // The tail form in a helper that creates closures: in place while every closure dies with
+    // the frame, copied when one escapes as an argument or inside one.
+    (
+        "{ h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)) }; f() }",
+        "[1]  6  5 10\n",
+    ),
+    (
+        "{ h <- function(d) { g <- function() length(d); List.append(d, g) }; f <- function() { for (i in 1) NULL; d <- list(1, 2); for (i in 1:4) d <- h(d); c(length(d), d[[6L]](), d[[3L]]()) }; f() }",
+        "[1] 6 5 2\n",
+    ),
+    (
+        "{ h <- function(d) { g <- function() length(d); List.append(d, list(g)) }; f <- function() { for (i in 1) NULL; d <- list(1, 2); for (i in 1:4) d <- h(d); c(length(d), d[[6L]][[1L]](), d[[3L]][[1L]]()) }; f() }",
+        "[1] 6 5 2\n",
+    ),
+    // The tail form in an `if` branch and under `return`.
+    (
+        "{ h <- function(d, k) { if (k > 100L) return(d); if (k %% 2L == 0L) Dict.insert(d, k, k) else d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:6) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(keep), Dict.len(d), Dict.len(h(d, 200L))) }; f() }",
+        "[1] 3 4 4\n",
+    ),
+    (
+        "{ h <- function(xs, k) { for (i in 1:2) if (i == k) return(List.append(xs, i)); xs }; f <- function() { for (i in 1) NULL; xs <- list(); for (k in c(1L, 2L, 3L, 1L)) xs <- h(xs, k); keep <- xs; xs <- h(xs, 2L); c(length(keep), length(xs), List.to_vector(xs)) }; f() }",
+        "[1] 3 4 1 2 1 2\n",
     ),
     (
         "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
@@ -821,6 +863,29 @@ const PRINTS: &[(&str, &str)] = &[
         "c(Num.pi, Num.tau / 2, Num.e)",
         "[1] 3.141593 3.141593 2.718282\n",
     ),
+    (
+        "c(Num.max_integer, Num.min_integer)",
+        "[1]  2147483647 -2147483647\n",
+    ),
+    (
+        "c(Num.max_double, Num.min_double)",
+        "[1]  1.797693e+308 -1.797693e+308\n",
+    ),
+    ("Num.to_integer(-3.7)", "[1] -3\n"),
+    ("c(Num.infinity, -Num.infinity)", "[1]  Inf -Inf\n"),
+    (
+        "(function() { xs <- List.reserve(list(1L, 2L), 10L); ys <- List.release_excess_capacity(xs); List.to_vector(ys) })()",
+        "[1] 1 2\n",
+    ),
+    (
+        "(function() { d <- Dict.reserve(Dict.single(\"a\", 1L), 20L); c(Dict.capacity(d) >= 21L, Dict.capacity(Dict.release_excess_capacity(d)), Dict.len(d), Dict.capacity(Dict.empty())) })()",
+        "[1] 1 1 1 0\n",
+    ),
+    (
+        "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",
+        "[1] 7 2 1\n",
+    ),
+    ("Num.to_integer(7L)", "[1] 7\n"),
     // Bool.
     ("c(Bool.true, Bool.false)", "[1]  TRUE FALSE\n"),
     (
@@ -939,6 +1004,18 @@ const ERRORS: &[(&str, &str)] = &[
         "`f` must be a function, not a double value",
     ),
     (
+        "Num.to_integer(1e10)",
+        "`number` must fit an integer, not 1e+10; `Num.to_integer_checked()` returns `:Err(:OutOfBounds)` instead",
+    ),
+    (
+        "List.range(1L, NA)",
+        "`end` must be a whole number, not `NA`",
+    ),
+    (
+        "List.range(-2147483647L, 2147483647L)",
+        "the list would have 4294967295 elements, more than the limit of 2147483647",
+    ),
+    (
         "List.keep_if(xs, function(x) NA)",
         "`predicate` must return `TRUE` or `FALSE`, not `NA`",
     ),
@@ -1050,6 +1127,20 @@ const ERRORS: &[(&str, &str)] = &[
         "the integer result overflows; `Num.mul_checked()` returns `:Err(:Overflow)` instead",
     ),
     ("Num.sub(Inf, Inf)", "the result is undefined (`NaN`)"),
+    ("Num.sin(Inf)", "the result is undefined (`NaN`)"),
+    ("Num.cos(-Inf)", "the result is undefined (`NaN`)"),
+    ("Num.tan(Inf)", "the result is undefined (`NaN`)"),
+    ("Num.pow(-1, 0.5)", "the result is undefined (`NaN`)"),
+    ("Num.abs_diff(Inf, Inf)", "the result is undefined (`NaN`)"),
+    (
+        "Num.add_saturated(Inf, -Inf)",
+        "the result is undefined (`NaN`)",
+    ),
+    ("Num.rem(Inf, 2)", "the result is undefined (`NaN`)"),
+    (
+        "List.sum(list(Inf, -Inf))",
+        "the result is undefined (`NaN`)",
+    ),
     (
         "Num.div(1, 0)",
         "`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead",

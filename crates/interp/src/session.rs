@@ -453,7 +453,8 @@ pub unsafe fn run_console(
 }
 
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
-/// the files they were drawing.
+/// the files they were drawing, stops the profilers, runs the exit finalizers and removes the
+/// temporary directory. The directory goes last because a finalizer may still write there.
 pub unsafe fn finish() {
     if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
         report_toplevel(unwind);
@@ -461,6 +462,11 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::utils::stop_profiler() {
         report_toplevel(unwind);
     }
+    if let Err(unwind) = crate::utils::stop_memory_profiler() {
+        report_toplevel(unwind);
+    }
+    (interp().hooks.run_exit_finalizers)();
+    crate::system::remove_session_temp_dir();
 }
 
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
@@ -495,6 +501,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         }
     };
     interp().frames.clear();
+    interp().foreign_calls.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
@@ -507,6 +514,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     {
         report_toplevel(unwind);
         interp().frames.clear();
+        interp().foreign_calls.clear();
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }

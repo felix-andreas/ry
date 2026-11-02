@@ -183,6 +183,11 @@ wall time. Several of them are worth knowing:
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
+  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
+  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
+  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
+  memory on the finance benchmark.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.
@@ -333,6 +338,17 @@ walk (`item_interface_edges`) go through `package_name` too. A structural edit r
 that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
 items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
+`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
+cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
+`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
+instead of interning a name and going through `package_name` or `test_name`, and `item_group`
+finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
+`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+facts; only the granularity of the recorded dependencies changes. Under
+`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
+per-item answer. The language server and a cached `ry check` keep the firewalls.
+
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions
 into the winners and, in the same loop, the names defined more than once. The duplicate check reads
@@ -387,7 +403,10 @@ the database first cancels it.
 A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
 loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
 methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
-[package loading](/reference/package-loading#s4-definitions) has the contract.
+[package loading](/reference/package-loading#s4-definitions) has the contract. When the definitions
+read only S4 constructors and their own names, the loader gives the unit a cache key
+(`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
+saved instead of running the definitions.
 
 ### Diagnostics
 
@@ -420,8 +439,21 @@ and all the documents, and the database handle deliberately never leaves it.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
   parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
   (below) ends, the first wave holds only the parse-stage classes, because the lints read the
-  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
-  second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
+  project-wide name maps. At idle time it publishes the settled full set, without a version.
+  Without a check record, the settled set is a faithful superset of the first, so the second wave
+  only ever adds findings.
+- **The first wave can come from the check record.** At initialize the worker loads
+  `.ry_cache/check.json`, computes the record's key exactly as `ry check` does
+  (`check_cache::key`, with the server's own binary), and runs `check_cache::plan` over the
+  project's files, reading the scripts it does not load from disk. A changed file the server did
+  not load has no surface there, which plans a fresh run and restores nothing. Every loaded file
+  the plan reuses gets its recorded findings, and the first wave shows them instead of the parse
+  stage until the settled wave replaces them. The server analyses only the package files and the
+  open documents while `ry check` analyses every file, so the two can differ in a finding that
+  depends on a script, and the settled wave corrects it. Any input change (an edit, a watched-file
+  event, a stub or `NAMESPACE` buffer, a file opened with other text) drops every restored finding,
+  because a change to one file can change another's findings. Restoring the record for a
+  300,000-line package costs about what a replaying `ry check` does, about 0.2 s. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
   scans every file's `library()` and `require()` calls and applies the attached set once, then

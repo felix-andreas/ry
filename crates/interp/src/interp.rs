@@ -32,6 +32,7 @@ pub mod bytecode;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
+pub mod console_server;
 pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
@@ -46,6 +47,7 @@ pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_engine;
 pub mod graphics_render;
+pub mod help_server;
 pub mod http;
 pub mod latex;
 pub mod linalg;
@@ -88,6 +90,7 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
+pub mod viewer;
 
 pub use crate::unwind::{Jump, RError};
 use {
@@ -136,6 +139,8 @@ pub struct Hooks {
     pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
+    /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
+    pub run_exit_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
     /// succeeded, and whether the value was visible.
     pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
@@ -156,7 +161,13 @@ pub struct Hooks {
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
+    /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
+    /// finds `user_unif_rand`.
+    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
+
+/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
+pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -169,12 +180,19 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
+    /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
+    /// `sys.calls()` does not, so they live beside the frames rather than among them.
+    pub foreign_calls: Vec<(Sexp, usize)>,
     /// The handler and restart stacks in effect, which every frame saves and restores.
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
+    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
+    /// the collector still sees them.
+    pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
@@ -312,9 +330,11 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
         global_handlers: None,
+        suspended_handlers: Vec::new(),
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
@@ -370,6 +390,7 @@ pub fn default_hooks() -> Hooks {
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_intseq: |_, _, _| Ok(None),
         run_finalizers: || {},
+        run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))
@@ -386,6 +407,7 @@ pub fn default_hooks() -> Hooks {
             Ok(())
         },
         connection_vfprintf: None,
+        find_native_symbol: |_| None,
     }
 }
 
@@ -461,9 +483,16 @@ impl RootSource for InterpRoots {
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
             }
+            for &(call, _) in &interp.foreign_calls {
+                marker.mark(call);
+            }
             conditions::trace_handlers(&interp.handlers, marker);
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
+            for (handlers, restarts) in &interp.suspended_handlers {
+                conditions::trace_handlers(handlers, marker);
+                conditions::trace_restarts(restarts, marker);
+            }
             marker.mark(interp.srcref);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
@@ -480,12 +509,6 @@ impl RootSource for InterpRoots {
                 marker.mark(call);
             }
             interp.globals.trace(marker);
-            interp.symbols.trace(marker);
-            for definition in &interp.builtins {
-                if let Some(object) = definition.object {
-                    marker.mark(object);
-                }
-            }
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);

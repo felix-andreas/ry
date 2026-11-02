@@ -12,7 +12,7 @@
 use {
     crate::{
         R_xlen_t, SEXPTYPE,
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Pinned, enter, error},
         runtime,
         vectors::sexp_type,
     },
@@ -172,22 +172,28 @@ unsafe fn checked(object: Sexp, kind: SexpType, what: &str) -> ApiResult<Sexp> {
 pub unsafe extern "C" fn FRAME(env: Sexp) -> Sexp {
     enter(|| {
         let env = checked(env, SexpType::Environment, "FRAME")?;
-        let runtime = runtime();
-        let mut list = runtime.nil();
-        for symbol in runtime.heap.frame_symbols(env).into_iter().rev() {
-            let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
-                continue;
-            };
-            list = runtime
-                .heap
-                .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
-            runtime.heap.root(list);
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                list.set_gp_bits(gp::ACTIVE_BINDING, true);
-            }
-        }
-        Ok(list)
+        Ok(Pinned(frame_pairlist(env)?))
     })
+    .0
+}
+
+/// The pairlist `FRAME` hands out, which `CAR` of an environment returns too.
+pub unsafe fn frame_pairlist(env: Sexp) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let mut list = runtime.nil();
+    for symbol in runtime.heap.frame_symbols(env).into_iter().rev() {
+        let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
+            continue;
+        };
+        list = runtime
+            .heap
+            .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
+        runtime.heap.root(list);
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            list.set_gp_bits(gp::ACTIVE_BINDING, true);
+        }
+    }
+    Ok(list)
 }
 
 /// `HASHTAB(env)`: `NULL`, which tells code that walks frames to use `FRAME` instead.
@@ -299,29 +305,24 @@ pub unsafe extern "C" fn SET_CLOENV(closure: Sexp, env: Sexp) {
     })
 }
 
-/// The debugging flags live in general-purpose bit 15 of a closure, as in GNU R.
-const DEBUG_BIT: u16 = 1 << 15;
-/// The single-step flag, general-purpose bit 14.
-const STEP_BIT: u16 = 1 << 14;
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RDEBUG(object: Sexp) -> c_int {
-    object.has_gp(DEBUG_BIT) as c_int
+    object.has_gp(gp::CLOSURE_DEBUG) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_RDEBUG(object: Sexp, value: c_int) {
-    object.set_gp_bits(DEBUG_BIT, value != 0);
+    object.set_gp_bits(gp::CLOSURE_DEBUG, value != 0);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RSTEP(object: Sexp) -> c_int {
-    object.has_gp(STEP_BIT) as c_int
+    object.has_gp(gp::CLOSURE_STEP) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_RSTEP(object: Sexp, value: c_int) {
-    object.set_gp_bits(STEP_BIT, value != 0);
+    object.set_gp_bits(gp::CLOSURE_STEP, value != 0);
 }
 
 /// `ENVFLAGS(env)`: an environment's general-purpose bits, where GNU R keeps its locked flag.
@@ -524,12 +525,12 @@ pub extern "C" fn MARK(_object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RTRACE(object: Sexp) -> c_int {
-    object.has_gp(1 << 13) as c_int
+    object.has_gp(gp::CLOSURE_TRACE) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_RTRACE(object: Sexp, value: c_int) {
-    object.set_gp_bits(1 << 13, value != 0);
+    object.set_gp_bits(gp::CLOSURE_TRACE, value != 0);
 }
 
 /// Unchecked data access: GNU R's `*0` accessors skip the type check, which ry keeps.

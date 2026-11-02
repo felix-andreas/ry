@@ -98,12 +98,12 @@ that exists only for Roc's type system or memory model.
 | Module | Functions |
 | --- | --- |
 | `Result` | `is_ok`, `is_err`, `with_default`, `map`, `map_err`, `map_both`, `map2`, `and_then`, `on_err` |
-| `List` | `len`, `is_empty`, `get`, `set`, `update`, `append`, `prepend`, `concat`, `single`, `repeat`, `reverse`, `join`, `map`, `map_with_index`, `map2`, `map3`, `map4`, `join_map`, `keep_if`, `drop_if`, `keep_oks`, `keep_errs`, `map_try`, `walk`, `walk_backwards`, `walk_until`, `walk_backwards_until`, `walk_with_index`, `walk_with_index_until`, `walk_from`, `walk_from_until`, `walk_try`, `for_each`, `for_each_try`, `any`, `all`, `contains`, `count_if`, `find_first`, `find_last`, `find_first_index`, `find_last_index`, `first`, `last`, `take_first`, `take_last`, `drop_first`, `drop_last`, `drop_at`, `sublist`, `split_at`, `split_first`, `split_last`, `split_on`, `split_on_list`, `chunks_of`, `intersperse`, `sort_with`, `sort_asc`, `sort_desc`, `swap`, `replace`, `append_if_ok`, `prepend_if_ok`, `concat_utf8`, `with_capacity`, `reserve`, `sum`, `product`, `min`, `max`, `starts_with`, `ends_with` |
+| `List` | `len`, `is_empty`, `get`, `set`, `update`, `append`, `prepend`, `concat`, `single`, `repeat`, `reverse`, `join`, `map`, `map_with_index`, `map2`, `map3`, `map4`, `join_map`, `keep_if`, `drop_if`, `keep_oks`, `keep_errs`, `map_try`, `walk`, `walk_backwards`, `walk_until`, `walk_backwards_until`, `walk_with_index`, `walk_with_index_until`, `walk_from`, `walk_from_until`, `walk_try`, `for_each`, `for_each_try`, `any`, `all`, `contains`, `count_if`, `find_first`, `find_last`, `find_first_index`, `find_last_index`, `first`, `last`, `take_first`, `take_last`, `drop_first`, `drop_last`, `drop_at`, `sublist`, `split_at`, `split_first`, `split_last`, `split_on`, `split_on_list`, `chunks_of`, `intersperse`, `sort_with`, `sort_asc`, `sort_desc`, `swap`, `replace`, `append_if_ok`, `prepend_if_ok`, `concat_utf8`, `with_capacity`, `reserve`, `release_excess_capacity`, `range`, `keep_if_try`, `sum`, `product`, `min`, `max`, `starts_with`, `ends_with` |
 | `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `from_utf8_lossy`, `with_ascii_lowercased`, `with_ascii_uppercased`, `caseless_ascii_equals`, `walk_utf8`, `walk_utf8_with_index`, `to_utf16`, `from_utf16`, `from_utf16_lossy`, `to_utf32`, `from_utf32`, `from_utf32_lossy` |
-| `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked`, `add`, `sub`, `mul`, `div`, `div_trunc`, `div_ceil`, `rem`, `pow_int`, `sqrt`, `log`, `asin`, `acos`, `is_nan`, `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left_by`, `shift_right_by`, `shift_right_zf_by`, `count_one_bits`, `count_leading_zero_bits`, `count_trailing_zero_bits`, `pi`, `tau`, `e` |
+| `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked`, `add`, `sub`, `mul`, `div`, `div_trunc`, `div_ceil`, `rem`, `pow_int`, `sqrt`, `log`, `asin`, `acos`, `is_nan`, `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left_by`, `shift_right_by`, `shift_right_zf_by`, `count_one_bits`, `count_leading_zero_bits`, `count_trailing_zero_bits`, `to_double`, `to_integer`, `to_integer_checked`, `pi`, `tau`, `e`, `infinity`, `max_integer`, `min_integer`, `max_double`, `min_double` |
 | `Bool` | `true`, `false`, `and`, `or`, `not`, `is_eq`, `is_not_eq` |
-| `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `clear` |
-| `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve` |
+| `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `capacity`, `release_excess_capacity`, `clear` |
+| `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve`, `capacity`, `release_excess_capacity` |
 
 ### Added or changed on the way
 
@@ -163,9 +163,9 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   heap decides by itself, and the others exist to serve Roc's abilities, which ry does not have
   (traits are declined). R's `print`, `format` and `serialize` play the inspection and encoding
   roles.
-- **`List.release_excess_capacity` and capacity queries**: ry's heap decides when a resizable
-  vector shrinks. `List.with_capacity`, `List.reserve`, `Dict.reserve` and `Set.reserve` are taken,
-  because updates now happen in place (see "Running it"). `Dict.with_capacity` and
+- **`Dict.with_capacity`, `Set.with_capacity` and the `Str` capacity functions**: the capacity
+  functions on `List`, `Dict` and `Set` are taken, because updates happen in place (see "Running
+  it") and the heap never shrinks a resizable vector by itself. `Dict.with_capacity` and
   `Set.with_capacity` are not: an empty collection has no key vector until its first key fixes the
   key type, so there is nothing to size. Roc's `Str` capacity functions are skipped because a
   string is an immutable `CHARSXP`.
@@ -174,8 +174,10 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   that wants wrapping (hashing, checksums) wants it total.
 - **Per-width functions and constants** (`to_i8`, `to_u64_checked`, `min_i32`, `max_f64`,
   `int_cast`, `bytes_to_u16`, `f64_to_parts` and the rest): R has exactly one integer and one
-  double type, which `Num.to_integer_checked` and `Num.to_double` convert between, and
-  `.Machine` holds their limits. `Num.to_frac` is `Num.to_double`.
+  double type, which `Num.to_integer`, `Num.to_integer_checked` and `Num.to_double` convert
+  between, and whose limits are the unsized `Num.max_integer`, `Num.min_integer`,
+  `Num.max_double` and `Num.min_double`. `Num.to_frac` is `Num.to_double`, and `Num.nan_f64` is
+  skipped because no library function returns `NaN`.
 - **`Num.with_decimal_point`, `without_decimal_point` and the `Dec` functions**: R has no decimal
   type.
 - **Effectful variants** (`List.walk!`, `List.map!`, `Result.on_err!` and the rest): R does not
@@ -185,7 +187,7 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   values by `identical()`, which already ignores a collection's order.
 - **An `Option` module**: Roc has none, and returns a `Result` with a descriptive error tag instead
   (`:Err(:ListWasEmpty)`). Code that wants an optional value writes `:Some(x) | :None` directly.
-- **`List.range` and `Str.len`**: R's `seq_len` and `seq` already build ranges. A string length
+- **`Str.len`**: a string length
   counts bytes or code points, never what a reader means by characters, which is why Roc's own
   `Str.len` only points the reader at the alternatives; `Str.count_utf8_bytes` and R's `nchar`
   remain.

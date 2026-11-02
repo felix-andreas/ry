@@ -46,11 +46,12 @@ pub fn normalized(url: &str) -> String {
 
 /// GETs `url` with the extra request `headers` (each `"Name: value"`), following redirects.
 pub fn fetch(url: &str, headers: &[String]) -> Result<Fetched, FetchError> {
-    on_transfer_thread(|| fetch_here(url, headers))
+    let agent = user_agent();
+    on_transfer_thread(|| fetch_here(url, headers, agent.as_deref()))
 }
 
-fn fetch_here(url: &str, headers: &[String]) -> Result<Fetched, FetchError> {
-    let response = send(client(true)?, url, headers, None)?;
+fn fetch_here(url: &str, headers: &[String], agent: Option<&str>) -> Result<Fetched, FetchError> {
+    let response = send(client(true)?, url, headers, agent, None)?;
     let status = response.status();
     if status.is_client_error() || status.is_server_error() {
         return Err(FetchError::Status(status));
@@ -77,19 +78,21 @@ pub fn header_lines(
     follow: bool,
     timeout: Option<Duration>,
 ) -> Result<(Vec<String>, u16), FetchError> {
-    on_transfer_thread(|| header_lines_here(url, follow, timeout))
+    let agent = user_agent();
+    on_transfer_thread(|| header_lines_here(url, follow, agent.as_deref(), timeout))
 }
 
 fn header_lines_here(
     url: &str,
     follow: bool,
+    agent: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<(Vec<String>, u16), FetchError> {
     let mut lines = Vec::new();
     let mut current = url.to_owned();
     // libcurl's default limit on followed redirects in GNU R's configuration.
     for _ in 0..20 {
-        let response = send(client(false)?, &current, &[], timeout)?;
+        let response = send(client(false)?, &current, &[], agent, timeout)?;
         let status = response.status();
         let version = match response.version() {
             Version::HTTP_09 => "HTTP/0.9",
@@ -131,11 +134,29 @@ fn header_lines_here(
 
 /// Runs a whole transfer, from building the client to reading the body, on a thread of its own:
 /// the blocking client runs an async runtime inside, which must not nest in one the embedding
-/// program may already be running on the caller's thread.
+/// program may already be running on the caller's thread. Meanwhile the caller answers the help
+/// server's requests.
 fn on_transfer_thread<T: Send>(
     transfer: impl FnOnce() -> Result<T, FetchError> + Send,
 ) -> Result<T, FetchError> {
-    std::thread::scope(|scope| scope.spawn(transfer).join()).unwrap_or_else(|_| {
+    std::thread::scope(|scope| {
+        let transfer = scope.spawn(transfer);
+        // GNU R's libcurl loop runs R's event loop, so a session can download pages from its own
+        // help server; waiting without answering would hang until the transfer timed out.
+        while crate::help_server::running() && !transfer.is_finished() {
+            // SAFETY: transfers start from R calls on the interpreter's thread, where GNU R
+            // runs event handlers too.
+            let served = unsafe { crate::help_server::wait_and_serve(Duration::from_millis(5)) };
+            if served.is_err() {
+                // The transfer cannot be cut short from here, so the Ctrl-C waits for the next
+                // interrupt check after it.
+                crate::unwind::INTERRUPT_REQUESTED
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        transfer.join()
+    })
+    .unwrap_or_else(|_| {
         Err(FetchError::Transport {
             code: 2,
             message: "Failed initialization",
@@ -167,13 +188,31 @@ fn client(follow: bool) -> Result<&'static Client, FetchError> {
     })
 }
 
+/// `getOption("HTTPUserAgent")`, which GNU R's libcurl transfers send on every request. It is
+/// read on the caller's thread, where the R session lives.
+fn user_agent() -> Option<String> {
+    // SAFETY: called from the R thread, before the transfer thread starts.
+    unsafe { crate::values::first_string(crate::envir::get_option("HTTPUserAgent")) }
+        .map(std::borrow::Cow::into_owned)
+}
+
 fn send(
     client: &'static Client,
     url: &str,
     headers: &[String],
+    agent: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<Response, FetchError> {
     let mut request = client.get(url);
+    // A `User-Agent` among the request's own headers replaces the option's, as in libcurl.
+    let explicit_agent = headers.iter().any(|header| {
+        header
+            .split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("user-agent"))
+    });
+    if let Some(agent) = agent.filter(|_| !explicit_agent) {
+        request = request.header(reqwest::header::USER_AGENT, agent);
+    }
     for header in headers {
         if let Some((name, value)) = header.split_once(':') {
             request = request.header(name.trim(), value.trim());

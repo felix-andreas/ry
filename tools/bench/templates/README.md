@@ -21,6 +21,11 @@ Header lines, all before the code:
 | `#@ ns LINE` | A line added to the package `NAMESPACE`, for S4 exports and imports. |
 | `#@ test` | Everything after this line is the test code. |
 
+In the typed program (`generate.py --typed`), a run of `#:= CODE` lines replaces, one for one,
+the lines right after it. That is how a template uses ry's records, tuples and tags where the
+untyped program, which must run under GNU R, keeps plain lists: the untyped program drops every
+`#:` line, so both programs draw the same instances.
+
 `@ID@` is always available and is unique per instance across the package, so every function
 name must end in `@ID@` (or contain it). Top-level `name <- function` and `name <- R6::R6Class`
 assignments are exported automatically.

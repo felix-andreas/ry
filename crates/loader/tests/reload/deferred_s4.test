@@ -35,19 +35,33 @@ placeholders .__C__Sq .__T__area:demo area
 sync exports
 run .onLoad
 
-#---- a_method_on_an_external_generic_keeps_everything_eager
+#---- a_method_on_an_external_generic_for_a_package_class_is_held_back
 #~~~~ R/a.R
 setClass("Sq", representation(side = "numeric"))
 setMethod("show", "Sq", function(object) cat("square\n"))
 #++++
 rebuild imports (0 directives)
 source R/a.R
-run R/a.R:1 setClass("Sq", representation(side = "numeric"))
-run R/a.R:2 setMethod("show", "Sq", function(object) cat("square\n"))
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setMethod("show", "Sq", function(object) cat("square\n"))
+placeholders .__C__Sq
+forced by other packages' generics show
 sync exports
 run .onLoad
 
-#---- a_replacement_method_without_a_package_generic_keeps_everything_eager
+#---- a_method_on_an_external_generic_for_another_class_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setMethod("show", "numeric", function(object) cat("number\n"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 setMethod("show", "numeric", function(object) cat("number\n"))
+sync exports
+run .onLoad
+
+#---- a_replacement_method_for_a_package_class_without_a_package_generic_is_held_back
 #~~~~ R/a.R
 setClass("Sq", representation(side = "numeric"))
 setGeneric("area", function(shape) standardGeneric("area"))
@@ -55,9 +69,11 @@ setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shap
 #++++
 rebuild imports (0 directives)
 source R/a.R
-run R/a.R:1 setClass("Sq", representation(side = "numeric"))
-run R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
-run R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+placeholders .__C__Sq .__T__area:demo area
+forced by other packages' generics area<-
 sync exports
 run .onLoad
 
@@ -109,5 +125,19 @@ rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 Sq <- setClass("Sq", representation(side = "numeric"))
 run R/a.R:2 Sq <- function(...) new("Sq", ...)
+sync exports
+run .onLoad
+
+#---- a_definition_that_reads_a_package_constant_is_not_cached
+#~~~~ R/a.R
+ZERO <- 0
+setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 ZERO <- 0
+hold back R/a.R:2 setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
+placeholders .__C__Sq
+metadata not cached: a definition reads other code
 sync exports
 run .onLoad

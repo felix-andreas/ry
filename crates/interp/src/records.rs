@@ -192,7 +192,7 @@ unsafe fn arg_items(args: &[Arg]) -> R<Vec<(Option<Sexp>, Sexp)>> {
 }
 
 /// The interned id of the tag a length-one string names.
-unsafe fn tag_id(name: Sexp) -> Result<u32, String> {
+pub(crate) unsafe fn tag_id(name: Sexp) -> Result<u32, String> {
     if name.kind() != SexpType::String
         || length(name) != 1
         || name.element(0) == values::na_string()
@@ -326,6 +326,117 @@ pub unsafe fn cached_field(object: Sexp, name: Sexp, shape: Sexp) -> R<Option<Se
     cache[0] = id as i32;
     cache[1] = index as i32;
     slot_value(object, index).map(Some)
+}
+
+/// `object[[index]]` for a constant `index` through a site's `shape` cache
+/// (`bytecode::Op::Item`), like [`cached_field`]: the item when `object` is a plain record or
+/// tuple that has it, and `None` for `[[`'s own path otherwise, which dispatches, reads a vector
+/// or raises the error.
+pub unsafe fn cached_item(object: Sexp, index: Sexp, shape: Sexp) -> R<Option<Sexp>> {
+    if object.kind() != SexpType::Record || object.is_object() {
+        return Ok(None);
+    }
+    let id = object.record_layout();
+    let cache = values::ints_mut(shape);
+    if cache[0] as u32 == id {
+        return slot_value(object, cache[1] as usize).map(Some);
+    }
+    let Some(layout) = crate::heap().layouts.get(id) else {
+        panic!("a record refers to layout {id}, which was never interned");
+    };
+    if !matches!(layout.kind(), NativeKind::Record | NativeKind::Tuple) {
+        return Ok(None);
+    }
+    let slot = if index.kind() == SexpType::String {
+        let name = index.element(0).bytes();
+        layout
+            .names()
+            .iter()
+            .position(|field| field.car().bytes() == name)
+    } else {
+        let position = values::as_real_scalar(index) as usize;
+        (position >= 1 && position <= object.record_slot_count()).then(|| position - 1)
+    };
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    cache[0] = id as i32;
+    cache[1] = slot as i32;
+    slot_value(object, slot).map(Some)
+}
+
+/// Whether `object` is a plain (unclassed) value of layout `layout`, the test a compiled
+/// tuple, record or tag pattern makes (`bytecode::Op::MatchShape`).
+pub unsafe fn has_layout(object: Sexp, layout: u32) -> bool {
+    object.kind() == SexpType::Record && !object.is_object() && object.record_layout() == layout
+}
+
+/// The tag of a plain tag value, or `None` for anything else (`bytecode::Op::MatchTag`).
+pub unsafe fn plain_tag(object: Sexp) -> Option<u32> {
+    if object.kind() != SexpType::Record || object.is_object() {
+        return None;
+    }
+    let id = object.record_layout();
+    let Some(layout) = crate::heap().layouts.get(id) else {
+        panic!("a record refers to layout {id}, which was never interned");
+    };
+    layout.tag
+}
+
+/// The layout a constructor call builds and the slot each item lands in, when the call's syntax
+/// decides both: `tag` is the tag's name for `.ry_tag`, and `names` holds each item's name
+/// symbol, or `nil()` for an unnamed item. `None` when the call would raise an error, which the
+/// constructor itself then reports.
+pub(crate) unsafe fn constructor_layout(
+    tag: Option<Sexp>,
+    names: &[Sexp],
+    record: bool,
+) -> Option<(u32, Vec<usize>)> {
+    let tag = match tag {
+        Some(name) => Some(tag_id(name).ok()?),
+        None => None,
+    };
+    let named = names.iter().filter(|name| **name != nil()).count();
+    if named != 0
+        && (named != names.len() || names.iter().any(|name| symbol_name(*name).is_empty()))
+    {
+        return None;
+    }
+    if tag.is_none() && (record != (named != 0) || record && names.is_empty()) {
+        return None;
+    }
+    let (fields, slots) = if named == 0 {
+        (
+            Fields::Positional(names.len() as u32),
+            (0..names.len()).collect(),
+        )
+    } else {
+        let mut sorted = names.to_vec();
+        sorted.sort_by(|left, right| left.car().bytes().cmp(right.car().bytes()));
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return None;
+        }
+        let slots = names
+            .iter()
+            .map(|name| sorted.iter().position(|field| field == name))
+            .collect::<Option<Vec<usize>>>()?;
+        (Fields::Named(sorted.into_boxed_slice()), slots)
+    };
+    let id = crate::heap().layouts.intern(Layout { tag, fields });
+    Some((id, slots))
+}
+
+/// A value of `layout` with these slots (`bytecode::Op::Construct`).
+pub unsafe fn construct(layout: u32, slots: &[Sexp]) -> R<Sexp> {
+    Ok(crate::heap().alloc_record(layout, slots)?)
+}
+
+/// The error a `match` raises when no arm matches `value`.
+pub unsafe fn no_arm_matches(value: Sexp, call: Sexp) -> Unwind {
+    error_in(
+        call,
+        format!("no arm of this `match` matches {}", describe(value)),
+    )
 }
 
 unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
@@ -476,18 +587,10 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         if !matches(pattern, value, &mut bindings, call.call)? {
             continue;
         }
-        if let Some(guard) = guard {
-            let scratch = values::new_env(call.env)?;
-            for &(name, bound) in &bindings {
-                eval::define(name, bound, scratch)?;
-            }
-            let condition = eval::eval(guard, scratch)?;
-            if condition.kind() == SexpType::Record {
-                return Err(boundary_error(condition, guard, call.call));
-            }
-            if !eval::as_condition(condition, call.call)? {
-                continue;
-            }
+        if let Some(guard) = guard
+            && !guard_condition(guard, &bindings, call.env, call.call)?
+        {
+            continue;
         }
         for &(name, bound) in &bindings {
             eval::define(name, bound, call.env)?;
@@ -495,10 +598,53 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         interp().visible = true;
         return eval::eval(body, call.env);
     }
-    Err(call.error(format!(
-        "no arm of this `match` matches {}",
-        describe(value)
-    )))
+    Err(no_arm_matches(value, call.call))
+}
+
+/// Whether a `match` guard holds, evaluated in a new child of `env` that binds the pattern's
+/// names, so that a failing guard or an assignment in it leaves `env` untouched.
+unsafe fn guard_condition(
+    guard: Sexp,
+    bindings: &[(Sexp, Sexp)],
+    env: Sexp,
+    call: Sexp,
+) -> R<bool> {
+    let condition = eval_bound(guard, bindings, env)?;
+    guard_holds(condition, guard, call)
+}
+
+/// Evaluates `expression` in a new child of `env` that binds each name of `bindings`.
+unsafe fn eval_bound(expression: Sexp, bindings: &[(Sexp, Sexp)], env: Sexp) -> R<Sexp> {
+    let scratch = values::new_env(env)?;
+    for &(name, bound) in bindings {
+        eval::define(name, bound, scratch)?;
+    }
+    eval::eval(expression, scratch)
+}
+
+/// [`eval_bound`] for compiled code, whose bound names are the symbols in the list `names` and
+/// whose values are `bound`, in the same order.
+pub unsafe fn eval_bound_registers(
+    expression: Sexp,
+    names: Sexp,
+    bound: &[Sexp],
+    env: Sexp,
+) -> R<Sexp> {
+    let bindings: Vec<(Sexp, Sexp)> = bound
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| (names.element(index), value))
+        .collect();
+    eval_bound(expression, &bindings, env)
+}
+
+/// Whether the value of the `match` guard `guard` holds, as `if` reads a condition, except that
+/// a record, tuple or tag gets the boundary error.
+pub unsafe fn guard_holds(condition: Sexp, guard: Sexp, call: Sexp) -> R<bool> {
+    if condition.kind() == SexpType::Record {
+        return Err(boundary_error(condition, guard, call));
+    }
+    eval::as_condition(condition, call)
 }
 
 /// The value a failed `match` names, shortened to one line.
@@ -675,7 +821,7 @@ unsafe fn payload_matches(
 /// A literal pattern matches a length-one value of the same kind that equals it: numbers match
 /// numbers whatever their storage, a missing literal matches a missing value of any type, and
 /// `NaN` matches `NaN`.
-unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
+pub unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
     if pattern == nil() || value == nil() {
         return pattern == value;
     }

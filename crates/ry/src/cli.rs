@@ -1,18 +1,19 @@
 use {
     crate::{
-        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Fingerprinter, Plan},
-        config::{self, ExperimentalFeatures},
+        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Plan},
+        config,
         diagnostics::{apply_suppressions, document_diagnostics},
         namespace,
         position::LineIndex,
     },
     console::style,
+    ide::{InferredAnnotation, TextEdit, inferred_annotations},
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
-    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -21,8 +22,9 @@ use {
             derive_from_syntax, project_fold_shares,
         },
         metadata::{
-            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            OS_TYPE, PackageMetadata, attached_union, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -34,8 +36,7 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
-        hash::Hasher,
-        io::Read,
+        io::{self, Read},
         iter, mem,
         num::NonZero,
         path::{Path, PathBuf},
@@ -122,6 +123,7 @@ pub fn check(
     output: OutputFormat,
     min_severity: MinSeverity,
     fix: FixMode,
+    annotate: bool,
     cache: CacheUse,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
@@ -156,8 +158,9 @@ pub fn check(
     let mut n_fixed = 0;
     let mut n_fixable = 0;
     let mut n_unsafe_fixable = 0;
+    let mut n_annotated = 0;
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+        let mut analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -165,7 +168,14 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+            }
+        }
+        if annotate {
+            let annotated = write_inferred_annotations(&analysis)?;
+            if annotated > 0 {
+                n_annotated += annotated;
+                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
             }
         }
         n_failures += analysis.failures;
@@ -181,17 +191,10 @@ pub fn check(
             n_diagnostics +=
                 render_findings(output, min_severity, path, source, problems, &|_| None);
         }
-        let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
-        for file in analysis.files.iter().filter(|file| file.requested) {
+        for (text, rendered) in render_project_findings(&analysis, output, min_severity) {
             n_files += 1;
-            n_diagnostics += render_findings(
-                output,
-                min_severity,
-                &file.path,
-                analysis.source(file),
-                &file.diagnostics,
-                &resolve_note,
-            );
+            n_diagnostics += rendered;
+            print_findings(output, &text);
         }
         if let Some((path, source, problems)) = &analysis.namespace {
             n_diagnostics +=
@@ -210,6 +213,14 @@ pub fn check(
         if n_fixed > 0 {
             let fixes = if n_fixed == 1 { "fix" } else { "fixes" };
             println!("applied {n_fixed} {fixes}");
+        }
+        if n_annotated > 0 {
+            let annotations = if n_annotated == 1 {
+                "annotation"
+            } else {
+                "annotations"
+            };
+            println!("added {n_annotated} inferred {annotations}");
         }
         report_check_summary(n_files, n_diagnostics);
         let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
@@ -269,6 +280,54 @@ fn apply_check_fixes(
     Ok(applied)
 }
 
+/// Writes the inferred annotation of every unannotated top-level binding in the requested files
+/// and returns how many it wrote. One pass is enough: an annotation states what inference
+/// already found, so it exposes no further binding to annotate.
+fn write_inferred_annotations(analysis: &ProjectAnalysis) -> Result<usize, CommandError> {
+    let mut written = 0;
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
+        let annotations: Vec<InferredAnnotation> = inferred_annotations(&analysis.db, file.file)
+            .into_iter()
+            .filter(|annotation| annotation.top_level)
+            .collect();
+        if annotations.is_empty() {
+            continue;
+        }
+        let count = annotations.len();
+        let mut edits: Vec<TextEdit> = annotations
+            .into_iter()
+            .flat_map(|annotation| annotation.edits)
+            .collect();
+        let original = fs::read_to_string(&file.path).map_err(|err| {
+            error_because(&format!("failed to read: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+            continue;
+        }
+        // Every edit is an insertion at a distinct offset, so applying them from the end keeps
+        // each earlier offset valid.
+        edits.sort_by_key(|edit| Reverse(edit.range.start()));
+        let mut edited = original;
+        for edit in edits {
+            edited.replace_range(
+                usize::from(edit.range.start())..usize::from(edit.range.end()),
+                &edit.replacement,
+            );
+        }
+        fs::write(&file.path, edited).map_err(|err| {
+            error_because(&format!("failed to write: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        written += count;
+    }
+    Ok(written)
+}
+
 /// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
 /// may not mean what they say.
 fn fixes_apply(file: &AnalyzedFile) -> bool {
@@ -279,8 +338,8 @@ fn fixes_apply(file: &AnalyzedFile) -> bool {
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
-/// it. Analysis always covers the whole project root; `requested` only marks which files the
-/// caller asked about.
+/// it. Analysis always covers the whole project root, so names resolve across it, but only the
+/// files the caller asked about are checked: the others' `diagnostics` are empty.
 pub(crate) struct ProjectAnalysis {
     pub db: RootDatabase,
     pub files: Vec<AnalyzedFile>,
@@ -297,12 +356,22 @@ pub(crate) struct AnalyzedFile {
     pub file: SourceFile,
     pub requested: bool,
     pub diagnostics: Vec<Diagnostic>,
+    /// A literate document's own text. Analysis reads its prose blanked, but a reader of a
+    /// diagnostic's snippet needs to see the prose around the chunk.
+    pub document: Option<String>,
 }
 
 impl ProjectAnalysis {
     /// The text lives only in the database, so a large project holds one copy of it.
     pub fn source(&self, file: &AnalyzedFile) -> &str {
         file.file.text(&self.db)
+    }
+
+    /// The text a diagnostic's snippet shows: the document itself, prose included.
+    pub fn shown_source<'a>(&'a self, file: &'a AnalyzedFile) -> &'a str {
+        file.document
+            .as_deref()
+            .unwrap_or_else(|| self.source(file))
     }
 
     /// Resolves a related range against the document it lives in, which is often another file.
@@ -313,29 +382,30 @@ impl ProjectAnalysis {
             .find(|analyzed| analyzed.file == related.file)?;
         Some(RelatedNote {
             path: &analyzed.path,
-            source: self.source(analyzed),
+            source: self.shown_source(analyzed),
             range: related.range,
             message: related.message,
         })
     }
 }
 
+/// Analyzes the R files under `walk` as one project rooted at `root`, whose `ry.toml`, stubs,
+/// `DESCRIPTION` and `NAMESPACE` apply, and checks the files under `requested`.
 pub(crate) fn analyze_project(
     root: &Path,
+    walk: &Path,
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<ProjectAnalysis, CommandError> {
-    // A directory that is no project, such as one holding a downloaded script, gets no record.
-    let is_project = config::CONFIG_FILE_NAMES
-        .iter()
-        .chain(["DESCRIPTION"].iter())
-        .any(|name| root.join(name).is_file());
-    let cache = if is_project { cache } else { CacheUse::Off };
-    let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
+    let cache = match check_cache::is_project(root) {
+        true => cache,
+        false => CacheUse::Off,
+    };
+    let (analysis, reused) = analyze_project_with(root, walk, config.clone(), requested, cache)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
-        let fresh = analyze_project_with(root, config, requested, CacheUse::Off)?.0;
+        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off)?.0;
         let source_files = |analysis: &ProjectAnalysis| -> Vec<SourceFile> {
             analysis.files.iter().map(|file| file.file).collect()
         };
@@ -346,7 +416,13 @@ pub(crate) fn analyze_project(
                 .map(|diagnostic| check_cache::recorded_form(diagnostic, files))
                 .collect()
         };
-        for (cached, recomputed) in analysis.files.iter().zip(&fresh.files) {
+        // A fresh run without the cache checks only the requested files.
+        for (cached, recomputed) in analysis
+            .files
+            .iter()
+            .zip(&fresh.files)
+            .filter(|(cached, _)| cached.requested)
+        {
             assert_eq!(
                 comparable(&cached.diagnostics, &reused_files),
                 comparable(&recomputed.diagnostics, &fresh_files),
@@ -372,13 +448,14 @@ pub(crate) fn analyze_project(
 /// The analysis, and whether any finding in it came from the check cache.
 fn analyze_project_with(
     root: &Path,
+    walk: &Path,
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<(ProjectAnalysis, bool), CommandError> {
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
-    let mut paths = collect_r_files(root, exclude.as_ref())?;
+    let mut paths = collect_r_files(walk, exclude.as_ref())?;
     // `exclude` scopes the project walk; it does not veto a file named directly.
     for target in requested {
         if !target.is_dir() && !paths.contains(target) {
@@ -470,11 +547,11 @@ fn analyze_project_with(
         stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
     }
 
-    let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
+    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-    for path in paths {
-        let source = match fs::read_to_string(&path) {
-            Ok(source) => analysable_source(&path, source),
+    for (path, read) in read_sources(paths) {
+        let (source, document) = match read {
+            Ok(read) => read,
             Err(err) => {
                 failures += 1;
                 error_because(&format!("failed to read: {}", path.display()), &err);
@@ -485,7 +562,7 @@ fn analyze_project_with(
             .iter()
             .any(|target| path == *target || path.starts_with(target));
         reported.push(asked_about);
-        checked.push((path, source));
+        checked.push((path, source, document));
     }
 
     // Analysis follows the project order; diagnostics still print in discovery order.
@@ -495,7 +572,7 @@ fn analyze_project_with(
     let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
     let mut project = Vec::with_capacity(checked.len());
     for index in ordered {
-        let (path, source) = &mut checked[index];
+        let (path, source, _) = &mut checked[index];
         let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
         let file = SourceFile::builder(mem::take(source), kind)
@@ -509,33 +586,36 @@ fn analyze_project_with(
         .durability(Durability::HIGH)
         .new(&db);
     let data_files = scan_data_files(root);
-    let key = {
-        let mut fingerprinter = Fingerprinter::new();
-        fingerprinter
-            .text(env!("CARGO_PKG_VERSION"))
-            .text(&build_identity())
-            .text(&format!("{config:?}"))
-            .text(&root.to_string_lossy())
-            .text(&format!("{data_files:?}"));
-        for source in [&namespace_source, &description_source] {
-            match source {
-                Some(text) => fingerprinter.bytes(&[1]).text(text),
-                None => fingerprinter.bytes(&[0]),
-            };
+    // Hashing the binary and every source only pays when a record is read or written.
+    let (key, contents) = match cache {
+        CacheUse::ReadWrite => {
+            let executable = env::current_exe().unwrap_or_default();
+            let key = check_cache::key(
+                &executable,
+                &config,
+                root,
+                &data_files,
+                namespace_source.as_deref(),
+                description_source.as_deref(),
+                project_stubs
+                    .iter()
+                    .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+            );
+            let contents: Vec<Fingerprint> = files
+                .iter()
+                .map(|&file| check_cache::fingerprint(file.text(&db)))
+                .collect();
+            (key, contents)
         }
-        for stub in &project_stubs {
-            fingerprinter.text(&stub.stem).text(&stub.text);
-        }
-        fingerprinter.finish()
+        CacheUse::Off => (Fingerprint::default(), Vec::new()),
     };
     let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
-    let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
-    let contents: Vec<Fingerprint> = files
-        .iter()
-        .map(|&file| check_cache::fingerprint(file.text(&db)))
-        .collect();
+    let (paths, documents): (Vec<PathBuf>, Vec<Option<String>>) = checked
+        .into_iter()
+        .map(|(path, _, document)| (path, document))
+        .unzip();
     let mut plan = match cache {
         CacheUse::Off => Plan::Fresh,
         CacheUse::ReadWrite => {
@@ -551,15 +631,15 @@ fn analyze_project_with(
     };
     if let Plan::Replay(record) = &plan {
         let per_file: Option<Vec<Vec<Diagnostic>>> = (0..files.len())
-            .map(|index| record.diagnostics(index, &files))
+            .map(|index| record.diagnostics(index, |index| files.get(index).copied()))
             .collect();
-        let namespace = record.namespace(&files);
+        let namespace = record.namespace(|index| files.get(index).copied());
         if let (Some(per_file), Some(namespace)) = (per_file, namespace) {
             let namespace = match (namespace, &namespace_source) {
                 (Some(problems), Some(source)) => Some((namespace_path, source.clone(), problems)),
                 _ => None,
             };
-            let files = analyzed_files(paths, files, reported, per_file);
+            let files = analyzed_files(paths, documents, files, reported, per_file);
             let analysis = ProjectAnalysis {
                 db,
                 files,
@@ -576,7 +656,7 @@ fn analyze_project_with(
     if let Plan::Partial { previous, stale } = &mut plan {
         for (index, stale) in stale.iter_mut().enumerate() {
             if !*stale {
-                recorded[index] = previous.diagnostics(index, &files);
+                recorded[index] = previous.diagnostics(index, |index| files.get(index).copied());
                 *stale = recorded[index].is_none();
             }
         }
@@ -681,22 +761,49 @@ fn analyze_project_with(
         metadata.set_attached(&mut db).to(attached.clone());
     }
 
+    // Without the cache only the requested files are checked: another file's items are still
+    // analyzed where a requested file's check reaches them, but its own findings would only be
+    // thrown away. The cache records every file's findings, so with it every stale file is checked.
+    let checked = |index: usize| match cache {
+        CacheUse::ReadWrite => true,
+        CacheUse::Off => reported.get(index).copied().unwrap_or(false),
+    };
+    let checked_by_size: Vec<usize> = checked_order
+        .iter()
+        .copied()
+        .filter(|&index| checked(index))
+        .collect();
     // Every item is named across cores first: a file's check names the items of other files its
-    // interface reaches, and two threads reaching the same item would block on one claim.
+    // interface reaches, and two threads reaching the same item would block on one claim. The
+    // interface edges follow for the same reason, and because the walk that finds the project's
+    // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
         if let Some(tree) = trees.get(index) {
             drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
         }
+        if !checked(index) {
+            return;
+        }
         let file = files[index];
-        for &item in semantics::item_tree(db, file) {
+        let items = semantics::item_tree(db, file);
+        for &item in items {
             semantics::item_naming(db, item);
         }
+        for &item in items {
+            semantics::item_interface_edges(db, item);
+        }
     });
+    // The group walk records one dependency edge per item, and salsa keeps that capacity in the
+    // handle's reused query-stack frame, so every later query at the same depth would clear a
+    // table sized for the whole project. A throwaway handle takes the walk and drops the frame.
+    if let Some(project) = ProjectFiles::try_get(&db) {
+        semantics::project_interface_groups(&db.clone(), project);
+    }
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &checked_order, |db, index| {
+    for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {
@@ -714,7 +821,7 @@ fn analyze_project_with(
                 .collect();
             recorded == used_tokens
         })
-        .and_then(|previous| previous.namespace(&files));
+        .and_then(|previous| previous.namespace(|index| files.get(index).copied()));
     if let (Some(namespace_source), Some(problems)) = (&namespace_source, recorded_namespace) {
         namespace = problems.map(|problems| (namespace_path, namespace_source.clone(), problems));
     } else if let Some(namespace_source) = &namespace_source {
@@ -790,7 +897,7 @@ fn analyze_project_with(
         }
     }
     let reused = matches!(plan, Plan::Partial { .. });
-    let files = analyzed_files(paths, files, reported, per_file);
+    let files = analyzed_files(paths, documents, files, reported, per_file);
     Ok((
         ProjectAnalysis {
             db,
@@ -805,6 +912,7 @@ fn analyze_project_with(
 
 fn analyzed_files(
     paths: Vec<PathBuf>,
+    documents: Vec<Option<String>>,
     files: Vec<SourceFile>,
     reported: Vec<bool>,
     per_file: Vec<Vec<Diagnostic>>,
@@ -814,27 +922,53 @@ fn analyzed_files(
         .zip(files)
         .zip(reported)
         .zip(per_file)
-        .map(|(((path, file), requested), diagnostics)| AnalyzedFile {
-            path,
-            file,
-            requested,
-            diagnostics,
-        })
+        .zip(documents)
+        .map(
+            |((((path, file), requested), diagnostics), document)| AnalyzedFile {
+                path,
+                file,
+                requested,
+                diagnostics,
+                document,
+            },
+        )
         .collect()
 }
 
-/// Identifies the running ry binary by its bytes, so a record written by another build is never
-/// read back, even one with the same size and modification time. Hashing the binary takes a few
-/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
-fn build_identity() -> String {
-    match env::current_exe().and_then(fs::read) {
-        Ok(bytes) => {
-            let mut hasher = FxHasher::default();
-            hasher.write(&bytes);
-            format!("{} {:x}", bytes.len(), hasher.finish())
-        }
-        Err(_) => format!("unreadable {}", std::process::id()),
-    }
+/// Reads every source across cores, in `paths` order. A cold check reads a thousand files
+/// before anything else can start, so a serial read is a visible slice of its wall time.
+fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(paths.len())
+        .max(1);
+    let chunk = paths.len().div_ceil(workers).max(1);
+    let read: Vec<io::Result<(String, Option<String>)>> = thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|path| {
+                            fs::read_to_string(path).map(|text| {
+                                if is_literate_path(path) {
+                                    (r_source_of_literate(&text), Some(text))
+                                } else {
+                                    (text, None)
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("read worker should not panic"))
+            .collect()
+    });
+    paths.into_iter().zip(read).collect()
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
@@ -1119,28 +1253,45 @@ pub(crate) fn read_project_stubs(
         .collect()
 }
 
-/// Package documents first (in `Collate` order when declared, then by path), then
-/// scripts. The server, `check`, and the stats agree on it, so the last-writer-wins
-/// symbol index selects the same winners everywhere.
+/// Package documents first, then scripts. Package files follow a load's order
+/// (`loader::collate_code_files`): the `Collate` field's files, then the rest with those of `R/`
+/// before those of a subdirectory, each by path. A load never runs the other operating system's
+/// subdirectory (`R/windows/` on Unix), so its files come first, where every loaded definition
+/// of the same name overrides them. The server, `check`, and the stats agree on this order, so
+/// the last-writer-wins symbol index selects the same winners everywhere, and the winner is the
+/// definition a load leaves bound.
 pub(crate) fn project_order<'a>(
     root: &'a Path,
     collate: &'a [String],
-) -> impl Fn(&Path) -> (bool, usize, String) + 'a {
+) -> impl Fn(&Path) -> (bool, bool, usize, bool, String) + 'a {
     let r_path = root.join("R");
+    let other_os = if OS_TYPE == "unix" { "windows" } else { "unix" };
     let collate_rank: HashMap<&str, usize> = collate
         .iter()
         .enumerate()
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
     move |path| {
-        let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+        // A `Collate` entry is a path relative to `R/`, such as `unix/a.R`.
+        let relative = path
+            .strip_prefix(&r_path)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        let rank = relative
+            .as_deref()
+            .and_then(|relative| collate_rank.get(relative))
             .copied()
             .unwrap_or(usize::MAX);
+        let in_other_os = relative
+            .as_deref()
+            .is_some_and(|relative| relative.starts_with(&format!("{other_os}/")));
         (
-            !path.starts_with(&r_path),
+            relative.is_none(),
+            !in_other_os,
             rank,
+            relative
+                .as_deref()
+                .is_some_and(|relative| relative.contains('/')),
             path.strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()
@@ -1149,8 +1300,111 @@ pub(crate) fn project_order<'a>(
     }
 }
 
-/// Renders the findings at or above the floor and returns how many it rendered.
+/// Renders each requested file's findings, in file order, with how many each rendered. A
+/// check that reports thousands of findings spends most of its tail in the renderer, so the
+/// files render across cores.
+fn render_project_findings(
+    analysis: &ProjectAnalysis,
+    output: OutputFormat,
+    min_severity: MinSeverity,
+) -> Vec<(String, usize)> {
+    let files = &analysis.files;
+    let sources: Vec<&str> = files
+        .iter()
+        .map(|file| analysis.shown_source(file))
+        .collect();
+    let mut positions: FxHashMap<SourceFile, usize> = FxHashMap::default();
+    for (index, file) in files.iter().enumerate() {
+        positions.entry(file.file).or_insert(index);
+    }
+    let resolve_note = |related: &RelatedLocation| {
+        let &index = positions.get(&related.file)?;
+        Some(RelatedNote {
+            path: &files.get(index)?.path,
+            source: sources.get(index)?,
+            range: related.range,
+            message: related.message,
+        })
+    };
+    let requested: Vec<usize> = (0..files.len())
+        .filter(|&index| files[index].requested)
+        .collect();
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(requested.len())
+        .max(1);
+    let next = AtomicUsize::new(0);
+    let mut rendered: Vec<(usize, String, usize)> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (next, requested, resolve_note) = (&next, &requested, &resolve_note);
+                let (files, sources) = (files, &sources);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    while let Some(&index) = requested.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let file = &files[index];
+                        let mut text = String::new();
+                        let count = render_findings_into(
+                            &mut text,
+                            output,
+                            min_severity,
+                            &file.path,
+                            sources[index],
+                            &file.diagnostics,
+                            resolve_note,
+                        );
+                        done.push((index, text, count));
+                    }
+                    done
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("render worker should not panic"))
+            .collect()
+    });
+    rendered.sort_unstable_by_key(|&(index, _, _)| index);
+    rendered
+        .into_iter()
+        .map(|(_, text, count)| (text, count))
+        .collect()
+}
+
+/// Renders the findings at or above the floor, prints them, and returns how many it rendered.
 pub(crate) fn render_findings<'a>(
+    output: OutputFormat,
+    min_severity: MinSeverity,
+    path: &Path,
+    source: &str,
+    diagnostics: &[Diagnostic],
+    resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
+) -> usize {
+    let mut text = String::new();
+    let rendered = render_findings_into(
+        &mut text,
+        output,
+        min_severity,
+        path,
+        source,
+        diagnostics,
+        resolve_note,
+    );
+    print_findings(output, &text);
+    rendered
+}
+
+/// Human findings go to stderr, JSON records to stdout.
+fn print_findings(output: OutputFormat, text: &str) {
+    match output {
+        OutputFormat::Human => eprint!("{text}"),
+        OutputFormat::Json => print!("{text}"),
+    }
+}
+
+/// Appends the findings at or above the floor to `out` and returns how many it rendered.
+fn render_findings_into<'a>(
+    out: &mut String,
     output: OutputFormat,
     min_severity: MinSeverity,
     path: &Path,
@@ -1177,11 +1431,11 @@ pub(crate) fn render_findings<'a>(
         match output {
             OutputFormat::Human => {
                 let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
-                render_human_diagnostic(path, source, lines, diagnostic, &related, fixable)
+                render_human_diagnostic(out, path, source, lines, diagnostic, &related, fixable)
             }
             OutputFormat::Json => {
                 let index = line_index.get_or_insert_with(|| LineIndex::new(source));
-                render_json_diagnostic(path, source, index, diagnostic, &related)
+                render_json_diagnostic(out, path, source, index, diagnostic, &related)
             }
         }
     }
@@ -1197,6 +1451,7 @@ pub(crate) struct RelatedNote<'a> {
 }
 
 fn render_human_diagnostic(
+    out: &mut String,
     path: &Path,
     source: &str,
     lines: &LineStarts,
@@ -1208,7 +1463,7 @@ fn render_human_diagnostic(
         .iter()
         .map(|note| LineStarts::new(note.source))
         .collect();
-    report(&Report {
+    out.push_str(&report_text(&Report {
         // A suppression comment must spell the code, so the human output leads with it.
         code: Some(diagnostic.code),
         severity: match diagnostic.severity {
@@ -1250,8 +1505,8 @@ fn render_human_diagnostic(
             }
         }),
         ..Report::default()
-    });
-    eprintln!();
+    }));
+    out.push('\n');
 }
 
 /// Clamped to the first line when the range spans more: drawing a whole
@@ -1288,6 +1543,7 @@ fn primary_label(source: &str, range: TextRange) -> LabeledSpan {
 
 /// Positions are 1-based like the human renderer; field names are a documented contract.
 fn render_json_diagnostic(
+    out: &mut String,
     path: &Path,
     source: &str,
     index: &LineIndex,
@@ -1343,7 +1599,8 @@ fn render_json_diagnostic(
             })
         }),
     });
-    println!("{record}");
+    out.push_str(&record.to_string());
+    out.push('\n');
 }
 
 /// Config errors and type errors share one reporter so they never look like two tools.
@@ -1432,6 +1689,10 @@ impl miette::Diagnostic for Report<'_> {
 /// Colour and unicode on an attended terminal, monochrome unicode when colour is
 /// refused, plain ASCII into a pipe or file.
 pub fn report(diagnostic: &dyn miette::Diagnostic) {
+    eprint!("{}", report_text(diagnostic));
+}
+
+fn report_text(diagnostic: &dyn miette::Diagnostic) -> String {
     let reporter = &*REPORTER;
     let mut rendered = String::new();
     if reporter
@@ -1440,8 +1701,7 @@ pub fn report(diagnostic: &dyn miette::Diagnostic) {
         .is_err()
     {
         // Cannot fail; the fallback degrades a reporter bug rather than swallowing the finding.
-        eprintln!("{diagnostic}");
-        return;
+        return format!("{diagnostic}\n");
     }
     let mut kept = String::with_capacity(rendered.len());
     for line in rendered.lines() {
@@ -1451,7 +1711,7 @@ pub fn report(diagnostic: &dyn miette::Diagnostic) {
         kept.push_str(line);
         kept.push('\n');
     }
-    eprint!("{kept}");
+    kept
 }
 
 struct Reporter {
@@ -1662,10 +1922,90 @@ pub(crate) fn analysis_root_for_target(target: &Path) -> PathBuf {
     }
 }
 
+/// A `--range` for `ry format`: one-based lines, and optional one-based
+/// character columns. A start without a column starts at its line's first
+/// character, and an end without one takes its whole line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatRange {
+    start: (usize, Option<usize>),
+    end: (usize, Option<usize>),
+}
+
+impl std::str::FromStr for FormatRange {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<FormatRange, String> {
+        let position = |part: &str| -> Result<(usize, Option<usize>), String> {
+            let number = |digits: &str| match digits.parse::<usize>() {
+                Ok(0) | Err(_) => Err(format!(
+                    "`{part}` is not a position: write LINE or LINE:COLUMN, counting from 1"
+                )),
+                Ok(number) => Ok(number),
+            };
+            match part.split_once(':') {
+                Some((line, column)) => Ok((number(line)?, Some(number(column)?))),
+                None => Ok((number(part)?, None)),
+            }
+        };
+        let (start, end) = text.split_once('-').unwrap_or((text, text));
+        let range = FormatRange {
+            start: position(start.trim())?,
+            end: position(end.trim())?,
+        };
+        if range.end.0 < range.start.0 {
+            return Err(format!("the range `{text}` ends before it starts"));
+        }
+        Ok(range)
+    }
+}
+
+impl FormatRange {
+    /// The byte range in `text`, or `None` when the range starts past the
+    /// last line, which on the command line is a typo rather than a request
+    /// to format the last line. A column past a line's end, or an end past
+    /// the file's end, clamps to it.
+    fn in_text(self, text: &str) -> Option<syntax::TextRange> {
+        if self.start.0 > line_count(text) {
+            return None;
+        }
+        let index = LineIndex::new(text);
+        let offset = |(line, column): (usize, Option<usize>), is_end: bool| {
+            let line = u32::try_from(line - 1).unwrap_or(u32::MAX);
+            if line >= index.line_count() {
+                return syntax::TextSize::of(text);
+            }
+            let line_start = index.line_start(line) as usize;
+            let line_text = &text[line_start..];
+            let line_text = &line_text[..line_text.find('\n').unwrap_or(line_text.len())];
+            let within = match (column, is_end) {
+                (Some(column), _) => line_text
+                    .char_indices()
+                    .nth(column - 1)
+                    .map_or(line_text.len(), |(at, _)| at),
+                (None, false) => 0,
+                (None, true) => line_text.len(),
+            };
+            syntax::TextSize::try_from(line_start + within).unwrap_or_default()
+        };
+        let (start, end) = (offset(self.start, false), offset(self.end, true));
+        Some(syntax::TextRange::new(start.min(end), start.max(end)))
+    }
+}
+
+/// The lines a person sees in `text`: a final line break ends the last line
+/// rather than starting an empty one, and an empty file still has line 1.
+fn line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+/// Files format on every core: each is independent, and the formatter does
+/// no I/O, so the work divides without any shared state. Reports come out in
+/// path order whatever order the workers finish in.
 pub fn fmt(
     maybe_files: Option<&[PathBuf]>,
     check: bool,
     diff: bool,
+    range: Option<FormatRange>,
     verbose: bool,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
@@ -1674,65 +2014,94 @@ pub fn fmt(
     let paths_with_config = files
         .iter()
         .map(|file| {
-            let config = config::Config::discover(file).map_err(|err| {
+            let mut config = config::Config::discover(file).map_err(|err| {
                 report(&err);
                 CommandError
             })?;
+            // lintr's settings only concern lints, so formatting never warns about them.
+            config.lintr_problems.clear();
             warn_config(&config);
-            // `[check] exclude` scopes analysis, not formatting. Literate documents are never
-            // formatted: most of an `.Rmd` is prose.
-            let paths: Vec<PathBuf> = collect_r_files(file, None)?
-                .into_iter()
-                .filter(|path| {
-                    !path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(is_literate_extension)
-                })
-                .collect();
-            Ok((paths, config))
+            // `[check] exclude` scopes analysis, not formatting.
+            let paths: Vec<PathBuf> = collect_r_files(file, None)?;
+            Ok((paths, config.format))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let jobs: Vec<(PathBuf, format::Config)> = paths_with_config
+        .into_iter()
+        .flat_map(|(paths, config)| paths.into_iter().map(move |path| (path, config)))
+        .collect();
+    if range.is_some() && jobs.len() != 1 {
+        error("`--range` formats part of one file, so pass exactly one file");
+        return Err(CommandError);
+    }
+    if range.is_some() && jobs.iter().any(|(path, _)| is_literate_path(path)) {
+        error(
+            "`--range` formats part of an R file; an `.Rmd`, `.qmd` or `.Rnw` formats whole chunks",
+        );
+        return Err(CommandError);
+    }
 
     let start_global = Instant::now();
-    let mut elapsed_total = Duration::ZERO;
-    let mut bytes_total = 0usize;
+    let workers = thread::available_parallelism()
+        .map(NonZero::get)
+        .unwrap_or(1)
+        .min(jobs.len().max(1));
+    let next = AtomicUsize::new(0);
+    let mut results: Vec<(usize, FormatResult)> = Vec::with_capacity(jobs.len());
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (next, jobs) = (&next, &jobs);
+                thread::Builder::new()
+                    // The formatter recurses once per nesting level of the code.
+                    .stack_size(crate::ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        let mut done = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some((path, config)) = jobs.get(index) else {
+                                break;
+                            };
+                            let result = format_file(path, *config, range, !(check || diff));
+                            done.push((index, result));
+                        }
+                        done
+                    })
+                    .expect("format worker thread should spawn")
+            })
+            .collect();
+        for handle in handles {
+            results.extend(handle.join().expect("format worker should not panic"));
+        }
+    });
+    results.sort_by_key(|(index, _)| *index);
 
-    let mut n_files = 0;
+    let n_files = jobs.len();
     let mut n_unformatted = 0;
     let mut n_errors = 0;
-    for (paths, config) in paths_with_config {
-        for path in paths {
-            n_files += 1;
-            let initial = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(err) => {
-                    n_errors += 1;
-                    error_because(&format!("failed to format: {}", path.display()), &err);
-                    continue;
-                }
-            };
-
-            let start = Instant::now();
-            let new = match format::format(&initial, config.format) {
-                Ok(new) => new,
-                Err(err) => {
-                    n_errors += 1;
-                    error_because(&format!("failed to format: {}", path.display()), &err);
-                    continue;
-                }
-            };
-            elapsed_total += start.elapsed();
-            bytes_total += initial.len();
-
-            if initial != new {
+    let mut elapsed_total = Duration::ZERO;
+    let mut bytes_total = 0usize;
+    for ((path, _), (_, result)) in jobs.iter().zip(results) {
+        match result {
+            FormatResult::Unchanged { bytes, elapsed } => {
+                bytes_total += bytes;
+                elapsed_total += elapsed;
+            }
+            FormatResult::Changed {
+                initial,
+                new,
+                elapsed,
+                write_error,
+            } => {
+                bytes_total += initial.len();
+                elapsed_total += elapsed;
                 n_unformatted += 1;
                 if diff {
                     eprintln!("Diff in {}:", path.display());
                     print_diff(&initial, &new);
                 } else if check {
                     eprintln!("Would reformat: {}", style(path.display()).bold());
-                } else if let Err(err) = fs::write(&path, &new) {
+                } else if let Some(err) = write_error {
                     n_errors += 1;
                     error_because(
                         &format!("failed to write to file: {}", path.display()),
@@ -1740,11 +2109,26 @@ pub fn fmt(
                     );
                 }
             }
+            FormatResult::ReadFailed(err) => {
+                n_errors += 1;
+                error_because(&format!("failed to format: {}", path.display()), &err);
+            }
+            FormatResult::Refused(err) => {
+                n_errors += 1;
+                error_because(&format!("failed to format: {}", path.display()), &err);
+            }
+            FormatResult::RangeOutsideFile { line, line_count } => {
+                n_errors += 1;
+                let plural = if line_count == 1 { "" } else { "s" };
+                error(&format!(
+                    "--range starts at line {line}, but {} has only {line_count} line{plural}",
+                    path.display()
+                ));
+            }
         }
     }
 
-    // Not a usage error: a pre-commit hook may pass only a literate document, which
-    // fmt deliberately skips.
+    // Not a usage error: a pre-commit hook may pass only files of other kinds.
     if n_files == 0 {
         info("0 files formatted");
         return Ok(Outcome::Clean);
@@ -1779,13 +2163,14 @@ pub fn fmt(
 
     if verbose {
         let global_elapsed = start_global.elapsed();
+        // Files format in parallel, so the summed per-file time is CPU time
+        // and only the global clock measures what the user waited.
         info(&format!(
-            "Formatted {} bytes in {} ms ({}/s) - including I/O: {} ms ({}/s)",
+            "Formatted {} in {} ms ({}/s), of which formatting took {} ms of CPU time",
             human_bytes(bytes_total as f64),
-            elapsed_total.as_millis(),
-            human_bytes(bytes_total as f64 / elapsed_total.as_secs_f64()),
             global_elapsed.as_millis(),
-            human_bytes(bytes_total as f64 / global_elapsed.as_secs_f64())
+            human_bytes(bytes_total as f64 / global_elapsed.as_secs_f64()),
+            elapsed_total.as_millis(),
         ));
     }
 
@@ -1797,6 +2182,80 @@ pub fn fmt(
     } else {
         Outcome::Clean
     })
+}
+
+enum FormatResult {
+    Unchanged {
+        bytes: usize,
+        elapsed: Duration,
+    },
+    Changed {
+        initial: String,
+        new: String,
+        elapsed: Duration,
+        write_error: Option<std::io::Error>,
+    },
+    ReadFailed(std::io::Error),
+    Refused(format::FormatError),
+    RangeOutsideFile {
+        line: usize,
+        line_count: usize,
+    },
+}
+
+fn is_literate_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_literate_extension)
+}
+
+fn format_file(
+    path: &Path,
+    config: format::Config,
+    range: Option<FormatRange>,
+    write: bool,
+) -> FormatResult {
+    let initial = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => return FormatResult::ReadFailed(err),
+    };
+    let start = Instant::now();
+    let formatted = match range {
+        Some(range) => {
+            let Some(selection) = range.in_text(&initial) else {
+                return FormatResult::RangeOutsideFile {
+                    line: range.start.0,
+                    line_count: line_count(&initial),
+                };
+            };
+            format::format_range(&initial, config, selection)
+                .map(|edits| format::apply_edits(&initial, &edits))
+        }
+        // A literate document formats chunk by chunk, so its prose is never touched.
+        None if is_literate_path(path) => format::format_literate(&initial, config),
+        None => format::format(&initial, config),
+    };
+    let elapsed = start.elapsed();
+    let new = match formatted {
+        Ok(new) => new,
+        Err(err) => return FormatResult::Refused(err),
+    };
+    if new == initial {
+        return FormatResult::Unchanged {
+            bytes: initial.len(),
+            elapsed,
+        };
+    }
+    let write_error = match write {
+        true => fs::write(path, &new).err(),
+        false => None,
+    };
+    FormatResult::Changed {
+        initial,
+        new,
+        elapsed,
+        write_error,
+    }
 }
 
 pub fn ast(path: &Path) -> Result<(), CommandError> {
@@ -1820,32 +2279,26 @@ pub fn ast(path: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
-pub fn parse_experimental_flags(flags: &[impl AsRef<str>]) -> ExperimentalFeatures {
-    let mut features = ExperimentalFeatures::default();
-    for flag in flags.iter().flat_map(|flag| flag.as_ref().split(' ')) {
-        match flag {
-            "" => {}
-            "all" => {
-                for feature in ExperimentalFeatures::KNOWN {
-                    let enabled = features.enable(feature.name);
-                    debug_assert!(enabled, "KNOWN feature must enable");
-                }
-            }
-            name => {
-                if !features.enable(name) {
-                    let known = ExperimentalFeatures::KNOWN
-                        .iter()
-                        .map(|feature| feature.name)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    warn(&format!(
-                        "unknown experimental feature: '{name}' (known: {known}, or \"all\")"
-                    ));
-                }
-            }
+/// Names features had while they were experimental. They are always on now,
+/// but editor configurations still pass them.
+const GRADUATED_EXPERIMENTAL_FEATURES: &[&str] = &["range_formatting"];
+
+/// No feature is experimental right now, so every name is ignored. A name is
+/// a warning and never a usage error: an editor launches the language server
+/// with the names its configuration lists, and refusing one would keep the
+/// server from starting at all.
+pub fn check_experimental_features(flags: &[String]) {
+    for name in flags.iter().flat_map(|flag| flag.split(' ')) {
+        match name {
+            "" | "all" => {}
+            name if GRADUATED_EXPERIMENTAL_FEATURES.contains(&name) => warn(&format!(
+                "ignoring experimental feature '{name}': it is no longer experimental and is always on"
+            )),
+            name => warn(&format!(
+                "unknown experimental feature: '{name}' (no feature is experimental right now)"
+            )),
         }
     }
-    features
 }
 
 fn print_diff(old: &str, new: &str) {
@@ -2069,6 +2522,7 @@ mod tests {
             }
             let config = config::Config::discover(&root).expect("the simulated ry.toml");
             let analysis = analyze_project(
+                &root,
                 &root,
                 config,
                 std::slice::from_ref(&root),

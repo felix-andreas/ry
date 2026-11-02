@@ -524,9 +524,10 @@ unsafe fn print_matrix_rows(
     // for the row title, and always print the column title line.
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
-    // With no rows, numbered labels still reserve the width of `[0,]`.
-    let empty_width = if numbered_rows {
-        format!("[{rows},]").len()
+    // GNU R sizes numbered labels by the digits of one past the last row, so nine rows already
+    // reserve two digits and no rows reserve one.
+    let numbered_width = if numbered_rows {
+        format!("[{},]", rows + 1).len()
     } else {
         0
     };
@@ -534,7 +535,8 @@ unsafe fn print_matrix_rows(
         .iter()
         .map(|label| display_width(label))
         .max()
-        .unwrap_or(empty_width);
+        .unwrap_or(0)
+        .max(numbered_width);
     let offset = if !titled {
         0
     } else if display_width(&row_title) < label_width + 2 {
@@ -697,7 +699,11 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
             }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
-        let shown = if index + 1 == shown_slices { last_rows } else { rows };
+        let shown = if index + 1 == shown_slices {
+            last_rows
+        } else {
+            rows
+        };
         print_matrix_rows(matrix, rows, cols, shown, options)?;
         out("\n");
     }

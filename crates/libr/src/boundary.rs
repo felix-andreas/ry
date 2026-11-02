@@ -16,7 +16,7 @@
 use {
     crate::{Global, Runtime, runtime},
     heap::{
-        arena::Arena,
+        arena::{Arena, Watermark},
         object::{Sexp, SexpType},
     },
     std::{
@@ -74,17 +74,43 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// What an API function does with its result before handing it to native code. A handle is
-/// rooted until the enclosing native call returns, which is the handle scope that makes ry
-/// forgive a forgotten `PROTECT` on a temporary.
+/// What an API function does with its result before handing it to native code. A handle stays
+/// rooted while it is among the native call's most recent handouts (`heap::HANDOUT_WINDOW`),
+/// which is the handle scope that makes ry forgive a forgotten `PROTECT` on a temporary.
 pub trait Handout: Copy {
     fn hand_out(self, _runtime: &mut Runtime) {}
 }
 
 impl Handout for Sexp {
     fn hand_out(self, runtime: &mut Runtime) {
-        if runtime.native_depth > 0 {
+        if runtime.native_depth == 0 {
+            return;
+        }
+        if runtime.api_depth == 0 {
+            runtime.heap.hand_out(self, runtime.handout_base);
+        } else {
             runtime.heap.root(self);
+        }
+    }
+}
+
+/// A result that stays reachable through the API function's argument, such as a list cell's
+/// `CAR` or an attribute, so it needs no handle: it lives exactly as long as GNU R's would.
+#[derive(Clone, Copy)]
+pub struct Reachable(pub Sexp);
+
+impl Handout for Reachable {}
+
+/// A result ry builds as a view of something GNU R stores in the argument, such as `FRAME`'s
+/// pairlist. Code that is correct under GNU R walks it unprotected for as long as the argument
+/// lives, so it stays rooted until the native call returns instead of leaving with the window.
+#[derive(Clone, Copy)]
+pub struct Pinned(pub Sexp);
+
+impl Handout for Pinned {
+    fn hand_out(self, runtime: &mut Runtime) {
+        if runtime.native_depth > 0 {
+            runtime.heap.root(self.0);
         }
     }
 }
@@ -112,9 +138,14 @@ impl Handout for Option<DlFunc> {}
 /// Runs an API function's body on behalf of native code, and turns its `Err` into the jump that
 /// native code expects.
 pub unsafe fn enter<T: Handout>(body: impl FnOnce() -> ApiResult<T>) -> T {
-    let mark = runtime().heap.handle_mark();
+    let mark = {
+        let runtime = runtime();
+        runtime.api_depth += 1;
+        runtime.heap.handle_mark()
+    };
     let result = catch_unwind(AssertUnwindSafe(body));
     let runtime = runtime();
+    runtime.api_depth -= 1;
     runtime.heap.release_handles(mark);
     match result {
         Ok(Ok(value)) => {
@@ -173,18 +204,56 @@ fn release_unwind(runtime: &mut Runtime, unwind: &Unwind) {
     }
 }
 
+/// The state a native call saves on entry and restores when it returns: its protection region,
+/// its handle scope, its handouts and its `R_alloc` watermark.
+struct NativeScope {
+    handle_mark: usize,
+    saved_handout_base: usize,
+    saved_api_depth: u32,
+    saved_protect_base: usize,
+    watermark: Watermark,
+}
+
+fn open_native_scope(runtime: &mut Runtime) -> NativeScope {
+    let scope = NativeScope {
+        handle_mark: runtime.heap.handle_mark(),
+        saved_handout_base: runtime.handout_base,
+        saved_api_depth: runtime.api_depth,
+        saved_protect_base: runtime.heap.roots.protect.enter(),
+        watermark: runtime.arena.watermark(),
+    };
+    runtime.native_depth += 1;
+    runtime.handout_base = runtime.heap.handout_mark();
+    runtime.api_depth = 0;
+    scope
+}
+
+/// Ends the scope `open_native_scope` began, and returns the protection depth the native code
+/// left behind.
+unsafe fn close_native_scope(runtime: &mut Runtime, scope: NativeScope) -> usize {
+    runtime.native_depth -= 1;
+    if runtime.native_depth == 0 {
+        runtime.heap.retire_escaped();
+    }
+    runtime.heap.release_handouts(runtime.handout_base);
+    runtime.handout_base = scope.saved_handout_base;
+    runtime.api_depth = scope.saved_api_depth;
+    let exit_depth = runtime.heap.roots.protect.leave(scope.saved_protect_base);
+    runtime.arena.reset(scope.watermark);
+    runtime.heap.release_handles(scope.handle_mark);
+    exit_depth
+}
+
 /// Runs a `.Call` or `.External` routine inside a C context and its own handle scope.
 pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiResult<Sexp> {
-    let (mark, saved_base, watermark, entry_depth) = {
+    let (scope, entry_depth) = {
         let runtime = runtime();
-        let mark = runtime.heap.handle_mark();
+        let entry_depth = runtime.heap.roots.protect.depth();
+        let scope = open_native_scope(runtime);
         for &arg in args {
             runtime.heap.root(arg);
         }
-        let entry_depth = runtime.heap.roots.protect.depth();
-        let saved_base = runtime.heap.roots.protect.enter();
-        runtime.native_depth += 1;
-        (mark, saved_base, runtime.arena.watermark(), entry_depth)
+        (scope, entry_depth)
     };
     let mut raw_result = std::ptr::null_mut();
     let status = ry_call_native(
@@ -194,15 +263,15 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
         &mut raw_result,
     );
     let runtime = runtime();
-    runtime.native_depth -= 1;
-    if runtime.native_depth == 0 {
-        runtime.heap.retire_escaped();
-    }
-    let exit_depth = runtime.heap.roots.protect.leave(saved_base);
-    runtime.arena.reset(watermark);
-    runtime.heap.release_handles(mark);
+    let exit_depth = close_native_scope(runtime, scope);
     if status != 0 {
         return Err(take_pending());
+    }
+    // Rooted before the warnings, which allocate and may run handlers, because closing the
+    // scope dropped whatever protected the result.
+    let result = Sexp::from_raw(raw_result);
+    if let Some(result) = result {
+        runtime.heap.root(result);
     }
     if exit_depth != entry_depth {
         warn(format!(
@@ -210,14 +279,13 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
         ));
     }
     // GNU R accepts a routine that returns C `NULL` and reads it as `R_NilValue`.
-    let result = match Sexp::from_raw(raw_result) {
+    let result = match result {
         Some(result) => result,
         None => {
             warn("converting NULL pointer to R NULL");
             runtime.nil()
         }
     };
-    runtime.heap.root(result);
     run_pending_finalizers();
     Ok(result)
 }
@@ -262,25 +330,9 @@ pub unsafe fn call_void(
 /// The bookkeeping every native call shares: a protection region, a handle scope and an
 /// `R_alloc` watermark, all restored when it returns.
 pub unsafe fn with_native_scope(call: impl FnOnce() -> c_int) -> ApiResult<()> {
-    let (mark, saved_base, watermark) = {
-        let runtime = runtime();
-        let saved_base = runtime.heap.roots.protect.enter();
-        runtime.native_depth += 1;
-        (
-            runtime.heap.handle_mark(),
-            saved_base,
-            runtime.arena.watermark(),
-        )
-    };
+    let scope = open_native_scope(runtime());
     let status = call();
-    let runtime = runtime();
-    runtime.native_depth -= 1;
-    if runtime.native_depth == 0 {
-        runtime.heap.retire_escaped();
-    }
-    runtime.heap.roots.protect.leave(saved_base);
-    runtime.arena.reset(watermark);
-    runtime.heap.release_handles(mark);
+    close_native_scope(runtime(), scope);
     if status != 0 {
         Err(take_pending())
     } else {
@@ -409,9 +461,26 @@ pub fn format_error(prefix: &str, error: &RError) -> String {
     }
 }
 
-/// Writes to the console. The callback is taken out of the runtime while it runs, so one that
-/// prints through the API again finds the default console instead of aliasing itself.
+/// Writes R output, as `Rprintf` and `REprintf` do: through `sink()`'s diversions once the
+/// interpreter runs, so `capture.output()` sees what native code prints.
 pub fn write_console(text: &[u8], is_error: bool) {
+    if !interp::is_installed() {
+        return write_terminal(text, is_error);
+    }
+    // SAFETY: the interpreter is installed, and output runs on its thread.
+    unsafe {
+        if is_error {
+            interp::connections::write_message(text);
+        } else {
+            interp::connections::write_output(text);
+        }
+    }
+}
+
+/// Writes to the console itself, past any sink. The callback is taken out of the runtime while
+/// it runs, so one that prints through the API again finds the default console instead of
+/// aliasing itself.
+pub fn write_terminal(text: &[u8], is_error: bool) {
     let mut console = std::mem::replace(&mut runtime().console, Box::new(default_console));
     console(text, is_error);
     runtime().console = console;
@@ -459,17 +528,34 @@ pub unsafe extern "C" fn Rf_onintr() {
 // The Rust half of native.c.
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_state_save(protect: *mut usize, vmax: *mut usize) {
+pub unsafe extern "C" fn ry_state_save(state: *mut ContextState) {
     let runtime = runtime();
-    *protect = runtime.heap.roots.protect.depth();
-    *vmax = Arena::encode(runtime.arena.watermark());
+    *state = ContextState {
+        protect: runtime.heap.roots.protect.depth(),
+        vmax: Arena::encode(runtime.arena.watermark()),
+        api_depth: runtime.api_depth as usize,
+        handout_base: runtime.handout_base,
+    };
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_state_restore(protect: usize, vmax: usize) {
+pub unsafe extern "C" fn ry_state_restore(state: *const ContextState) {
     let runtime = runtime();
-    runtime.heap.roots.protect.restore(protect);
-    runtime.arena.reset(Arena::decode(vmax));
+    let state = &*state;
+    runtime.heap.roots.protect.restore(state.protect);
+    runtime.arena.reset(Arena::decode(state.vmax));
+    runtime.api_depth = state.api_depth as u32;
+    runtime.handout_base = state.handout_base;
+}
+
+/// What a C context saves when it begins and restores when a jump lands on it. A jump may leave
+/// API entries without returning through them, so the entry depth is restored with the rest.
+#[repr(C)]
+pub struct ContextState {
+    protect: usize,
+    vmax: usize,
+    api_depth: usize,
+    handout_base: usize,
 }
 
 #[unsafe(no_mangle)]

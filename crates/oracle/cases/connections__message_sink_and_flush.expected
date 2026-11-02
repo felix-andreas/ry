@@ -1,0 +1,33 @@
+[stdout]
+| [1] 3
+| [1] 2
+| [1] "this"
+| character(0)
+| [1] "w" "c"
+| [1] "[1] 1"
+| [1] "unknown" "UTF-8"   "unknown"
+| [1] "UTF-8"
+| [1] 1
+| attr(,"match.length")
+| [1] 4
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] 1 9
+| attr(,"match.length")
+| [1] 4 2
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "<a>"
+| [1] 8
+| a^b
+[messages]
+- msg
+[warnings]
+[errors]
+[value]
+language
+| a^b

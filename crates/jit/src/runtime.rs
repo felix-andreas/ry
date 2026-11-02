@@ -9,7 +9,10 @@
 use {
     crate::analysis::{Speculation, resolve_function},
     heap::{
-        object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+        object::{
+            Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
+            UNBOXED_SLOTS, gp, is_na_real,
+        },
         records::NativeKind,
     },
     interp::{
@@ -105,15 +108,28 @@ pub struct Compiled {
     pub osr: Vec<usize>,
 }
 
-/// Whether every function lookup compiled code assumed still resolves the same way. Every
-/// change that could alter such a lookup moves the binding epoch (see `gp::WATCHED`), so an
-/// unchanged epoch proves the lookups without walking them.
-pub unsafe fn valid(compiled: &Compiled) -> bool {
-    let epoch = heap().binding_epoch();
-    if epoch == compiled.epoch.get() {
+/// Whether every function lookup compiled code assumed still resolves the same way for an
+/// activation whose frame is `frame`. Every change that could alter such a lookup moves the
+/// binding epoch (see `gp::WATCHED`), so an unchanged epoch proves the lookups without walking
+/// them. `thorough` walks them anyway, for an activation whose frame may have bound a watched
+/// name before the name was watched.
+pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+    let heap = heap();
+    let epoch = heap.binding_epoch();
+    if epoch == compiled.epoch.get() && !thorough {
         return true;
     }
     for speculation in &compiled.speculations {
+        // The body's own lookups start past its frame, because the compiler cannot see the
+        // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
+        // locals `UseMethod` copies in can each bind the name there.
+        if speculation.env == compiled.enclosure
+            && heap
+                .frame_cell(frame, speculation.symbol)
+                .is_some_and(|cell| may_be_function(cell.cdr()))
+        {
+            return false;
+        }
         match resolve_function(speculation.symbol, speculation.env) {
             Some(found)
                 if found.cell == speculation.cell && found.function == speculation.function => {}
@@ -122,6 +138,19 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
     }
     compiled.epoch.set(epoch);
     true
+}
+
+/// Whether a lookup of a function could stop at a binding holding `value`, which R skips only
+/// when it is certainly not a function.
+unsafe fn may_be_function(value: Sexp) -> bool {
+    unsafe {
+        let value = if value.kind() == SexpType::Promise {
+            value.car()
+        } else {
+            value
+        };
+        value == values::unbound() || values::is_function(value)
+    }
 }
 
 /// How many times a body may be compiled before the JIT gives up on it.
@@ -242,7 +271,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !valid(compiled(activation)) => outcome::INVALIDATED,
+                Ok(()) if validate != 0 && !valid(compiled(activation), machine.env, false) => {
+                    outcome::INVALIDATED
+                }
                 Ok(()) => outcome::OK,
             }
         })
@@ -285,7 +316,9 @@ unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, b
             Ok((value, local)) => {
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
-                if !compiled(activation).speculations.is_empty() && !valid(compiled(activation)) {
+                if !compiled(activation).speculations.is_empty()
+                    && !valid(compiled(activation), machine(activation).env, false)
+                {
                     return outcome::LOAD_INVALIDATED;
                 }
                 if local { 1 } else { 2 }
@@ -425,7 +458,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !valid(compiled(activation)) {
+                    if !valid(compiled(activation), machine.env, false) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
@@ -619,6 +652,59 @@ pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32
     unsafe { boxed(activation, || values::scalar_logical(value)) }
 }
 
+/// A record, tuple or tag of `layout` whose `count` slots are `(kind, bits)` pairs in the
+/// [`representation`] encoding. Numbers go into the record unboxed, without a scalar on the way.
+pub unsafe extern "C" fn jit_construct(
+    activation: *mut Activation,
+    layout: i32,
+    pairs: *const i64,
+    count: i64,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || {
+            let pairs = std::slice::from_raw_parts(pairs, 2 * count as usize);
+            let heap = heap();
+            let mut slots: SmallVec<[Slot; 4]> = SmallVec::with_capacity(count as usize);
+            // Every box made here stays rooted until the record holds it, because the next
+            // allocation may collect. Slots past the unboxed mask hold handles only.
+            let mut rooted = |value: Sexp| {
+                heap.root(value);
+                Slot::Handle(value)
+            };
+            for (index, pair) in pairs.chunks_exact(2).enumerate() {
+                let (kind, bits) = (pair[0] as i32, pair[1]);
+                let wide = index >= UNBOXED_SLOTS;
+                let slot = match kind {
+                    representation::INTEGER if wide => rooted(values::scalar_integer(bits as i32)?),
+                    representation::LOGICAL if wide => rooted(values::scalar_logical(bits as i32)?),
+                    representation::DOUBLE if wide => {
+                        rooted(values::scalar_real(f64::from_bits(bits as u64))?)
+                    }
+                    representation::INTEGER => Slot::Integer(bits as i32),
+                    representation::LOGICAL => Slot::Logical(bits as i32),
+                    representation::DOUBLE => {
+                        let number = f64::from_bits(bits as u64);
+                        let upper = (bits as u64 >> 32) as u32;
+                        // A NaN whose upper half reads as an integer's or logical's tag stays
+                        // boxed, as `slot_for` keeps it.
+                        if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                            rooted(values::scalar_real(number)?)
+                        } else {
+                            Slot::Real(number)
+                        }
+                    }
+                    _ => Slot::Handle(
+                        Sexp::from_raw(bits as *mut Header)
+                            .ok_or_else(|| error("compiled code passed a null slot"))?,
+                    ),
+                };
+                slots.push(slot);
+            }
+            Ok(heap.alloc_record_slots(layout as u32, &slots)?)
+        })
+    }
+}
+
 /// Key kinds [`jit_collection_position`] takes.
 pub mod key {
     pub const INTEGER: i32 = 0;
@@ -631,6 +717,27 @@ fn collection_kind(set: i32) -> NativeKind {
         NativeKind::Set
     } else {
         NativeKind::Dict
+    }
+}
+
+/// The tag of a plain tag value, or -1 for anything else.
+pub unsafe extern "C" fn jit_plain_tag(value: *mut Header) -> i64 {
+    unsafe {
+        Sexp::from_raw(value)
+            .and_then(|value| interp::records::plain_tag(value))
+            .map_or(-1, i64::from)
+    }
+}
+
+/// 1 when `value` matches the literal pattern `pattern`, as a `match` arm tests it.
+pub unsafe extern "C" fn jit_literal_matches(value: *mut Header, pattern: *mut Header) -> i32 {
+    unsafe {
+        match (Sexp::from_raw(value), Sexp::from_raw(pattern)) {
+            (Some(value), Some(pattern)) => {
+                i32::from(interp::records::literal_matches(pattern, value))
+            }
+            _ => 0,
+        }
     }
 }
 
@@ -692,6 +799,13 @@ pub unsafe extern "C" fn jit_dict_get(
 /// Whether a calling handler is established, so a warning would run R code.
 pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32
+}
+
+/// How many closure calls may still nest before R's expression depth limit, which a native
+/// function call counts down instead of pushing frames.
+pub extern "C" fn jit_depth_budget() -> i64 {
+    let state = interp::interp();
+    i64::from(state.max_depth) - state.frames.len() as i64
 }
 
 /// `^` on doubles, as tier 0 computes it.

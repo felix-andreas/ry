@@ -1065,6 +1065,10 @@ pub unsafe fn run_closure(
     let depth = state.frames.len();
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
+    if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
+        function.set_gp_bits(gp::CLOSURE_STEP, false);
+        crate::debugger::debugged_call(depth);
+    }
     let signature = match entry {
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
@@ -2660,7 +2664,13 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
                 return Ok(expression);
             }
             if value.kind() == SexpType::Promise {
-                return Ok(value.cdr());
+                // An argument passed on as a promise, like a replacement function's `value`,
+                // substitutes to the code of the innermost promise.
+                let mut code = value.cdr();
+                while code.kind() == SexpType::Promise {
+                    code = code.cdr();
+                }
+                return Ok(code);
             }
             if value.kind() == SexpType::Dots {
                 return Ok(expression);
@@ -2679,6 +2689,9 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
 pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
     let dots = symbols().dots;
     let mut items: Vec<(Sexp, Sexp)> = Vec::new();
+    // GNU R reuses the spliced dots cells, so a call whose head comes from `...` becomes a
+    // pairlist: `substitute(...())` is how code captures the dots unevaluated.
+    let mut kind = list.kind();
     let mut cell = list;
     while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
         let element = cell.car();
@@ -2686,6 +2699,9 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
             let value = crate::heap().frame_cell(env, dots).map(|cell| cell.cdr());
             match value {
                 Some(value) if value.kind() == SexpType::Dots => {
+                    if items.is_empty() {
+                        kind = SexpType::Pairlist;
+                    }
                     let mut dot = value;
                     while dot.kind() == SexpType::Dots {
                         let code = if dot.car().kind() == SexpType::Promise {
@@ -2706,7 +2722,7 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
         }
         cell = cell.cdr();
     }
-    let result = values::pairlist(&items, list.kind())?;
+    let result = values::pairlist(&items, kind)?;
     if result != nil() && list.attrib() != nil() {
         crate::heap().set_attrib(result, list.attrib());
     }
@@ -2802,7 +2818,7 @@ pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
 /// first parameter `target` as the first argument (`bytecode::tail_update`). Unlike
 /// [`rebind_call`], nothing assigns the result to `target`, so the parameter's value may be
 /// updated in place only when no one can see the parameter afterwards: a move into this frame
-/// still lasts once the arguments are evaluated, which shows that nothing has reached the frame
+/// still lasts once the arguments are evaluated and no closure made in the frame can outlive it
 /// (`moves::frame_private`).
 pub unsafe fn tail_update(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
@@ -2824,7 +2840,10 @@ unsafe fn reuse_first_argument(
     // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
-            && (!private_frame || moves::frame_private(env))
+            && (!private_frame || {
+                let others: Vec<Sexp> = args[1..].iter().map(|arg| arg.value).collect();
+                moves::frame_private(env, &others)
+            })
             && solely_held(target, subject, env)
             && !args[1..]
                 .iter()
@@ -3095,6 +3114,10 @@ pub unsafe fn complex_assign(
         }
         levels.push(level);
     }
+    let right_hand_side = match whole.cdr().cdr().kind() {
+        SexpType::Pairlist | SexpType::Language => whole.cdr().cdr().car(),
+        _ => value,
+    };
     let mut replacement = value;
     for (depth, getter) in getters.iter().enumerate() {
         let object = levels[levels.len() - 1 - depth];
@@ -3109,8 +3132,13 @@ pub unsafe fn complex_assign(
         let object_promise = forced_promise(object_code, object)?;
         crate::heap().untrack_references(object_promise);
         // GNU R's value promise does not count either, so a replacement that updated its target
-        // in place stays uniquely referenced for the next update.
-        let value_promise = forced_promise(replacement, replacement)?;
+        // in place stays uniquely referenced for the next update. Its code is the right-hand
+        // side as written, which `substitute(value)` reports (tibble names it in errors).
+        let value_code = match depth {
+            0 => right_hand_side,
+            _ => replacement,
+        };
+        let value_promise = forced_promise(value_code, replacement)?;
         crate::heap().untrack_references(value_promise);
         let mut items = vec![(nil(), setter), (nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {

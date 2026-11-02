@@ -25,7 +25,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use {
-    crate::linalg::format_g,
+    crate::format::format_g,
     std::{cell::RefCell, ffi::c_int, rc::Rc},
 };
 
@@ -674,41 +674,25 @@ pub fn logspace_sum(logx: &[f64]) -> f64 {
     }
 }
 
-/// The continued fraction for `sum_k x^k / (i + k d)`, the tail of `log1pmx` and `lgamma1p`.
-fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
-    const SCALE: f64 = 1.157_920_892_373_162e77;
-    let mut c1 = 2.0 * d;
-    let mut c2 = i + d;
-    let mut c4 = c2 + d;
-    let mut a1 = c2;
-    let mut b1 = i * (c2 - i * x);
-    let mut b2 = d * d * x;
-    let mut a2 = c4 * c2 - b2;
-    b2 = c4 * b1 - i * b2;
-    while (a2 * b1 - a1 * b2).abs() > (eps * b1 * b2).abs() {
-        let mut c3 = c2 * c2 * x;
-        c2 += d;
-        c4 += d;
-        a1 = c4 * a2 - c3 * a1;
-        b1 = c4 * b2 - c3 * b1;
-        c3 = c1 * c1 * x;
-        c1 += d;
-        c4 += d;
-        a2 = c4 * a1 - c3 * a2;
-        b2 = c4 * b1 - c3 * b2;
-        if b2.abs() > SCALE {
-            a1 /= SCALE;
-            b1 /= SCALE;
-            a2 /= SCALE;
-            b2 /= SCALE;
-        } else if b2.abs() < 1.0 / SCALE {
-            a1 *= SCALE;
-            b1 *= SCALE;
-            a2 *= SCALE;
-            b2 *= SCALE;
-        }
+/// `sum_{k >= 0} x^k / (first + k step)` for `|x| < 1`, the series behind `log1pmx`, `bd0` and
+/// `lgamma1p`. Each term is at most `|x|^k` times the first, so the sum stops once that falls
+/// below a quarter of an ulp, and it runs from the smallest term up (Horner's rule in `x`) so
+/// the largest terms are rounded last.
+fn progression_series(x: f64, first: f64, step: f64) -> f64 {
+    // Callers pass |x| below one half; the cap only bounds the loop for anything else.
+    const MAXIMUM_TERMS: u32 = 2000;
+    let magnitude = x.abs();
+    let mut terms = 0;
+    let mut power = 1.0;
+    while power > f64::EPSILON / 4.0 && terms < MAXIMUM_TERMS {
+        power *= magnitude;
+        terms += 1;
     }
-    a2 / b2
+    let mut sum = 0.0;
+    for k in (0..=terms).rev() {
+        sum = sum * x + 1.0 / (first + f64::from(k) * step);
+    }
+    sum
 }
 
 /// `log(1 + x) - x`, accurate near zero.
@@ -722,7 +706,7 @@ pub fn log1pmx(x: f64) -> f64 {
     if x.abs() < 1e-2 {
         r * ((((2.0 / 9.0 * y + 2.0 / 7.0) * y + 2.0 / 5.0) * y + 2.0 / 3.0) * y - x)
     } else {
-        r * (2.0 * y * logcf(y, 3.0, 2.0, 1e-14) - x)
+        r * (2.0 * y * progression_series(y, 3.0, 2.0) - x)
     }
 }
 
@@ -774,13 +758,13 @@ const LGAMMA1P_COEFFICIENTS: [f64; 40] = [
 /// `log(gamma(1 + a))`, accurate for small `a`.
 pub fn lgamma1p(a: f64) -> f64 {
     const EULER: f64 = 0.577_215_664_901_532_9;
-    // zeta(42) - 1, the remainder the continued fraction scales.
+    // zeta(42) - 1, the remainder the series scales.
     const TAIL: f64 = 2.2737368458246524e-13;
     if a.abs() >= 0.5 {
         return lgammafn(a + 1.0);
     }
     let count = LGAMMA1P_COEFFICIENTS.len();
-    let mut lgam = TAIL * logcf(-a / 2.0, (count + 2) as f64, 1.0, 1e-14);
+    let mut lgam = TAIL * progression_series(-a / 2.0, (count + 2) as f64, 1.0);
     for coefficient in LGAMMA1P_COEFFICIENTS.iter().rev() {
         lgam = coefficient - a * lgam;
     }
@@ -980,7 +964,8 @@ pub fn lgammafn_sign(x: f64) -> (f64, c_int) {
     (answer, sign)
 }
 
-/// `stirlerr(n) = log(n!) - log(sqrt(2 pi n) (n/e)^n)` at the half integers up to 15.
+/// `stirlerr(n) = ln(n!) - ln(sqrt(2 pi n) (n / e)^n)` at the half integers up to 15, rounded
+/// from 50-digit evaluations of that definition (`stirlerr(0)` is 0 by convention).
 const STIRLERR_HALVES: [f64; 31] = [
     0.0,
     0.15342640972002736,
@@ -1015,31 +1000,44 @@ const STIRLERR_HALVES: [f64; 31] = [
     0.005554733551962801,
 ];
 
-/// The error of Stirling's formula for `log(n!)` (Loader 2000).
+/// The error of Stirling's approximation to `ln(n!)`, `ln Gamma(n + 1) - (n + 1/2) ln n + n -
+/// ln sqrt(2 pi)` (Loader 2000). Up to 15 it is read from the table at half integers or computed
+/// from that definition; above 15 it is Stirling's series `sum_k B_2k / (2k (2k - 1) n^(2k - 1))`
+/// with as many terms as Loader's cutoffs (35, 80 and 500) need for full precision.
 fn stirlerr(n: f64) -> f64 {
-    const S0: f64 = 1.0 / 12.0;
-    const S1: f64 = 1.0 / 360.0;
-    const S2: f64 = 1.0 / 1260.0;
-    const S3: f64 = 1.0 / 1680.0;
-    const S4: f64 = 1.0 / 1188.0;
+    // |B_2k| / (2k (2k - 1)) for k = 1..5; the series alternates in sign.
+    const STIRLING_SERIES: [f64; 5] = [
+        1.0 / 12.0,
+        1.0 / 360.0,
+        1.0 / 1260.0,
+        1.0 / 1680.0,
+        1.0 / 1188.0,
+    ];
     if n <= 15.0 {
-        let nn = n + n;
-        if nn == nn.trunc() {
-            return STIRLERR_HALVES[nn as usize];
+        let doubled = 2.0 * n;
+        if doubled == doubled.trunc()
+            && doubled >= 0.0
+            && let Some(value) = STIRLERR_HALVES.get(doubled as usize)
+        {
+            return *value;
         }
         return lgammafn(n + 1.0) - (n + 0.5) * n.ln() + n - M_LN_SQRT_2PI;
     }
-    let nn = n * n;
-    if n > 500.0 {
-        return (S0 - S1 / nn) / n;
+    let terms = if n > 500.0 {
+        2
+    } else if n > 80.0 {
+        3
+    } else if n > 35.0 {
+        4
+    } else {
+        5
+    };
+    let square = n * n;
+    let mut sum = 0.0;
+    for coefficient in STIRLING_SERIES.iter().take(terms).rev() {
+        sum = coefficient - sum / square;
     }
-    if n > 80.0 {
-        return (S0 - (S1 - S2 / nn) / nn) / n;
-    }
-    if n > 35.0 {
-        return (S0 - (S1 - (S2 - S3 / nn) / nn) / nn) / n;
-    }
-    (S0 - (S1 - (S2 - (S3 - S4 / nn) / nn) / nn) / nn) / n
+    sum / n
 }
 
 /// The deviance term `x log(x/np) + np - x`, by a series when `x` is near `np` (Loader 2000).
@@ -1753,32 +1751,7 @@ pub fn qnorm(p: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
     let q = p_ - 0.5;
     let mut value;
     if q.abs() <= 0.425 {
-        let r = 0.180625 - q * q;
-        value = q
-            * (((((((r * 2509.0809287301226727 + 33430.575583588128105) * r
-                + 67265.770927008700853)
-                * r
-                + 45921.953931549871457)
-                * r
-                + 13731.693765509461125)
-                * r
-                + 1971.5909503065514427)
-                * r
-                + 133.14166789178437745)
-                * r
-                + 3.387132872796366608)
-            / (((((((r * 5226.495278852854561 + 28729.085735721942674) * r
-                + 39307.89580009271061)
-                * r
-                + 21213.794301586595867)
-                * r
-                + 5394.1960214247511077)
-                * r
-                + 687.1870074920579083)
-                * r
-                + 42.313330701600911252)
-                * r
-                + 1.0);
+        value = qnorm_central(q);
     } else {
         let lp = if log && ((lower && q <= 0.0) || (!lower && q > 0.0)) {
             p
@@ -1874,6 +1847,46 @@ pub fn qnorm(p: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
         }
     }
     mu + sigma * value
+}
+
+/// The quantile of the standard normal at `p` in (0, 1), as `qnorm(p, 0, 1)` computes it, for
+/// a caller that turns uniforms into normal deviates in bulk.
+#[inline]
+pub fn qnorm_standard(p: f64) -> f64 {
+    let q = p - 0.5;
+    if q.abs() <= 0.425 {
+        qnorm_central(q)
+    } else {
+        qnorm(p, 0.0, 1.0, true, false)
+    }
+}
+
+/// Wichura's AS 241 rational approximation for `|p - 0.5| <= 0.425`, where `q = p - 0.5`.
+#[inline]
+fn qnorm_central(q: f64) -> f64 {
+    let r = 0.180625 - q * q;
+    q * (((((((r * 2509.0809287301226727 + 33430.575583588128105) * r + 67265.770927008700853)
+        * r
+        + 45921.953931549871457)
+        * r
+        + 13731.693765509461125)
+        * r
+        + 1971.5909503065514427)
+        * r
+        + 133.14166789178437745)
+        * r
+        + 3.387132872796366608)
+        / (((((((r * 5226.495278852854561 + 28729.085735721942674) * r + 39307.89580009271061)
+            * r
+            + 21213.794301586595867)
+            * r
+            + 5394.1960214247511077)
+            * r
+            + 687.1870074920579083)
+            * r
+            + 42.313330701600911252)
+            * r
+            + 1.0)
 }
 
 // The uniform distribution.
@@ -2576,18 +2589,19 @@ pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) ->
     }
 }
 
-/// The gamma quantile: AS 91 (Best and Roberts) with its seven-term Taylor iteration, then
-/// Newton steps on the log scale to full precision.
+/// The gamma quantile, the root `x` of `pgamma(x) = p`. On the standard scale `y = x / scale`
+/// it solves `ln P(y) = ln p` for `u = ln y`, where `P` is the tail whose probability is at most
+/// one half, so the target keeps all its digits. In `u` the lower tail is nearly linear
+/// (`ln P ~ shape u`) and nothing underflows before the quantile does. Halley's method runs
+/// from the best of three approximations: Wilson and Hilferty's cube of a normal deviate, the
+/// leading term `y^shape / Gamma(shape + 1)` of the lower tail's series, and the leading term
+/// `y^(shape - 1) e^-y / Gamma(shape)` of the upper tail's asymptotic expansion (Abramowitz and
+/// Stegun 26.4.17, 6.5.29 and 6.5.32). A bracket of the root guards every step. The scaled
+/// result takes Newton steps on `x` and then moves to the neighbouring double whose probability
+/// is closest to `p`.
 pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
-    const EPS1: f64 = 1e-2;
-    const EPS2: f64 = 5e-7;
-    const EPS_N: f64 = 1e-15;
-    const MAXIT: i32 = 1000;
-    const P_MIN: f64 = 1e-100;
-    const P_MAX: f64 = 1.0 - 1e-14;
-    const I420: f64 = 1.0 / 420.0;
-    const I2520: f64 = 1.0 / 2520.0;
-    const I5040: f64 = 1.0 / 5040.0;
+    const MAXIMUM_ITERATIONS: usize = 60;
+    const MAXIMUM_POLISH: usize = 64;
     if p.is_nan() || alpha.is_nan() || scale.is_nan() {
         return p + alpha + scale;
     }
@@ -2600,93 +2614,173 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     if alpha == 0.0 {
         return 0.0;
     }
-    let mut p_ = dt_qiv(p, lower, log);
-    // Within 1e-8 of one, the lower probability that the AS 91 stage solves for keeps fewer
-    // than eight significant digits of its complement, so Newton's method on the requested
-    // scale has to carry the quantile the rest of the way.
-    let mut max_it_newton = if alpha < 1e-10 {
-        7
-    } else if p_ > 1.0 - 1e-8 {
-        20
+    if alpha == f64::INFINITY {
+        return f64::INFINITY;
+    }
+    let log_lower = dt_log(p, lower, log);
+    let use_lower = log_lower <= -M_LN2;
+    let target = if use_lower {
+        log_lower
     } else {
-        1
+        dt_clog(p, lower, log)
     };
-    let g = lgammafn(alpha);
-    let mut ch = qchisq_appr(p, 2.0 * alpha, g, lower, log, EPS1);
-    'iterate: {
-        if !finite(ch) {
-            max_it_newton = 0;
-            break 'iterate;
+    let log_tail_at = |u: f64| pgamma(u.exp(), alpha, 1.0, use_lower, true);
+    // Below this `u` the scaled quantile rounds to zero.
+    let smallest = f64::from_bits(1);
+    let underflow = smallest.ln() - scale.ln();
+
+    // Near zero `P(y) = y^shape / Gamma(shape + 1) (1 + O(y))`, so when this start lies below
+    // the smallest positive double, so does the quantile.
+    let small = (log_lower + lgamma1p(alpha)) / alpha;
+    if small < underflow - 1.0 {
+        return 0.0;
+    }
+    let mut candidates = [small, f64::NAN, f64::NAN];
+    let ninth = 1.0 / (9.0 * alpha);
+    let cube_root = 1.0 - ninth + qnorm(p, 0.0, 1.0, lower, log) * ninth.sqrt();
+    if cube_root > 0.0 {
+        candidates[1] = alpha.ln() + 3.0 * cube_root.ln();
+    }
+    if !use_lower {
+        let lgamma_shape = lgammafn(alpha);
+        let mut y = -target;
+        for _ in 0..4 {
+            y = -target + (alpha - 1.0) * y.ln() - lgamma_shape;
+            if !(y > 0.0 && y.is_finite()) {
+                break;
+            }
         }
-        if ch < EPS2 || !(P_MIN..=P_MAX).contains(&p_) {
-            max_it_newton = 20;
-            break 'iterate;
-        }
-        let c = alpha - 1.0;
-        let s6 = (120.0 + c * (346.0 + 127.0 * c)) * I5040;
-        let ch0 = ch;
-        for _ in 1..=MAXIT {
-            let q = ch;
-            let p1 = 0.5 * ch;
-            let p2 = p_ - regularized_gamma(p1, alpha, true, false);
-            if !finite(p2) || ch <= 0.0 {
-                ch = ch0;
-                max_it_newton = 27;
-                break 'iterate;
-            }
-            let t = p2 * (alpha * M_LN2 + g + p1 - c * ch.ln()).exp();
-            let b = t / ch;
-            let a = 0.5 * t - b * c;
-            let s1 =
-                (210.0 + a * (140.0 + a * (105.0 + a * (84.0 + a * (70.0 + 60.0 * a))))) * I420;
-            let s2 = (420.0 + a * (735.0 + a * (966.0 + a * (1141.0 + 1278.0 * a)))) * I2520;
-            let s3 = (210.0 + a * (462.0 + a * (707.0 + 932.0 * a))) * I2520;
-            let s4 =
-                (252.0 + a * (672.0 + 1182.0 * a) + c * (294.0 + a * (889.0 + 1740.0 * a))) * I5040;
-            let s5 = (84.0 + 2264.0 * a + c * (1175.0 + 606.0 * a)) * I2520;
-            ch += t
-                * (1.0 + 0.5 * t * s1
-                    - b * c * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))));
-            if (q - ch).abs() < EPS2 * ch {
-                break 'iterate;
-            }
-            if (q - ch).abs() > 0.1 * ch {
-                ch = if ch < q { 0.9 * q } else { 1.1 * q };
-            }
+        if y > 0.0 && y.is_finite() {
+            candidates[2] = y.ln();
         }
     }
-    let mut x = 0.5 * scale * ch;
-    if max_it_newton > 0 {
-        let (p, log) = if log { (p, log) } else { (p.ln(), true) };
-        if x == 0.0 {
-            x = DBL_MIN;
-            p_ = pgamma(x, alpha, scale, lower, log);
-            if (lower && p_ > p * (1.0 + 1e-7)) || (!lower && p_ < p * (1.0 - 1e-7)) {
-                return 0.0;
-            }
-        } else {
-            p_ = pgamma(x, alpha, scale, lower, log);
+    let mut u = alpha.ln();
+    let mut residual = f64::INFINITY;
+    for candidate in candidates {
+        if !candidate.is_finite() {
+            continue;
         }
-        if p_ == f64::NEG_INFINITY {
+        let candidate_residual = log_tail_at(candidate) - target;
+        if candidate_residual.abs() < residual.abs() {
+            u = candidate;
+            residual = candidate_residual;
+        }
+    }
+
+    // `ln P` rises with `u` for the lower tail and falls for the upper one. Writing `s` for its
+    // derivative in `u`, `y` times the density over the tail, the second derivative is
+    // `s (shape - y - s)`.
+    let rising = use_lower;
+    let (mut below, mut above) = (f64::NEG_INFINITY, f64::INFINITY);
+    let mut best = (u, f64::INFINITY);
+    for _ in 0..MAXIMUM_ITERATIONS {
+        let log_tail = log_tail_at(u);
+        residual = log_tail - target;
+        if residual.abs() < best.1 {
+            best = (u, residual.abs());
+        } else if residual.abs() > best.1 && below.is_finite() && above.is_finite() {
+            // Rounding in the distribution function now outweighs the step.
+            break;
+        }
+        if residual == 0.0 {
+            break;
+        }
+        if (residual < 0.0) == rising {
+            below = u;
+        } else {
+            above = u;
+        }
+        if above < underflow {
             return 0.0;
         }
-        for i in 1..=max_it_newton {
-            let p1 = p_ - p;
-            if p1.abs() < (EPS_N * p).abs() {
-                break;
-            }
-            let g = dgamma(x, alpha, scale, log);
-            if g == d0(log) {
-                break;
-            }
-            let t = if log { p1 * (p_ - g).exp() } else { p1 / g };
-            let t = if lower { x - t } else { x + t };
-            p_ = pgamma(t, alpha, scale, lower, log);
-            if (p_ - p).abs() > p1.abs() || (i > 1 && (p_ - p).abs() == p1.abs()) {
-                break;
-            }
-            x = t;
+        let y = u.exp();
+        let magnitude = (dgamma(y, alpha, 1.0, true) - log_tail).exp() * y;
+        let slope = if rising { magnitude } else { -magnitude };
+        let newton = residual / slope;
+        let correction = 1.0 - 0.5 * newton * (alpha - y - slope);
+        let step = if correction > 0.5 {
+            newton / correction
+        } else {
+            newton
+        };
+        let mut next = u - step;
+        if !(next > below && next < above) {
+            next = match (below.is_finite(), above.is_finite()) {
+                (true, true) => 0.5 * (below + above),
+                (true, false) => below + 1.0 + below.abs(),
+                _ => above - 1.0 - above.abs(),
+            };
         }
+        if next == u || (next - u).abs() <= 2.0 * f64::EPSILON {
+            best.0 = next;
+            break;
+        }
+        u = next;
+    }
+
+    let mut x = best.0.exp() * scale;
+    if !(x > 0.0) {
+        return 0.0;
+    }
+    if x == f64::INFINITY {
+        return x;
+    }
+    // Far from 1 a double `u` resolves `y` only to hundreds of ulps, so Newton steps on `x`
+    // itself finish the root before the walk to the closest neighbour.
+    let residual_at = |x: f64| pgamma(x, alpha, scale, use_lower, true) - target;
+    let mut x_residual = residual_at(x);
+    for _ in 0..4 {
+        let log_tail = x_residual + target;
+        let magnitude = (dgamma(x, alpha, scale, true) - log_tail).exp();
+        let slope = if rising { magnitude } else { -magnitude };
+        let next = x - x_residual / slope;
+        if !(next > 0.0 && next.is_finite()) || next == x {
+            break;
+        }
+        let next_residual = residual_at(next);
+        if !(next_residual.abs() < x_residual.abs()) {
+            break;
+        }
+        x = next;
+        x_residual = next_residual;
+    }
+    let mut closest = x_residual.abs();
+    for upward in [true, false] {
+        for _ in 0..MAXIMUM_POLISH {
+            let neighbour = if upward { x.next_up() } else { x.next_down() };
+            let neighbour_distance = residual_at(neighbour).abs();
+            if !(neighbour_distance < closest) {
+                break;
+            }
+            x = neighbour;
+            closest = neighbour_distance;
+        }
+    }
+    // Where the distribution function is flat to its last bit, a run of doubles share the
+    // closest probability and the root lies somewhere among them; the middle of the run is the
+    // best guess.
+    let mut run = [0usize; 2];
+    for (side, upward) in [true, false].into_iter().enumerate() {
+        let mut edge = x;
+        for _ in 0..MAXIMUM_POLISH {
+            edge = if upward {
+                edge.next_up()
+            } else {
+                edge.next_down()
+            };
+            if residual_at(edge).abs() != closest {
+                break;
+            }
+            run[side] += 1;
+        }
+    }
+    let (up, down) = (run[0], run[1]);
+    for _ in 0..up.abs_diff(down) / 2 {
+        x = if up > down {
+            x.next_up()
+        } else {
+            x.next_down()
+        };
     }
     x
 }
@@ -5444,6 +5538,11 @@ pub fn pgeom(x: f64, p: f64, lower: bool, log: bool) -> f64 {
     }
 }
 
+/// The geometric quantile, the smallest count `k` with `P(X <= k) >= p`. Since
+/// `P(X > k) = (1 - prob)^(k + 1)`, it is the ceiling of `ln P(X > k) / ln(1 - prob) - 1`. The
+/// quotient is lowered by 1e-12 first, so that one which is an integer in exact arithmetic but
+/// rounded up does not step past it. The fuzz is absolute, which is what GNU R's answers show;
+/// beyond a quotient of about 1e4 it is smaller than the rounding it is meant to absorb.
 pub fn qgeom(p: f64, prob: f64, lower: bool, log: bool) -> f64 {
     if p.is_nan() || prob.is_nan() {
         return p + prob;
@@ -5457,10 +5556,8 @@ pub fn qgeom(p: f64, prob: f64, lower: bool, log: bool) -> f64 {
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
     }
-    fmax2(
-        0.0,
-        (dt_clog(p, lower, log) / (-prob).ln_1p() - 1.0 - 1e-12).ceil(),
-    )
+    let quotient = dt_clog(p, lower, log) / (-prob).ln_1p();
+    fmax2(0.0, (quotient - 1.0 - 1e-12).ceil())
 }
 
 pub fn dhyper(x: f64, r: f64, b: f64, n: f64, log: bool) -> f64 {
@@ -5998,8 +6095,15 @@ pub fn qf(p: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
 
 // Non-central distributions.
 
+/// The noncentral chi-squared density, the Poisson mixture `sum_i w_i(ncp / 2) f(x; df + 2i)`
+/// of central chi-squared densities (Johnson, Kotz and Balakrishnan (1995), chapter 29).
+/// Neighbouring terms have the ratio `(x ncp / 2) / ((i + 1)(df + 2i))`, which falls as `i`
+/// grows, so the terms rise to a single largest one at the ceiling of the root of
+/// `2i^2 + (df + 2) i + df - x ncp / 2 = 0` and fall geometrically on both sides of it. The sum
+/// starts there and runs outward relative to that term, whose size enters once at the end, on
+/// the log scale when it underflows. Where the peak lies beyond 1e10, the density is Patnaik's
+/// (1949) scaled central chi-squared with the same mean and variance.
 pub fn dnchisq(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
-    const EPS: f64 = 5e-15;
     if x.is_nan() || df.is_nan() || ncp.is_nan() {
         return x + df + ncp;
     }
@@ -6022,57 +6126,56 @@ pub fn dnchisq(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
     if x == f64::INFINITY {
         return d0(log);
     }
-    let ncp2 = 0.5 * ncp;
-    // Sum the Poisson mixture outwards from its largest term.
-    let mut imax = ((-(2.0 + df) + ((2.0 - df) * (2.0 - df) + 4.0 * ncp * x).sqrt()) / 4.0).ceil();
-    if imax < 0.0 {
-        imax = 0.0;
+    let half_ncp = 0.5 * ncp;
+    let product = x * half_ncp;
+    let root = (-(2.0 + df) + ((2.0 - df) * (2.0 - df) + 4.0 * ncp * x).sqrt()) / 4.0;
+    // Past this many terms on each side of the peak the outward sum costs too much, and the
+    // two-moment approximation is already within about `1 / sqrt(root)` relative.
+    if !(root <= 1e10) {
+        let mean = df + ncp;
+        let ratio = (mean + ncp) / mean;
+        let density = dchisq(x / ratio, mean / ratio, log);
+        return if log {
+            density - ratio.ln()
+        } else {
+            density / ratio
+        };
     }
-    let (dfmid, mid);
-    if finite(imax) {
-        dfmid = df + 2.0 * imax;
-        mid = dpois_raw(imax, ncp2, false) * dchisq(x, dfmid, false);
-    } else {
-        dfmid = 0.0;
-        mid = 0.0;
-    }
-    if mid == 0.0 {
-        if log || ncp > 1000.0 {
-            let nl = df + ncp;
-            let ic = nl / (nl + ncp);
-            return dchisq(x * ic, nl * ic, log);
-        }
-        return d0(log);
-    }
-    let mut sum = mid;
-    let mut term = mid;
-    let mut df_ = dfmid;
-    let mut i = imax;
-    let x2 = x * ncp2;
+    let peak = root.ceil().max(0.0);
+    let peak_df = df + 2.0 * peak;
+    // A remaining tail below this share of the sum cannot change it.
+    let tolerance = f64::EPSILON / 4.0;
+    let mut sum = 1.0;
+    let (mut term, mut index, mut degrees) = (1.0, peak, peak_df);
     loop {
-        i += 1.0;
-        let q = x2 / i / df_;
-        df_ += 2.0;
-        term *= q;
+        index += 1.0;
+        let ratio = product / (index * degrees);
+        degrees += 2.0;
+        term *= ratio;
         sum += term;
-        if !(q >= 1.0 || term * q > (1.0 - q) * EPS || term > 1e-10 * sum) {
+        if ratio < 1.0 && term * ratio <= (1.0 - ratio) * tolerance * sum {
             break;
         }
     }
-    term = mid;
-    df_ = dfmid;
-    i = imax;
-    while i != 0.0 {
-        df_ -= 2.0;
-        let q = i * df_ / x2;
-        i -= 1.0;
-        term *= q;
+    (term, index, degrees) = (1.0, peak, peak_df);
+    while index > 0.0 {
+        let ratio = index * (degrees - 2.0) / product;
+        index -= 1.0;
+        degrees -= 2.0;
+        term *= ratio;
         sum += term;
-        if q < 1.0 && term * q <= (1.0 - q) * EPS {
+        if ratio < 1.0 && term * ratio <= (1.0 - ratio) * tolerance * sum {
             break;
         }
     }
-    d_val(sum, log)
+    if !log {
+        let peak_term = dpois_raw(peak, half_ncp, false) * dchisq(x, peak_df, false);
+        if peak_term >= DBL_MIN {
+            return peak_term * sum;
+        }
+    }
+    let log_density = dpois_raw(peak, half_ncp, true) + dchisq(x, peak_df, true) + sum.ln();
+    d_exp(log_density, log)
 }
 
 /// The noncentral chi-squared distribution function, the Poisson mixture

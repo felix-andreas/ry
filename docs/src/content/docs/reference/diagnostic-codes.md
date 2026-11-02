@@ -58,6 +58,37 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `assignment-operator` | `=` to `<-` | safe |
 | `boolean-shorthand` | `T` to `TRUE`, `F` to `FALSE` | safe |
 | `trailing-comma` | remove the comma | safe |
+| `redundant-return` | `return(x)` to `x` | safe |
+| `any-is-na` | `any(is.na(x))` to `anyNA(x)` | safe |
+| `paste-sep` | `paste(..., sep = "")` to `paste0(...)`, when no comment sits inside the call | safe |
+| `literal-coercion` | `as.integer(1)` to `1L`, and the like for other literals | safe |
+| `single-quotes` | `'text'` to `"text"`, when the text holds no `"` or `\'` | safe |
+| `comparison-negation` | `!(x == y)` to `x != y`, and the like for other comparisons | safe |
+| `outer-negation` | `all(!x)` to `!any(x)`, `any(!x)` to `!all(x)` | safe |
+| `which-grepl` | `which(grepl(...))` to `grep(...)` | safe |
+| `length-levels` | `length(levels(x))` to `nlevels(x)` | safe |
+| `numeric-leading-zero` | `.5` to `0.5` | safe |
+| `while-true` | `while (TRUE)` to `repeat`, when no comment sits in the header | safe |
+| `empty-assignment` | `x <- {}` to `x <- NULL` | safe |
+| `unnecessary-concatenation` | `c("a")` to `"a"`, `c()` to `NULL`, when no comment sits inside the call | safe |
+| `testthat-expectation` | `expect_equal(x, NULL)` and `expect_true(is.null(x))` to `expect_null(x)` | safe |
+| `testthat-expectation` | `expect_equal(x, TRUE)` to `expect_true(x)`, `expect_true(!x)` to `expect_false(x)`, `expect_equal(length(x), n)` to `expect_length(x, n)`, `expect_equal(names(x), n)` to `expect_named(x, n)`, `expect_true(inherits(x, "a"))` to `expect_s3_class(x, "a")` | unsafe |
+| `condition-message` | `stop(paste0(a, b))` to `stop(a, b)` | unsafe |
+| `fixed-regex` | add `fixed = TRUE` | unsafe |
+| `lengths` | `sapply(x, length)` to `lengths(x)` | unsafe |
+| `redundant-equals` | `x == TRUE` to `x`, `x == FALSE` to `!x` | unsafe |
+| `equals-na` | `x == NA` to `is.na(x)`, `x != NA` to `!is.na(x)` | unsafe |
+| `vector-logic` | `&` to `&&`, `|` to `||` | unsafe |
+| `length-sequence` | `1:length(x)` to `seq_along(x)`, `1:nrow(x)` to `seq_len(nrow(x))` | unsafe |
+| `class-equals` | `class(x) == "a"` to `inherits(x, "a")` | unsafe |
+| `length-test` | `length(x == y)` to `length(x) == y` | unsafe |
+| `scalar-in` | `x %in% "a"` to `x == "a"` | unsafe |
+| `order-subset` | `x[order(x)]` to `sort(x, na.last = TRUE)` | unsafe |
+| `matrix-apply` | `apply(x, 1, sum)` to `rowSums(x)`, and `colSums`, `rowMeans`, `colMeans` alike | unsafe |
+| `unnecessary-lambda` | `lapply(x, function(y) f(y))` to `lapply(x, f)` | unsafe |
+| `yoda-test` | `expect_equal(2, x)` to `expect_equal(x, 2)` | unsafe |
+| `nzchar` | `nchar(x) == 0` to `!nzchar(x)`, `nchar(x) > 0` and `!= 0` to `nzchar(x)` | unsafe |
+| `sample-int` | `sample(1:n, k)` to `sample.int(n, k)` | unsafe |
 | `annotation-mismatch` | change the `#:` comment to the inline type, when ry uses the inline one and it names no type parameter | safe |
 | `unreachable-pattern` | remove the arm, when it has its lines to itself | safe |
 | `unresolved`, `type-mismatch`, `annotation` | change a misspelled name, argument, field, column or type to the suggestion | unsafe |
@@ -106,6 +137,48 @@ no finding for that name, because there it may mean the binding.
 argument, which fails only when the callee evaluates it: `c(1, 2, )` stops with "argument 3 is
 empty", while `ngettext(2, "a", "b", )` runs, because the empty argument leaves `domain` at its
 default.
+
+**`equals-na`** (warning): a comparison with `NA`, such as `x == NA`, which gives `NA` whatever `x`
+holds, so it never tests whether a value is missing. The fix to `is.na(x)` is unsafe because the
+result changes from `NA` to `TRUE` or `FALSE`, which is the point but changes what the code does.
+
+**`vector-logic`** (warning): `&` or `|` in an `if` or `while` condition, where `&&` and `||` skip the right-hand side once the left decides the answer, and (since R 4.3)
+stop with an error on a vector longer than one instead of looking at its first element. The fix
+is unsafe because the right-hand side may no longer run. Inside a call such as `any(x & y)` the
+operator is left alone, because there it works on vectors on purpose.
+
+**`length-sequence`** (warning): `1:length(x)`, `1:nrow(x)`, `1:ncol(x)`, `1:NROW(x)` or
+`1:NCOL(x)`, and the same counts in `seq(length(x))`. When the length is zero, `1:0` is `c(1, 0)`, so a loop over it runs twice instead of
+not at all. The fix to `seq_along(x)` or `seq_len(nrow(x))` is unsafe because it changes what an
+empty input does.
+
+**`class-equals`** (warning): `class(x) == "name"` or `!=`, which misses an object whose class
+vector has several entries: a tibble's class is `c("tbl_df", "tbl", "data.frame")`, so the
+comparison gives three values, and since R 4.2 an `if` on it stops with an error. The fix to `inherits(x, "name")` is unsafe because it changes the result for such
+objects.
+
+**`unreachable-code`** (warning): statements after `return()`, `stop()`, `break` or `next` in the
+same block, which never run. The range covers every statement from the first unreachable one to
+the end of the block. A file that defines its own `return` or `stop` gets no finding for it, and
+neither does a block inside `quote()`, `bquote()`, `substitute()` or `expression()`.
+
+**`sprintf-arguments`** (warning): a `sprintf()` or `gettextf()` call whose literal format wants a
+different number of values than the call passes. Too few values stop R with "too few arguments",
+and an extra value is dropped with a warning. `%%` consumes nothing and `*` in a width or precision
+consumes a value. A format with `%1$s` positions, a format that is not a literal, a `...` argument,
+or a named argument other than `fmt` turns the check off for that call.
+
+```text
+! This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+```
+
+**`length-test`** (warning): a comparison inside `length()`, such as `length(x == 0)`. It counts
+the comparison's elements, which is `length(x)` when the right side is one value, so the comparison
+was meant for the length. The fix moves it outside, and is unsafe because it changes the result.
+
+```text
+! `length(x == 0)` is the length of the comparison, not a test of the length. Did you mean `length(x) == 0`?
+```
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
@@ -194,5 +267,88 @@ mentions. Only `ry check` reports it.
 function from `base`, or from another package, such as defining your own `filter` while
 `stats::filter` exists.
 
-These four take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
+**`redundant-return`** (off by default): `return(x)` as a function's last expression, including
+both branches of a trailing `if`, where `x` alone returns the same value. A file that defines its
+own `return` gets no finding.
+
+**`commented-code`** (off by default): a comment that parses as R and calls, assigns, defines,
+branches, loops or indexes, such as `# x <- compute(y)`. Prose rarely parses that way, and roxygen
+(`#'`), plumber (`#*`), Quarto (`#|`), `#!` and `#>` output comments are skipped. Delete the code
+instead: version control keeps it.
+
+**`duplicate-argument`** (off by default): the same argument name twice in one call, which stops a
+function with "formal argument matched by multiple actual arguments". It is off because a function
+that collects `...` keeps both values on purpose, such as cli's `c("i" = ..., "i" = ...)` bullets or
+two HTML `class` attributes, and the lint cannot see which functions do. With type checking on,
+a call that gives a known function's parameter twice is a `type-mismatch` anyway, such as
+`paste(sep = "", sep = "-")`. `mutate()`, `transmute()`,
+`summarise()`, `summarize()` and `reframe()` are exempt, because there a repeated name updates a
+column.
+
+**`any-is-na`**, **`paste-sep`**, **`lengths`**, **`literal-coercion`**, **`redundant-equals`** and
+**`single-quotes`** (off by default): spellings with a shorter or faster equivalent, listed with
+their fixes under [Fixes](#fixes). `redundant-equals` and `lengths` have unsafe fixes, because
+`1 == TRUE` is `TRUE` and `sapply()` on an empty list returns a list, not an integer vector.
+
+**`testthat-expectation`** (off by default): a general testthat expectation where a specific one
+exists, such as `expect_equal(x, NULL)` for `expect_null(x)`. The specific one fails with a message
+that says what went wrong. Most fixes are unsafe because the specific expectation accepts different
+values: `expect_false(x)` passes only for `FALSE`, while `expect_true(!x)` also passes for `0`.
+
+**`condition-message`** (off by default): `paste0()`, or `paste()` with `sep = ""`, inside `stop()`,
+`warning()`, `message()` or `packageStartupMessage()`, which join their arguments themselves. R
+translates a condition message argument by argument, so a pasted message cannot be translated. The
+fix is unsafe because `paste0()` recycles vectors element by element where `stop()` joins them end
+to end.
+
+**`fixed-regex`** (off by default): a literal pattern with no regular expression syntax in `grepl()`,
+`grep()`, `sub()`, `gsub()`, `regexpr()`, `gregexpr()`, `regexec()` or `strsplit()`, which
+`fixed = TRUE` matches faster. Calls that already set `fixed`, `perl` or `ignore.case` are skipped,
+and so are `sub()` and `gsub()` with a replacement that may hold a backreference. The fix is unsafe
+because R can mark the encoding of a fixed match's result differently.
+
+**`browser-call`** (off by default): a `browser()` call, which pauses the code whenever it runs
+interactively. A call inside `quote()`, `bquote()`, `substitute()` or `expression()` is skipped,
+because there it is code built on purpose.
+
+**`line-length`** (off by default): a line longer than `[lint] max-line-length` characters, 80
+unless you set it. The formatter keeps your line breaks and never splits a line, so this lint is
+what keeps lines short. It counts characters, not bytes, and reports from the first character past
+the limit.
+
+**`implicit-assignment`** (off by default): `<-`, `<<-` or `->` inside an `if` or `while`
+condition, such as `if (x <- f())`, where an assignment reads like a comparison. A function defined
+inside the condition is skipped. `while ((line <- next_line()) != "")` is a common R idiom, which is
+why the lint is opt-in.
+
+**`scalar-in`**, **`order-subset`**, **`matrix-apply`** and **`unnecessary-lambda`** (off by
+default): code with a simpler or faster equivalent whose fix can change the result in an edge
+case, so each fix is unsafe. `x %in% "a"` is `FALSE` for an `NA` where `x == "a"` is `NA`.
+`x[order(x)]` dispatches like `[` where `sort()` dispatches on its own methods. `apply()` turns a
+data frame into a matrix before `rowSums()` would, and a function passed by name receives the extra
+arguments an apply function forwards, where an anonymous one with a single parameter would reject
+them. `matrix-apply` covers `sum` and `mean` over margin 1 or 2, with an optional `na.rm`, and
+`unnecessary-lambda` covers `lapply()`, `sapply()`, `vapply()`, `Filter()`, `Map()` and purrr's
+`map()` family, `walk()`, `keep()` and `discard()`.
+
+**`yoda-test`** (off by default): `expect_equal()` or `expect_identical()` with a constant first and
+the value under test second. testthat reports the first argument as the actual value, so a failure
+message reads backwards. The fix swaps them, and is unsafe because `expect_equal()` measures a
+numeric tolerance relative to one of its two arguments.
+
+**`nzchar`** and **`sample-int`** (off by default): `nchar(x) == 0`, which counts every string
+only to test whether it is empty, and `sample(1:n, k)`, which builds `1:n` only to draw from it.
+Both fixes are unsafe: `nchar(NA)` is 2 while `nzchar(NA)` is `TRUE`, and `sample(1:0, 1)` draws
+from `c(1, 0)` where `sample.int(0, 1)` fails.
+
+**`while-true`**, **`empty-assignment`** and **`unnecessary-concatenation`** (off by default):
+`while (TRUE)`, which `repeat` says directly, `x <- {}`, which assigns `NULL`, and `c()` around a
+single constant or around nothing, which returns that constant or `NULL`. All three fixes are safe.
+
+**`comparison-negation`**, **`outer-negation`**, **`which-grepl`**, **`length-levels`** and
+**`numeric-leading-zero`** (off by default): more spellings with a shorter equivalent, each with a
+safe fix under [Fixes](#fixes). A fix that would change how the surrounding expression parses gets
+parentheses, so `all(!x) + 1` becomes `(!any(x)) + 1`.
+
+These lints take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
 still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.

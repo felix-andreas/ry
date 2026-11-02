@@ -1,88 +1,41 @@
-//! Arithmetic helpers, sorting and the C API's random number entry points.
+//! Arithmetic helpers, sorting and the C API of the random number generator.
 //!
-//! The generator is the interpreter's (`interp::random`), which implements every RNG kind GNU R
-//! has and keeps its state in `.Random.seed`, so native code and R code draw from one stream.
+//! The generator is the interpreter's (`interp::random`), so C code and R code share one
+//! stream and every kind `RNGkind` offers, with the state in `.Random.seed` exactly as in GNU R.
 
 use {
-    crate::{
-        boundary::{ApiResult, enter, raise},
-        runtime,
-    },
+    crate::boundary::enter,
     heap::object::{NA_INTEGER, Rcomplex, is_na_real},
-    interp::{random, unwind::R},
+    interp::random,
     std::{cmp::Ordering, ffi::c_int},
 };
 
-/// A handle on the interpreter's generator, which the `r*` deviate functions draw through.
-#[derive(Default)]
-pub struct Rng;
-
-impl Rng {
-    pub fn unif_rand(&mut self) -> f64 {
-        // SAFETY: the C API runs on the interpreter's thread.
-        drawn(unsafe { random::unif_rand() })
-    }
-
-    pub fn norm_rand(&mut self) -> f64 {
-        // SAFETY: as above.
-        drawn(unsafe { random::norm_rand() })
-    }
-
-    pub fn exp_rand(&mut self) -> f64 {
-        // SAFETY: as above.
-        drawn(unsafe { random::exp_rand() })
-    }
-
-    pub fn unif_index(&mut self, n: f64) -> f64 {
-        // SAFETY: as above.
-        drawn(unsafe { random::unif_index(n) })
-    }
-}
-
-/// A draw's value, or the R error it raised (an unsupported normal kind), which the C API
-/// raises in the native caller as GNU R's `error()` would.
-fn drawn(result: R<f64>) -> f64 {
-    match result {
-        Ok(value) => value,
-        // SAFETY: deviates are drawn only from native code the C API called into.
-        Err(unwind) => unsafe { raise(unwind) },
-    }
-}
-
-pub(crate) unsafe fn read_seed() -> ApiResult<()> {
-    random::get_rng_state()
-}
-
-pub(crate) unsafe fn write_seed() -> ApiResult<()> {
-    random::put_rng_state()
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetRNGstate() {
-    enter(|| read_seed())
+    enter(|| random::get_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PutRNGstate() {
-    enter(|| write_seed())
+    enter(|| random::put_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unif_rand() -> f64 {
-    runtime().rng.unif_rand()
+    enter(|| random::unif_rand())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn norm_rand() -> f64 {
-    runtime().rng.norm_rand()
+    enter(|| random::norm_rand())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exp_rand() -> f64 {
-    runtime().rng.exp_rand()
+    enter(|| random::exp_rand())
 }
 
-/// `Sampletype`'s code of the sampling method `RNGkind(sample.kind =)` chose.
+/// `Sampletype`: 0 for the rounding sampler of R before 3.6.0, 1 for rejection sampling.
 #[unsafe(no_mangle)]
 pub extern "C" fn R_sample_kind() -> c_int {
     random::sample_kind()
@@ -96,7 +49,7 @@ pub extern "C" fn R_binom_kind() -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_unif_index(n: f64) -> f64 {
-    runtime().rng.unif_index(n)
+    enter(|| random::unif_index(n))
 }
 
 #[unsafe(no_mangle)]

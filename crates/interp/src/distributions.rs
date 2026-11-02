@@ -32,8 +32,9 @@ use {
         rmath::*,
         unwind::{R, error},
         values::{
-            alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
-            ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+            alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits,
+            integer_vector, ints, ints_mut, length, list_vector, materialize, nil, reals,
+            reals_mut, set_attr, symbols,
         },
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real},
@@ -74,10 +75,13 @@ macro_rules! distributions {
         math($args, $interface, $vectors, $function)
     };
     (@call random integer $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, true, $function)
+        random_vector($args, $interface, true, $function, None)
     };
     (@call random real $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, false, $function)
+        random_vector($args, $interface, false, $function, None)
+    };
+    (@call random normal $function:expr, $args:expr, $interface:expr) => {
+        random_vector($args, $interface, false, $function, Some(fill_rnorm))
     };
 }
 
@@ -172,7 +176,7 @@ distributions! {
     "rnbinom" 3 random integer |s, v| rnbinom(s, v[0], v[1]);
     "rnbinom_mu" 3 random real |s, v| rnbinom_mu(s, v[0], v[1]);
     "rnchisq" 3 random real |s, v| rnchisq(s, v[0], v[1]);
-    "rnorm" 3 random real |s, v| rnorm(s, v[0], v[1]);
+    "rnorm" 3 random normal |s, v| rnorm(s, v[0], v[1]);
     "runif" 3 random real |s, v| runif(s, v[0], v[1]);
     "rweibull" 3 random real |s, v| rweibull(s, v[0], v[1]);
     "rwilcox" 3 random integer |s, v| rwilcox(s, v[0], v[1]);
@@ -327,6 +331,10 @@ unsafe fn flag(value: Sexp) -> R<i32> {
     Ok(ints(integer)[0])
 }
 
+/// Fills a whole result with draws at the first parameter set, or declines with `false` so the
+/// caller draws one at a time.
+type BatchFill = unsafe fn(&mut [f64], &[f64; 3]) -> bool;
+
 /// GNU R's `random1` to `random3`: `n` is a count, or the length of a longer vector, and the
 /// parameters recycle over it. Missing parameters give `NA`s, and every NaN drawn raises "NAs
 /// produced". The stats routines return the discrete generators' counts as integers when they
@@ -335,7 +343,8 @@ unsafe fn random_vector(
     args: &[Arg],
     interface: Interface,
     integer: bool,
-    function: fn(&mut SessionDeviates, &[f64; 3]) -> R<f64>,
+    function: impl Fn(&mut SessionDeviates, &[f64; 3]) -> R<f64>,
+    batch: Option<BatchFill>,
 ) -> R<Sexp> {
     let count = random_count(argument(args, 0))?;
     let parameters = args.len().saturating_sub(1).min(3);
@@ -350,10 +359,14 @@ unsafe fn random_vector(
         lengths[index] = length(original);
     }
     let integer = integer && interface == Interface::Stats;
-    let mut drawn = vec![NA_REAL; count];
+    // Every element is written below before anything reads the vector, and a failed draw
+    // returns the error, so the vector starts unzeroed.
+    let result = alloc_uninit(SexpType::Real, count)?;
+    let drawn = reals_mut(result);
     if count > 0 && lengths[..parameters].contains(&0) {
+        drawn.fill(NA_REAL);
         warning("NAs produced")?;
-        return random_result(&drawn, integer);
+        return random_result(result, integer);
     }
     if count > 0 {
         random::get_rng_state()?;
@@ -364,28 +377,31 @@ unsafe fn random_vector(
         for index in 0..parameters {
             arguments[index] = reals(operands[index])[0];
         }
-        for (element, slot) in drawn.iter_mut().enumerate() {
-            if !scalar {
-                for index in 0..parameters {
-                    arguments[index] = reals(operands[index])[element % lengths[index]];
+        let batched = scalar && batch.is_some_and(|batch| batch(drawn, &arguments));
+        if !batched {
+            for (element, slot) in drawn.iter_mut().enumerate() {
+                if !scalar {
+                    for index in 0..parameters {
+                        arguments[index] = reals(operands[index])[element % lengths[index]];
+                    }
                 }
-            }
-            match function(&mut deviates, &arguments) {
-                Ok(value) => *slot = value,
-                Err(failure) => {
-                    outcome = Err(failure);
-                    break;
+                match function(&mut deviates, &arguments) {
+                    Ok(value) => *slot = value,
+                    Err(failure) => {
+                        outcome = Err(failure);
+                        break;
+                    }
                 }
             }
         }
         random::put_rng_state()?;
         outcome?;
         raise_warnings()?;
-        if drawn.iter().any(|value| value.is_nan()) {
+        if reals(result).iter().any(|value| value.is_nan()) {
             warning("NAs produced")?;
         }
     }
-    random_result(&drawn, integer)
+    random_result(result, integer)
 }
 
 /// The number of draws `n` asks for: the value of a scalar, or the length of a longer vector.
@@ -417,21 +433,36 @@ unsafe fn random_count(value: Sexp) -> R<usize> {
     Ok(count as usize)
 }
 
-unsafe fn random_result(drawn: &[f64], integer: bool) -> R<Sexp> {
-    let fits = |value: &f64| value.is_nan() || value.abs() <= f64::from(i32::MAX);
-    if integer && drawn.iter().all(fits) {
-        let result = alloc(SexpType::Integer, drawn.len())?;
-        for (slot, value) in ints_mut(result).iter_mut().zip(drawn) {
-            *slot = if value.is_nan() {
-                NA_INTEGER
-            } else {
-                *value as i32
-            };
-        }
-        return Ok(result);
+/// `rnorm`'s draws in bulk for a scalar mean and standard deviation, when [`rnorm`] would
+/// draw a deviate for every element and the generator supports bulk draws.
+unsafe fn fill_rnorm(slots: &mut [f64], arguments: &[f64; 3]) -> bool {
+    let [mu, sigma, _] = *arguments;
+    if mu.is_nan() || !sigma.is_finite() || sigma <= 0.0 || !mu.is_finite() {
+        return false;
     }
-    let result = alloc(SexpType::Real, drawn.len())?;
-    reals_mut(result).copy_from_slice(drawn);
+    if !random::fill_standard_normal(slots) {
+        return false;
+    }
+    for slot in slots.iter_mut() {
+        *slot = mu + sigma * *slot;
+    }
+    true
+}
+
+/// The drawn deviates, as integers when the routine counts and every count fits.
+unsafe fn random_result(drawn: Sexp, integer: bool) -> R<Sexp> {
+    let fits = |value: &f64| value.is_nan() || value.abs() <= f64::from(i32::MAX);
+    if !integer || !reals(drawn).iter().all(fits) {
+        return Ok(drawn);
+    }
+    let result = alloc_uninit(SexpType::Integer, length(drawn))?;
+    for (slot, value) in ints_mut(result).iter_mut().zip(reals(drawn)) {
+        *slot = if value.is_nan() {
+            NA_INTEGER
+        } else {
+            *value as i32
+        };
+    }
     Ok(result)
 }
 
@@ -591,6 +622,12 @@ pub fn rnchisq(deviates: &mut impl Deviates, df: f64, lambda: f64) -> R<f64> {
         value += rgamma(deviates, df / 2.0, 2.0)?;
     }
     Ok(value)
+}
+
+/// A noncentral beta deviate from two chi-squares, as GNU R's `rnbeta`.
+pub fn rnbeta(deviates: &mut impl Deviates, a: f64, b: f64, ncp: f64) -> R<f64> {
+    let numerator = rnchisq(deviates, 2.0 * a, ncp)?;
+    Ok(numerator / (numerator + rchisq(deviates, 2.0 * b)?))
 }
 
 pub fn rt(deviates: &mut impl Deviates, df: f64) -> R<f64> {
@@ -1392,7 +1429,9 @@ pub fn rwilcox(deviates: &mut impl Deviates, m: f64, n: f64) -> R<f64> {
 }
 
 /// One multinomial draw of `size` objects into `probabilities.len()` boxes, as successive
-/// binomial draws conditional on the boxes before.
+/// binomial draws conditional on the boxes before. The remaining mass starts at the sum of the
+/// probabilities, added in order as GNU R does, so probabilities that sum to one only within
+/// rounding give GNU R's conditionals.
 pub fn rmultinom(
     deviates: &mut impl Deviates,
     size: i32,
@@ -1404,7 +1443,7 @@ pub fn rmultinom(
         return Ok(());
     };
     let mut left = size;
-    let mut remaining_probability = 1.0;
+    let mut remaining_probability: f64 = probabilities.iter().sum();
     for (index, &probability) in probabilities[..last].iter().enumerate() {
         if probability > 0.0 {
             let conditional = probability / remaining_probability;
