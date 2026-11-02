@@ -92,6 +92,6 @@ ry prints a warning first when an inline annotation and a `#:` comment disagree,
 [strict mode](/type-checking/strict-mode) a command with a strict-mode error does not run. GNU R runs
 each command with the annotations erased.
 
-Only the commands that run code (`ry R`, `ry run` and `ry load`) need R installed, and even ry's own
-runtime still takes base R from it. Checking, formatting and the editor read the source and never
-run it. The [command reference](/reference/cli#run-and-r) lists every option.
+Only the commands that run code (`ry R`, `ry run`, `ry load`, `ry test` and `ry document`) need R
+installed, and even ry's own runtime still takes base R from it. Checking, formatting and the
+editor read the source and never run it. The [command reference](/reference/cli#run-and-r) lists every option.

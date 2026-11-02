@@ -19,13 +19,16 @@ strict = true
 Strict mode reports type errors too, so it needs no `typing = true` beside it. A `# typing: strict`
 comment turns it on for a single file instead.
 
-Strict mode also guards running code. `ry run` and `ry R` print the errors and exit with status 1 instead of
-running a script that has one, `ry load` does the same for a package whose `R/` files have one,
-and the console refuses each command that has one:
+Strict mode also guards running code. `ry run` and `ry R` print the errors and exit with status 1
+instead of running a script that has one, `ry load` does the same for a package whose `R/` files
+have one, and the console refuses each command that has one:
 
 ```text
   x strict mode found 1 error, so this code does not run
 ```
+
+`ry load` checks only the package's own files, so an error in a test or a script fails `ry check`
+but does not stop the load.
 
 ## What it reports
 

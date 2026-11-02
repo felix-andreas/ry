@@ -1840,6 +1840,20 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**PGO is not used for the release build, because it measured slower.** An instrumented libR
+(`-Cprofile-generate` on the `interp`, `heap`, `libr` and `R` crates through a
+`RUSTC_WORKSPACE_WRAPPER`, so dependency fingerprints stay unchanged) was trained on every oracle
+case with the JIT off and on, and rebuilt with `-Cprofile-use`. On held-out scripts with the JIT
+off, best of three, it ran 1.4 to 1.9x slower than the plain release build: period.apply 2.10 s
+against 1.47 s, 300k `sd` calls 7.11 s against 4.44 s, row `apply` 1.28 s against 0.66 s, `fib(27)`
+0.55 s against 0.29 s, a 200k-record `lapply` 1.28 s against 0.79 s, and 50k S4 `new`/`slot<-` 13.9
+s against 8.7 s. The cause is unverified. The likeliest suspects are applying the profile only to
+the runtime crates under fat LTO, or a profile that went stale against the merged module, either of
+which leaves hot code optimized as cold. Retrying needs the profile applied to every crate linked
+into libR (cargo-pgo does this), a check for `-Wbackend-plugin` profile-mismatch warnings, and BOLT,
+which is not installed in the cloud environment. Until a retry measures a gain, the release workflow
+stays as it is.
+
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
 without moving any epoch. The rest of the walk (the top environment, the generic's registered
@@ -6445,6 +6459,28 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+## Completion pushes down names whose declared type cannot fit, and never promotes
+
+- **Before.** Completion ranked equally good matches by source and use counts only, so in
+  `if (is_|)` a helper declared `-> character` ranked beside one declared `-> logical`.
+- **Shape.** `expected_type` in `crates/ide/src/ide.rs` reads what the code around the cursor
+  wants: a logical for an `if`/`while` condition and an operand of `!`, `&&` or `||`, and for an
+  argument the parameter type its global or stub callee *declares*. It reads the declared
+  scheme, not the call's instance, because the instance took its parameter types from the
+  argument being typed (`print(i)` made the slot `integer` and pushed `iconv` down), and it
+  unions the parameter across every stub overload, because the argument picks the overload only
+  once it is written (`lapply`'s first overload takes a named list, which pushed `seq_along`
+  down). A candidate is compared by coarse value shape (`type_mismatch`), with R's
+  logical-to-integer-to-double widening allowed, and a known mismatch sorts after the fits within
+  the same match score and source group. Inferred function types are ignored on both sides,
+  since they say how a body ends, not what callers may pass.
+- **Rejected:** promoting candidates that fit. Project helpers with an inferred `logical` result
+  then outranked `is.na` and friends, and two characters on call heads lost 2 points on purrr and
+  1.3 on R6.
+- **Impact.** Neutral on httr2, purrr and R6 and +0.3 points on finbench at two characters,
+  with completion still about 2 ms median on the packages and 8 ms on finbench; the gain is in
+  annotated code, which the `completion_expected_type` fixtures pin.
 
 # Decision record: a cold check holds one parse tree per worker
 
