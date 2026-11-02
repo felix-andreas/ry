@@ -2613,10 +2613,7 @@ enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
     Literal(memmem::Finder<'static>),
     /// `fresh_start` as in [`Translation`], here and in `Automaton`.
-    Pattern {
-        regex: Rc<Regex>,
-        fresh_start: bool,
-    },
+    Pattern { regex: Rc<Regex>, fresh_start: bool },
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
     /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
@@ -2749,15 +2746,14 @@ impl Matcher {
                 // comparing at each candidate first byte is several times faster.
                 let start = if haystack.len() < 64 {
                     match needle.split_first() {
-                        Some((&first, rest)) => haystack
-                            .iter()
-                            .enumerate()
-                            .position(|(start, &byte)| {
+                        Some((&first, rest)) => {
+                            haystack.iter().enumerate().position(|(start, &byte)| {
                                 byte == first
                                     && haystack
                                         .get(start + 1..start + needle.len())
                                         .is_some_and(|tail| tail == rest)
-                            }),
+                            })
+                        }
                         None => Some(0),
                     }
                 } else {

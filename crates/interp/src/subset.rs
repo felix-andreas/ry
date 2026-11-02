@@ -1036,10 +1036,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         }
         return value_of(value);
     }
-    if matches!(
-        object.kind(),
-        SexpType::Pairlist | SexpType::Language
-    ) {
+    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         let list = values::pairlist_to_list(object)?;
         return subset2(list, indices, exact, call);
     }
@@ -2260,15 +2257,18 @@ struct Flattener {
 /// among all the leaves under that base.
 struct NameScope {
     base: String,
+    /// The base is an NA name, which a lone unnamed leaf keeps as NA.
+    base_is_na: bool,
     count: usize,
     position: usize,
 }
 
 impl Flattener {
-    unsafe fn add(&mut self, value: Sexp, tag: &str) -> R<()> {
+    unsafe fn add(&mut self, value: Sexp, tag: &str, tag_is_na: bool) -> R<()> {
         let value = flattenable(value)?;
         let mut scope = NameScope {
             base: tag.to_owned(),
+            base_is_na: tag_is_na,
             count: if tag.is_empty() {
                 0
             } else {
@@ -2297,6 +2297,7 @@ impl Flattener {
                     name => {
                         // A named element starts a new base, so its leaves count afresh, but
                         // they still take their places in the enclosing base's numbering.
+                        let base_is_na = name.is_none() && scope.base.is_empty();
                         let name = name.unwrap_or_else(|| "NA".to_owned());
                         let base = match scope.base.as_str() {
                             "" => name,
@@ -2305,6 +2306,7 @@ impl Flattener {
                         let count = self.unnamed_leaves(element)?;
                         let mut inner = NameScope {
                             base,
+                            base_is_na,
                             count,
                             position: 0,
                         };
@@ -2344,6 +2346,9 @@ impl Flattener {
         Some(if !own.is_empty() {
             format!("{}.{own}", scope.base)
         } else if scope.count == 1 {
+            if scope.base_is_na {
+                return None;
+            }
             scope.base.clone()
         } else {
             format!("{}{}", scope.base, scope.position)
@@ -2440,10 +2445,16 @@ pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    combine_args(&args, false, true)
+    combine_args(&args, &[], false, true)
 }
 
-unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp> {
+/// `na_tags` marks the arguments whose tag stands for an NA name; it may be shorter than `args`.
+unsafe fn combine_args(
+    args: &[Arg],
+    na_tags: &[bool],
+    recursive: bool,
+    use_names: bool,
+) -> R<Sexp> {
     let mut flattener = Flattener {
         kind: SexpType::Nil,
         values: Vec::new(),
@@ -2463,7 +2474,8 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
     } else if let Some(result) = combine_unnamed_atomic(args, flattener.kind)? {
         return Ok(result);
     }
-    for arg in args {
+    for (index, arg) in args.iter().enumerate() {
+        let tag_is_na = na_tags.get(index).copied().unwrap_or(false);
         let tag = if arg.tag == nil() {
             String::new()
         } else {
@@ -2478,10 +2490,10 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
             && arg.value.kind().is_atomic()
         {
             // Atomic vectors are split into elements of the list.
-            flattener.add(arg.value, &tag)?;
+            flattener.add(arg.value, &tag, tag_is_na)?;
             continue;
         }
-        flattener.add(arg.value, &tag)?;
+        flattener.add(arg.value, &tag, tag_is_na)?;
     }
     flattener.build()
 }
@@ -2540,7 +2552,7 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
             args.push(*arg);
         }
     }
-    combine_args(&args, recursive, use_names)
+    combine_args(&args, &[], recursive, use_names)
 }
 
 unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
@@ -2574,10 +2586,10 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
             }
         })
         .collect();
-    if !recursive {
-        return combine_args(&args, false, use_names);
-    }
-    combine_args(&args, true, use_names)
+    let na_tags: Vec<bool> = (0..length(list))
+        .map(|index| names != nil() && names.element(index) == values::na_string())
+        .collect();
+    combine_args(&args, &na_tags, recursive, use_names)
 }
 
 unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {

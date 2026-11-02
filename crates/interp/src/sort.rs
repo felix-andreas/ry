@@ -550,7 +550,10 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     }
     let widened: Vec<i32>;
     let column = if x.kind() == SexpType::Raw {
-        widened = values::raws(x).iter().map(|&byte| i32::from(byte)).collect();
+        widened = values::raws(x)
+            .iter()
+            .map(|&byte| i32::from(byte))
+            .collect();
         Column::Integer(&widened)
     } else {
         column(x).ok_or_else(|| unimplemented_type(x, "greater"))?
@@ -751,7 +754,10 @@ unsafe fn match_integers(x: Sexp, table: Sexp, nomatch: i32) -> R<Sexp> {
                 na_position
             } else {
                 let offset = i64::from(key) - i64::from(low);
-                match usize::try_from(offset).ok().and_then(|offset| first.get(offset)) {
+                match usize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| first.get(offset))
+                {
                     Some(&position) if position != 0 => position,
                     _ => nomatch,
                 }

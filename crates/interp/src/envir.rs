@@ -1988,7 +1988,10 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool) -> R<Sexp>
         let frame = values::new_env(base_namespace())?;
         let x = values::install("x")?;
         eval::define(x, package, frame)?;
-        eval::eval(values::call(values::install("loadNamespace")?, &[x])?, frame)?
+        eval::eval(
+            values::call(values::install("loadNamespace")?, &[x])?,
+            frame,
+        )?
     };
     if namespace == base_namespace() || !exported {
         let value = find_var_in_frame(symbol, namespace)?;

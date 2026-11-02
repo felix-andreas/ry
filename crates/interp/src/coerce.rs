@@ -1191,7 +1191,8 @@ unsafe fn integers_as_strings(source: &[i32], result: Sexp) -> R<()> {
             match slot {
                 Some(Some(charsxp)) => *charsxp,
                 slot => {
-                    let charsxp = heap.mk_char(integer_digits(value, &mut buffer), Encoding::Native)?;
+                    let charsxp =
+                        heap.mk_char(integer_digits(value, &mut buffer), Encoding::Native)?;
                     if let Some(slot) = slot {
                         *slot = Some(charsxp);
                     }

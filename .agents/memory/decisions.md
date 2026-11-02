@@ -5702,3 +5702,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - Measured rule (`env.profile` as the black box): every insert counts one, a removal uncounts one only when it empties its bucket, the table grows to `size * 1.2 + 1` once the counter passes 85% of the size, and a growth restarts the counter at the number of occupied buckets.
 - Target shape: a hashed frame boxes a `HashTable` with the current size, the counter, per-bucket occupancy and the growth points (as slot-prefix lengths, remapped by compaction). Inserts and removals keep it current; listing replays the live bindings and applies each growth at its recorded point, which is exact because a removed entry only ever left its chain. `Heap::count_transient_binding` accounts `*tmp*` from the complex-assignment path.
 - Impact: listing order matches GNU R across random inserts and removals (pinned by `crates/oracle/cases/environments__hashed_order_after_removal.R`). Unhashed frames (every closure call) pay one word for the `Option<Box<_>>`, the same as the old size field with its padding. Hashed inserts pay one PJW hash of the name.
+
+## Base kernels pick their data structure by the value range
+
+- **Previous shape.** `match()` on integers hashed boxed keys, `split()` grew each piece as it scattered, `as.character()` on integers formatted and interned every element, and `order()` on several keys ran one least-significant-digit radix pass per key over all rows. Each was 1.5x to 2.7x GNU R's time at 1e6 rows.
+- **Shape.** `match()` on integers indexes a dense array of first positions when the table spans a small range and hashes plain `i32` otherwise. `split()` counts each level first and scatters into exact-size pieces. `as.character()` on integers interns each distinct value once when the values span a small range, which `factor()`, `table()` and `cut()` inherit. In `sort.rs`, when the first of several order keys spans fewer values than there are rows, one counting pass splits the rows by it and each group sorts by the remaining keys on its own, so later passes stay in cache.
+- **Impact.** At 1e6 rows `match` on integers runs at 0.09 of GNU R's time, `split` 0.55, `table` 0.37 (one factor) and 0.70 (two), `cut` 0.80 and `formatC` 0.88 (`tools/bench/base`). Each falls back to the general path when the range is wide, so no input is slower than before.
+
+## Runtime error checks follow GNU R's order and blame
+
+- **Rule.** Where GNU R checks a condition before matching arguments or dispatching, ry checks it at the same point and blames the same call. `NextMethod()` errors through the innermost closure call ("called from outside a function", "called from an anonymous function", "object not specified" when `.Class` is unbound and the object has no class, "generic function not specified", "no method to invoke"), with no fallback to the call's name. `round()` and `signif()` count their arguments before matching them and blame the calling closure, so `eval.rs` leaves their formals check to them.
+- **Why.** Packages and GNU R's own tests compare these messages, and a lenient fallback hid real bugs (a `NextMethod` that silently picked the wrong generic).
+
+## A formula's dot expands to the sum GNU R prints
+
+- `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
