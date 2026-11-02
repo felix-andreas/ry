@@ -2651,6 +2651,10 @@ impl<'db> Checker<'db, '_> {
                             self.table.resolve(self.db, value_ty).kind(self.db),
                             TyKind::Null
                         )
+                        && !matches!(
+                            self.module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+                        )
                     {
                         self.valued_slots.insert(slot);
                     }
@@ -8838,15 +8842,33 @@ impl<'db> Checker<'db, '_> {
     /// a placeholder for a value written where the checker cannot see. Correct R never tests
     /// or passes on a value that is always `NULL` where `NULL` fails, so such a read is not
     /// reported there. A parameter's `NULL` is what the caller passed, and stays checked.
+    /// A local whose every visible write is a bare `NA` (`pattern.end = NA` before a closure
+    /// fills it with `<<-`) is the same placeholder, spelled as a missing value.
     fn reads_null_placeholder(&self, value: ExprId, ty: Ty<'db>) -> bool {
         let mut value = value;
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
             value = *inner;
         }
-        if !matches!(ty.kind(self.db), TyKind::Null)
-            || !matches!(self.module.kind(value), ExpressionKind::NameRef(_))
+        if !matches!(self.module.kind(value), ExpressionKind::NameRef(_))
             || self.binds_parameter(value)
         {
+            return false;
+        }
+        if matches!(ty.kind(self.db), TyKind::Scalar(Atomic::Logical)) {
+            let ExpressionKind::NameRef(name) = self.module.kind(value) else {
+                return false;
+            };
+            return self
+                .super_assigned
+                .binary_search_by_key(&name.as_str(), |written| written.as_str())
+                .is_ok()
+                && self
+                    .naming
+                    .resolutions
+                    .get(&value)
+                    .is_some_and(|slot| !self.valued_slots.contains(slot));
+        }
+        if !matches!(ty.kind(self.db), TyKind::Null) {
             return false;
         }
         // A local that a test narrowed to `NULL`, or a write replaced with `NULL`, also held a

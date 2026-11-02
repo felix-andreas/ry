@@ -824,6 +824,30 @@ impl<'db> InferenceTable<'db> {
                 .into_iter()
                 .any(|member| self.compatible_probe(db, actual, member, depth + 1));
         }
+        // A scalar is a length-one vector in R, so a variable that a scalar use bounded (`1:n`)
+        // fills a vector parameter as its element, as a scalar argument does.
+        if let (TyKind::Var(var), TyKind::Vector(element) | TyKind::NamedVector(element)) =
+            (actual.kind(db), expected.kind(db))
+            && let Entry::Unbound {
+                constraint: Constraint::ScalarNumeric | Constraint::AtomicElement | Constraint::Key,
+                ..
+            } = self.entry(self.find(*var))
+        {
+            return self.unify(db, *element, actual).is_ok();
+        }
+        if let (TyKind::Rigid(name), TyKind::Vector(element) | TyKind::NamedVector(element)) =
+            (actual.kind(db), expected.kind(db))
+            && matches!(
+                self.rigid_constraints.get(name),
+                Some(Constraint::ScalarNumeric | Constraint::AtomicElement | Constraint::Key)
+            )
+        {
+            let snapshot = self.snapshot();
+            if self.unify(db, *element, actual).is_ok() {
+                return true;
+            }
+            self.rollback(snapshot);
+        }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
             return self.unify(db, actual, expected).is_ok();
@@ -893,9 +917,29 @@ impl<'db> InferenceTable<'db> {
                         return false;
                     }
                 }
-                members
+                // An open member goes last and binds only when it can: after `x <- list(x)` on
+                // one path, `list{U}` binds the target's element to `U`, and `U` itself cannot
+                // then become a list of itself, which R never asks of it.
+                let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
+                    members.iter().copied().partition(|&member| {
+                        matches!(
+                            member.kind(db),
+                            TyKind::Var(var) if matches!(
+                                self.entry(self.find(*var)),
+                                Entry::Unbound { constraint: Constraint::Unconstrained, .. }
+                            )
+                        )
+                    });
+                concrete
                     .iter()
                     .all(|&member| self.compatible_probe(db, member, expected, depth + 1))
+                    && open.iter().all(|&member| {
+                        let snapshot = self.snapshot();
+                        if self.unify(db, member, expected).is_err() {
+                            self.rollback(snapshot);
+                        }
+                        true
+                    })
             }
             // A tag the open target does not list falls into its `..`; a listed name must
             // fit that member, which the general search below decides.

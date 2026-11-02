@@ -876,3 +876,22 @@ find <- function(scopes) {
 #++++
 parse: fn(x: character) -> list{scheme: character, host: character}
 find: <T> fn(scopes: T) -> list{} | list{scheme: character, host: character}
+
+#---- a_scalar_bounded_variable_fills_a_vector_parameter
+# `1:n` bounds `n` as a scalar, and a scalar is a length-one vector, so `lapply` still takes it
+# (gmp's `BernoulliQ`).
+B1 <- function(n) {
+  for (k in 1:n) B1(2 * k)
+}
+bernoulli <- function(n) {
+  B1(n)
+  lapply(n, B1)
+}
+counted <- function(n) {
+  for (i in 1:n) NULL
+  vapply(n, function(k) k + 1, double(1))
+}
+#++++
+B1: <T: scalar numeric> fn(n: T) -> NULL
+bernoulli: <T: scalar numeric> fn(n: T) -> list[NULL]
+counted: <T: scalar numeric> fn(n: T) -> double[]

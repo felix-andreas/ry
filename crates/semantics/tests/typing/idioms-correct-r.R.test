@@ -31,6 +31,19 @@ f <- function() reject(1)
 reject: NULL
 f: fn() -> Unknown
 
+#---- an_na_placeholder_a_closure_fills_is_unchecked
+group <- function(lines) {
+  pattern <- NA
+  fun <- function(line) {
+    if (grepl(pattern, line)) return(1)
+    pattern <<- sub("a", "b", line)
+    0
+  }
+  vapply(lines, fun, numeric(1))
+}
+#++++
+group: <T> fn(lines: list[T] | T[]) -> double[]
+
 #---- a_null_placeholder_does_not_hide_a_base_function
 trimws <- NULL
 f <- function(text) trimws(text)
@@ -2244,3 +2257,12 @@ use <- function(x) {
 #++++
 pick: <T> fn(x: T) -> Any
 use: <T> fn(x: T) -> Unknown
+
+#---- a_value_wrapped_in_a_list_on_one_path_still_maps
+# htmltools wraps a named list in `list()` before mapping over it.
+render <- function(script) {
+  if (length(names(script)) > 0) script <- list(script)
+  lapply(script, function(item) item)
+}
+#++++
+render: <T> fn(script: T) -> list[T]
