@@ -4859,6 +4859,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
   pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
   no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **Held-back methods for other packages' generics** (`DeferredS4::foreign_generics`). Previously
+  any `setMethod` on a generic the package did not define kept the whole unit eager, and nearly
+  every S4 package defines a `show` method, so on the synthetic finance code base no S4 was held
+  back. Such a method now qualifies when its signature names one of the package's own classes,
+  which means it can only be selected for objects of that class. Three doors are covered: a
+  dispatch (`methods::dispatch_generic` forces before reading the tables), `R_getGeneric` (the
+  name joins the deferred generics), and direct reads of the generic's `.MTable`/`.AllMTable`
+  by `getMethod`/`existsMethod`, which go through `.getGenericFromCache` with no C hook, so those
+  bindings become promises that put the real tables back and force (`.ry_s4_table_placeholder`).
+  Primitives, group generics and functions that are not yet generic stay eager
+  (`.ry_may_defer_s4`): they dispatch without `standardGeneric`, so an object read back from disk
+  could select the wrong method.
 - **The S4 metadata cache** (`DeferredS4::cache_key`, `s4_cache_path` in `loader.rs`;
   `.ry_restore_s4`, `.ry_save_s4` in `runtime.R`). Previously every process ran the held-back
   definitions through the `methods` package (about 330 ms on the bench package, 1.7x GNU R, the gap
