@@ -3069,14 +3069,19 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.45-1.6 s on 4 cores and already uses about 3.4 of them, so the 1 s cold
-  target needs about a third less CPU work. Under callgrind the finance bench went from 27.6 to
-  24.6 G instructions with: direct descent in `node_at`, green walks for `write_tokens`, a node-only
-  `walk_green` (syntax lints 2.1 to 1.06 G, syntax sites 0.82 to 0.66 G), a per-check memo of type
-  definitions, and a formal-use walk that tracks only the formals. Wall time did not move outside the
-  machine's noise. What is left is flat: item checking 11.05 G (45%, `infer_ordinary_call` 5.7 G,
-  argument matching 1.75 G, `InferenceTable::resolve` 1.8 G), parse inside `file_attached_namespaces`
-  4.2 G (rowan's node cache, `flush_deferred_trivia`, the lexer), HIR lowering 3.7 G, naming
-  `resolve` 0.88 G, mimalloc about 4.5 G spread over all of them, and salsa's dependency edges about
-  0.7 G. A real third needs the checker's per-call allocations gone (argument targets, scheme clones,
-  `match_arguments` vectors) and a cheaper tree build, not more local cuts.
+- A cold check is about 1.4-1.5 s on 4 cores (4.3 s on one core) and already uses about 3.3 of
+  them, so the 1 s cold target still needs about a third less CPU work. Under callgrind the finance
+  bench went from 27.6 to 24.6 G instructions with green walks and direct descent, then to about
+  22.6 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
+  symbol-keyed `GlobalEnv` lookups, a token-only green builder, lexer fast paths and parallel
+  rendering (`decisions.md`, "The cold check's per-call work"). In interleaved runs against the
+  build before them, one-core wall went from 4.6-4.8 s to 4.2-4.5 s and 4-core medians from about
+  1.6 s to about 1.48 s, while peak RSS rose from about 440 to 510 MiB because green nodes are no
+  longer deduplicated. What is left is flat: mimalloc about 1.4 G, salsa bookkeeping about 1.1 G
+  (dependency edges, memo setup), hashbrown about 1.1 G spread over many tables, parse about 3.4 G
+  inclusive, HIR lowering about 3.6 G inclusive (much of it red-cursor allocation, 3.6 M
+  `NodeData::new`), naming `resolve` about 2.9 G inclusive, and item checking about 7 G. A real third
+  needs a structural change rather than local cuts: lowering HIR straight from the green tree during
+  or right after the parse (no red cursors), and a one-shot check path that does not record salsa
+  dependency edges per item (`package_name` and `test_name` are fetched about 340 k times only to
+  record edges a cold check never replays).
