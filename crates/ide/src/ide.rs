@@ -1843,7 +1843,14 @@ pub fn signature_help_with(
             .get(callee)
             .copied()
             .filter(|ty| matches!(ty.kind(db), TyKind::Function(_)));
-        let schemes = callee_name(hir, *callee).and_then(|name| stubs(db)?.schemes.get(&name));
+        let name = callee_name(hir, *callee).map(|name| {
+            if name == "." && is_query_list(db, position.item, hir, *id, *callee) {
+                "list".to_owned()
+            } else {
+                name
+            }
+        });
+        let schemes = name.and_then(|name| stubs(db)?.schemes.get(&name));
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));
@@ -2196,6 +2203,27 @@ fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
         ExpressionKind::Namespace { name, .. } => name.map(|name| name.to_string()),
         _ => None,
     }
+}
+
+/// data.table's `.(...)`, which means `list(...)` inside a query's brackets: `.` is not bound
+/// anywhere the code can see, and the call sits in an argument of a single-bracket index.
+fn is_query_list(db: &dyn Db, item: Item<'_>, hir: &Module, call: ExprId, callee: ExprId) -> bool {
+    let free = item_naming(db, item)
+        .as_ref()
+        .is_some_and(|naming| !naming.resolutions.contains_key(&callee));
+    let call_range = hir.range(call);
+    free && hir.expression_ids().any(|id| match hir.kind(id) {
+        ExpressionKind::Index {
+            double: false,
+            arguments,
+            ..
+        } => hir[arguments].iter().any(|argument| {
+            argument
+                .value
+                .is_some_and(|value| hir.range(value).contains_range(call_range))
+        }),
+        _ => false,
+    })
 }
 
 /// A non-function declaration still occupies its slot, so the committed index stays aligned
