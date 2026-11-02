@@ -180,7 +180,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (80): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
+completion (82): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 hint @52first =
 hint @56second =
