@@ -6445,3 +6445,26 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** `sq <- function(x) x * x + 1` summed over 100,000 doubles 50 times runs in 0.035 s
   on ry against 1.99 s on GNU R; the same loop through `g <- function(x) sq(x) - sq(x - 1)` runs in
   0.056 s against 5.44 s, with both `sq` calls inlined into `g`'s 144-byte native function.
+
+## Closures made at one site share compiled code
+
+- **Previous shape.** Compiled code hung off a weak reference keyed on the enclosure it was
+  compiled for, and ran only for that enclosure. A `function(v) ...` passed as an argument was a
+  promise of its source, so the AST evaluator made each closure with its own body, which compiled
+  its own bytecode and, under `RY_JIT=force`, its own machine code on every call: `vapply` over
+  an anonymous function cost 306 µs against 8.2 µs on tier 0.
+- **Target shape.** A function literal that is a whole call argument compiles as promise code
+  (`compiles_as_promise` in `crates/interp/src/bytecode.rs`), whose `Op::Closure` gives every
+  closure from that site one bytecode body. Compiled code is *portable* when each speculation
+  starts from the enclosure or a long-lived environment and finds a binding in a long-lived one
+  (global, base, a namespace or its imports, the search path; `long_lived` in
+  `crates/jit/src/jit.rs`). Portable code holds what it embeds strongly and runs for any
+  enclosure. `Compiled::checked` is a weak reference keyed on the enclosure whose lookups the
+  epoch and stamps were last proven for; a new enclosure resets them, so `runtime::valid` walks
+  every speculation from that enclosure (`Compiled::rooted`) before trusting them. Code that
+  speculates on a function local to its enclosure keeps the per-enclosure scheme.
+- **Why a weak reference, not the enclosure's address.** A dead enclosure's address can be reused
+  by a new environment whose lookups nobody checked.
+- **Impact.** The `vapply` case runs at tier 0's speed under `RY_JIT=force` (about 15 µs per
+  call of ten elements), and base R's `pmin`, whose body makes such a closure, is no slower with
+  the JIT on than off.
