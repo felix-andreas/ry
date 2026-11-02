@@ -268,3 +268,38 @@ figure("abline_variants", {
   abline(a = 1, b = 0.5, lwd = 2, col = "orange")
   abline(coef = c(10, -1), col = "purple")
 })
+figure("contour_methods", {
+  par(mfrow = c(1, 3), mar = c(2, 2, 2, 1))
+  for (method in c("simple", "edge", "flattest"))
+    contour(volcano, method = method, main = method, labcex = 0.8)
+})
+figure("text_positions", {
+  plot(1:4, 1:4, type = "n", xlim = c(0, 5), ylim = c(0, 5))
+  points(1:4, 1:4)
+  text(1:4, 1:4, c("below", "left", "above", "right"), pos = 1:4)
+  text(1:4, 1:4 + 0.5, "offset", pos = 4, offset = 2, cex = 1.4)
+  text(2.5, 0.5, expression(hat(beta)[1] == frac(sum(x[i] * y[i]), n)), cex = 1.2)
+})
+figure("margin_text_and_titles", {
+  par(mar = c(4, 4, 5, 2))
+  plot(1:10, main = c("first title line", "second title line"), xaxt = "n",
+       col.axis = "darkred")
+  axis(1, col = "steelblue", col.ticks = "orange")
+  mtext("far beyond the margin", side = 3, line = 6)
+  mtext(expression(sigma^2), side = 4, line = 0.5, las = 1)
+  title(sub = "sub title", line = 2.5)
+  title(main = expression(alpha + beta), line = 0.5, adj = 0)
+})
+figure("clip_then_xpd", {
+  plot(1:10, type = "n")
+  clip(3, 7, 3, 7)
+  abline(h = 1:10, col = "grey")
+  text(5, 10.6, "outside the clip, xpd = TRUE", xpd = TRUE)
+  abline(v = 1:10, col = "red")
+})
+figure("line_types", {
+  plot.new()
+  plot.window(c(0, 1), c(0, 8))
+  for (i in 0:6) segments(0.1, i + 1, 0.9, i + 1, lty = i, lwd = 2)
+  segments(0.1, 7.6, 0.9, 7.6, lty = "2262", lwd = 2)
+})

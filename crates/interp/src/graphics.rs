@@ -2490,8 +2490,12 @@ unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
             length(result)
         )));
     }
-    draw_axis(call, side, values::reals(result))?;
-    Ok(result)
+    // GNU R's `C_axis` returns `NULL` for an axis that `xaxt` or `yaxt` suppresses.
+    if draw_axis(call, side, values::reals(result))? {
+        Ok(result)
+    } else {
+        Ok(nil())
+    }
 }
 
 // graphics: text metrics and coordinate conversion.
@@ -5172,7 +5176,7 @@ unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Label>>> {
 
 /// Draws `axis(side, at, labels, tick, line, pos, outer, font, lty, lwd, lwd.ticks, col,
 /// col.ticks, hadj, padj, gap.axis, ...)` for ticks `at` in user coordinates.
-unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
+unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<bool> {
     let labels = axis_labels(call.arg(2), at)?;
     let tick = values::as_logical_scalar(call.arg(3)) != 0;
     let line = values::as_real_scalar(call.arg(4));
@@ -5194,7 +5198,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
         let horizontal = side % 2 == 1;
         // `xaxt = "n"` or `yaxt = "n"`, set globally or inline, suppresses the whole axis.
         if (if horizontal { pars.xaxt } else { pars.yaxt }) == 'n' {
-            return Ok(());
+            return Ok(false);
         }
         let [x_axis, y_axis] = user_axes(device);
         let axis = if horizontal { x_axis } else { y_axis };
@@ -5291,7 +5295,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             }
         }
         let Some(labels) = labels else {
-            return Ok(());
+            return Ok(true);
         };
         let perpendicular = match side {
             1 | 3 => pars.las == 2 || pars.las == 3,
@@ -5375,7 +5379,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 label_colour,
             )?;
         }
-        Ok(())
+        Ok(true)
     })
 }
 
