@@ -14,7 +14,8 @@ use {
             UnaryOperator, destructure_leaves, integer_literal_position, is_whole_number_double,
         },
         infer::{
-            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
+            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
+            apply_definition,
         },
         metadata::{imported_by_name, imports_every_name, is_own_package},
         naming::{
@@ -572,6 +573,7 @@ pub fn check_item_with_annotation<'db>(
         forward_captured: FxHashSet::default(),
         capture_joins: FxHashMap::default(),
         capture_repass_needed: false,
+        superassign_seeds: FxHashMap::default(),
         pre_materialized: FxHashMap::default(),
         no_default_formals: FxHashSet::default(),
         defaulted_formals: FxHashSet::default(),
@@ -1016,6 +1018,9 @@ struct Checker<'db, 'a> {
     capture_joins: FxHashMap<BindingId, Ty<'db>>,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
+    /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
+    /// enclosing type on entry, and whether the body's first write has bound it yet.
+    superassign_seeds: FxHashMap<BindingId, (Ty<'db>, bool)>,
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
     pre_materialized: FxHashMap<BindingId, Ty<'db>>,
@@ -3063,8 +3068,21 @@ impl<'db> Checker<'db, '_> {
                 };
                 self.string_values.insert(slot, tracked);
                 if spelling == AssignSpelling::Super {
+                    // The rest of this body reads the value just written. The scopes that
+                    // hold the variable join it with their own writes once the body ends.
                     let written = self.table.resolve(self.db, value_ty);
-                    self.join_enclosing_write(slot, written);
+                    if let Some((seed, bound)) = self.superassign_seeds.get(&slot).copied()
+                        && !bound
+                    {
+                        // A later write of another type leaves the seed at the first one.
+                        let snapshot = self.table.snapshot();
+                        if self.table.unify(self.db, seed, written).is_ok() {
+                            self.superassign_seeds.insert(slot, (seed, true));
+                        } else {
+                            self.table.rollback(snapshot);
+                        }
+                    }
+                    self.environment.set(slot, EnvEntry::Mono(written));
                     self.pending_enclosing_writes.push((slot, written));
                     self.note_captured_write(slot, value_ty);
                 } else {
@@ -7027,10 +7045,14 @@ impl<'db> Checker<'db, '_> {
     /// the first run is fully discarded (environment, unification, diagnostics, `<<-` writes).
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
+        let saved_seeds = mem::take(&mut self.superassign_seeds);
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
         let errors_mark = self.errors.len();
         let origins_mark = self.strict_origins.len();
+        let mut superassigned = Vec::new();
+        self.collect_superassigned(body, &mut superassigned);
+        self.seed_superassigned_reads(&superassigned);
         let mut trailing_ty = self.infer(body);
         if self.capture_repass_needed {
             self.environment.rollback(body_mark);
@@ -7042,10 +7064,64 @@ impl<'db> Checker<'db, '_> {
                 frame.clear();
             }
             self.capture_repass_needed = false;
+            self.superassign_seeds.clear();
+            self.seed_superassigned_reads(&superassigned);
             trailing_ty = self.infer(body);
+        }
+        // A write the body never reached leaves its seed open; it must not generalize.
+        let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
+        for (seed, written) in seeds.into_values() {
+            if !written && self.table.unify(self.db, seed, unknown(self.db)).is_err() {
+                panic!("an open superassignment seed always unifies with `Unknown`");
+            }
         }
         self.capture_repass_needed = saved_repass;
         trailing_ty
+    }
+
+    /// A function that writes an enclosing variable with `<<-` may run many times, so on entry
+    /// that variable holds whatever an earlier call wrote: `if (is.null(cache)) cache <<- f()`
+    /// reads `cache` as `NULL` or the written value. The entry reads a fresh variable beside the
+    /// enclosing type, and the body's first write of the slot binds it. Only a variable that
+    /// may still be `NULL` is seeded: that is the lazily filled cache, while a counter's
+    /// `count <<- count + 1L` must read the concrete count to type the write at all.
+    fn seed_superassigned_reads(&mut self, slots: &[BindingId]) {
+        for &slot in slots {
+            let Some(EnvEntry::Mono(existing)) = self.environment.get(slot) else {
+                continue;
+            };
+            let existing = self.table.resolve(self.db, existing);
+            if !guard_members(self.db, existing)
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Null))
+            {
+                continue;
+            }
+            let seed = self.fresh(Constraint::Unconstrained);
+            self.superassign_seeds.insert(slot, (seed, false));
+            let entry = union_of(self.db, [existing, seed]);
+            self.environment.set(slot, EnvEntry::Mono(entry));
+        }
+    }
+
+    /// The slots this body itself writes with `<<-`. A nested function's writes are its own,
+    /// since they happen only when it is called.
+    fn collect_superassigned(&self, id: ExprId, slots: &mut Vec<BindingId>) {
+        if let ExpressionKind::Assign {
+            spelling: AssignSpelling::Super,
+            target,
+            ..
+        } = self.module.kind(id)
+            && let Some(&slot) = self.naming.resolutions.get(target)
+            && !slots.contains(&slot)
+        {
+            slots.push(slot);
+        }
+        if matches!(self.module.kind(id), ExpressionKind::Function { .. }) {
+            return;
+        }
+        let module = self.module;
+        module.for_each_child(id, |child| self.collect_superassigned(child, slots));
     }
 
     /// `return(x)` exits the function, so a body that always ends in an exit contributes no
@@ -9503,7 +9579,7 @@ impl<'db> Checker<'db, '_> {
     ) -> bool {
         let witness = Ty::new(
             self.db,
-            TyKind::Named(Name::new(self.db, " unchecked argument"), Vec::new()),
+            TyKind::Named(Name::new(self.db, UNCHECKED_WITNESS), Vec::new()),
         );
         let mut witnessed = call_arguments.to_vec();
         for argument in &mut witnessed {

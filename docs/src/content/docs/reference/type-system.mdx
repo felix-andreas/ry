@@ -1930,6 +1930,14 @@ type `integer`. When the assignment carries an annotation, `expr` is checked by 
   write replaces the old type, and writes that arrive from different paths are joined (see
   [control-flow joins](#control-flow-joins)). So after `x <- 1L; x <- "foo"`, `x` is `character`, and
   after `x <- 1L; if (flag) x <- "foo"`, it is `integer | character`.
+- `x <<- v` writes the nearest enclosing frame that defines `x`, or the global environment. The rest
+  of the writing function reads `x` as `v`, and the frame that defines `x` joins `v` with its own
+  writes, because a closure may run at any time after it is created. A write whose type is still
+  undetermined, such as a callback's result, joins as a union member instead of binding the other
+  writes, so a reset `cache <<- TRUE` beside `cache <<- fun()` leaves `fun` generic.
+- A closure may run many times, so on entry an enclosing variable that may still be `NULL` holds
+  either that or what the closure's own first `<<-` writes. The lazily filled cache
+  `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`.
 
 #### Recursion
 

@@ -204,7 +204,7 @@ f <- function(fun) {
 }
 #++++
 == R/main.R
-f: <T> fn([fun]: fn() -> T) -> fn() -> T | NULL
+f: <T> fn([fun]: fn() -> T) -> fn() -> T
 
 #---- a_closure_local_assigned_on_one_path_might_be_undefined
 #~~~~ R/main.R

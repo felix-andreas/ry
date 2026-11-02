@@ -123,6 +123,7 @@ Compare.difftime : fn(e1: double, e2: difftime) -> logical
 
 # A matrix supports the full elementwise arithmetic and comparison R gives it,
 # against another matrix, a scalar, or a vector that R recycles down its columns.
+# A matrix of strings or logicals compares against strings and logicals too.
 # Declaring these is what makes typing `%*%` safe: without them the `matrix` the
 # product returns would reject `+ 1L`, which R accepts.
 Arith.matrix : fn(e1: matrix, e2: matrix) -> matrix
@@ -135,6 +136,8 @@ Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
 Compare.matrix : fn(e1: double[], e2: matrix) -> logical
+Compare.matrix : fn(e1: matrix, e2: character | character[] | logical | logical[]) -> logical
+Compare.matrix : fn(e1: character | character[] | logical | logical[], e2: matrix) -> logical
 
 # Arithmetic on a data frame works column by column and keeps the frame, while a
 # comparison gives a logical matrix. `[` keeps the frame unless it drops to one

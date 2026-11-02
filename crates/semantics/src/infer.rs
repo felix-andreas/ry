@@ -83,6 +83,10 @@ pub fn resolve_calls() -> u64 {
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
 
+/// The name of the type an overload probe substitutes for an unchecked argument. Only `Any`
+/// and an unconstrained type variable accept it, and no source annotation can spell it.
+pub(crate) const UNCHECKED_WITNESS: &str = " unchecked argument";
+
 impl<'db> InferenceTable<'db> {
     pub fn fresh(&mut self, constraint: Constraint) -> InferenceVar {
         let var = InferenceVar(self.entries.len() as u32);
@@ -143,11 +147,15 @@ impl<'db> InferenceTable<'db> {
     }
 
     /// An undeclared name or a wrong type-argument count. Both already carry an
-    /// annotation diagnostic, so relations treat the type like `Unknown`.
+    /// annotation diagnostic, so relations treat the type like `Unknown`. The overload
+    /// witness is undeclared on purpose and must stay incompatible with every concrete type.
     pub(crate) fn undeclared_nominal(&self, db: &'db dyn Db, ty: Ty<'db>) -> bool {
         let TyKind::Named(name, arguments) = ty.kind(db) else {
             return false;
         };
+        if name.text(db) == UNCHECKED_WITNESS {
+            return false;
+        }
         match self.definitions.and_then(|table| table.get(name)) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),

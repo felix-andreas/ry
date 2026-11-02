@@ -403,6 +403,15 @@ texts: fn(page: xml_document | xml_node | xml_nodeset | xml_missing) -> list[cha
 nodes_are_not_numbers: Unknown
 192..218 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[xml_node]`
 
+#---- a_json_string_fits_a_character_result_but_is_not_a_number
+#namespace import(jsonlite)
+encode_all <- function(values) vapply(values, function(x) toJSON(x), character(1))
+json_is_not_a_number <- function(x) toJSON(x) + 1L
+#++++
+encode_all: <T> fn(values: list[T] | T[]) -> character[]
+json_is_not_a_number: Unknown
+147..156 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
 #---- extends_without_a_second_class_lists_the_superclasses
 #namespace import(methods)
 superclasses <- function(name) extends(getClass(name))

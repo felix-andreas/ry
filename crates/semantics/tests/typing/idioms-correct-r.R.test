@@ -488,6 +488,38 @@ scale_rows <- function(m, weights) {
 #++++
 scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix
 
+#---- an_unchecked_argument_does_not_pick_a_candidate_with_a_class_parameter
+shift <- function(period) {
+  months(period[[1]]) + 1L
+}
+#++++
+shift: <T> fn(period: T) -> Unknown
+
+#---- a_date_argument_still_picks_the_class_candidate
+shift <- function() {
+  months(Sys.Date()) + 1L
+}
+#++++
+shift: Unknown
+24..42 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_character_matrix_compares_against_a_string
+flags <- function(values) {
+  codes <- matrix(values, 1, 2)
+  codes == "c"
+}
+#++++
+flags: <T> fn(values: T) -> logical
+
+#---- a_matrix_does_not_compare_against_a_function
+flags <- function(values) {
+  codes <- matrix(values, 1, 2)
+  codes == sum
+}
+#++++
+flags: Unknown
+62..74 error[type-mismatch] `==` is not defined between `matrix` and `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
 #---- a_data_frame_maps_over_its_columns
 summarise <- function(path) {
   frame <- read.csv(path)
@@ -1439,7 +1471,57 @@ memoize <- function(fun) {
   dec
 }
 #++++
-memoize: <T> fn([fun]: fn() -> T) -> fn() -> T | NULL
+memoize: <T> fn([fun]: fn() -> T) -> fn() -> T
+
+#---- a_closure_reads_back_the_value_it_just_superassigned
+once <- function(fun) {
+  cache <- NULL
+  function() {
+    cache <<- fun()
+    cache
+  }
+}
+#++++
+once: <T> fn(fun: fn() -> T) -> fn() -> T
+
+#---- a_superassigned_value_read_back_is_still_checked
+once <- function() {
+  cache <- NULL
+  function() {
+    cache <<- "ready"
+    cache + 1L
+  }
+}
+#++++
+once: Unknown
+78..83 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_lazily_filled_cache_reads_as_its_value_after_the_null_check
+versions <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) {
+      cached <<- dir("css")
+    }
+    cached
+  }
+})
+#++++
+versions: fn() -> character[]
+
+#---- a_lazily_filled_cache_still_checks_how_its_value_is_used
+versions <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) {
+      cached <<- dir("css")
+    }
+    cached + 1L
+  }
+})
+#++++
+versions: Unknown
+117..123 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character[]`
 
 #---- concrete_closure_writes_of_different_types_still_join
 counter <- function() {
