@@ -2235,7 +2235,14 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
     may not be a real one.
-  - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
+  - Matrix's `indexing.R` stops at `identical5(m[L, drop = FALSE], M[L, drop = FALSE], ...)` with
+    "logical subscript too long" from `.subscript.2ary`: a method sees a `j`, so the one-index
+    path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
+    the test set up is involved; bisect the file to find it.
+  - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
+    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
+    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
+  - No graphics devices: gtable, and every vignette that plots (rcmdcheck's
     `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
