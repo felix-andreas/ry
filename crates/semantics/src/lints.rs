@@ -105,6 +105,31 @@ pub struct LintConfig {
     pub browser_call: LintLevel,
     /// Off by default: a number such as `.5` without its leading zero.
     pub numeric_leading_zero: LintLevel,
+    /// `length(x == y)`, which counts the comparison's elements instead of comparing a length.
+    pub length_test: LintLevel,
+    /// Off by default: an assignment inside an `if` or `while` condition.
+    pub implicit_assignment: LintLevel,
+    /// Off by default: `while (TRUE)`, which `repeat` spells directly.
+    pub while_true: LintLevel,
+    /// Off by default: `x %in% 1`, which is `x == 1` apart from NA.
+    pub scalar_in: LintLevel,
+    /// Off by default: `x[order(x)]`, which is `sort(x, na.last = TRUE)`.
+    pub order_subset: LintLevel,
+    /// Off by default: `apply(x, 1, sum)` and kin, which `rowSums(x)` and kin compute in C.
+    pub matrix_apply: LintLevel,
+    /// Off by default: `x <- {}`, which assigns NULL.
+    pub empty_assignment: LintLevel,
+    /// Off by default: `lapply(x, function(y) f(y))`, which is `lapply(x, f)`.
+    pub unnecessary_lambda: LintLevel,
+    /// Off by default: `expect_equal(2, x)`, which puts the expected value where testthat
+    /// reports the value under test.
+    pub yoda_test: LintLevel,
+    /// Off by default: `nchar(x) == 0`, which `!nzchar(x)` answers without counting.
+    pub nzchar: LintLevel,
+    /// Off by default: `sample(1:n, k)`, which is `sample.int(n, k)`.
+    pub sample_int: LintLevel,
+    /// Off by default: `c("a")` or `c()`, where `c()` combines nothing.
+    pub unnecessary_concatenation: LintLevel,
     /// Off by default: a line longer than `max_line_length` characters. The formatter never
     /// splits a line, so this is the one check that keeps lines short.
     pub line_length: LintLevel,
@@ -288,7 +313,10 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::UNARY_EXPR => comparison_negation_lint(&red, config, diagnostics),
                 SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
                     vector_logic_lint(&red, config, diagnostics);
+                    implicit_assignment_lint(&red, config, diagnostics);
+                    while_true_lint(&red, config, diagnostics);
                 }
+                SyntaxKind::SUBSET_EXPR => order_subset_lint(&red, config, diagnostics),
                 SyntaxKind::FUNCTION_DEF => {
                     redundant_return_lint(&red, config, &mut lints.unless_redefined);
                 }
@@ -438,17 +466,27 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
             matches!(
                 kind,
                 SyntaxKind::EQ | SyntaxKind::EQ2 | SyntaxKind::BANG_EQ | SyntaxKind::COLON
-            ) || (config.naming_style.is_some() && kind == SyntaxKind::LESS_MINUS)
+            ) || ((config.naming_style.is_some() || is_enabled(config.empty_assignment, None))
+                && kind == SyntaxKind::LESS_MINUS)
+                || (is_enabled(config.empty_assignment, None) && kind == SyntaxKind::LESS2_MINUS)
+                || (is_enabled(config.scalar_in, None) && kind == SyntaxKind::SPECIAL)
+                || (is_enabled(config.nzchar, None) && kind == SyntaxKind::GREATER)
         }),
         SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
-            is_enabled(config.vector_logic, Some(Severity::Warning))
-                && node.child_kinds().any(|kind| {
-                    matches!(
-                        kind,
-                        SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR | SyntaxKind::PAREN_EXPR
-                    )
-                })
+            (is_enabled(config.while_true, None) && node.kind() == SyntaxKind::WHILE_EXPR)
+                || ((is_enabled(config.vector_logic, Some(Severity::Warning))
+                    || is_enabled(config.implicit_assignment, None))
+                    && node.child_kinds().any(|kind| {
+                        matches!(
+                            kind,
+                            SyntaxKind::BINARY_EXPR
+                                | SyntaxKind::UNARY_EXPR
+                                | SyntaxKind::PAREN_EXPR
+                                | SyntaxKind::CALL_EXPR
+                        )
+                    }))
         }
+        SyntaxKind::SUBSET_EXPR => is_enabled(config.order_subset, None),
         SyntaxKind::FUNCTION_DEF => is_enabled(config.redundant_return, None),
         SyntaxKind::ARGUMENT_LIST => {
             parent.is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
@@ -528,6 +566,13 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             Some((Applicability::Safe, "Change to `<-`", "<-".to_owned())),
         );
     }
+    if matches!(
+        operator.kind(),
+        SyntaxKind::EQ2 | SyntaxKind::BANG_EQ | SyntaxKind::GREATER
+    ) && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
+    {
+        nzchar_lint(node, operator.kind(), &lhs, &rhs, config, diagnostics);
+    }
     if matches!(operator.kind(), SyntaxKind::EQ2 | SyntaxKind::BANG_EQ)
         && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
     {
@@ -542,6 +587,50 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             .is_some_and(|token| matches!(token.text(), "1" | "1L"))
     {
         length_sequence_lint(node, &rhs, false, config, diagnostics);
+    }
+    if operator.kind() == SyntaxKind::SPECIAL
+        && operator.text() == "%in%"
+        && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
+        && is_constant(&rhs)
+        && !is_na_literal(&rhs)
+        && !is_null_literal(&rhs)
+    {
+        push_lint(
+            diagnostics,
+            opt_in(config.scalar_in),
+            Severity::Warning,
+            "scalar-in",
+            significant_range(node),
+            "Use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA",
+            Some((
+                Applicability::Unsafe,
+                "Change to `==`",
+                in_place_of(
+                    node,
+                    format!("{} == {}", significant_text(&lhs), significant_text(&rhs)),
+                ),
+            )),
+        );
+    }
+    if matches!(
+        operator.kind(),
+        SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ
+    ) && let Some(value) = binary.rhs()
+        && value.kind() == SyntaxKind::BRACE_EXPR
+        && value.first_child().is_none()
+        && !value
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::COMMENT)
+    {
+        push_lint(
+            diagnostics,
+            opt_in(config.empty_assignment),
+            Severity::Warning,
+            "empty-assignment",
+            significant_range(&value),
+            "Assign NULL instead of an empty `{}`, which evaluates to NULL",
+            Some((Applicability::Safe, "Change to `NULL`", "NULL".to_owned())),
+        );
     }
     if let Some(style) = config.naming_style
         && matches!(operator.kind(), SyntaxKind::LESS_MINUS | SyntaxKind::EQ)
@@ -818,19 +907,27 @@ fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
         "any" => opted(config.any_is_na) || opted(config.outer_negation),
         "all" => opted(config.outer_negation),
         "paste" => opted(config.paste_sep),
-        "sapply" | "vapply" => opted(config.lengths),
+        "sapply" | "vapply" => opted(config.lengths) || opted(config.unnecessary_lambda),
+        "lapply" | "Filter" | "Map" | "map" | "map_chr" | "map_dbl" | "map_int" | "map_lgl"
+        | "walk" | "keep" | "discard" => opted(config.unnecessary_lambda),
+        "apply" => opted(config.matrix_apply),
+        "sample" => opted(config.sample_int),
+        "c" => opted(config.unnecessary_concatenation),
         "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character" => {
             opted(config.literal_coercion)
         }
-        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" => {
-            opted(config.testthat_expectation)
+        "expect_equal" | "expect_identical" => {
+            opted(config.testthat_expectation) || opted(config.yoda_test)
         }
+        "expect_true" | "expect_false" => opted(config.testthat_expectation),
         "stop" | "warning" | "message" | "packageStartupMessage" => opted(config.condition_message),
         "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
             opted(config.fixed_regex)
         }
         "which" => opted(config.which_grepl),
-        "length" => opted(config.length_levels),
+        "length" => {
+            opted(config.length_levels) || is_enabled(config.length_test, Some(Severity::Warning))
+        }
         "browser" => opted(config.browser_call),
         name => object_system_function(name).is_some(),
     }
@@ -928,7 +1025,12 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             }
         }
         "paste" => paste_sep_lint(call, &arguments, config, diagnostics),
-        "sapply" | "vapply" => {
+        "sapply" | "vapply" | "lapply" | "Filter" | "Map" | "map" | "map_chr" | "map_dbl"
+        | "map_int" | "map_lgl" | "walk" | "keep" | "discard" => {
+            unnecessary_lambda_lint(&arguments, config, diagnostics);
+            if !matches!(callee.as_str(), "sapply" | "vapply") {
+                return;
+            }
             let expected = if callee == "sapply" { 2 } else { 3 };
             let counts_lengths = all_positional
                 && positional.len() == expected
@@ -959,6 +1061,65 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
         }
         "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if all_positional => {
             testthat_expectation_lint(call, &callee, &positional, config, diagnostics);
+            if let [expected, actual] = positional[..]
+                && matches!(callee.as_str(), "expect_equal" | "expect_identical")
+                && is_constant(expected)
+                && !is_null_literal(expected)
+                && !is_constant(actual)
+            {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.yoda_test),
+                    Severity::Warning,
+                    "yoda-test",
+                    significant_range(call),
+                    format!(
+                        "Put the value under test first: testthat reports the first argument of {callee}() as the actual value"
+                    ),
+                    Some((
+                        Applicability::Unsafe,
+                        "Swap the arguments",
+                        format!(
+                            "{callee}({}, {})",
+                            significant_text(actual),
+                            significant_text(expected)
+                        ),
+                    )),
+                );
+            }
+        }
+        "apply" => matrix_apply_lint(call, &arguments, config, diagnostics),
+        "sample" => sample_int_lint(call, &arguments, config, diagnostics),
+        "c" if arguments.len() <= 1 && !is_quoted(call) => {
+            let constant = match &arguments[..] {
+                [] => Some("NULL".to_owned()),
+                [argument] => argument
+                    .value
+                    .as_ref()
+                    .filter(|value| argument.name.is_none() && is_constant(value))
+                    .map(significant_text),
+                _ => None,
+            };
+            let has_comment = call
+                .descendants_with_tokens()
+                .any(|element| element.kind() == SyntaxKind::COMMENT);
+            if let Some(constant) = constant {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.unnecessary_concatenation),
+                    Severity::Warning,
+                    "unnecessary-concatenation",
+                    significant_range(call),
+                    format!("Write `{constant}` directly: c() has nothing to combine here"),
+                    (!has_comment).then(|| {
+                        (
+                            Applicability::Safe,
+                            "Remove `c()`",
+                            in_place_of(call, constant.clone()),
+                        )
+                    }),
+                );
+            }
         }
         "stop" | "warning" | "message" | "packageStartupMessage" => {
             condition_message_lint(&callee, &arguments, config, diagnostics);
@@ -1000,6 +1161,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             );
         }
         "length" if all_positional && positional.len() == 1 => {
+            length_test_lint(call, positional[0], config, diagnostics);
             if let Some(("levels", value)) = single_argument_of(positional[0], &["levels"]) {
                 push_lint(
                     diagnostics,
@@ -1482,6 +1644,429 @@ fn vector_logic_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut V
             _ => {}
         }
     }
+}
+
+/// An assignment in a condition reads like a comparison (`if (x <- 0)` for `if (x < 0)`), and
+/// its side effect is easy to miss. A function defined in the condition is its own scope.
+fn implicit_assignment_lint(
+    node: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !is_enabled(config.implicit_assignment, None) {
+        return;
+    }
+    let Some(condition) = node.first_child() else {
+        return;
+    };
+    let keyword = if node.kind() == SyntaxKind::IF_EXPR {
+        "if"
+    } else {
+        "while"
+    };
+    let mut pending = vec![condition];
+    while let Some(expression) = pending.pop() {
+        if expression.kind() == SyntaxKind::FUNCTION_DEF {
+            continue;
+        }
+        let assigns = BinaryExpr::cast(expression.clone())
+            .and_then(|binary| binary.operator())
+            .is_some_and(|operator| {
+                matches!(
+                    operator.kind(),
+                    SyntaxKind::LESS_MINUS
+                        | SyntaxKind::LESS2_MINUS
+                        | SyntaxKind::MINUS_GREATER
+                        | SyntaxKind::MINUS_GREATER2
+                )
+            });
+        if assigns {
+            push_lint(
+                diagnostics,
+                opt_in(config.implicit_assignment),
+                Severity::Warning,
+                "implicit-assignment",
+                significant_range(&expression),
+                format!(
+                    "Move this assignment out of the `{keyword}` condition, where it reads like a comparison"
+                ),
+                None,
+            );
+        }
+        pending.extend(expression.children());
+    }
+}
+
+fn while_true_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    if node.kind() != SyntaxKind::WHILE_EXPR
+        || !node
+            .first_child()
+            .is_some_and(|condition| boolean_literal(&condition) == Some(true))
+    {
+        return;
+    }
+    let Some(close) = node
+        .children_with_tokens()
+        .find(|element| element.kind() == SyntaxKind::R_PAREN)
+    else {
+        return;
+    };
+    let range = TextRange::new(significant_range(node).start(), close.text_range().end());
+    let has_comment = node
+        .children_with_tokens()
+        .take_while(|element| element.kind() != SyntaxKind::R_PAREN)
+        .any(|element| element.kind() == SyntaxKind::COMMENT);
+    push_lint(
+        diagnostics,
+        opt_in(config.while_true),
+        Severity::Warning,
+        "while-true",
+        range,
+        "Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`",
+        (!has_comment).then(|| {
+            (
+                Applicability::Safe,
+                "Change to `repeat`",
+                "repeat".to_owned(),
+            )
+        }),
+    );
+}
+
+/// `order()` puts NA last and `sort()` drops it by default, so the fix keeps NA with
+/// `na.last = TRUE`. It is unsafe because `x[order(x)]` also works on a value whose `sort()`
+/// method sorts differently.
+fn order_subset_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    let Some(object) = node.first_child() else {
+        return;
+    };
+    let arguments = call_arguments(node);
+    let [argument] = &arguments[..] else {
+        return;
+    };
+    let Some(order) = argument
+        .value
+        .as_ref()
+        .filter(|value| argument.name.is_none() && bare_callee(value).as_deref() == Some("order"))
+    else {
+        return;
+    };
+    let order_arguments = call_arguments(order);
+    let mut sorted = None;
+    let mut decreasing = None;
+    for order_argument in &order_arguments {
+        match (&order_argument.name, &order_argument.value) {
+            (None, Some(value)) if sorted.is_none() => sorted = Some(value),
+            (Some((name, _)), Some(value)) if name == "decreasing" => decreasing = Some(value),
+            _ => return,
+        }
+    }
+    if sorted.is_none_or(|sorted| significant_text(sorted) != significant_text(&object)) {
+        return;
+    }
+    let object = significant_text(&object);
+    let decreasing = decreasing
+        .map(|value| format!(", decreasing = {}", significant_text(value)))
+        .unwrap_or_default();
+    push_lint(
+        diagnostics,
+        opt_in(config.order_subset),
+        Severity::Warning,
+        "order-subset",
+        significant_range(node),
+        "Use sort(x) instead of x[order(x)], which builds an index only to subset with it",
+        Some((
+            Applicability::Unsafe,
+            "Change to `sort()`",
+            format!("sort({object}{decreasing}, na.last = TRUE)"),
+        )),
+    );
+}
+
+/// `apply()` calls its function once per row or column from R code, where the `rowSums()`
+/// family loops in C. The fix is unsafe: `apply()` turns a data frame into a matrix first, so
+/// the two disagree on a data frame with a non-numeric column.
+fn matrix_apply_lint(
+    call: &SyntaxNode,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let (positional, named): (Vec<&CallArgument>, Vec<&CallArgument>) = arguments
+        .iter()
+        .partition(|argument| argument.name.is_none());
+    let [matrix, margin, function] = positional[..] else {
+        return;
+    };
+    let na_rm = match &named[..] {
+        [] => None,
+        [argument]
+            if argument
+                .name
+                .as_ref()
+                .is_some_and(|(name, _)| name == "na.rm") =>
+        {
+            argument.value.as_ref()
+        }
+        _ => return,
+    };
+    let (Some(matrix), Some(margin), Some(function)) =
+        (&matrix.value, &margin.value, &function.value)
+    else {
+        return;
+    };
+    let prefix = match margin.text().to_string().as_str() {
+        "1" | "1L" => "row",
+        "2" | "2L" => "col",
+        _ => return,
+    };
+    let suffix = match function.text().to_string().as_str() {
+        "sum" if function.kind() == SyntaxKind::NAME => "Sums",
+        "mean" if function.kind() == SyntaxKind::NAME => "Means",
+        _ => return,
+    };
+    let replacement = format!(
+        "{prefix}{suffix}({}{})",
+        significant_text(matrix),
+        na_rm
+            .map(|value| format!(", na.rm = {}", significant_text(value)))
+            .unwrap_or_default()
+    );
+    push_lint(
+        diagnostics,
+        opt_in(config.matrix_apply),
+        Severity::Warning,
+        "matrix-apply",
+        significant_range(call),
+        format!(
+            "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
+            function.text()
+        ),
+        Some((
+            Applicability::Unsafe,
+            &format!("Change to `{prefix}{suffix}()`"),
+            replacement,
+        )),
+    );
+}
+
+/// The fix is unsafe because extra arguments the apply function forwards through its `...`
+/// reach the named function, where the anonymous one would have rejected them.
+fn unnecessary_lambda_lint(
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for function in arguments
+        .iter()
+        .filter_map(|argument| argument.value.as_ref())
+        .filter(|value| value.kind() == SyntaxKind::FUNCTION_DEF)
+    {
+        let Some(parameters) = function
+            .children()
+            .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)
+        else {
+            continue;
+        };
+        let mut parameter_nodes = parameters
+            .children()
+            .filter(|child| child.kind() == SyntaxKind::PARAMETER);
+        let (Some(parameter), None) = (parameter_nodes.next(), parameter_nodes.next()) else {
+            continue;
+        };
+        // A default or a type annotation is a child node; a bare parameter is one token.
+        if parameter.first_child().is_some() {
+            continue;
+        }
+        let Some(name) = parameter
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+        else {
+            continue;
+        };
+        let Some(body) = function.children().last().filter(|body| {
+            body.kind() == SyntaxKind::CALL_EXPR
+                && !body
+                    .descendants_with_tokens()
+                    .any(|element| element.kind() == SyntaxKind::COMMENT)
+        }) else {
+            continue;
+        };
+        let Some(callee) = body.first_child().filter(|callee| {
+            matches!(callee.kind(), SyntaxKind::NAME | SyntaxKind::NAMESPACE_EXPR)
+        }) else {
+            continue;
+        };
+        let body_arguments = call_arguments(&body);
+        let forwards_parameter = match &body_arguments[..] {
+            [argument] => {
+                argument.name.is_none()
+                    && argument.value.as_ref().is_some_and(|value| {
+                        value.kind() == SyntaxKind::NAME && value.text() == name.text()
+                    })
+            }
+            _ => false,
+        };
+        if !forwards_parameter || callee.text() == name.text() {
+            continue;
+        }
+        let callee = significant_text(&callee);
+        push_lint(
+            diagnostics,
+            opt_in(config.unnecessary_lambda),
+            Severity::Warning,
+            "unnecessary-lambda",
+            significant_range(function),
+            format!("Pass `{callee}` itself instead of a function that only calls it"),
+            Some((
+                Applicability::Unsafe,
+                &format!("Change to `{callee}`"),
+                callee.clone(),
+            )),
+        );
+    }
+}
+
+/// `nchar(x) == 0` counts every string to test for emptiness. The fix is unsafe because the two
+/// disagree on `NA`: `nchar(NA)` is 2, and `nzchar()` calls a missing string non-empty.
+fn nzchar_lint(
+    comparison: &SyntaxNode,
+    operator: SyntaxKind,
+    lhs: &SyntaxNode,
+    rhs: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
+        return;
+    };
+    if !matches!(rhs.text().to_string().as_str(), "0" | "0L") {
+        return;
+    }
+    let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
+    let replacement = format!("{negation}nzchar({})", significant_text(&value));
+    push_lint(
+        diagnostics,
+        opt_in(config.nzchar),
+        Severity::Warning,
+        "nzchar",
+        significant_range(comparison),
+        format!("Use `{replacement}`, which tests for an empty string without counting characters"),
+        Some((
+            Applicability::Unsafe,
+            "Change to `nzchar()`",
+            in_place_of(comparison, replacement.clone()),
+        )),
+    );
+}
+
+/// `sample(1:n, k)` draws the same values as `sample.int(n, k)` but builds `1:n` first. The fix
+/// is unsafe because `1:0` is `c(1, 0)`, which `sample()` draws from where `sample.int(0, k)`
+/// fails.
+fn sample_int_lint(
+    call: &SyntaxNode,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(first) = arguments.first().filter(|argument| argument.name.is_none()) else {
+        return;
+    };
+    let Some(value) = &first.value else {
+        return;
+    };
+    let Some(sequence) = BinaryExpr::cast(value.clone()) else {
+        return;
+    };
+    let (Some(operator), Some(lhs), Some(count)) =
+        (sequence.operator(), sequence.lhs(), sequence.rhs())
+    else {
+        return;
+    };
+    if operator.kind() != SyntaxKind::COLON
+        || !matches!(lhs.text().to_string().as_str(), "1" | "1L")
+    {
+        return;
+    }
+    let Some(list) = call
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+    else {
+        return;
+    };
+    let list_start = list.text_range().start();
+    let first_range = significant_range(value) - list_start;
+    let list_text = list.text().to_string();
+    let (Some(before), Some(after)) = (
+        list_text.get(..usize::from(first_range.start())),
+        list_text.get(usize::from(first_range.end())..),
+    ) else {
+        return;
+    };
+    let count = significant_text(&count);
+    push_lint(
+        diagnostics,
+        opt_in(config.sample_int),
+        Severity::Warning,
+        "sample-int",
+        significant_range(call),
+        format!(
+            "Use sample.int({count}, ...), which draws the same values without building 1:{count}"
+        ),
+        Some((
+            Applicability::Unsafe,
+            "Change to `sample.int()`",
+            format!("sample.int{before}{count}{after}"),
+        )),
+    );
+}
+
+/// `length(x == y)` counts the comparison's elements, which is `length(x)` whatever `y` is,
+/// so the comparison was surely meant to apply to the length.
+fn length_test_lint(
+    call: &SyntaxNode,
+    value: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(comparison) = BinaryExpr::cast(value.clone()) else {
+        return;
+    };
+    let (Some(operator), Some(lhs), Some(rhs)) =
+        (comparison.operator(), comparison.lhs(), comparison.rhs())
+    else {
+        return;
+    };
+    if !matches!(
+        operator.kind(),
+        SyntaxKind::EQ2
+            | SyntaxKind::BANG_EQ
+            | SyntaxKind::LESS
+            | SyntaxKind::GREATER
+            | SyntaxKind::LESS_EQ
+            | SyntaxKind::GREATER_EQ
+    ) {
+        return;
+    }
+    let operator = operator.text().to_owned();
+    let lhs = significant_text(&lhs);
+    let rhs = significant_text(&rhs);
+    push_lint(
+        diagnostics,
+        config.length_test,
+        Severity::Warning,
+        "length-test",
+        significant_range(call),
+        format!(
+            "`length({lhs} {operator} {rhs})` is the length of the comparison, not a test of the length. Did you mean `length({lhs}) {operator} {rhs}`?"
+        ),
+        Some((
+            Applicability::Unsafe,
+            "Compare the length",
+            in_place_of(call, format!("length({lhs}) {operator} {rhs}")),
+        )),
+    );
 }
 
 /// A `return(x)` whose value the function would return anyway: the last expression of the body,
@@ -2088,6 +2673,22 @@ fn boolean_literal(node: &SyntaxNode) -> Option<bool> {
             SyntaxKind::FALSE_KW => Some(false),
             _ => None,
         })
+}
+
+/// A literal number, string or logical, possibly negated, such as `2`, `"a"` or `-1`.
+fn is_constant(node: &SyntaxNode) -> bool {
+    match node.kind() {
+        SyntaxKind::LITERAL => true,
+        SyntaxKind::UNARY_EXPR => {
+            node.children_with_tokens()
+                .find(|element| !element.kind().is_trivia())
+                .is_some_and(|element| element.kind() == SyntaxKind::MINUS)
+                && node
+                    .first_child()
+                    .is_some_and(|operand| is_constant(&operand))
+        }
+        _ => false,
+    }
 }
 
 fn is_null_literal(node: &SyntaxNode) -> bool {

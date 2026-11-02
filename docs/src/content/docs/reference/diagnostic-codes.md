@@ -68,6 +68,9 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `which-grepl` | `which(grepl(...))` to `grep(...)` | safe |
 | `length-levels` | `length(levels(x))` to `nlevels(x)` | safe |
 | `numeric-leading-zero` | `.5` to `0.5` | safe |
+| `while-true` | `while (TRUE)` to `repeat`, when no comment sits in the header | safe |
+| `empty-assignment` | `x <- {}` to `x <- NULL` | safe |
+| `unnecessary-concatenation` | `c("a")` to `"a"`, `c()` to `NULL`, when no comment sits inside the call | safe |
 | `testthat-expectation` | `expect_equal(x, NULL)` and `expect_true(is.null(x))` to `expect_null(x)` | safe |
 | `testthat-expectation` | `expect_equal(x, TRUE)` to `expect_true(x)`, `expect_true(!x)` to `expect_false(x)`, `expect_equal(length(x), n)` to `expect_length(x, n)`, `expect_equal(names(x), n)` to `expect_named(x, n)`, `expect_true(inherits(x, "a"))` to `expect_s3_class(x, "a")` | unsafe |
 | `condition-message` | `stop(paste0(a, b))` to `stop(a, b)` | unsafe |
@@ -78,6 +81,14 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `vector-logic` | `&` to `&&`, `|` to `||` | unsafe |
 | `length-sequence` | `1:length(x)` to `seq_along(x)`, `1:nrow(x)` to `seq_len(nrow(x))` | unsafe |
 | `class-equals` | `class(x) == "a"` to `inherits(x, "a")` | unsafe |
+| `length-test` | `length(x == y)` to `length(x) == y` | unsafe |
+| `scalar-in` | `x %in% "a"` to `x == "a"` | unsafe |
+| `order-subset` | `x[order(x)]` to `sort(x, na.last = TRUE)` | unsafe |
+| `matrix-apply` | `apply(x, 1, sum)` to `rowSums(x)`, and `colSums`, `rowMeans`, `colMeans` alike | unsafe |
+| `unnecessary-lambda` | `lapply(x, function(y) f(y))` to `lapply(x, f)` | unsafe |
+| `yoda-test` | `expect_equal(2, x)` to `expect_equal(x, 2)` | unsafe |
+| `nzchar` | `nchar(x) == 0` to `!nzchar(x)`, `nchar(x) > 0` and `!= 0` to `nzchar(x)` | unsafe |
+| `sample-int` | `sample(1:n, k)` to `sample.int(n, k)` | unsafe |
 | `annotation-mismatch` | change the `#:` comment to the inline type, when ry uses the inline one and it names no type parameter | safe |
 | `unreachable-pattern` | remove the arm, when it has its lines to itself | safe |
 | `unresolved`, `type-mismatch`, `annotation` | change a misspelled name, argument, field, column or type to the suggestion | unsafe |
@@ -159,6 +170,14 @@ or a named argument other than `fmt` turns the check off for that call.
 
 ```text
 ! This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+```
+
+**`length-test`** (warning): a comparison inside `length()`, such as `length(x == 0)`. It counts
+the comparison's elements, which is `length(x)` when the right side is one value, so the comparison
+was meant for the length. The fix moves it outside, and is unsafe because it changes the result.
+
+```text
+! `length(x == 0)` is the length of the comparison, not a test of the length. Did you mean `length(x) == 0`?
 ```
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
@@ -296,6 +315,35 @@ because there it is code built on purpose.
 unless you set it. The formatter keeps your line breaks and never splits a line, so this lint is
 what keeps lines short. It counts characters, not bytes, and reports from the first character past
 the limit.
+
+**`implicit-assignment`** (off by default): `<-`, `<<-` or `->` inside an `if` or `while`
+condition, such as `if (x <- f())`, where an assignment reads like a comparison. A function defined
+inside the condition is skipped. `while ((line <- next_line()) != "")` is a common R idiom, which is
+why the lint is opt-in.
+
+**`scalar-in`**, **`order-subset`**, **`matrix-apply`** and **`unnecessary-lambda`** (off by
+default): code with a simpler or faster equivalent whose fix can change the result in an edge
+case, so each fix is unsafe. `x %in% "a"` is `FALSE` for an `NA` where `x == "a"` is `NA`.
+`x[order(x)]` dispatches like `[` where `sort()` dispatches on its own methods. `apply()` turns a
+data frame into a matrix before `rowSums()` would, and a function passed by name receives the extra
+arguments an apply function forwards, where an anonymous one with a single parameter would reject
+them. `matrix-apply` covers `sum` and `mean` over margin 1 or 2, with an optional `na.rm`, and
+`unnecessary-lambda` covers `lapply()`, `sapply()`, `vapply()`, `Filter()`, `Map()` and purrr's
+`map()` family, `walk()`, `keep()` and `discard()`.
+
+**`yoda-test`** (off by default): `expect_equal()` or `expect_identical()` with a constant first and
+the value under test second. testthat reports the first argument as the actual value, so a failure
+message reads backwards. The fix swaps them, and is unsafe because `expect_equal()` measures a
+numeric tolerance relative to one of its two arguments.
+
+**`nzchar`** and **`sample-int`** (off by default): `nchar(x) == 0`, which counts every string
+only to test whether it is empty, and `sample(1:n, k)`, which builds `1:n` only to draw from it.
+Both fixes are unsafe: `nchar(NA)` is 2 while `nzchar(NA)` is `TRUE`, and `sample(1:0, 1)` draws
+from `c(1, 0)` where `sample.int(0, 1)` fails.
+
+**`while-true`**, **`empty-assignment`** and **`unnecessary-concatenation`** (off by default):
+`while (TRUE)`, which `repeat` says directly, `x <- {}`, which assigns `NULL`, and `c()` around a
+single constant or around nothing, which returns that constant or `NULL`. All three fixes are safe.
 
 **`comparison-negation`**, **`outer-negation`**, **`which-grepl`**, **`length-levels`** and
 **`numeric-leading-zero`** (off by default): more spellings with a shorter equivalent, each with a

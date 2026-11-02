@@ -26,6 +26,7 @@ length-sequence = "warn"      # 1:length(x), which counts down when x is empty
 class-equals = "warn"         # class(x) == "name" instead of inherits()
 unreachable-code = "warn"     # statements after return(), stop(), break or next
 sprintf-arguments = "warn"    # a sprintf() format that wants more or fewer values
+length-test = "warn"          # length(x == y) instead of length(x) == y
 redundant-return = "off"      # return() as a function's last expression
 commented-code = "off"        # a comment that is commented-out code
 duplicate-argument = "off"    # the same argument name twice in one call
@@ -44,6 +45,17 @@ which-grepl = "off"           # which(grepl(...)) instead of grep(...)
 length-levels = "off"         # length(levels(x)) instead of nlevels(x)
 browser-call = "off"          # a browser() call left in the code
 numeric-leading-zero = "off"  # .5 instead of 0.5
+implicit-assignment = "off"   # an assignment inside an if or while condition
+while-true = "off"            # while (TRUE) instead of repeat
+scalar-in = "off"             # x %in% 1 instead of x == 1
+order-subset = "off"          # x[order(x)] instead of sort(x)
+matrix-apply = "off"          # apply(x, 1, sum) instead of rowSums(x)
+empty-assignment = "off"      # x <- {} instead of x <- NULL
+unnecessary-lambda = "off"    # lapply(x, function(y) f(y)) instead of lapply(x, f)
+yoda-test = "off"             # expect_equal(2, x) instead of expect_equal(x, 2)
+nzchar = "off"                # nchar(x) == 0 instead of !nzchar(x)
+sample-int = "off"            # sample(1:n, k) instead of sample.int(n, k)
+unnecessary-concatenation = "off" # c("a") or c() around a single constant
 line-length = "off"           # a line longer than max-line-length characters
 max-line-length = 80          # the limit line-length checks
 unused-parameter = "off"      # a parameter the body never reads

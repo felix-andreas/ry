@@ -4767,8 +4767,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `return(x <- 1)` and a trailing `x <- 1` are both invisible.
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.
-- `unreachable-code` and `sprintf-arguments` are on by default (each is a bug; a CRAN corpus sweep
-  found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
+- `unreachable-code`, `sprintf-arguments` and `length-test` are on by default (each is a bug; a
+  CRAN corpus sweep found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
   bug, because a callee that collects `...` keeps both on purpose (cli bullets in `c()`, repeated
   HTML `class` attributes) and a syntax lint cannot see the callee's formals. The semantic
   version already exists: with `[check] typing = true`, a call that gives a known function's
@@ -4777,7 +4777,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - The other lintr ports (`any-is-na`, `paste-sep`, `lengths`, `literal-coercion`,
   `redundant-equals`, `single-quotes`, `testthat-expectation`, `condition-message`,
   `comparison-negation`, `outer-negation`, `fixed-regex`, `which-grepl`, `length-levels`,
-  `browser-call`, `numeric-leading-zero`, `line-length`) are opt-in taste or speed lints.
+  `browser-call`, `numeric-leading-zero`, `line-length`, `implicit-assignment`, `while-true`,
+  `scalar-in`, `order-subset`, `matrix-apply`, `empty-assignment`, `unnecessary-lambda`,
+  `yoda-test`, `nzchar`, `sample-int`, `unnecessary-concatenation`) are opt-in taste or speed lints. `implicit-assignment` is opt-in because
+  `while ((line <- f()) != "")` is idiomatic R; lintr's `cyclocomp`, `object_length` and
+  `nested_ifelse` were skipped as low value without a fix.
   `line-length` is the only lintr layout linter ported, because the formatter never splits a
   line, so nothing else keeps lines short. lintr's whitespace and
   layout linters are not ported, because `ry format` owns layout.

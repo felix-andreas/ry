@@ -92,7 +92,7 @@ syntax-error
 
 ## Lints
 
-Ten lints are on by default. Three of them catch a habit that causes bugs, and here they are in a
+Eleven lints are on by default. Three of them catch a habit that causes bugs, and here they are in a
 script, with the `unused` finding for each assignment left out:
 
 ```r
@@ -121,9 +121,10 @@ it, so it is a warning. The fourth, `object-system`, warns on each S4, R6 or
 Reference Class definition, because [records and tags](/type-checking/records-and-tags) model data
 with every field checked.
 
-Four more catch code that reads right but does something else: `x == NA` is always `NA`, `&` in
-an `if` condition evaluates both sides, `1:length(x)` counts down to zero when `x` is empty, and
-`class(x) == "data.frame"` misses a tibble. Each fix changes what the code does, which is the point,
+Five more catch code that reads right but does something else: `x == NA` is always `NA`, `&` in
+an `if` condition evaluates both sides, `1:length(x)` counts down to zero when `x` is empty,
+`class(x) == "data.frame"` misses a tibble, and `length(x == 0)` measures the comparison instead of
+comparing the length. Each fix changes what the code does, which is the point,
 so it is unsafe and runs only with `--unsafe-fixes`. The last two, `unreachable-code` and
 `sprintf-arguments`, flag code after a `return()` and a `sprintf()` format that wants more or fewer
 values than it gets. Style lints, such as `redundant-return`, `single-quotes` and `paste-sep`, are off until

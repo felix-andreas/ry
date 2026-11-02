@@ -1,0 +1,34 @@
+# A package linted with lintr keeps its `# nolint` comments, and ry honors them.
+
+file DESCRIPTION
+| Package: tally
+| Version: 0.1.0
+file R/tally.R
+| count_rows <- function(rows) {
+|   if (length(rows == 0)) return(0L) # nolint: length_test_linter.
+|   if (length(rows > 10)) warning("many rows")
+|   flag <- T # nolint
+|   # nolint start
+|   other <- F
+|   # nolint end
+|   while (TRUE) {
+|     if (flag && other) break
+|   }
+|   rows
+| }
+file ry.toml
+| [lint]
+| while-true = "warn"
+
+run ry check
+expect exit 1
+expect stderr "length-test"
+expect stderr "while-true"
+expect stdout "2 problems in 1 file"
+
+run ry check --fix --unsafe-fixes
+expect exit 0
+expect file R/tally.R "if (length(rows) > 10) warning"
+expect file R/tally.R "if (length(rows == 0)) return(0L)"
+expect file R/tally.R "  repeat {"
+expect file R/tally.R "flag <- T # nolint"

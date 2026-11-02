@@ -236,6 +236,18 @@ fn lintr_codes(name: &str) -> &'static [&'static str] {
         "unreachable_code" => &["unreachable-code"],
         "sprintf" => &["sprintf-arguments"],
         "duplicate_argument" => &["duplicate-argument"],
+        "length_test" => &["length-test"],
+        "implicit_assignment" => &["implicit-assignment"],
+        "repeat" => &["while-true"],
+        "scalar_in" => &["scalar-in"],
+        "sort" => &["order-subset"],
+        "matrix_apply" => &["matrix-apply"],
+        "empty_assignment" => &["empty-assignment"],
+        "unnecessary_lambda" => &["unnecessary-lambda"],
+        "yoda_test" => &["yoda-test"],
+        "nzchar" => &["nzchar"],
+        "sample_int" => &["sample-int"],
+        "unnecessary_concatenation" => &["unnecessary-concatenation"],
         _ => &[],
     }
 }
