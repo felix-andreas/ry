@@ -68,7 +68,12 @@ impl Preflight {
     pub fn new(config: Config, path: PathBuf) -> Preflight {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(&db, config.check.inline_annotations, config.check.strict);
+        semantics::AnalysisSettings::new(
+            &db,
+            config.check.inline_annotations,
+            config.check.strict,
+            config.check.prelude,
+        );
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {

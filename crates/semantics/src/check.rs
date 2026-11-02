@@ -23,7 +23,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, lower_type_text, stubs},
+        stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
@@ -621,10 +621,6 @@ pub trait GlobalEnv<'db> {
     /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
     /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
     fn defines_dollar_method(&self) -> bool;
-
-    /// The shipped declaration alone, which a call reaches when R's function lookup skips a
-    /// project binding whose value is not a function.
-    fn stub_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
 }
 
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
@@ -2783,7 +2779,7 @@ impl<'db> Checker<'db, '_> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        globals.library_candidates(&name)?.last().cloned()
+                        self.library?.schemes.get(name.as_str())?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -3079,8 +3075,8 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         first_call_error: usize,
     ) {
-        // A library function accepts ry values, but only a bare name or `ry::` reaches it:
-        // `pkg::List.len` is the package's own function, whatever its name.
+        // A library function accepts ry values, but only a bare name, `std::` or `ry::` reaches
+        // it: `pkg::List.len` is the package's own function, whatever its name.
         let (function, may_be_library) = match self.module.kind(callee) {
             ExpressionKind::NameRef(name) => {
                 let deferred = self.naming.deferred_non_locals.contains(&callee);
@@ -3099,15 +3095,17 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => (
                 name.as_str(),
-                package.is_some_and(|package| package.as_str() == STANDARD_LIBRARY),
+                package.is_some_and(|package| NATIVE_NAMESPACES.contains(&package.as_str())),
             ),
             _ => return,
         };
         if accepts_native(function)
             || (may_be_library
-                && self
-                    .library
-                    .is_some_and(|library| library.exports(STANDARD_LIBRARY, function)))
+                && self.library.is_some_and(|library| {
+                    NATIVE_NAMESPACES
+                        .iter()
+                        .any(|namespace| library.exports(namespace, function))
+                }))
         {
             return;
         }
@@ -11410,7 +11408,7 @@ impl<'db> Checker<'db, '_> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.globals?.library_candidates(&name)?;
+                    let schemes = self.library?.schemes.get(name.as_str())?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -12297,7 +12295,7 @@ impl<'db> Checker<'db, '_> {
                 package: Some(package),
                 name: Some(name),
                 ..
-            } if package.as_str() == STANDARD_LIBRARY => name.as_str(),
+            } if NATIVE_NAMESPACES.contains(&package.as_str()) => name.as_str(),
             _ => return,
         };
         if !MATCH_FUN_CALLERS.contains(&name) {

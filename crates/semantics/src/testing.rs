@@ -3,8 +3,8 @@
 
 use {
     crate::{
-        Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
-        binds_only_own_name,
+        AnalysisSettings, Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
+        SpliceCache, binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
         item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
@@ -149,8 +149,13 @@ thread_local! {
     static FIXTURE_DATABASE: RefCell<Option<RootDatabase>> = const { RefCell::new(None) };
 }
 
+/// The first line that turns the prelude off for a fixture case, as `[check] prelude = false` does
+/// for a project.
+pub const PRELUDE_OFF_DIRECTIVE: &str = "# [check] prelude = false";
+
 /// Reuses one database per thread across cases, because parsing the shipped stubs costs far more
-/// than checking a case.
+/// than checking a case. A case whose first file starts with [`PRELUDE_OFF_DIRECTIVE`] runs with
+/// the prelude off; every other case gets the default settings.
 pub fn with_fixture_project<R>(
     files: Vec<(String, DocumentKind)>,
     render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
@@ -159,8 +164,16 @@ pub fn with_fixture_project<R>(
         let db = slot.get_or_insert_with(|| {
             let db = RootDatabase::default();
             install_shipped_stubs(&db);
+            AnalysisSettings::new(&db, true, true, true);
             db
         });
+        let prelude = files
+            .first()
+            .is_none_or(|(text, _)| !text.starts_with(PRELUDE_OFF_DIRECTIVE));
+        let settings = AnalysisSettings::get(db);
+        if *settings.prelude(db) != prelude {
+            settings.set_prelude(db).to(prelude);
+        }
         let sources: Vec<SourceFile> = files
             .into_iter()
             .map(|(text, kind)| SourceFile::new(db, text, kind))

@@ -3,9 +3,14 @@
 doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
 #++++
 hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package ry (2 declaration(s), declared in stub source ry at `List.map`)
-hover-documentation: Applies `f` to each element.
-definition: stub source ry at `List.map`
+hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover-documentation: Applies `f` to every element.
+hover-documentation:
+hover-documentation: ```r dput
+hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
+hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: ```
+definition: stub source std at `List.map`
 references: none
 rename: none
 signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
@@ -40,9 +45,14 @@ hover 43..51: Dict.get: fn(
 hover 43..51:   dict: Dict<character, double>,
 hover 43..51:   key: character,
 hover 43..51: ) -> :Ok(double) | :Err(:KeyNotFound)
-hover-definition: package ry (1 declaration(s), declared in stub source ry at `Dict.get`)
-hover-documentation: The value stored under `key`, or `:Err(:KeyNotFound)`.
-definition: stub source ry at `Dict.get`
+hover-definition: package std (1 declaration(s), declared in stub source std at `Dict.get`)
+hover-documentation: The value for `key`, or `:Err(:KeyNotFound)`.
+hover-documentation:
+hover-documentation: ```r dput
+hover-documentation: Dict.get(Dict.single("a", 1), "a")
+hover-documentation: #> :Ok(1)
+hover-documentation: ```
+definition: stub source std at `Dict.get`
 references: none
 rename: none
 signature: fn(dict: Dict<character, double>, key: character) -> :Ok(double) | :Err(:KeyNotFound)
@@ -74,8 +84,8 @@ completion (1): Result
 unwrap <- function(r) Result.with_default(r, 0L)
 #++++
 hover 9..15: @alias Result<T, U> {:Ok(T) | :Err(U)}
-hover-definition: package ry (0 declaration(s), declared in stub source ry at `Result`)
-definition: stub source ry at `Result`
+hover-definition: package std (0 declaration(s), declared in stub source std at `Result`)
+definition: stub source std at `Result`
 references: 9..15
 rename: none
 signature: none
@@ -107,3 +117,80 @@ hint @139: list[Position]
 hint @140 -> double[]
 hint @159FUN =
 hint @175FUN.VALUE =
+
+#==== qualified_standard_library
+#---- hover_on_a_qualified_library_function
+doubled <- std::List.m$0ap(list(1L, 2L), function(x) x * 2L)
+#++++
+hover 11..24: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover-documentation: Applies `f` to every element.
+hover-documentation:
+hover-documentation: ```r dput
+hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
+hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: ```
+definition: stub source std at `List.map`
+references: none
+rename: none
+signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
+parameters: [list: Array<T>] | f: fn(T) -> U
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
+parameters: [list: list[integer]] | f: fn(integer) -> integer
+action: Add inferred type annotation for `doubled`
+  edit 7..7 -> ": list[integer]"
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": list[integer]"
+completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
+hint @7: list[integer]
+hint @25list =
+
+#---- completion_after_std
+doubled <- std::List.ma$0
+#++++
+hover 11..23: List.ma
+hover-definition: installed List.ma from std
+definition: installed List.ma from std
+references: none
+rename: none
+signature: none
+completion (8): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.join_map
+
+#---- prelude_off_completion_leaves_out_bare_library_names
+# [check] prelude = false
+doubled <- List.ma$0
+#++++
+hover 37..44: List.ma
+hover-definition: installed List.ma from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed List.ma from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion: none
+
+#---- prelude_off_hover_on_a_qualified_library_function
+# [check] prelude = false
+doubled <- std::List.m$0ap(list(1L, 2L), function(x) x * 2L)
+#++++
+hover 37..50: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover-documentation: Applies `f` to every element.
+hover-documentation:
+hover-documentation: ```r dput
+hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
+hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: ```
+definition: stub source std at `List.map`
+references: none
+rename: none
+signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
+parameters: [list: Array<T>] | f: fn(T) -> U
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
+parameters: [list: list[integer]] | f: fn(integer) -> integer
+action: Add inferred type annotation for `doubled`
+  edit 33..33 -> ": list[integer]"
+action: Add inferred type annotations for the whole file
+  edit 33..33 -> ": list[integer]"
+completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
+hint @33: list[integer]
+hint @51list =

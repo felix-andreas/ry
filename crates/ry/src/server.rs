@@ -617,6 +617,7 @@ impl Worker {
         let _: AnalysisSettings = AnalysisSettings::builder(
             worker.config.check.inline_annotations,
             worker.config.check.strict,
+            worker.config.check.prelude,
         )
         .durability(Durability::MEDIUM)
         .new(&worker.db);
@@ -1824,6 +1825,7 @@ impl Worker {
                         config_changed |= config != self.config;
                         let inline_annotations = config.check.inline_annotations;
                         let strict = config.check.strict;
+                        let prelude = config.check.prelude;
                         self.config = config;
                         let settings = AnalysisSettings::get(&self.db);
                         if *settings.inline_annotations(&self.db) != inline_annotations {
@@ -1833,6 +1835,9 @@ impl Worker {
                         }
                         if *settings.strict(&self.db) != strict {
                             settings.set_strict(&mut self.db).to(strict);
+                        }
+                        if *settings.prelude(&self.db) != prelude {
+                            settings.set_prelude(&mut self.db).to(prelude);
                         }
                         self.report_config_warnings();
                         self.publish_config_diagnostics(None);

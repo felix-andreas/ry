@@ -1,7 +1,7 @@
 //! ry's standard library at runtime: the functions' results and errors, the agreement between the
-//! runtime's table and the declarations in `types/ry.Rtypes`, and a property test that holds the
-//! dictionary and set against a reference model. The interpreter is global to the process, so the
-//! interpreter cases run as one test.
+//! runtime's table and the declarations in `types/std.Rtypes` and `types/ry.Rtypes`, and a property
+//! test that holds the dictionary and set against a reference model. The interpreter is global to
+//! the process, so the interpreter cases run as one test.
 //!
 //! The interpreter runs here without base R, so the setup defines the few functions base R would.
 
@@ -1214,11 +1214,17 @@ fn take_output() -> String {
     OUTPUT.with(|output| std::mem::take(&mut *output.borrow_mut()))
 }
 
-/// The declarations in `types/ry.Rtypes`: each function's name and its parameter names.
+/// The declarations in `types/std.Rtypes` and `types/ry.Rtypes`: each function's name and its parameter names.
 fn declarations() -> Vec<(String, Vec<String>)> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.Rtypes");
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", path.display()));
+    let text = ["std.Rtypes", "ry.Rtypes"]
+        .map(|file| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../types")
+                .join(file);
+            fs::read_to_string(&path)
+                .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", path.display()))
+        })
+        .join("\n");
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
@@ -1262,9 +1268,24 @@ fn declarations() -> Vec<(String, Vec<String>)> {
 
 #[test]
 fn declarations_and_runtime_bind_the_same_names() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
-    let manifest = fs::read_to_string(&manifest)
-        .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
+    let read = |file: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../types")
+            .join(file);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", path.display()))
+    };
+    let library_manifest = read("std.exports");
+    let listed: BTreeSet<&str> = library_manifest
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    let library: BTreeSet<&str> = standard_library::names().collect();
+    assert_eq!(
+        listed, library,
+        "types/std.exports must list exactly the standard library the runtime binds in `std`"
+    );
+    let manifest = read("ry.exports") + "\n" + &library_manifest;
     // The list and Array conversions are base builtins, listed in the manifest only for the
     // checker.
     let outside = |name: &str| {
@@ -1296,8 +1317,8 @@ fn declarations_and_runtime_bind_the_same_names() {
     let unbound: Vec<_> = exported.difference(&bound).collect();
     assert!(
         unexported.is_empty() && unlisted.is_empty() && unbound.is_empty(),
-        "declared in types/ry.Rtypes but not in types/ry.exports: {unexported:?}; \
-         bound but not in types/ry.exports: {unlisted:?}; in types/ry.exports but not bound: {unbound:?}"
+        "declared in types/ but not in an exports manifest: {unexported:?}; \
+         bound but not in a manifest: {unlisted:?}; in a manifest but not bound: {unbound:?}"
     );
 }
 
@@ -1314,11 +1335,13 @@ fn no_shipped_package_exports_a_library_name() {
         let path = entry
             .unwrap_or_else(|failure| panic!("cannot read an entry: {failure}"))
             .path();
-        // `ry.exports` is the library's own list.
+        // `std.exports` is the library's own list, and `ry.exports` is ry's runtime package.
         if path
             .extension()
             .is_none_or(|extension| extension != "exports")
-            || path.file_stem().is_some_and(|stem| stem == "ry")
+            || path
+                .file_stem()
+                .is_some_and(|stem| stem == "std" || stem == "ry")
         {
             continue;
         }
@@ -1591,7 +1614,7 @@ fn message(unwind: Unwind) -> String {
 /// function is a leaf, so each one compiled code meets takes the fast call.
 #[test]
 fn leaves_are_the_functions_without_callbacks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.Rtypes");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/std.Rtypes");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", path.display()));
     let mut calling_back = BTreeSet::new();

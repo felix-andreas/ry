@@ -473,6 +473,7 @@ hover 5..16:   [sep]: character,
 hover 5..16:   [collapse]: character | NULL,
 hover 5..16:   [recycle0]: logical,
 hover 5..16: ) -> character
+hover-definition: package base (1 declaration(s), declared in stub source base at `paste`)
 definition: stub source base at `paste`
 references: none
 rename: none
@@ -724,6 +725,7 @@ completion (1): par
 fit <- stats::uniroot(function(x) x - 1, c(0, 2))$ro$0ot
 #++++
 hover 50..54: root: double
+hover-definition: package stats (1 declaration(s), declared in stub source stats at `uniroot`)
 definition: stub source stats at `uniroot`
 references: none
 rename: none

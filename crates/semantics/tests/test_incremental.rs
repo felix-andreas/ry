@@ -349,7 +349,7 @@ fn a_deep_reexport_chain_resolves_fully() {
 #[test]
 fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     let mut db = ProbeDatabase::default();
-    let settings = AnalysisSettings::new(&db, true, true);
+    let settings = AnalysisSettings::new(&db, true, true, true);
     let files = db.project(&[
         "typed <- function(x: integer) -> integer x\n",
         "untyped <- function(x) x + 1L\n",
@@ -361,6 +361,24 @@ fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     settings.set_inline_annotations(&mut db).to(false);
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["typed"]);
+}
+
+#[test]
+fn turning_the_prelude_off_rechecks_only_items_that_use_the_library() {
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let settings = AnalysisSettings::new(&db, true, true, true);
+    let files = db.project(&[
+        "lengths <- function(x) List.len(x)\n",
+        "plain <- function(x) length(x)\n",
+        "qualified <- function(x) std::List.len(x)\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    settings.set_prelude(&mut db).to(false);
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["lengths"]);
 }
 
 #[test]

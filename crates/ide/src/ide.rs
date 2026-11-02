@@ -21,8 +21,8 @@ use {
         naming::{BindingId, BindingKind, CopySource, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{
-            STANDARD_LIBRARY, StubSources, declaring_namespace, exporting_namespaces,
-            stub_declaration, stubs,
+            NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
+            outside_prelude, stub_declaration, stubs,
         },
         types::{
             Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
@@ -345,8 +345,19 @@ fn typed_hover(
             )
         }
         ExpressionKind::Namespace {
-            name: Some(name), ..
-        } => (hover_lines(db, name, &TypeScheme::monomorphic(ty)), None),
+            package,
+            name: Some(name),
+            ..
+        } => {
+            // A name the package's stub declares is documented there, as a bare name is.
+            let declared = package
+                .as_ref()
+                .is_some_and(|package| declaring_namespace(db, name) == Some(package.as_str()));
+            (
+                hover_lines(db, name, &TypeScheme::monomorphic(ty)),
+                declared.then(|| stub_hover_definition(db, name)).flatten(),
+            )
+        }
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
@@ -2498,7 +2509,10 @@ pub fn completion_with(
                     library
                         .schemes
                         .iter()
-                        .filter(|(name, _)| search_match(name, &query).is_some())
+                        .filter(|(name, _)| {
+                            search_match(name, &query).is_some()
+                                && !outside_prelude(db, library, name)
+                        })
                         .filter_map(|(name, schemes)| {
                             Some(CompletionItem {
                                 documentation: documentation(name),
@@ -2516,6 +2530,7 @@ pub fn completion_with(
                             !library.schemes.contains_key(*name)
                                 && is_syntactic_name(name)
                                 && search_match(name, &query).is_some()
+                                && !outside_prelude(db, library, name)
                         })
                         .map(|name| CompletionItem {
                             documentation: documentation(name),
@@ -2849,7 +2864,7 @@ pub fn import_fixes(
         let packages: Vec<String> = match exporting.and_then(|exporting| exporting.get(name)) {
             Some(packages) => packages
                 .iter()
-                .filter(|package| package.as_str() != STANDARD_LIBRARY)
+                .filter(|package| !NATIVE_NAMESPACES.contains(&package.as_str()))
                 .take(IMPORT_CANDIDATES)
                 .cloned()
                 .collect(),
@@ -6059,7 +6074,10 @@ fn namespace_completions(
                         .get(name)
                         .and_then(|schemes| schemes.first())
                     {
-                        Some(scheme) => scheme_completion(db, label, scheme),
+                        Some(scheme) => CompletionItem {
+                            documentation: library.documentation.get(name).cloned(),
+                            ..scheme_completion(db, label, scheme)
+                        },
                         None => CompletionItem::new(
                             label,
                             CompletionKind::Variable,

@@ -107,7 +107,7 @@ fn main() {
     let _stubs = StubSources::builder(shipped_stub_sources(), shipped_export_manifests())
         .durability(Durability::MEDIUM)
         .new(&db);
-    let _settings = AnalysisSettings::builder(true, false)
+    let _settings = AnalysisSettings::builder(true, false, true)
         .durability(Durability::MEDIUM)
         .new(&db);
     let _metadata = PackageMetadata::builder(

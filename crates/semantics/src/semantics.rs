@@ -785,9 +785,9 @@ pub fn package_scheme_exists_in(
         return true;
     }
     library.is_some_and(|library| {
-        library.schemes.contains_key(name)
-            || library.nominals.contains(name)
-            || library.known_exports.contains(name)
+        library.nominals.contains(name)
+            || ((library.schemes.contains_key(name) || library.known_exports.contains(name))
+                && !stubs::outside_prelude(db, library, name))
     })
 }
 
@@ -1096,6 +1096,13 @@ pub struct AnalysisSettings {
     /// strict file's checks record the undetermined origins strict mode reports, which in
     /// untyped code are about one per expression.
     pub strict: bool,
+    /// `[check] prelude`. Off, the standard library's names resolve only as `std::Name`.
+    pub prelude: bool,
+}
+
+/// Whether the standard library's names are in scope bare. Unset settings keep the prelude.
+pub fn prelude_enabled(db: &dyn Db) -> bool {
+    AnalysisSettings::try_get(db).is_none_or(|settings| *settings.prelude(db))
 }
 
 /// Read only where an inline annotation exists, so a project without any never
@@ -3036,7 +3043,17 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
-        self.library?.schemes.get(name)?.last().cloned()
+        self.bare_library_candidates(name)?.last().cloned()
+    }
+
+    /// The shipped declarations a bare `name` reaches, which leave out the standard library's
+    /// when `[check] prelude` is off.
+    fn bare_library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+        let library = self.library?;
+        if stubs::outside_prelude(self.db, library, name) {
+            return None;
+        }
+        library.schemes.get(name).map(Vec::as_slice)
     }
 
     fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
@@ -3096,6 +3113,9 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
 
     fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
+        if stubs::outside_prelude(self.db, library, name) {
+            return None;
+        }
         match library.schemes.get(name) {
             Some(candidates) => Some(candidates),
             None => library.known_exports.contains(name).then_some(&[]),
@@ -3103,7 +3123,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
-        let candidates = self.library?.schemes.get(name.as_str())?;
+        let candidates = self.bare_library_candidates(name.as_str())?;
         if candidates.len() < 2 {
             return None;
         }
@@ -3131,10 +3151,6 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         *file_defines_dollar_method(self.db, self.file)
             || ProjectFiles::try_get(self.db)
                 .is_some_and(|files| *project_defines_dollar_method(self.db, files))
-    }
-
-    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        self.library?.schemes.get(name)?.last().cloned()
     }
 }
 
