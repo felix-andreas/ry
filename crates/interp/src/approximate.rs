@@ -195,7 +195,7 @@ unsafe fn adist(call: &Call<'_>) -> R<Sexp> {
                 };
                 let alignment = align(source, &target, insertion, deletion, substitution);
                 values::reals_mut(distances)[cell] = alignment.distance;
-                let tally = [b'I', b'D', b'S'].map(|operation| {
+                let tally = b"IDS".map(|operation| {
                     alignment
                         .operations
                         .iter()

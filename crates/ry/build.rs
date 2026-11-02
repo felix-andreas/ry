@@ -3,7 +3,8 @@
 //! embed `ry.exe.manifest`, so Windows runs them with a UTF-8 code page, which embedded R inherits as its native encoding: MSVC through linker
 //! flags, gnullvm through a resource object that `windres` compiles. Every Windows target reserves a
 //! 64 MiB main-thread stack, because R sessions run on `main` and Windows' default of 1 MiB
-//! overflows while the default packages load (Linux and macOS give `main` 8 MiB).
+//! overflows while the default packages load (Linux and macOS give `main` 8 MiB). For `rcmd` it
+//! also embeds ry's C headers, from which ry assembles its R home at run time.
 
 use std::{
     env, fs,
@@ -26,6 +27,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=WINDRES");
     let target = env::var("TARGET").unwrap_or_default();
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    if env::var("CARGO_PKG_NAME").is_ok_and(|name| name == "rcmd") {
+        embed_headers(&out_dir);
+    }
     // The script and a copy of the manifest sit side by side in `OUT_DIR`, so the resource
     // script names the manifest by a relative path that no quoting rule of a Windows path can
     // break.
@@ -48,6 +52,43 @@ fn main() {
             manifest.display()
         );
     }
+}
+
+/// Writes `headers.rs`, which embeds ry's C headers (`crates/libr/include`) as `HEADERS`, so
+/// ry can assemble an R home wherever it runs.
+fn embed_headers(out_dir: &Path) {
+    let include =
+        Path::new(&env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+            .join("../libr/include");
+    println!("cargo:rerun-if-changed={}", include.display());
+    let mut files = Vec::new();
+    let mut pending = vec![include.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("reading crates/libr/include") {
+            let path = entry.expect("reading crates/libr/include").path();
+            if path.is_dir() {
+                println!("cargo:rerun-if-changed={}", path.display());
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut source = String::from("pub const HEADERS: &[(&str, &[u8])] = &[\n");
+    for path in files {
+        let relative = path
+            .strip_prefix(&include)
+            .expect("a header under include/");
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let absolute = fs::canonicalize(&path).expect("canonicalizing a header path");
+        source.push_str(&format!(
+            "    ({relative:?}, include_bytes!({:?})),\n",
+            absolute
+        ));
+    }
+    source.push_str("];\n");
+    fs::write(out_dir.join("headers.rs"), source).expect("writing headers.rs into OUT_DIR");
 }
 
 /// Compiles a resource script that embeds the manifest as resource 1 of type 24 (`RT_MANIFEST`),

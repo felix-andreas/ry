@@ -113,6 +113,28 @@ const PRINTS: &[(&str, &str)] = &[
     // format and deparse use ry syntax.
     ("format(circle)", "[1] \":Circle(radius = 2)\"\n"),
     ("deparse(point)", "[1] \"(x = 1, y = 2)\"\n"),
+    // `Record{...}` and `Tuple{...}` annotations admit ry values, and a list does not pass.
+    (
+        "{ f <- function(x: double) -> Record{x: double} (x = x,); f(1) }",
+        "(x = 1,)\n",
+    ),
+    (
+        "{ f <- function(t: Tuple{integer, character}) -> integer t[[1]]; f(pair) }",
+        "[1] 1\n",
+    ),
+    (
+        "{ f <- function() -> Record{x: double} list(x = 1); f() }",
+        "Error in f() : the function must return `Record{x: double}`, not `list`\n",
+    ),
+    // A whole-number double passes an `integer` parameter, as the checker's literal rule allows.
+    (
+        "{ f <- function(n: integer = 50) -> double n * 2; f() + f(3) }",
+        "[1] 106\n",
+    ),
+    (
+        "{ f <- function(n: integer) n; f(2.5) }",
+        "Error in f(2.5) : argument `n` must be `integer`, not `double`\n",
+    ),
     // Inline type definitions and nominal constructors exist only for the checker.
     ("@UserId(7L)", "[1] 7\n"),
     ("deparse(quote(@UserId(7L)))", "[1] \"(7L)\"\n"),
@@ -520,12 +542,11 @@ fn records_tuples_tags_and_match() {
             take_output();
             let printed = match evaluate(code) {
                 Ok(value) => {
-                    if interp::interp().visible {
-                        if let Err(failure) = print::print_value_top(value, values::global_env()) {
-                            failures
-                                .push(format!("`{code}`: printing failed: {}", message(failure)));
-                            continue;
-                        }
+                    if interp::interp().visible
+                        && let Err(failure) = print::print_value_top(value, values::global_env())
+                    {
+                        failures.push(format!("`{code}`: printing failed: {}", message(failure)));
+                        continue;
                     }
                     take_output()
                 }

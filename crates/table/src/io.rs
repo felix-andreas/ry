@@ -17,19 +17,29 @@
 //! `NA` and as numbers.
 
 use {
-    crate::{Error, Result, Table, convert::string_to_factor},
-    memmap2::Mmap,
-    polars::prelude::{
-        BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
-        Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-        Schema as PolarsSchema, SerReader, Series,
+    crate::{
+        Error, Result, Table,
+        convert::{categorical_codes_to_factor, string_to_factor},
     },
-    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    memmap2::{Mmap, UncheckedAdvice},
+    polars::prelude::{
+        BooleanChunked, CategoricalPhysical, Categories, ChunkedArray, Column, CsvEncoding,
+        CsvReadOptions, DataFrame, DataType, Float64Chunked, Float64Type, Int32Chunked, Int32Type,
+        IntoColumn, IntoSeries, NullValues, PlSmallStr, PolarsDataType, Schema as PolarsSchema,
+        SerReader, Series, UInt32Chunked,
+    },
+    polars_arrow::{
+        array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+        bitmap::{Bitmap, MutableBitmap},
+        datatypes::ArrowDataType,
+        types::NativeType,
+    },
     rayon::prelude::*,
     sniff::{ColumnType as TextColumn, Guess, Layout},
     std::{
         fs::File,
         io::{BufWriter, Cursor, Write},
+        ops::Range,
         path::Path,
         sync::Arc,
     },
@@ -49,6 +59,9 @@ pub struct ReadOptions {
     pub columns: Option<Vec<PlSmallStr>>,
     /// The number of data rows to read; `None` reads them all.
     pub rows: Option<usize>,
+    /// Reads every column sniffed as character as a factor, as `fread(stringsAsFactors = TRUE)`
+    /// does.
+    pub factors: bool,
 }
 
 /// Reads part of a delimited text file into a table.
@@ -58,7 +71,12 @@ pub fn read_csv_with(path: &Path, options: &ReadOptions) -> Result<Table> {
     // the file meanwhile is undefined behavior, the same trade every memory-mapped reader,
     // including `fread`, makes for not copying the file.
     let map = unsafe { Mmap::map(&file)? };
-    read_bytes(map, options)
+    read_bytes(&map, options, SLICE_BYTES, &|range: Range<usize>| {
+        // A parsed slice's pages are dropped, so a large file is never resident all at once.
+        // SAFETY: the map is a read-only file mapping and the parsed columns own their data, so
+        // a later read of the range faults the file's bytes back in rather than seeing zeros.
+        unsafe { map.unchecked_advise_range(UncheckedAdvice::DontNeed, range.start, range.len()) }
+    })
 }
 
 /// The columns and their types a file reads as, from its sniffed layout, without parsing it.
@@ -80,16 +98,28 @@ pub fn csv_schema(path: &Path) -> Result<crate::Schema> {
 
 /// Reads delimited text held in memory, as `fread(text = ...)` does.
 pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
-    read_bytes(bytes, &ReadOptions::default())
+    read_bytes(
+        bytes.as_ref(),
+        &ReadOptions::default(),
+        SLICE_BYTES,
+        &|_| Ok(()),
+    )
 }
 
 /// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
-/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
-/// coverage-guided `fuzz/` target.
+/// order, or fail with an error; a table that reads also writes, and reads the same in slices of
+/// a few bytes as whole. Nothing panics. Shared with the coverage-guided `fuzz/` target.
 pub fn check_csv_input(bytes: &[u8]) {
     let Ok(table) = read_csv_bytes(bytes) else {
         return;
     };
+    match read_bytes(bytes, &ReadOptions::default(), 16, &|_| Ok(())) {
+        Ok(sliced) => assert!(
+            sliced.frame().equals_missing(table.frame()),
+            "a read in slices differs from a whole read for {bytes:?}"
+        ),
+        Err(error) => panic!("{bytes:?} reads whole but not in slices: {error}"),
+    }
     let promised: Vec<String> = sniff::sniff(bytes)
         .columns
         .into_iter()
@@ -111,8 +141,18 @@ pub fn check_csv_input(bytes: &[u8]) {
     }
 }
 
-fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> Result<Table> {
-    let layout = sniff::sniff(bytes.as_ref());
+/// Files are parsed in slices of about this many bytes, each released once parsed, so reading a
+/// file never holds more than one slice of its text and the columns it has become.
+const SLICE_BYTES: usize = 1 << 28;
+
+/// Reads `bytes` as a table, calling `release` with each byte range once it has been parsed.
+fn read_bytes(
+    bytes: &[u8],
+    options: &ReadOptions,
+    slice_bytes: usize,
+    release: &dyn Fn(Range<usize>) -> std::io::Result<()>,
+) -> Result<Table> {
+    let layout = sniff::sniff(bytes);
     if layout.columns.is_empty() {
         return Ok(Table::default());
     }
@@ -126,12 +166,319 @@ fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> 
     {
         return Err(Error::NoColumn(missing.to_string()));
     }
-    let cursor = Cursor::new(bytes);
-    let frame = match parse(cursor.get_ref().as_ref(), &layout, options, false) {
+    let mut frame = match read_sliced(bytes, &layout, options, slice_bytes, release) {
         Ok(frame) => frame,
-        Err(_) => parse(cursor.get_ref().as_ref(), &layout, options, true)?,
+        // A value the sniffer's sample missed fails the typed parse, so the file is read again
+        // with every column as text, each then typed from all of its values.
+        Err(Error::Polars(_)) => {
+            let schema = schema(&layout, options, true);
+            let frame = parse(bytes, &layout, options, &schema, layout.header)?;
+            let height = frame.height();
+            let columns: Vec<Column> = frame
+                .into_columns()
+                .into_par_iter()
+                .map(|column| type_text_column(column, None))
+                .collect::<Result<_>>()?;
+            DataFrame::new(height, columns)?
+        }
+        Err(error) => return Err(error),
     };
-    Table::new(frame)
+    let undecided: Vec<PlSmallStr> = frame
+        .columns()
+        .iter()
+        .filter(|column| matches!(column.dtype(), DataType::Categorical(..)))
+        .map(|column| column.name().clone())
+        .collect();
+    if !undecided.is_empty() {
+        // A categorical column reads an empty field as `NA`, where `fread` reads the empty
+        // string, so a column with a missing value is read again as text to tell the two apart.
+        let text = ReadOptions {
+            columns: Some(undecided),
+            rows: options.rows,
+            factors: false,
+        };
+        let schema = schema(&layout, &text, false);
+        for column in parse(bytes, &layout, &text, &schema, layout.header)?.into_columns() {
+            frame.with_column(column)?;
+        }
+    }
+    let mut table = Table::new(frame)?;
+    if options.factors {
+        strings_as_factors(&mut table)?;
+    }
+    Ok(table)
+}
+
+/// Parses the file slice by slice with the sniffed types, appending each slice's columns to the
+/// table's final column buffers before the next slice is parsed, so a typed column is never held
+/// as parsed pieces and a copy of them. A text column keeps Polars' pieces and joins them at the
+/// end, which copies its strings once. A factor's column numbers its strings with one mapping
+/// across the slices, so the codes of every slice agree and are renumbered into levels in place.
+fn read_sliced(
+    bytes: &[u8],
+    layout: &Layout,
+    options: &ReadOptions,
+    slice_bytes: usize,
+    release: &dyn Fn(Range<usize>) -> std::io::Result<()>,
+) -> Result<DataFrame> {
+    let schema = schema(layout, options, false);
+    // One range spanning the file is the intended value, not a mistyped `(0..n).collect()`.
+    #[allow(clippy::single_range_in_vec_init)]
+    let ranges = match options.rows {
+        // A leading `head` reads only the first rows, so it parses the file whole.
+        Some(_) => vec![0..bytes.len()],
+        None => slices(bytes, slice_bytes, layout.separator),
+    };
+    let mut builders: Vec<(PlSmallStr, Builder)> = Vec::new();
+    let mut height = 0;
+    for (index, range) in ranges.iter().enumerate() {
+        // A last slice of blank lines, such as a file's trailing line breaks, holds no rows.
+        if index > 0
+            && bytes[range.clone()]
+                .iter()
+                .all(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            release(range.clone())?;
+            continue;
+        }
+        let header = index == 0 && layout.header;
+        let frame = parse(&bytes[range.clone()], layout, options, &schema, header)?;
+        if index == 0 {
+            // The rows still to come are estimated from the first slice's bytes per row. A
+            // reservation the file does not fill is never touched, so it costs no memory.
+            let rows = frame.height() * bytes.len() / range.len().max(1);
+            let reserve = rows + rows / 8 + 1024;
+            builders = frame
+                .columns()
+                .iter()
+                .map(|column| (column.name().clone(), Builder::new(column.dtype(), reserve)))
+                .collect();
+        }
+        height += frame.height();
+        for ((_, builder), column) in builders.iter_mut().zip(frame.into_columns()) {
+            builder.append(column)?;
+        }
+        release(range.clone())?;
+    }
+    let columns: Vec<Column> = builders
+        .into_par_iter()
+        .map(|(name, builder)| builder.finish(name, layout))
+        .collect::<Result<_>>()?;
+    Ok(DataFrame::new(height, columns)?)
+}
+
+/// One column's final buffer while a file is read slice by slice. A validity bitmap is made only
+/// once a missing value turns up.
+enum Builder {
+    Integer(Vec<i32>, Option<MutableBitmap>),
+    Double(Vec<f64>, Option<MutableBitmap>),
+    /// A `Categorical` column's codes, all numbered by the mapping its dtype holds.
+    Codes(DataType, Vec<u32>, Option<MutableBitmap>),
+    /// Text, kept as Polars' chunks until the column is typed from all of its values.
+    Text(Option<Column>),
+}
+
+impl Builder {
+    fn new(dtype: &DataType, rows: usize) -> Builder {
+        match dtype {
+            DataType::Int32 => Builder::Integer(Vec::with_capacity(rows), None),
+            DataType::Float64 => Builder::Double(Vec::with_capacity(rows), None),
+            DataType::Categorical(..) => {
+                Builder::Codes(dtype.clone(), Vec::with_capacity(rows), None)
+            }
+            _ => Builder::Text(None),
+        }
+    }
+
+    fn append(&mut self, column: Column) -> Result<()> {
+        match self {
+            Builder::Integer(values, validity) => {
+                for array in column.i32()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Double(values, validity) => {
+                for array in column.f64()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Codes(_, values, validity) => {
+                let physical = column.as_materialized_series().to_physical_repr();
+                for array in physical.u32()?.downcast_iter() {
+                    extend(values, validity, array);
+                }
+            }
+            Builder::Text(text) => match text {
+                Some(text) => {
+                    text.append_owned(column)?;
+                }
+                None => *text = Some(column),
+            },
+        }
+        Ok(())
+    }
+
+    fn finish(self, name: PlSmallStr, layout: &Layout) -> Result<Column> {
+        Ok(match self {
+            Builder::Integer(values, validity) => Int32Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::Int32, values.into(), bitmap(validity)),
+            )
+            .into_column(),
+            Builder::Double(values, validity) => Float64Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::Float64, values.into(), bitmap(validity)),
+            )
+            .into_column(),
+            Builder::Codes(dtype, values, validity) => match (&dtype, bitmap(validity)) {
+                (DataType::Categorical(_, mapping), None) => {
+                    categorical_codes_to_factor(name, mapping, values, None)?.into_column()
+                }
+                // A column with a missing value stays categorical, to be read again as text.
+                (_, validity) => {
+                    let codes = UInt32Chunked::with_chunk(
+                        name,
+                        PrimitiveArray::new(ArrowDataType::UInt32, values.into(), validity),
+                    )
+                    .into_series()
+                    .cast(&dtype.to_physical())?;
+                    // SAFETY: every code was numbered by the mapping `dtype` holds.
+                    unsafe { codes.from_physical_unchecked(&dtype) }?.into_column()
+                }
+            },
+            Builder::Text(text) => {
+                let column = match text {
+                    Some(text) => text.rechunk(),
+                    None => Column::new_empty(name, &DataType::String),
+                };
+                let declared = layout
+                    .columns
+                    .iter()
+                    .find(|sniffed| sniffed.name == column.name().as_str())
+                    .map(|sniffed| sniffed.kind);
+                type_text_column(column, declared)?
+            }
+        })
+    }
+}
+
+/// Appends an array's values and validity to a column's buffers.
+fn extend<T: NativeType>(
+    values: &mut Vec<T>,
+    validity: &mut Option<MutableBitmap>,
+    array: &PrimitiveArray<T>,
+) {
+    let before = values.len();
+    values.extend_from_slice(array.values());
+    match (validity.as_mut(), array.validity()) {
+        (Some(bits), Some(valid)) => bits.extend_from_bitmap(valid),
+        (Some(bits), None) => bits.extend_constant(array.len(), true),
+        (None, Some(valid)) if valid.unset_bits() > 0 => {
+            let mut bits = MutableBitmap::with_capacity(values.capacity());
+            bits.extend_constant(before, true);
+            bits.extend_from_bitmap(valid);
+            *validity = Some(bits);
+        }
+        (None, _) => {}
+    }
+}
+
+fn bitmap(validity: Option<MutableBitmap>) -> Option<Bitmap> {
+    validity.and_then(|bits| bits.into())
+}
+
+/// Row-aligned byte ranges of about `slice_bytes` each, covering `bytes`. A range ends just
+/// after a line break outside quotes. Where quoting stands at each stretch's start comes from
+/// tracking every stretch from each of the three states in parallel, then chaining the results.
+fn slices(bytes: &[u8], slice_bytes: usize, separator: u8) -> Vec<Range<usize>> {
+    let stretches = bytes.len().div_ceil(slice_bytes).max(1);
+    if stretches == 1 {
+        // One range spanning the file is the intended value, not a mistyped `(0..n).collect()`.
+        #[allow(clippy::single_range_in_vec_init)]
+        return vec![0..bytes.len()];
+    }
+    let ends: Vec<[Quoting; 3]> = (0..stretches)
+        .into_par_iter()
+        .map(|stretch| {
+            let start = stretch * slice_bytes;
+            let range = start..(start + slice_bytes).min(bytes.len());
+            Quoting::ALL.map(|state| quoting_after(bytes, range.clone(), state, separator))
+        })
+        .collect();
+    let mut ranges = Vec::with_capacity(stretches);
+    let mut start = 0;
+    let mut state = Quoting::Outside;
+    for (stretch, ends) in ends.iter().enumerate().take(stretches - 1) {
+        // `state` becomes the quoting at the start of the next stretch.
+        state = ends[state as usize];
+        let boundary = (stretch + 1) * slice_bytes;
+        if boundary <= start {
+            continue;
+        }
+        let mut scan = state;
+        let Some(end) = (boundary..bytes.len()).find(|position| {
+            scan = quoting_step(bytes, *position, scan, separator);
+            bytes[*position] == b'\n' && scan == Quoting::Outside
+        }) else {
+            break;
+        };
+        ranges.push(start..end + 1);
+        start = end + 1;
+    }
+    if start < bytes.len() || ranges.is_empty() {
+        ranges.push(start..bytes.len());
+    }
+    ranges
+}
+
+/// Where a byte stands in the CSV quoting grammar. A quote opens a quoted field only at a field's
+/// start, so a stray quote inside an unquoted value, such as `5" pipe`, is text, and a doubled
+/// quote inside a quoted field is an escaped quote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quoting {
+    Outside = 0,
+    Inside = 1,
+    /// Just after a quote that may close the field or, doubled, escape a quote.
+    JustClosed = 2,
+}
+
+impl Quoting {
+    const ALL: [Quoting; 3] = [Quoting::Outside, Quoting::Inside, Quoting::JustClosed];
+}
+
+/// The quoting after the bytes in `range`, from `state` at its start. A stretch without a quote
+/// leaves a quoted field open and an unquoted one closed, so only stretches with quotes are
+/// walked byte by byte.
+fn quoting_after(bytes: &[u8], range: Range<usize>, state: Quoting, separator: u8) -> Quoting {
+    if !bytes[range.clone()].contains(&sniff::QUOTE) {
+        return match state {
+            Quoting::JustClosed if !range.is_empty() => Quoting::Outside,
+            state => state,
+        };
+    }
+    range.fold(state, |state, position| {
+        quoting_step(bytes, position, state, separator)
+    })
+}
+
+fn quoting_step(bytes: &[u8], position: usize, state: Quoting, separator: u8) -> Quoting {
+    let quote = bytes[position] == sniff::QUOTE;
+    match (state, quote) {
+        (Quoting::Inside, true) => Quoting::JustClosed,
+        (Quoting::Inside, false) => Quoting::Inside,
+        (Quoting::JustClosed, true) => Quoting::Inside,
+        (Quoting::Outside | Quoting::JustClosed, false) => Quoting::Outside,
+        (Quoting::Outside, true) => {
+            let field_start = position.checked_sub(1).is_none_or(|before| {
+                matches!(bytes[before], b'\n' | b'\r') || bytes[before] == separator
+            });
+            if field_start {
+                Quoting::Inside
+            } else {
+                Quoting::Outside
+            }
+        }
+    }
 }
 
 /// Writes a table as comma-separated text, as `fwrite(x, path)` does.
@@ -208,23 +555,44 @@ pub fn write_csv_to(table: &Table, writer: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Parses the text with the sniffed layout. With `as_text`, every column reads as text and is
-/// then typed from all of its values, which is the fallback for a value the sample missed.
-fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) -> Result<DataFrame> {
+/// The Polars schema to parse with. With `as_text`, every column reads as text and is then
+/// typed from all of its values, which is the fallback for a value the sample missed.
+fn schema(layout: &Layout, options: &ReadOptions, as_text: bool) -> Arc<PolarsSchema> {
     let mut schema = PolarsSchema::with_capacity(layout.columns.len());
     for column in &layout.columns {
         let dtype = match (as_text, column.kind) {
             (false, TextColumn::Integer) => DataType::Int32,
             (false, TextColumn::Double) => DataType::Float64,
+            // A factor's column parses straight into codes, so its strings never exist row by
+            // row. Each column numbers its own strings. A read of the first rows parses them as
+            // text, because Polars may number strings from rows past the last one it keeps, which
+            // would become levels no row has.
+            (false, TextColumn::Character) if options.factors && options.rows.is_none() => {
+                DataType::from_categories(Categories::random(
+                    PlSmallStr::from_static("ry"),
+                    CategoricalPhysical::U32,
+                ))
+            }
             // Polars reads only `true` and `false` as booleans, so a logical column reads as
             // text and is converted with `fread`'s three spellings.
             _ => DataType::String,
         };
         schema.insert(PlSmallStr::from(column.name.as_str()), dtype);
     }
-    let frame = CsvReadOptions::default()
-        .with_has_header(layout.header)
-        .with_schema(Some(Arc::new(schema)))
+    Arc::new(schema)
+}
+
+/// Parses the text with `schema`, leaving logical and undecided columns as Polars read them.
+fn parse(
+    bytes: &[u8],
+    layout: &Layout,
+    options: &ReadOptions,
+    schema: &Arc<PolarsSchema>,
+    header: bool,
+) -> Result<DataFrame> {
+    Ok(CsvReadOptions::default()
+        .with_has_header(header)
+        .with_schema(Some(schema.clone()))
         .with_rechunk(false)
         .with_columns(
             options
@@ -244,25 +612,7 @@ fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) ->
                 .with_missing_is_null(false)
         })
         .into_reader_with_file_handle(Cursor::new(bytes))
-        .finish()?;
-    let height = frame.height();
-    let columns: Vec<Column> = frame
-        .into_columns()
-        .into_par_iter()
-        .map(|column| {
-            let sniffed = layout
-                .columns
-                .iter()
-                .find(|sniffed| sniffed.name == column.name().as_str());
-            let declared = if as_text {
-                None
-            } else {
-                sniffed.map(|sniffed| sniffed.kind)
-            };
-            type_text_column(column, declared)
-        })
-        .collect::<Result<_>>()?;
-    Ok(DataFrame::new(height, columns)?)
+        .finish()?)
 }
 
 /// Types a column Polars read as text. A column sniffed as character stays text. Any other
@@ -425,4 +775,77 @@ pub fn strings_as_factors(table: &mut Table) -> Result<()> {
         table.put_column(factor.into_column())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::{
+            Quoting, ReadOptions, SLICE_BYTES, quoting_after, read_bytes, read_sliced, slices,
+        },
+        crate::Result,
+    };
+
+    /// Quoted fields with line breaks and doubled quotes straddle many slice boundaries. With
+    /// `stray`, some unquoted values also hold a quote, which only the slicer handles.
+    fn text(stray: bool) -> String {
+        let mut text = String::from("id,name,note,x\n");
+        for row in 0..400 {
+            let note = match row % 4 {
+                0 => "\"line\nbreak\"".to_string(),
+                1 => "\"say \"\"hi\"\", ok\"".to_string(),
+                2 => String::new(),
+                // A quote inside an unquoted value is text, not the start of a quoted field.
+                _ if stray && row % 8 == 3 => format!("{row}\" pipe"),
+                _ => format!("n{row}"),
+            };
+            text.push_str(&format!("{row},k{},{note},{}.5\n", row % 7, row));
+        }
+        text
+    }
+
+    #[test]
+    fn slices_end_at_line_breaks_outside_quotes() {
+        let text = text(true);
+        let bytes = text.as_bytes();
+        assert!(text.matches("\" pipe").count() > 0);
+        for size in [1, 7, 64, 1000] {
+            let ranges = slices(bytes, size, b',');
+            assert_eq!(ranges.first().map(|range| range.start), Some(0));
+            assert_eq!(ranges.last().map(|range| range.end), Some(bytes.len()));
+            for pair in ranges.windows(2) {
+                assert_eq!(pair[0].end, pair[1].start);
+                let before = &bytes[..pair[0].end];
+                assert_eq!(before.last(), Some(&b'\n'));
+                let state = quoting_after(bytes, 0..pair[0].end, Quoting::Outside, b',');
+                assert!(
+                    state == Quoting::Outside,
+                    "a slice of {size} bytes ends inside quotes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sliced_read_matches_a_whole_read() -> Result<()> {
+        // Polars cannot read a stray quote at all, sliced or whole, so it is left out here.
+        let text = text(false);
+        let bytes = text.as_bytes();
+        for factors in [false, true] {
+            let options = ReadOptions {
+                factors,
+                ..ReadOptions::default()
+            };
+            let whole = read_bytes(bytes, &options, SLICE_BYTES, &|_| Ok(()))?;
+            // A failed sliced read falls back to a whole one, so it is checked on its own.
+            read_sliced(bytes, &sniff::sniff(bytes), &options, 97, &|_| Ok(()))?;
+            let sliced = read_bytes(bytes, &options, 97, &|_| Ok(()))?;
+            assert_eq!(whole.frame().height(), 400);
+            assert!(
+                whole.frame().equals_missing(sliced.frame()),
+                "factors: {factors}"
+            );
+        }
+        Ok(())
+    }
 }

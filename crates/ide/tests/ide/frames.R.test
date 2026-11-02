@@ -3,8 +3,9 @@
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 totals <- sales[, .(total = sum(am$0)), by = team]
 #++++
-hover 89..91: am: Unknown
-definition: none
+hover 89..91: am
+hover-definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed am from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
@@ -26,8 +27,9 @@ hint @5: DataFrame{team: character[], amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 counts <- sales[, .(n = .$0), by = team]
 #++++
-hover 81..82: .: Unknown
-definition: none
+hover 81..82: .
+hover-definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -40,8 +42,9 @@ hint @5: DataFrame{team: character[], amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 amou$0
 #++++
-hover 57..61: amou: Unknown
-definition: none
+hover 57..61: amou
+hover-definition: installed amou from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed amou from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -55,13 +58,14 @@ sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 sales[, t$0ax := amount * 0.2]
 #++++
 hover 65..68: tax: double[]
-definition: none
+hover-definition: installed tax from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed tax from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
-completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
+completion (82): t, team, t.data.frame, t.default, t.test, table, tabulate, tail
 hint @5: DataFrame{team: character[], amount: double[]}
 
 #---- hover_on_a_column_named_by_a_string
@@ -83,9 +87,9 @@ sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 sales$amo$0unt
 #++++
 hover 63..69: amount: double[]
-definition: none
-references: none
-rename: none
+definition 39..45
+references: 39..45*, 63..69
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
@@ -128,6 +132,27 @@ action: Add inferred type annotations for the whole file
 completion (1): team
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @64: GroupBy{team: character[]; amount: double[]}
+
+#---- hover_on_a_column_string_inside_col
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+doubled <- sales |> DataFrame.with_columns(col("amo$0unt") * 2)
+#++++
+hover 104..112: amount: double[]
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotation for `doubled`
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
+completion (1): amount
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @64: DataFrame{team: character[], amount: double[]}
 
 #---- completion_in_a_verb_string_after_a_pipe
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))

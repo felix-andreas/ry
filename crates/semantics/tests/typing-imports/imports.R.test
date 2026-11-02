@@ -11,6 +11,14 @@ f <- function(x) setDT(x)
 f: <T> fn(x: T) -> Unknown
 17..22 warning[unresolved] I could not resolve `setDT` in this package, its imports, or builtins.
 
+#---- imports_in_both_branches_of_a_namespace_if_count
+#namespace if (.Platform$OS.type == "windows") { importFrom(data.table, setDT) } else importFrom(data.table, fread)
+f <- function(x) setDT(x)
+g <- function(path) fread(path)
+#++++
+f: <T> fn(x: T) -> data.table
+g: fn(path: character) -> data.table
+
 #---- import_from_covers_operator_spellings
 #namespace importFrom(rlang, "%||%")
 f <- function(a, b) a %||% b

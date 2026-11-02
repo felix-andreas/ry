@@ -329,6 +329,24 @@ fn seeds_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // An integer and a double joined stay what they were: integer arithmetic on the
+        // integer side, `typeof` and `NA` all see the original value.
+        (
+            "out <- NULL\nfor (i in 1:n) { r <- if (i %% 2L == 0L) i else 0.5; out <- c(out, .Internal(typeof(r)), r + 1L, r < 3, r / 2) }\nout",
+            "(n = 300L)",
+            false,
+        ),
+        (
+            "out <- NULL\nfor (i in 1:n) { r <- if (i == 2L) NA_integer_ else if (i == 3L) NA_real_ else i; out <- c(out, r * 2, .Internal(typeof(r))) }\nout",
+            "(n = 300L)",
+            false,
+        ),
+        // A loop-carried variable that alternates between integer and double.
+        (
+            "x <- 0L\nfor (i in 1:n) x <- if (i %% 2L == 0L) x + 1L else x * 1.5\nc(x, .Internal(typeof(x)))",
+            "(n = 40L)",
+            false,
+        ),
         // A promise forced by a load whose type guard then fails keeps the visibility it set.
         (
             "wv <- function(x) .Internal(withVisible(x))\nseen <- 0L\nfor (i in 1:n) if (wv(if (i < 400L) i else y <- 2.5)$visible) seen <- seen + 1L\nseen",
@@ -483,6 +501,75 @@ fn native_functions_agree_across_tiers() {
                     "case {case}, call {}: f{call} after\n{definitions}\nwith body\n{body}",
                     run + 1
                 );
+            }
+        }
+    });
+}
+
+#[test]
+fn traversals_agree_across_tiers() {
+    // A library traversal whose callback inlines runs as a compiled loop. A list or an element
+    // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
+    // tier 0, which must then give the same value or error.
+    let definitions = "xs <- List.from_vector(1:50 + 0)\nys <- List.from_vector(1:50)\nflip <- 0L\n\
+                       add <- function(acc, x) acc + x\nstep <- add";
+    let cases = [
+        ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
+        ("List.walk(ys, 0L, function(acc, x) acc + x)", false),
+        (
+            "List.walk(list(2147483647L, 1L), 0L, function(acc, x) acc + x)",
+            false,
+        ),
+        ("List.walk(xs, 0, add) + List.walk(xs, 1, add)", false),
+        (
+            "flip <<- flip + 1L\nif (flip %% 3L == 0L) step <<- function(acc, x) x + acc else step <<- add\nList.walk(xs, 0, step)",
+            false,
+        ),
+        (
+            "b <- b + 0\nList.walk(xs, 0, function(acc, x) acc + x * b)",
+            false,
+        ),
+        (
+            "s <- 0\nfor (l in list(xs, list(), ys)) s <- s + List.walk(l, 1, function(acc, x) acc * 0.5 + x * b)\ns",
+            false,
+        ),
+        (
+            "flip <<- flip + 1L\nl <- if (flip %% 2L == 0L) list(1, 2) else list(1, 2L)\nList.walk(l, 0, function(acc, x) acc + x)",
+            false,
+        ),
+        (
+            "List.walk(list(1, \"a\"), 0, function(acc, x) acc + x)",
+            true,
+        ),
+        ("List.walk(c(1, 2), 0, function(acc, x) acc + x)", true),
+        ("List.map(xs, function(x) x * 2)", false),
+        ("List.map(ys, function(x) x %/% 3L)", false),
+        ("List.map(ys, function(x) x > 25L)", false),
+        ("List.map(list(), function(x) x * 2)", false),
+        ("List.keep_if(xs, function(x) x > 20)", false),
+        ("List.drop_if(ys, function(x) x %% 3L == 0L)", false),
+        ("List.keep_if(list(a = 1, b = 5), function(x) x > 2)", false),
+        ("List.any(xs, function(x) x > 40)", false),
+        ("List.any(xs, function(x) x < 0)", false),
+        ("List.all(ys, function(x) x > 0L)", false),
+        ("List.all(ys, function(x) x < 10L)", false),
+        ("List.count_if(xs, function(x) x > b * 10)", false),
+        ("List.any(list(1, NA_real_, 3), function(x) x > 2)", true),
+        ("List.count_if(list(1, 2), function(x) x)", true),
+        (
+            "List.walk(xs, 0, function(acc: double, x: double) -> double acc + x)",
+            false,
+        ),
+    ];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe { run(definitions) };
+        for (case, (body, fails)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled) = unsafe { outcomes(3_000_000 + case, body, "()") };
+            assert_eq!(reference == "error", *fails, "case {case} gave {reference}");
+            for (run, outcome) in compiled.iter().enumerate() {
+                assert_eq!(&reference, outcome, "case {case}, call {}: {body}", run + 1);
             }
         }
     });
@@ -701,7 +788,16 @@ fn program(rng: &mut SplitMix64) -> String {
             ),
         });
     }
-    statements.push(["s", "v", "list(s, v, total)", "c(s, total)"][rng.below(4)].to_owned());
+    statements.push(
+        [
+            "s",
+            "v",
+            "list(s, v, total)",
+            "c(s, total)",
+            "c(.Internal(typeof(s)), .Internal(typeof(total)))",
+        ][rng.below(5)]
+        .to_owned(),
+    );
     statements.join("\n")
 }
 

@@ -344,8 +344,12 @@ these rules:
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
   `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
-  types below it in the promotion order, as the checker does. A list type admits any list, a
-  function type any function, and a union any of its members. Vector shape, element types, and
+  types below it in the promotion order, as the checker does. A parameter whose type admits
+  `integer` also admits a `double` scalar holding a whole number, because the checker accepts a
+  whole-number literal there (`f(10)` for `n: integer`) and storage cannot tell a literal from a
+  computed value; a return value gets no such allowance. A list type admits any R list, a
+  `Record{...}` or `Tuple{...}` type any ry record or tuple, a function type any function, and a
+  union any of its members. Vector shape, element types, and
   attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
   parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
   have the annotated type.
@@ -3265,7 +3269,7 @@ first column it reads, as Polars names it. Its type follows R's rules for the op
 | `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
 | comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
 | `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
-| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column, except that `Expr.min` and `Expr.max` of a `logical` column are `integer`, as in R |
 | `Expr.len()`, `Expr.count` | `integer` |
 | `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
 | `lit(value)`, a plain R value | the value's type |
@@ -3287,6 +3291,35 @@ type-mismatch
 
 An argument whose expression the checker cannot read, such as a variable holding an `Expr`, leaves
 the result's columns unknown.
+
+The operands of an expression must have types the operation takes, as the table engine checks
+before it runs a query. In the rules below, a number is an `integer` or `double` column or value,
+and text is a `character` or `factor` one:
+
+| Operation | Operands |
+| --- | --- |
+| `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-` and `+`, `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | numbers or `logical`, never text |
+| `&`, `\|`, `!` | `logical` or numbers, never text |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | never text on one side and a number on the other |
+| the test of `Expr.if_else` | `logical` |
+
+An operand that breaks a rule is a type error on that operand, and a comparison is one on the whole
+comparison:
+
+```text
+type-mismatch
+
+  x `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
+   --[a.R:2:35]
+ 1 | sales <- DataFrame(region = ["eu", "us"], units = [1L, 2L])
+ 2 | kept <- sales |> DataFrame.filter(col("region") > 1L)
+   |                                   ^^^^^^^^^^^^^^^^^^
+```
+
+The engine compares an `integer` with a string by formatting the number, as R does, so that
+comparison runs, but it is still an error here: a schema that puts text against a number almost
+always means the wrong column. The rules check only operands of known type, so an expression over
+a frame whose columns are unknown is never an error.
 
 #### data.table queries
 

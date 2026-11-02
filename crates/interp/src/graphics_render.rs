@@ -87,6 +87,16 @@ pub enum Mark {
     },
     /// A [`Definition::Group`] drawn through `transform`.
     Group { group: usize, transform: Affine },
+    /// A raster image of `columns` by `rows` pixels, row by row from the top, drawn into the
+    /// parallelogram `placement` maps the unit square onto, with the image's bottom-left corner
+    /// at `(0, 0)`. `interpolate` asks for smooth scaling rather than hard pixel edges.
+    Image {
+        pixels: Vec<Colour>,
+        columns: usize,
+        rows: usize,
+        placement: Affine,
+        interpolate: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -306,7 +316,8 @@ impl Operator {
         })
     }
 
-    /// tiny-skia has every operator but `saturate`, which composites as `add`, its nearest.
+    /// tiny-skia has every operator but `saturate`, which `draw_items` composites by hand; it
+    /// maps to `add` here only so the match is total.
     fn skia(self) -> tiny_skia::BlendMode {
         use tiny_skia::BlendMode;
         match self {
@@ -675,7 +686,12 @@ fn pdf_document(drawing: &Drawing, size: [f64; 2], title: &str) -> Vec<u8> {
     // definitions the pages use follow.
     let page_count = drawing.pages.len();
     let first_page = 5;
-    let mut writer = PdfWriter::new(&drawing.definitions, size, first_page + 2 * page_count);
+    let mut writer = PdfWriter::new(
+        &drawing.definitions,
+        size,
+        first_page + 2 * page_count,
+        false,
+    );
     let contents: Vec<Vec<u8>> = drawing
         .pages
         .iter()
@@ -761,10 +777,13 @@ fn deflate(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 /// Writes content streams, and the objects for the definitions they use, which all pages and
-/// definitions share through one resource dictionary, object 3.
+/// definitions share through one resource dictionary, object 3. With `postscript` set, the
+/// content is the page body of a PostScript document instead, whose prolog defines PDF's
+/// operators; images are then written inline, since PostScript has no objects.
 struct PdfWriter<'a> {
     definitions: &'a [Definition],
     size: [f64; 2],
+    postscript: bool,
     /// The objects after the pages', the first numbered `first_object`.
     objects: Vec<Vec<u8>>,
     first_object: usize,
@@ -774,18 +793,27 @@ struct PdfWriter<'a> {
     /// The resource name and object number of each definition written so far; a gradient's
     /// opacity mask is a resource of its own under the definition's name with a prefix.
     written: BTreeMap<(char, usize), usize>,
+    /// The object number of each image written so far, also its resource name's suffix.
+    images: Vec<usize>,
 }
 
 impl<'a> PdfWriter<'a> {
-    fn new(definitions: &'a [Definition], size: [f64; 2], first_object: usize) -> Self {
+    fn new(
+        definitions: &'a [Definition],
+        size: [f64; 2],
+        first_object: usize,
+        postscript: bool,
+    ) -> Self {
         PdfWriter {
             definitions,
             size,
+            postscript,
             objects: Vec::new(),
             first_object,
             opacities: BTreeMap::new(),
             blend_modes: BTreeSet::new(),
             written: BTreeMap::new(),
+            images: Vec::new(),
         }
     }
 
@@ -846,8 +874,13 @@ impl<'a> PdfWriter<'a> {
                 _ => states.push(entry),
             }
         }
+        xobjects.extend(
+            self.images
+                .iter()
+                .map(|object| format!("/Im{object} {object} 0 R")),
+        );
         format!(
-            "<< /ProcSet [/PDF /Text] /Font << {} >> /ExtGState << {} >> /Pattern << {} >> \
+            "<< /ProcSet [/PDF /Text /ImageC /ImageB] /Font << {} >> /ExtGState << {} >> /Pattern << {} >> \
              /XObject << {} >> >>",
             fonts.join(" "),
             states.join(" "),
@@ -1012,6 +1045,23 @@ impl<'a> PdfWriter<'a> {
                 ));
                 out.push_str("Q\n");
             }
+            Mark::Image {
+                pixels,
+                columns,
+                rows,
+                placement,
+                interpolate,
+            } => {
+                let [a, b, c, d, e, f] = placement.0.map(pt);
+                out.push_str(&format!("q {a:.4} {b:.4} {c:.4} {d:.4} {e:.2} {f:.2} cm\n"));
+                if self.postscript {
+                    postscript_image(out, pixels, *columns, *rows, *placement, *interpolate);
+                } else {
+                    let object = self.image(pixels, *columns, *rows, *interpolate);
+                    out.push_str(&format!("/Im{object} Do\n"));
+                }
+                out.push_str("Q\n");
+            }
             Mark::Group { group, transform } => {
                 if !self.define('X', *group, depth) {
                     return;
@@ -1025,6 +1075,48 @@ impl<'a> PdfWriter<'a> {
                 ));
             }
         }
+    }
+
+    /// Writes an image XObject, with a soft mask holding its alpha when any pixel is not
+    /// opaque, and returns its object number.
+    fn image(
+        &mut self,
+        pixels: &[Colour],
+        columns: usize,
+        rows: usize,
+        interpolate: bool,
+    ) -> usize {
+        let interpolate = if interpolate {
+            " /Interpolate true"
+        } else {
+            ""
+        };
+        let entries = |colour_space: &str| {
+            format!(
+                "/Type /XObject /Subtype /Image /Width {columns} /Height {rows} \
+                 /ColorSpace {colour_space} /BitsPerComponent 8{interpolate}"
+            )
+        };
+        let mask = if pixels.iter().all(|pixel| alpha(*pixel) == 255) {
+            String::new()
+        } else {
+            let alphas: Vec<u8> = pixels.iter().map(|pixel| alpha(*pixel)).collect();
+            let mask = self.add(pdf_stream(&entries("/DeviceGray"), &alphas));
+            format!(" /SMask {mask} 0 R")
+        };
+        let colours: Vec<u8> = pixels
+            .iter()
+            .flat_map(|pixel| {
+                let [red, green, blue, _] = channels(*pixel);
+                [red, green, blue]
+            })
+            .collect();
+        let object = self.add(pdf_stream(
+            &format!("{}{mask}", entries("/DeviceRGB")),
+            &colours,
+        ));
+        self.images.push(object);
+        object
     }
 
     /// Writes the object a resource named `kind` and `index` stands for, unless it has been
@@ -1356,6 +1448,7 @@ const POSTSCRIPT_PROLOG: &str = "\
 /n { newpath } bind def
 /w { setlinewidth } bind def /J { setlinecap } bind def /j { setlinejoin } bind def
 /M { setmiterlimit } bind def /d { setdash } bind def /gs { pop } bind def
+/cm { 6 array astore concat } bind def
 /BT { gsave } bind def /ET { grestore } bind def
 /Tf { exch findfont exch scalefont setfont } bind def
 /Tm { 6 array astore concat 0 0 moveto } bind def
@@ -1365,6 +1458,109 @@ const POSTSCRIPT_PROLOG: &str = "\
 /F1 /Helvetica reencode /F2 /Helvetica-Bold reencode /F3 /Helvetica-Oblique reencode
 /F4 /Helvetica-BoldOblique reencode /F5 /Symbol findfont definefont pop
 ";
+
+/// Writes a raster image into the unit square of a PostScript page's current space. PostScript
+/// has no alpha, so the image is drawn opaque, and no interpolation, so an image that asks for
+/// it is first scaled smoothly to one pixel per point of `placement`'s size, as GNU R does.
+fn postscript_image(
+    out: &mut String,
+    pixels: &[Colour],
+    columns: usize,
+    rows: usize,
+    placement: Affine,
+    interpolate: bool,
+) {
+    let resampled;
+    let (pixels, columns, rows) = match interpolate.then(|| point_size(placement)).flatten() {
+        Some([width, height]) => {
+            resampled = interpolate_raster(pixels, [columns, rows], [width, height]);
+            (resampled.as_slice(), width, height)
+        }
+        None => (pixels, columns, rows),
+    };
+    out.push_str(&format!(
+        "/DeviceRGB setcolorspace\n<< /ImageType 1 /Width {columns} /Height {rows} \
+         /BitsPerComponent 8 /Decode [0 1 0 1 0 1] /DataSource currentfile /ASCIIHexDecode \
+         filter /ImageMatrix [{columns} 0 0 -{rows} 0 {rows}] >> image\n"
+    ));
+    for (index, pixel) in pixels.iter().enumerate() {
+        let [red, green, blue, _] = channels(*pixel);
+        out.push_str(&format!("{red:02x}{green:02x}{blue:02x}"));
+        if index % 13 == 12 {
+            out.push('\n');
+        }
+    }
+    out.push_str(">\n");
+}
+
+/// The size in whole points of the parallelogram an image is drawn into, or `None` when it is
+/// too large to scale an image up to, which no image on a page of sensible size is.
+fn point_size(placement: Affine) -> Option<[usize; 2]> {
+    const MOST_PIXELS: f64 = 16_777_216.0;
+    let [a, b, c, d, _, _] = placement.0;
+    let [width, height] =
+        [a.hypot(b), c.hypot(d)].map(|inches| (pt(inches) + 0.5).floor().max(1.0));
+    (width * height <= MOST_PIXELS).then_some([width as usize, height as usize])
+}
+
+/// Scales an image of `from` columns and rows to `to` by bilinear interpolation, edge pixels
+/// extending outwards, sampling where GNU R's engine samples and with its weights in
+/// sixteenths, so the scaled pixels match GNU R's.
+fn interpolate_raster(pixels: &[Colour], from: [usize; 2], to: [usize; 2]) -> Vec<Colour> {
+    let [columns, rows] = from;
+    // Where destination pixel `index` samples the source along one axis: the source pixel and
+    // the next one's weight, in sixteenths. The sample point is half a source pixel back from
+    // the destination pixel's start.
+    let sample = |index: usize, source: usize, destination: usize| -> (usize, u32) {
+        let position = (index as f64 * 16.0 * source as f64 / destination as f64 - 8.0).max(0.0);
+        let fixed = position as usize;
+        let (whole, fraction) = (fixed / 16, (fixed % 16) as u32);
+        if whole >= source - 1 {
+            (source - 1, 0)
+        } else {
+            (whole, fraction)
+        }
+    };
+    let pixel = |column: usize, row: usize| {
+        pixels
+            .get(row * columns + column)
+            .copied()
+            .unwrap_or_default()
+    };
+    let mut scaled = Vec::with_capacity(to[0] * to[1]);
+    for row in 0..to[1] {
+        let (top, down) = sample(row, rows, to[1]);
+        let bottom = (top + 1).min(rows - 1);
+        for column in 0..to[0] {
+            let (left, right_weight) = sample(column, columns, to[0]);
+            let right = (left + 1).min(columns - 1);
+            let weights = [
+                (16 - right_weight) * (16 - down),
+                right_weight * (16 - down),
+                (16 - right_weight) * down,
+                right_weight * down,
+            ];
+            let corners = [
+                pixel(left, top),
+                pixel(right, top),
+                pixel(left, bottom),
+                pixel(right, bottom),
+            ];
+            let mut colour: Colour = 0;
+            for channel in 0..4 {
+                let shift = 8 * channel;
+                let total: u32 = corners
+                    .iter()
+                    .zip(weights)
+                    .map(|(corner, weight)| ((*corner >> shift) & 0xff) * weight)
+                    .sum();
+                colour |= ((total + 128) >> 8).min(255) << shift;
+            }
+            scaled.push(colour);
+        }
+    }
+    scaled
+}
 
 /// A PostScript document of `pages`, each `size` inches, placed on `paper` as
 /// [`Format::Postscript`] describes. An `encapsulated` document is EPS, which leaves out the
@@ -1430,7 +1626,7 @@ fn postscript_document(
         title.replace(['\n', '\r'], " "),
         pages.len(),
     );
-    let mut writer = PdfWriter::new(&[], size, 0);
+    let mut writer = PdfWriter::new(&[], size, 0, true);
     for (index, page) in pages.iter().enumerate() {
         out.push_str(&format!("%%Page: {0} {0}\ngsave\n{placement}", index + 1));
         out.push_str(&writer.page(page));
@@ -1638,6 +1834,47 @@ impl SvgWriter<'_> {
                     xml_escape(text)
                 ));
             }
+            Mark::Image {
+                pixels,
+                columns,
+                rows,
+                placement,
+                interpolate,
+            } => {
+                // Viewers scale a small image up in visible steps, so an image that asks for
+                // interpolation is first scaled up smoothly to one pixel per point, as cairo
+                // does.
+                let Some(mut image) = image_pixmap(pixels, *columns, *rows) else {
+                    return;
+                };
+                let (mut columns, mut rows) = (*columns, *rows);
+                if *interpolate
+                    && let Some(size) = point_size(*placement)
+                    && (size[0] > columns || size[1] > rows)
+                    && let Some(scaled) = smooth_scale(&image, size)
+                {
+                    (image, [columns, rows]) = (scaled, size);
+                }
+                let Ok(png) = image.encode_png() else {
+                    return;
+                };
+                let [a, b, c, d, e, f] = image_space(columns, rows)
+                    .then(*placement)
+                    .then(self.to_points())
+                    .0;
+                // Viewers smooth a scaled image unless told otherwise.
+                let rendering = if *interpolate {
+                    ""
+                } else {
+                    " style=\"image-rendering:pixelated\""
+                };
+                out.push_str(&format!(
+                    "<image width=\"{columns}\" height=\"{rows}\" preserveAspectRatio=\"none\" \
+                     transform=\"matrix({a:.6} {b:.6} {c:.6} {d:.6} {e:.2} {f:.2})\"{rendering} \
+                     xlink:href=\"data:image/png;base64,{}\"/>\n",
+                    base64(&png)
+                ));
+            }
             Mark::Group { group, transform } => {
                 if !self.define('g', *group, depth) {
                     return;
@@ -1778,27 +2015,79 @@ impl SvgWriter<'_> {
                 let [x, y] = [self.x(rect.x0), self.y(rect.y1)];
                 let [width, height] = [self.x(rect.x1 - rect.x0), self.x(rect.y1 - rect.y0)];
                 // SVG patterns only repeat. A reflected tile is a repeated block of the tile and
-                // its three mirror images, and a tile that is not repeated is spaced so that its
-                // next copy falls off the page; viewers rasterize a pattern tile, so a spacing
-                // much larger than the page would blur it. SVG cannot repeat a tile's edge
-                // pixels, so `pad` paints nothing beyond the tile either.
-                let page = self.width.max(self.height);
-                let (tile_width, tile_height) = match extend {
+                // its three mirror images. A tile that is not repeated sits `margin` points
+                // inside a cell large enough that the next copy falls off the page; viewers
+                // rasterize a pattern cell, so a cell much larger than the page would blur it.
+                let margin = match extend {
+                    Extend::Repeat | Extend::Reflect => 0.0,
+                    Extend::Pad | Extend::None => {
+                        self.width.max(self.height) + x.abs().max(y.abs())
+                    }
+                };
+                let (cell_width, cell_height) = match extend {
                     Extend::Repeat => (width, height),
                     Extend::Reflect => (2.0 * width, 2.0 * height),
-                    Extend::Pad | Extend::None => (
-                        width + 2.0 * (page + x.abs()),
-                        height + 2.0 * (page + y.abs()),
-                    ),
+                    Extend::Pad | Extend::None => (width + 2.0 * margin, height + 2.0 * margin),
                 };
                 out.push_str(&format!(
-                    "<pattern id=\"f{index}\" patternUnits=\"userSpaceOnUse\" x=\"{x:.2}\" \
-                     y=\"{y:.2}\" width=\"{tile_width:.2}\" height=\"{tile_height:.2}\">\n\
-                     <clipPath id=\"f{index}c\"><rect width=\"{width:.2}\" \
-                     height=\"{height:.2}\"/></clipPath>\n\
-                     <g id=\"f{index}t\" clip-path=\"url(#f{index}c)\">\n\
+                    "<pattern id=\"f{index}\" patternUnits=\"userSpaceOnUse\" x=\"{:.2}\" \
+                     y=\"{:.2}\" width=\"{cell_width:.2}\" height=\"{cell_height:.2}\">\n\
+                     <clipPath id=\"f{index}c\"><rect x=\"{margin:.2}\" y=\"{margin:.2}\" \
+                     width=\"{width:.2}\" height=\"{height:.2}\"/></clipPath>\n",
+                    x - margin,
+                    y - margin,
+                ));
+                if *extend == Extend::Pad {
+                    // cairo pads with the tile's edge pixels, which are one point wide at the
+                    // SVG surface's 72 pixels per inch. Each edge strip and corner of the tile
+                    // is mirrored outwards and stretched across the margin by the map
+                    // `e (1 + k) - k v + s`, which sends the strip's inner side `k` points
+                    // beyond the edge `e` and shifts it `s` points back over the tile. The
+                    // pieces overlap, corners under edges under the tile, so viewers draw no
+                    // anti-aliased seam where they meet.
+                    let strip = [width, height].map(|extent| extent.min(1.0));
+                    let stretch = margin.max(1.0);
+                    let sides = |start: f64, extent: f64, strip: f64| {
+                        [
+                            Some((start, start, strip, strip)),
+                            None,
+                            Some((start + extent, start + extent - strip, strip, -strip)),
+                        ]
+                    };
+                    let axis = |side: Option<(f64, f64, f64, f64)>, extent: f64| match side {
+                        Some((edge, from, strip, shift)) => {
+                            (-stretch, edge * (1.0 + stretch) + shift, from, strip)
+                        }
+                        None => (1.0, 0.0, margin, extent),
+                    };
+                    let mut pieces = Vec::new();
+                    for vertical in sides(margin, height, strip[1]) {
+                        for horizontal in sides(margin, width, strip[0]) {
+                            match (horizontal.is_some(), vertical.is_some()) {
+                                (true, true) => pieces.insert(0, (horizontal, vertical)),
+                                (false, false) => {}
+                                _ => pieces.push((horizontal, vertical)),
+                            }
+                        }
+                    }
+                    for (piece, (horizontal, vertical)) in pieces.into_iter().enumerate() {
+                        let (scale_x, shift_x, clip_x, clip_width) = axis(horizontal, width);
+                        let (scale_y, shift_y, clip_y, clip_height) = axis(vertical, height);
+                        out.push_str(&format!(
+                            "<clipPath id=\"f{index}s{piece}\"><rect x=\"{clip_x:.2}\" \
+                             y=\"{clip_y:.2}\" width=\"{clip_width:.2}\" \
+                             height=\"{clip_height:.2}\"/></clipPath>\n\
+                             <g transform=\"matrix({scale_x:.2} 0 0 {scale_y:.2} {shift_x:.2} \
+                             {shift_y:.2})\"><g clip-path=\"url(#f{index}s{piece})\">\
+                             <use xlink:href=\"#f{index}t\"/></g></g>\n"
+                        ));
+                    }
+                }
+                out.push_str(&format!(
+                    "<g id=\"f{index}t\" clip-path=\"url(#f{index}c)\">\n\
                      <g transform=\"translate({:.2} {:.2})\">\n",
-                    -x, -y
+                    margin - x,
+                    margin - y
                 ));
                 self.items(out, items, depth + 1);
                 out.push_str("</g>\n</g>\n");
@@ -2004,6 +2293,10 @@ fn draw_items(
             continue;
         };
         draw_mark(definitions, &mut layer, &item.mark, to_pixels, None, depth);
+        if operator == Operator::Saturate {
+            saturate(canvas, &layer, coverage);
+            continue;
+        }
         canvas.draw_pixmap(
             0,
             0,
@@ -2015,6 +2308,30 @@ fn draw_items(
             tiny_skia::Transform::identity(),
             Some(coverage),
         );
+    }
+}
+
+/// Composites `layer` onto `canvas` within `coverage` by cairo's `saturate` operator, which
+/// tiny-skia lacks: the source, scaled down to fit the room the destination's alpha leaves,
+/// is added to the destination. Both are premultiplied and the same size.
+fn saturate(canvas: &mut tiny_skia::Pixmap, layer: &tiny_skia::Pixmap, coverage: &tiny_skia::Mask) {
+    let pixels = canvas.data_mut().chunks_exact_mut(4);
+    for ((destination, source), &cover) in pixels
+        .zip(layer.data().chunks_exact(4))
+        .zip(coverage.data())
+    {
+        let cover = f32::from(cover) / 255.0;
+        let source_alpha = f32::from(source[3]) * cover;
+        if source_alpha <= 0.0 {
+            continue;
+        }
+        let room = 255.0 - f32::from(destination[3]);
+        let scale = cover * (room / source_alpha).min(1.0);
+        for (value, added) in destination.iter_mut().zip(source) {
+            *value = (f32::from(*value) + f32::from(*added) * scale)
+                .round()
+                .min(255.0) as u8;
+        }
     }
 }
 
@@ -2162,6 +2479,69 @@ fn draw_mark(
                     coverage,
                 );
             }
+        }
+        Mark::Image {
+            pixels,
+            columns,
+            rows,
+            placement,
+            interpolate,
+        } => {
+            let Some(image) = image_pixmap(pixels, *columns, *rows) else {
+                return;
+            };
+            let Some(path) = skia_path(
+                &polygon_outline(
+                    &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+                        .map(|corner| placement.apply(corner)),
+                    true,
+                ),
+                to_pixels,
+            ) else {
+                return;
+            };
+            let quality = if *interpolate {
+                tiny_skia::FilterQuality::Bilinear
+            } else {
+                tiny_skia::FilterQuality::Nearest
+            };
+            let paint = tiny_skia::Paint {
+                shader: tiny_skia::Pattern::new(
+                    image.as_ref(),
+                    tiny_skia::SpreadMode::Pad,
+                    quality,
+                    1.0,
+                    image_space(*columns, *rows).then(*placement).skia(),
+                ),
+                anti_alias: true,
+                ..tiny_skia::Paint::default()
+            };
+            // cairo samples an image drawn without interpolation at pixel centres and finds
+            // nothing beyond its edge, so an edge pixel whose centre lies outside the image
+            // stays empty however much of it the image covers.
+            let centres;
+            let coverage = if *interpolate {
+                coverage
+            } else {
+                let Some(mut inside) = tiny_skia::Mask::new(canvas.width(), canvas.height()) else {
+                    return;
+                };
+                inside.fill_path(&path, tiny_skia::FillRule::Winding, false, to_pixels.skia());
+                if let Some(coverage) = coverage {
+                    for (value, scale) in inside.data_mut().iter_mut().zip(coverage.data()) {
+                        *value = ((u16::from(*value) * u16::from(*scale) + 127) / 255) as u8;
+                    }
+                }
+                centres = inside;
+                Some(&centres)
+            };
+            canvas.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                to_pixels.skia(),
+                coverage,
+            );
         }
         Mark::Group { group, transform } => {
             let Some(Definition::Group {
@@ -2422,6 +2802,62 @@ fn radial_gradient_image(
         }
     }
     Some(pixmap)
+}
+
+/// The map from an image's pixel space, `columns` by `rows` with y growing downwards, to the
+/// unit square a [`Mark::Image`]'s placement starts from.
+fn image_space(columns: usize, rows: usize) -> Affine {
+    Affine([1.0 / columns as f64, 0.0, 0.0, -1.0 / rows as f64, 0.0, 1.0])
+}
+
+/// An image's pixels as a premultiplied pixmap.
+fn image_pixmap(pixels: &[Colour], columns: usize, rows: usize) -> Option<tiny_skia::Pixmap> {
+    let size =
+        tiny_skia::IntSize::from_wh(u32::try_from(columns).ok()?, u32::try_from(rows).ok()?)?;
+    let data = pixels
+        .iter()
+        .flat_map(|pixel| {
+            let [red, green, blue, a] = channels(*pixel);
+            let premultiply = |value: u8| ((u16::from(value) * u16::from(a) + 127) / 255) as u8;
+            [premultiply(red), premultiply(green), premultiply(blue), a]
+        })
+        .collect();
+    tiny_skia::Pixmap::from_vec(data, size)
+}
+
+/// `image` scaled to `size` pixels by bilinear filtering, its edge pixels extending outwards.
+fn smooth_scale(image: &tiny_skia::Pixmap, size: [usize; 2]) -> Option<tiny_skia::Pixmap> {
+    let [width, height] = size.map(|extent| u32::try_from(extent).ok());
+    let mut scaled = tiny_skia::Pixmap::new(width?, height?)?;
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    let transform = tiny_skia::Transform::from_scale(
+        size[0] as f32 / image.width() as f32,
+        size[1] as f32 / image.height() as f32,
+    );
+    scaled.draw_pixmap(0, 0, image.as_ref(), &paint, transform, None);
+    Some(scaled)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let [first, second, third] = [0, 1, 2].map(|index| chunk.get(index).copied().unwrap_or(0));
+        let group = (u32::from(first) << 16) | (u32::from(second) << 8) | u32::from(third);
+        for position in 0..4 {
+            if position <= chunk.len() {
+                encoded.push(char::from(
+                    ALPHABET[(group >> (18 - 6 * position)) as usize & 63],
+                ));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
 }
 
 fn solid_paint(colour: Colour) -> tiny_skia::Paint<'static> {
@@ -3091,8 +3527,8 @@ unsafe fn draw(dd: *mut DevDesc, mark: Mark) {
 }
 
 /// Adds a mark's outline to a path being built. GNU R's PDF device builds a path either from
-/// text or from other drawing, never both, and warns about the part it drops; groups never
-/// join a path.
+/// text or from other drawing, never both, and warns about the part it drops; groups and
+/// raster images never join a path.
 fn append_to_path(capture: &mut PathCapture, mark: Mark, pdf: bool) -> Option<&'static str> {
     match mark {
         Mark::Path { outline, .. } => {
@@ -3121,7 +3557,7 @@ fn append_to_path(capture: &mut PathCapture, mark: Mark, pdf: bool) -> Option<&'
             }
             capture.text = true;
         }
-        Mark::Group { .. } => {}
+        Mark::Group { .. } | Mark::Image { .. } => {}
     }
     None
 }
@@ -3859,9 +4295,8 @@ unsafe extern "C" fn device_rect(
     draw_outline(dd, polygon_outline(&corners, true), FillRule::Winding, &*gc);
 }
 
-/// Draws a raster image as one filled quadrilateral per cell, its first row at the top, with
-/// its bottom-left corner at `x`, `y` and rotated `angle` degrees anticlockwise about it. The
-/// renderer has no images, so `interpolate` is ignored and cells keep hard edges.
+/// Draws a raster image, its first row at the top, with its bottom-left corner at `x`, `y` and
+/// rotated `angle` degrees anticlockwise about it.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn device_raster(
     pixels: *mut c_uint,
@@ -3872,18 +4307,21 @@ unsafe extern "C" fn device_raster(
     width: f64,
     height: f64,
     angle: f64,
-    _interpolate: Rboolean,
+    interpolate: Rboolean,
     _gc: *const GEContext,
     dd: *mut DevDesc,
 ) {
     let (Ok(columns), Ok(rows)) = (usize::try_from(columns), usize::try_from(rows)) else {
         return;
     };
-    if pixels.is_null() || columns == 0 || rows == 0 {
+    let Some(count) = columns.checked_mul(rows) else {
+        return;
+    };
+    if pixels.is_null() || count == 0 {
         return;
     }
     let device = render_device(dd);
-    let pixels = std::slice::from_raw_parts(pixels, columns * rows);
+    let pixels = std::slice::from_raw_parts(pixels, count).to_vec();
     let origin = device.point(x, y);
     let across = device.point(x + width, y);
     let up = device.point(x, y + height);
@@ -3891,39 +4329,16 @@ unsafe extern "C" fn device_raster(
     let rotate = |[dx, dy]: [f64; 2]| [dx * cos - dy * sin, dx * sin + dy * cos];
     let across = rotate([across[0] - origin[0], across[1] - origin[1]]);
     let up = rotate([up[0] - origin[0], up[1] - origin[1]]);
-    let at = |column: usize, row: usize| {
-        let (u, v) = (
-            column as f64 / columns as f64,
-            1.0 - row as f64 / rows as f64,
-        );
-        [
-            origin[0] + u * across[0] + v * up[0],
-            origin[1] + u * across[1] + v * up[1],
-        ]
-    };
-    let cells: Vec<Mark> = pixels
-        .iter()
-        .enumerate()
-        .filter(|(_, pixel)| **pixel >> 24 != 0)
-        .map(|(index, &pixel)| {
-            let (row, column) = (index / columns, index % columns);
-            let corners = [
-                at(column, row + 1),
-                at(column + 1, row + 1),
-                at(column + 1, row),
-                at(column, row),
-            ];
-            Mark::Path {
-                outline: polygon_outline(&corners, true),
-                fill: Some(Fill::Colour(pixel as Colour)),
-                rule: FillRule::Winding,
-                stroke: None,
-            }
-        })
-        .collect();
-    for cell in cells {
-        draw(dd, cell);
-    }
+    draw(
+        dd,
+        Mark::Image {
+            pixels,
+            columns,
+            rows,
+            placement: Affine([across[0], across[1], up[0], up[1], origin[0], origin[1]]),
+            interpolate: interpolate != 0,
+        },
+    );
 }
 
 /// Draws subpaths as one compound path, filled by the nonzero winding rule when `winding` is

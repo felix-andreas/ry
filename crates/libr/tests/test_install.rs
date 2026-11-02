@@ -55,11 +55,10 @@ fn home() -> &'static PathBuf {
 
 /// The GNU R installation whose base packages ry's R home links: `R RHOME`.
 fn gnu_r_home() -> PathBuf {
-    let output = Command::new("R")
-        .arg("RHOME")
-        .output()
-        .expect("GNU R on PATH");
-    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    gnu_r()
+        .expect("each test checks for GNU R first")
+        .home
+        .clone()
 }
 
 fn no_test_load() -> rcmd::InstallOptions {
@@ -87,6 +86,9 @@ fn run_home(program: &str, arguments: &[&str], directory: &Path) -> String {
 
 #[test]
 fn r_cmd_config_reports_ry_s_toolchain() {
+    if !gnu_r_available() {
+        return;
+    }
     let output = Command::new(home().join("bin/R"))
         .args(["CMD", "config", "CC"])
         .output()
@@ -103,6 +105,9 @@ fn r_cmd_config_reports_ry_s_toolchain() {
 /// `without_compiler` expects.
 #[test]
 fn the_user_makevars_overrides_the_compiler() {
+    if !gnu_r_available() {
+        return;
+    }
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("user-makevars");
     drop(std::fs::remove_dir_all(&directory));
     std::fs::create_dir_all(&directory).expect("a directory");
@@ -156,6 +161,9 @@ fn rytest_source() -> PathBuf {
 
 #[test]
 fn a_source_package_installs_and_runs_under_ry() {
+    if !gnu_r_available() {
+        return;
+    }
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-library");
     let installed =
         rcmd::install(home(), &rytest_source(), &library, &no_test_load()).expect("install rytest");
@@ -182,6 +190,9 @@ fn a_source_package_installs_and_runs_under_ry() {
 
 #[test]
 fn a_binary_package_from_an_older_r_installs_unchanged() {
+    if !gnu_r_available() {
+        return;
+    }
     let source = Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary-package");
     drop(std::fs::remove_dir_all(&source));
     std::fs::create_dir_all(source.join("R")).expect("a package directory");
@@ -260,8 +271,8 @@ fn write_rcode_source() -> PathBuf {
     for (path, text) in files {
         std::fs::write(root.join(path), text).expect("a source file");
     }
-    let r_home = gnu_r_home();
-    let status = Command::new(r_home.join("bin/Rscript"))
+    let rscript = &gnu_r().expect("each test checks for GNU R first").rscript;
+    let status = Command::new(rscript)
         .args([
             "-e",
             "sizes <- data.frame(n = 1:3); save(sizes, file = 'data/sizes.rda'); \
@@ -276,6 +287,9 @@ fn write_rcode_source() -> PathBuf {
 
 #[test]
 fn the_r_level_half_runs_on_ry() {
+    if !gnu_r_available() {
+        return;
+    }
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-library");
     drop(std::fs::remove_dir_all(&library));
     let installed = rcmd::install(
@@ -327,6 +341,9 @@ fn the_r_level_half_runs_on_ry() {
 /// S7's and pkgload's tests rely on.
 #[test]
 fn install_packages_installs_a_source_package() {
+    if !gnu_r_available() {
+        return;
+    }
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-packages-library");
     drop(std::fs::remove_dir_all(&library));
     std::fs::create_dir_all(&library).expect("a library");
@@ -345,6 +362,9 @@ fn install_packages_installs_a_source_package() {
 /// again as a binary package. pkgbuild's binary builds depend on it.
 #[test]
 fn install_build_packs_a_binary_package() {
+    if !gnu_r_available() {
+        return;
+    }
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-build");
     drop(std::fs::remove_dir_all(&directory));
     std::fs::create_dir_all(directory.join("first")).expect("a library");
@@ -380,6 +400,9 @@ fn install_build_packs_a_binary_package() {
 /// unregistered `sourceCppContext` by name, because registering turns dynamic lookup back on.
 #[test]
 fn registering_routines_restores_dynamic_lookup() {
+    if !gnu_r_available() {
+        return;
+    }
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-source");
     drop(std::fs::remove_dir_all(&root));
     std::fs::create_dir_all(root.join("src")).expect("a source directory");
@@ -414,6 +437,9 @@ fn registering_routines_restores_dynamic_lookup() {
 
 #[test]
 fn the_front_ends_run_r_code_on_ry() {
+    if !gnu_r_available() {
+        return;
+    }
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let output = run_home(
         "Rscript",
@@ -467,6 +493,9 @@ fn the_front_ends_run_r_code_on_ry() {
 /// interpreter runs, so a package's C code and its R code take the same version branches.
 #[test]
 fn the_headers_and_the_runtime_present_the_base_r_version() {
+    if !gnu_r_available() {
+        return;
+    }
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let script = "cat(format(getRversion()) == format(packageVersion('base')), format(getRversion()), R.version$`svn rev`)";
     let output = run_home("Rscript", &["-e", script], directory);
@@ -504,6 +533,9 @@ fn the_headers_and_the_runtime_present_the_base_r_version() {
 /// helpers from the user profile, so both have to behave as in GNU R.
 #[test]
 fn the_console_reads_stdin_after_the_user_profile() {
+    if !gnu_r_available() {
+        return;
+    }
     use std::{io::Write, process::Stdio};
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let profile = directory.join("console-profile.R");
@@ -536,6 +568,9 @@ fn the_console_reads_stdin_after_the_user_profile() {
 /// `target/tmp/source-library`, dependencies of `LinkingTo` resolving from `R_LIBS`.
 #[test]
 fn source_packages_build_against_ry_s_headers() {
+    if !gnu_r_available() {
+        return;
+    }
     let Some(directory) = std::env::var_os("RY_SOURCE_PACKAGES") else {
         return;
     };

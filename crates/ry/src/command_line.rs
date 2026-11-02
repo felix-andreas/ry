@@ -145,6 +145,9 @@ pub enum Command {
         /// Where `--emit-plan` keeps what the session has loaded
         #[arg(long, hide = true, requires = "emit_plan")]
         state: Option<PathBuf>,
+        /// A file holding the values R gave the conditions of `if` directives in `NAMESPACE`
+        #[arg(long, hide = true, requires = "emit_plan")]
+        conditions: Option<PathBuf>,
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
@@ -222,6 +225,9 @@ pub enum Debug {
     Ast { path: PathBuf },
     /// Analyze a workspace and report where time and memory go
     AnalysisStats { path: Option<PathBuf> },
+    /// Rewrite the given R files in place as the plain R program they mean, with every inline
+    /// annotation removed
+    Erase { paths: Vec<PathBuf> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

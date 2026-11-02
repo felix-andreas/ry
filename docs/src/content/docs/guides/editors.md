@@ -14,17 +14,28 @@ You get:
 
 - diagnostics as you type, the same ones `ry check` reports
 - hover with the inferred type of any expression, parameter or loop variable
-- completion, including the fields of a list such as `person$` and the argument names a call
-  still accepts (`second = `), with your own names ranked ahead of keywords and the library
+- completion, including the fields of a list such as `person$`, the members of `pkg::`, and the
+  argument names a call still accepts (`second = `), also for R6 methods and untyped package
+  functions; names you use often in the project rank ahead of keywords and the rest of the library
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
-- signature help with each parameter's type and default, and inlay hints for assignments, loop
-  variables, and parameter names in calls with two or more positional arguments
-  (`grow(principal = 100, years = 2)`)
+- go-to-definition and hover on `$` fields: `account$balance` goes to where `balance` was put
+  into the value, whether that is `list(balance = 0)`, a record, an `account$balance <- x`
+  write, or a member of an R6 class read through `self$` or `private$`
+- navigation into installed packages that have no stub: go-to-definition opens the package's R
+  code, read from your R library, and hover shows its help page
+- signature help with each parameter's type and default, also for an untyped function from an
+  installed package and for a method of an R6 class called through `self$` or an instance
+- inlay hints for assignments, loop variables, the inferred types of a function's parameters and
+  result (`function<T>(x: T) -> T`), and parameter names in calls with two or more positional
+  arguments (`grow(principal = 100, years = 2)`)
 - quick fixes for misspelled names, arguments, fields and columns, and for the lints that have one
   obvious rewrite (`T` to `TRUE`, `=` to `<-`, a trailing comma), and an "Apply all safe fixes"
   action your editor can run on save; [Fixes](/reference/diagnostic-codes#fixes) lists them all
+- for a name no attached package defines but a package ry has types for exports, a fix that
+  qualifies it as `pkg::name` and, outside a package's own code, one that adds `library(pkg)` after
+  the `library` calls above the name
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
   functions and sections under the function that defines them, plus workspace symbol search
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
@@ -46,6 +57,28 @@ it are one binding, so renaming `rate` in `grow <- function(principal, rate)` al
 `grow(100, rate = 0.05)` in every file, and hover, go-to-definition and references work from either
 end. An abbreviated argument that R completes by partial matching (`grow(100, ra = 0.05)`) is not
 followed, so spell arguments out before you rename their parameter.
+
+A field ry cannot trace to the value it was read from, such as a field of a function parameter,
+goes to every place in the project that puts a field of that name into a value, and rename refuses
+it, because those places are a guess. For the same reason, renaming a field you can trace is
+refused while any other read of that name in the project cannot be traced, since that read might
+be the same field. A rename covers every `if` branch that builds the value, and it does not touch
+string indexing such as `cfg[["port"]]`. A field of a value that a package function returns, such as
+`optim(start, cost)$par`, goes to that function, whose help page describes what it returns. A
+named argument passed to a function that collects its `...` into a list, as in
+`new_rate <- function(...) list(...)` and then `new_rate(pause = 1)`, counts as a place that puts
+`pause` into a value. In `account$deposit(amount = 5)`, the argument name `amount` goes to the
+parameter of the function stored in `deposit`, and renaming that parameter renames the argument.
+
+The code of an installed package comes from its lazy-load database, so it is the code R runs. ry
+writes it to a file under your cache directory (`~/.cache/ry/packages` on Linux), named by the
+package's version, and reads a package only when you first navigate into it. Edits to that file
+change nothing, because ry regenerates it. Packages are looked up in this order: the project's
+renv library, the libraries in `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE`, your user library, and
+R's own library. A package
+installed with `options(keep.source.pkgs = TRUE)` shows its original source with comments,
+otherwise the code is deparsed. Base R's primitive functions, such as `sum` and `c`, have no R
+code, so they show only their arguments.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.

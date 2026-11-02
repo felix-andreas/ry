@@ -42,8 +42,8 @@ const REMOVED: Sexp = Sexp::dangling();
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
-/// The end of a bucket chain in `Frame::hash_chains`.
-const EMPTY_CHAIN: usize = usize::MAX;
+/// The end of a bucket chain in [`HashTable`].
+const EMPTY_CHAIN: u32 = u32::MAX;
 
 #[derive(Default)]
 pub struct Frame {
@@ -53,8 +53,9 @@ pub struct Frame {
     /// Boxed, because only large frames have one and the inline map would push every
     /// environment into a larger size class.
     index: Option<Box<FxHashMap<Sexp, u32>>>,
-    /// The initial table size of a hashed frame, or 0 for an unhashed one.
-    hash_size: u32,
+    /// GNU R's chained table for a hashed frame, which only decides the listing order: lookups
+    /// go through `index`. Boxed, for the same reason as the index.
+    table: Option<Box<HashTable>>,
     /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     formals: u32,
@@ -123,13 +124,22 @@ impl Frame {
     }
 
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
-    /// positive).
+    /// positive). Environments are hashed when they are created, so the bindings a frame
+    /// already holds are entered as if inserted afterwards, in order.
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 {
+        let size = if size > 0 {
             size as u32
         } else {
             HASH_MINIMUM_SIZE
         };
+        let mut table = HashTable::new(size);
+        for (position, binding) in self.bindings.iter().enumerate() {
+            table.push(binding.symbol);
+            if binding.symbol != REMOVED {
+                table.insert(position);
+            }
+        }
+        self.table = Some(Box::new(table));
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -142,7 +152,7 @@ impl Frame {
     /// # Safety
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn listed_cells(&self) -> Vec<Sexp> {
-        if self.hash_size == 0 {
+        let Some(table) = &self.table else {
             let formals = (self.formals as usize).min(self.bindings.len());
             let (formals, locals) = self.bindings.split_at(formals);
             return locals
@@ -152,15 +162,13 @@ impl Frame {
                 .filter(|binding| binding.symbol != REMOVED)
                 .map(|binding| binding.cell)
                 .collect();
-        }
-        let (heads, next, _) = unsafe { self.hash_chains() };
-        let cells: Vec<Sexp> = self.cells().collect();
-        let mut listed = Vec::with_capacity(cells.len());
-        for &head in &heads {
+        };
+        let mut listed = Vec::with_capacity(self.len());
+        for &head in &table.heads {
             let mut position = head;
             while position != EMPTY_CHAIN {
-                listed.push(cells[position]);
-                position = next[position];
+                listed.push(self.bindings[position as usize].cell);
+                position = table.next[position as usize];
             }
         }
         listed
@@ -173,63 +181,21 @@ impl Frame {
     /// # Safety
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn hash_profile(&self) -> Option<(Vec<usize>, usize)> {
-        if self.hash_size == 0 {
-            return None;
-        }
-        let (heads, next, count) = unsafe { self.hash_chains() };
-        let lengths = heads
+        let table = self.table.as_ref()?;
+        let lengths = table
+            .heads
             .iter()
             .map(|&head| {
                 let mut length = 0;
                 let mut position = head;
                 while position != EMPTY_CHAIN {
                     length += 1;
-                    position = next[position];
+                    position = table.next[position as usize];
                 }
                 length
             })
             .collect();
-        Some((lengths, count))
-    }
-
-    /// Replays GNU R's chained table, measured against its output: an insert prepends to its
-    /// bucket and counts one, and once the count passes 85% of the size the table grows to
-    /// `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry prepended,
-    /// after which the count restarts at the number of occupied buckets. Each bucket is a chain
-    /// threaded through `next`, so an insert and a rehash allocate nothing per entry. Returns the
-    /// bucket heads, the chain links and the count, with positions counting live bindings only.
-    unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>, usize) {
-        let mut size = (self.hash_size as usize).max(1);
-        let mut heads = vec![EMPTY_CHAIN; size];
-        let mut next = vec![EMPTY_CHAIN; self.bindings.len()];
-        let mut count = 0;
-        let hashes: Vec<usize> = self
-            .live()
-            .map(|binding| unsafe { pjw_hash(binding.symbol.car().bytes()) } as usize)
-            .collect();
-        for (position, hash) in hashes.iter().enumerate() {
-            let bucket = hash % size;
-            next[position] = heads[bucket];
-            heads[bucket] = position;
-            count += 1;
-            if count as f64 > size as f64 * 0.85 {
-                size = (size as f64 * 1.2) as usize + 1;
-                let mut grown = vec![EMPTY_CHAIN; size];
-                for &head in &heads {
-                    let mut moved = head;
-                    while moved != EMPTY_CHAIN {
-                        let following = next[moved];
-                        let bucket = hashes[moved] % size;
-                        next[moved] = grown[bucket];
-                        grown[bucket] = moved;
-                        moved = following;
-                    }
-                }
-                count = grown.iter().filter(|head| **head != EMPTY_CHAIN).count();
-                heads = grown;
-            }
-        }
-        (heads, next, count)
+        Some((lengths, table.count as usize))
     }
 
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
@@ -239,6 +205,10 @@ impl Frame {
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
         self.filter |= filter_bit(symbol);
+        if let Some(table) = &mut self.table {
+            table.push(symbol);
+            table.insert(position as usize);
+        }
         match &mut self.index {
             Some(index) => {
                 index.entry(symbol).or_insert(position);
@@ -272,6 +242,9 @@ impl Frame {
         let cell = binding.cell;
         binding.symbol = REMOVED;
         self.removed += 1;
+        if let Some(table) = &mut self.table {
+            table.remove(position);
+        }
         // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
         if let Some(index) = &mut self.index
             && let Some(duplicate) = (position + 1..self.formals as usize)
@@ -291,6 +264,9 @@ impl Frame {
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();
+        if let Some(table) = &mut self.table {
+            table.compact(&self.bindings);
+        }
         self.bindings.retain(|binding| binding.symbol != REMOVED);
         self.formals = formals as u32;
         self.removed = 0;
@@ -299,6 +275,124 @@ impl Frame {
             for (position, binding) in self.bindings.iter().enumerate() {
                 index.entry(binding.symbol).or_insert(position as u32);
             }
+        }
+    }
+}
+
+/// GNU R's chained hash table for a hashed frame, kept in step with the frame's inserts and
+/// removals because the order GNU R lists the frame in depends on that whole history: a removal
+/// leaves the table at the size it grew to, and its chain counter falls only when a bucket
+/// empties. Each bucket is a chain threaded through `next`, indexed like the frame's slots, so an
+/// insert allocates nothing per entry.
+struct HashTable {
+    heads: Vec<u32>,
+    next: Vec<u32>,
+    /// The PJW hash of each slot's symbol name, so a resize does not hash again.
+    hashes: Vec<u32>,
+    /// GNU R's `HASHPRI`, which `env.profile` reports as `nchains`.
+    count: u32,
+}
+
+impl HashTable {
+    fn new(size: u32) -> HashTable {
+        HashTable {
+            heads: vec![EMPTY_CHAIN; size.max(1) as usize],
+            next: Vec::new(),
+            hashes: Vec::new(),
+            count: 0,
+        }
+    }
+
+    /// Adds the slot for a binding of `symbol`, which `insert` then links in.
+    fn push(&mut self, symbol: Sexp) {
+        let hash = if symbol == REMOVED {
+            0
+        } else {
+            // SAFETY: a bound symbol is interned, and its name lives as long as the symbol.
+            unsafe { pjw_hash(symbol.car().bytes()) }
+        };
+        self.hashes.push(hash);
+        self.next.push(EMPTY_CHAIN);
+    }
+
+    /// Links slot `position` in, as GNU R's `R_HashSet` does: it prepends to the bucket and
+    /// counts one whether or not the bucket was empty, and once the count passes 85% of the size
+    /// the table grows to `size * 1.2 + 1`, moving the old buckets in ascending order with each
+    /// entry prepended, after which the count is the number of occupied buckets.
+    fn insert(&mut self, position: usize) {
+        let bucket = self.hashes[position] as usize % self.heads.len();
+        self.next[position] = self.heads[bucket];
+        self.heads[bucket] = position as u32;
+        self.count += 1;
+        if self.count as f64 <= self.heads.len() as f64 * 0.85 {
+            return;
+        }
+        let size = (self.heads.len() as f64 * 1.2) as usize + 1;
+        let mut grown = vec![EMPTY_CHAIN; size];
+        for &head in &self.heads {
+            let mut moved = head;
+            while moved != EMPTY_CHAIN {
+                let following = self.next[moved as usize];
+                let bucket = self.hashes[moved as usize] as usize % size;
+                self.next[moved as usize] = grown[bucket];
+                grown[bucket] = moved;
+                moved = following;
+            }
+        }
+        self.count = grown.iter().filter(|head| **head != EMPTY_CHAIN).count() as u32;
+        self.heads = grown;
+    }
+
+    /// Unlinks slot `position`, as GNU R's `R_HashDelete` does: the count falls only when the
+    /// bucket empties, and the table never shrinks.
+    fn remove(&mut self, position: usize) {
+        let bucket = self.hashes[position] as usize % self.heads.len();
+        let target = position as u32;
+        let following = self.next[position];
+        if self.heads[bucket] == target {
+            self.heads[bucket] = following;
+            if following == EMPTY_CHAIN {
+                self.count -= 1;
+            }
+        } else {
+            let mut previous = self.heads[bucket];
+            while previous != EMPTY_CHAIN {
+                if self.next[previous as usize] == target {
+                    self.next[previous as usize] = following;
+                    break;
+                }
+                previous = self.next[previous as usize];
+            }
+        }
+        self.next[position] = EMPTY_CHAIN;
+    }
+
+    /// Renumbers the slots as the frame drops its removed ones.
+    fn compact(&mut self, bindings: &[Binding]) {
+        let mut renumbered = vec![EMPTY_CHAIN; bindings.len()];
+        let mut live = 0;
+        for (position, binding) in bindings.iter().enumerate() {
+            if binding.symbol != REMOVED {
+                renumbered[position] = live;
+                self.hashes[live as usize] = self.hashes[position];
+                self.next[live as usize] = self.next[position];
+                live += 1;
+            }
+        }
+        self.hashes.truncate(live as usize);
+        self.next.truncate(live as usize);
+        let renumber = |position: u32| {
+            if position == EMPTY_CHAIN {
+                EMPTY_CHAIN
+            } else {
+                renumbered[position as usize]
+            }
+        };
+        for head in &mut self.heads {
+            *head = renumber(*head);
+        }
+        for link in &mut self.next {
+            *link = renumber(*link);
         }
     }
 }

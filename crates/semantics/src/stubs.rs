@@ -426,6 +426,33 @@ fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<St
     )
 }
 
+/// For each name, every namespace whose export manifest lists it, whether or not the project
+/// uses that package, in namespace order. An unresolved name looks up here which packages could
+/// provide it.
+#[salsa::tracked(returns(ref))]
+pub fn exporting_namespaces(db: &dyn Db, sources: StubSources) -> ExportingNamespaces {
+    let mut index: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    for (namespace, text) in sources.manifests(db) {
+        for line in text.lines() {
+            let name = strip_comment(line).trim();
+            if name.is_empty() {
+                continue;
+            }
+            let namespaces = index.entry(name.to_owned()).or_default();
+            if !namespaces.contains(namespace) {
+                namespaces.push(namespace.clone());
+            }
+        }
+    }
+    for namespaces in index.values_mut() {
+        namespaces.sort_unstable();
+    }
+    ExportingNamespaces(index)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ExportingNamespaces(pub FxHashMap<String, Vec<String>>);
+
 pub fn stubs<'db>(db: &'db dyn Db) -> Option<&'db StubLibrary<'db>> {
     StubSources::try_get(db).map(|sources| stub_library(db, sources))
 }
@@ -1086,7 +1113,7 @@ mod tests {
         install_shipped_stubs(&db);
         let check = first_item_check(&db, "f <- function() cumsum(1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let ret = scheme_return(&db, &check);
+        let ret = scheme_return(&db, check);
         let TyKind::Vector(element) = ret.kind(&db) else {
             panic!("expected integer[], got {:?}", ret.kind(&db));
         };
@@ -1100,7 +1127,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function() sum(1, 2)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1119,7 +1146,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(1)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1159,7 +1186,7 @@ mod tests {
         let scheme = check.scheme.clone().expect("scheme");
         assert!(scheme.binders.is_empty(), "{scheme:?}");
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Unknown
         ));
     }
@@ -1180,7 +1207,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(function(v) v, 1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1202,7 +1229,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function(n) f(n, 2L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1228,7 +1255,7 @@ mod tests {
             "the parameter must stay generic: {scheme:?}"
         );
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Character)
         ));
     }
@@ -1272,7 +1299,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function(x) base::length(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }

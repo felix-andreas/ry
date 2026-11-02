@@ -21,6 +21,7 @@ use {
         },
         console_link::{ConsoleLink, identifier_at},
         diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
+        installed::{InstalledPackages, source_cache},
         namespace::namespace_import_problems,
         position::{LineColumn, LineIndex},
     },
@@ -105,6 +106,7 @@ pub async fn run(debug: bool) {
             consoles: true,
             cancel: cancel.clone(),
             executable: env::current_exe().unwrap_or_default(),
+            installed_packages: true,
         };
         thread::Builder::new()
             .name("ry-analysis".to_owned())
@@ -255,6 +257,9 @@ struct WorkerSeed {
     /// The ry binary whose `ry check` records the server may trust: a record is keyed by the
     /// binary that wrote it.
     executable: PathBuf,
+    /// Whether navigation may read installed R packages. Off in the simulator, which must not
+    /// depend on the machine's R library.
+    installed_packages: bool,
 }
 
 /// Where the worker's server-to-client traffic goes. Every message the worker originates
@@ -441,6 +446,7 @@ struct Worker {
     /// Aligned with the `StubSources` order: shipped sources point at materialized
     /// cache copies, overrides at their real files. `None` when materialization failed.
     stub_source_paths: Vec<Option<PathBuf>>,
+    installed: Option<InstalledPackages>,
     namespace_documents: HashMap<PathBuf, String>,
     collate_order: Vec<String>,
     virtual_document_uris: HashMap<PathBuf, lsp_types::Url>,
@@ -588,6 +594,7 @@ impl Worker {
             open_documents: BTreeSet::new(),
             stub_documents: HashMap::new(),
             stub_source_paths: Vec::new(),
+            installed: None,
             namespace_documents: HashMap::new(),
             collate_order: Vec::new(),
             virtual_document_uris: HashMap::new(),
@@ -628,6 +635,12 @@ impl Worker {
         let _: DataFiles = DataFiles::builder(scan_data_files(&worker.workspace_root))
             .durability(Durability::MEDIUM)
             .new(&worker.db);
+        if seed.installed_packages {
+            worker.installed = Some(InstalledPackages::new(
+                &worker.workspace_root,
+                source_cache(),
+            ));
+        }
         worker.load_workspace_sources();
         worker.recorded_diagnostics = worker.restore_recorded_diagnostics(&seed.executable);
 
@@ -1353,7 +1366,7 @@ impl Worker {
             .map(|(path, _)| path)
     }
 
-    fn render_hover_definition(&self, definition: &HoverDefinition) -> Option<String> {
+    fn render_hover_definition(&mut self, definition: &HoverDefinition) -> Option<String> {
         match definition {
             HoverDefinition::Local {
                 target,
@@ -1394,6 +1407,7 @@ impl Worker {
                 }
                 Some(summary)
             }
+            HoverDefinition::Package(target) => self.installed.as_mut()?.documentation(target),
         }
     }
 
@@ -1412,8 +1426,19 @@ impl Worker {
         ))
     }
 
-    fn definition_location(&self, target: DefinitionTarget) -> Option<lsp_types::Location> {
+    fn definition_location(&mut self, target: DefinitionTarget) -> Option<lsp_types::Location> {
         match target {
+            DefinitionTarget::Package(target) => {
+                let (source, range) = self.installed.as_mut()?.definition(&target)?;
+                let range = TextRange::new(
+                    TextSize::from(u32::try_from(range.start).ok()?),
+                    TextSize::from(u32::try_from(range.end).ok()?),
+                );
+                Some(lsp_types::Location {
+                    uri: lsp_types::Url::from_file_path(source.path.as_ref()?).ok()?,
+                    range: self.to_range(&source.text, range),
+                })
+            }
             DefinitionTarget::Project(target) => {
                 let path = self.path_of(target.file)?;
                 Some(lsp_types::Location {
@@ -1456,6 +1481,11 @@ impl Worker {
             tracing::warn!("unusable URI in didOpen: {}", params.text_document.uri);
             return;
         };
+        // A generated installed-package source is for reading: analysing it would make every
+        // function of the package a project global.
+        if self.is_generated_package_source(&path) {
+            return;
+        }
         let version = params.text_document.version;
         if path
             .extension()
@@ -1519,6 +1549,9 @@ impl Worker {
             tracing::warn!("unusable URI in didChange: {}", params.text_document.uri);
             return;
         };
+        if self.is_generated_package_source(&path) {
+            return;
+        }
         let version = params.text_document.version;
 
         if let Some(text) = self.stub_documents.remove(&path) {
@@ -1545,9 +1578,11 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let mut updated = self.apply_content_changes(text, &params.content_changes);
-        if self.literate_documents.contains_key(&file) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) =
+            self.literate_documents.entry(file)
+        {
             let analysed = r_source_of_literate(&updated);
-            self.literate_documents.insert(file, updated);
+            e.insert(updated);
             updated = analysed;
         }
         self.pending_lowering.retain(|owed| owed != &path);
@@ -1683,6 +1718,12 @@ impl Worker {
         text
     }
 
+    fn is_generated_package_source(&self, path: &Path) -> bool {
+        self.installed
+            .as_ref()
+            .is_some_and(|installed| installed.is_generated(path))
+    }
+
     fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) {
         let Some(path) = self.document_path(&params.text_document.uri) else {
             return;
@@ -1703,6 +1744,9 @@ impl Worker {
         let Some(path) = self.document_path(&params.text_document.uri) else {
             return;
         };
+        if self.is_generated_package_source(&path) {
+            return;
+        }
         if self.stub_documents.remove(&path).is_some() {
             return;
         }
@@ -2019,7 +2063,7 @@ impl Worker {
         let published = apply_suppressions(document_diagnostics(&self.db, file, &config), &text);
         let fixable = published
             .iter()
-            .filter(|diagnostic| diagnostic.fix.is_some())
+            .filter(|diagnostic| ide::has_quick_fix(diagnostic))
             .cloned()
             .collect();
         let converted = published
@@ -2047,7 +2091,7 @@ impl Worker {
         }
         apply_suppressions(document_diagnostics(&self.db, file, &self.config), text)
             .into_iter()
-            .filter(|diagnostic| diagnostic.fix.is_some())
+            .filter(ide::has_quick_fix)
             .collect()
     }
 
@@ -2522,14 +2566,20 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let files = ProjectFiles::get(&worker.db);
-            let target = worker
+            let targets = worker
                 .cancellable(|worker| ide::definition(&worker.db, files, file, offset))
                 .unwrap_or_default();
-            Ok(target.and_then(|target| {
-                Some(lsp_types::GotoDefinitionResponse::Scalar(
-                    worker.definition_location(target)?,
-                ))
-            }))
+            let mut locations: Vec<lsp_types::Location> = targets
+                .into_iter()
+                .filter_map(|target| worker.definition_location(target))
+                .collect();
+            Ok(match locations.len() {
+                0 => None,
+                1 => locations
+                    .pop()
+                    .map(lsp_types::GotoDefinitionResponse::Scalar),
+                _ => Some(lsp_types::GotoDefinitionResponse::Array(locations)),
+            })
         })
     }
 
@@ -2770,7 +2820,12 @@ impl LanguageServer for ServerState {
             }
             let files = ProjectFiles::get(&worker.db);
             let result = worker
-                .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
+                .cancellable(|worker| {
+                    let installed = &mut worker.installed;
+                    ide::completion_with(&worker.db, files, file, offset, &mut |target| {
+                        installed.as_mut()?.formals(target)
+                    })
+                })
                 .unwrap_or_default();
             let (mut items, is_incomplete) = match result {
                 Some(result) => (
@@ -2792,7 +2847,7 @@ impl LanguageServer for ServerState {
                 usize::from(offset),
                 &items,
             ));
-            Ok((!items.is_empty()).then(|| {
+            Ok((!items.is_empty()).then_some({
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete,
                     items,
@@ -2844,7 +2899,12 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let help = worker
-                .cancellable(|worker| ide::signature_help(&worker.db, file, offset))
+                .cancellable(|worker| {
+                    let installed = &mut worker.installed;
+                    ide::signature_help_with(&worker.db, file, offset, &mut |target| {
+                        installed.as_mut()?.formals(target)
+                    })
+                })
                 .unwrap_or_default();
             Ok(help.map(|help| {
                 let active_parameter = help
@@ -2896,6 +2956,7 @@ impl LanguageServer for ServerState {
                     let mut actions = Vec::new();
                     if wants_quick_fixes {
                         actions.extend(ide::diagnostic_fixes(&fixable, range));
+                        actions.extend(ide::import_fixes(&worker.db, file, &fixable, range));
                         actions.extend(ide::code_actions(&worker.db, file, range));
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
@@ -3620,6 +3681,7 @@ fn convert_completion_item(
         CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
         CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
         CompletionKind::Tag => lsp_types::CompletionItemKind::ENUM_MEMBER,
+        CompletionKind::Package => lsp_types::CompletionItemKind::MODULE,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),

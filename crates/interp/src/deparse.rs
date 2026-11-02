@@ -86,7 +86,6 @@ enum Kind {
     Assign,
     Dollar,
     Subset,
-    Other,
 }
 
 /// GNU R's precedences.
@@ -326,7 +325,17 @@ impl Deparser {
                 self.print(&format!(".Primitive(\"{name}\")"));
             }
             SexpType::Environment => self.print("<environment>"),
-            SexpType::Promise => self.print("<promise>"),
+            // A forced promise in a call, such as a replacement call's `value`, shows its value as
+            // GNU R's does; deparsing never forces one, so an unforced promise shows its code.
+            SexpType::Promise => {
+                let shown = if object.car() == values::unbound() {
+                    object.cdr()
+                } else {
+                    object.car()
+                };
+                self.left_of = left_of;
+                self.deparse(shown);
+            }
             SexpType::ExternalPtr => self.print("<pointer: 0x0>"),
             SexpType::WeakRef => self.print("<weak reference>"),
             SexpType::Bytecode => self.print("<bytecode>"),
@@ -1653,7 +1662,6 @@ unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
                             || (main.precedence == info.precedence
                                 && left == main.right_associative);
                     }
-                    Kind::Other => return false,
                 }
             }
             if matches!(name, b"for" | b"if" | b"while" | b"repeat") {

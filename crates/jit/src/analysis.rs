@@ -32,7 +32,7 @@ use {
         values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
-    smallvec::SmallVec,
+    smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
         ptr::NonNull,
@@ -69,6 +69,10 @@ pub enum Ty {
     Dbl,
     /// An attribute-free logical scalar, unboxed as an `i32`.
     Lgl,
+    /// An attribute-free integer or double scalar, as a join of the two produces: the value as
+    /// an `f64` (an integer `NA` as the double `NA`) and a flag that is nonzero for an integer,
+    /// so boxing it gives back exactly the R value it came from.
+    Num,
     /// A boxed, attribute-free, non-ALTREP integer vector of any length.
     IntVec,
     DblVec,
@@ -92,6 +96,11 @@ pub enum Ty {
 impl Ty {
     pub fn is_unboxed(self) -> bool {
         matches!(self, Ty::Int | Ty::Dbl | Ty::Lgl)
+    }
+
+    /// Whether compiled code holds a value of this type in variables rather than as an object.
+    pub fn in_variables(self) -> bool {
+        matches!(self, Ty::Int | Ty::Dbl | Ty::Lgl | Ty::Num)
     }
 
     /// Whether every value of this type is a plain object, which no builtin dispatches on.
@@ -146,6 +155,9 @@ impl Ty {
             (a, b) if a == b => a,
             (Ty::Bottom, b) => b,
             (a, Ty::Bottom) => a,
+            // Joined, an integer and a double stay unboxed: the value widens to a double and a
+            // flag remembers which it was, so a loop whose branches disagree stays compiled.
+            (Ty::Int | Ty::Dbl | Ty::Num, Ty::Int | Ty::Dbl | Ty::Num) => Ty::Num,
             (a, b) if a.vector() == b.vector() && a.vector().is_vector() => a.vector(),
             _ => Ty::Boxed,
         }
@@ -226,10 +238,10 @@ impl Slot {
         // hold, so from there on it is a value to write back, not the frame's own (see
         // `box_slot` in codegen).
         let boxed = |side: Slot| {
-            side.ty.is_unboxed()
+            side.ty.in_variables()
                 && side.may_be(status::LOCAL)
                 && ty != Ty::Bottom
-                && !ty.is_unboxed()
+                && !ty.in_variables()
         };
         let mut status = self.status | other.status;
         if boxed(self) || boxed(other) {
@@ -479,8 +491,9 @@ impl Inst<'_> {
 pub enum Effect {
     /// Reads and writes only its registers, and never signals a condition.
     Pure,
-    /// Runs no R code unless one of these registers holds an object or a calling handler is
-    /// established, since a warning runs the handler; in either case it is opaque.
+    /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
+    /// methods a package may write in R), or a calling handler is established, since a warning
+    /// runs the handler; in each case it is opaque.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
@@ -543,6 +556,43 @@ pub enum Argument {
     Slot(usize),
 }
 
+/// A callback-taking library function compiled code runs as a loop of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Traversal {
+    /// `List.walk(list, state, f)`: the state after `f(state, x)` for each element in turn.
+    Walk,
+    /// `List.map(list, f)`.
+    Map,
+    /// `List.keep_if(list, predicate)` and, when false, `List.drop_if`.
+    Filter(bool),
+    /// `List.any(list, predicate)`: stops at the first element that passes.
+    Any,
+    /// `List.all(list, predicate)`: stops at the first element that fails.
+    All,
+    /// `List.count_if(list, predicate)`.
+    CountIf,
+}
+
+impl Traversal {
+    fn of(name: &str) -> Option<Traversal> {
+        Some(match name {
+            "List.walk" => Traversal::Walk,
+            "List.map" => Traversal::Map,
+            "List.keep_if" => Traversal::Filter(true),
+            "List.drop_if" => Traversal::Filter(false),
+            "List.any" => Traversal::Any,
+            "List.all" => Traversal::All,
+            "List.count_if" => Traversal::CountIf,
+            _ => return None,
+        })
+    }
+
+    /// Whether the callback is a predicate, whose answer must be `TRUE` or `FALSE`.
+    pub fn is_predicate(self) -> bool {
+        !matches!(self, Traversal::Walk | Traversal::Map)
+    }
+}
+
 /// What compiled code does at one instruction.
 #[derive(Clone, Copy, Debug)]
 pub enum Action<'a> {
@@ -587,6 +637,26 @@ pub enum Action<'a> {
     /// that fails in them hands the call itself back to tier 0.
     Inline {
         steps: &'a [(Action<'a>, StateId)],
+    },
+    /// A library traversal whose callback was inlined: compiled code loops over the plain list
+    /// in `list` itself, unboxing each element into `element` and running `steps`, which leave
+    /// the callback's value in `result`. `prelude` loads the variables the callback reads once,
+    /// before the loop. Like an inlined call, none of the steps has an effect, so any check that
+    /// fails hands the whole call back to tier 0, which runs it from the start.
+    Traverse {
+        traversal: Traversal,
+        list: usize,
+        /// For [`Traversal::Walk`], the register of the initial state and the temporary the
+        /// callback reads the state from.
+        accumulator: Option<(usize, usize)>,
+        /// For a callback named by a variable, its register and the closure the loop inlines,
+        /// which the loop checks the register still holds.
+        expected: Option<(usize, Sexp)>,
+        element: (usize, Ty),
+        prelude: &'a [(Action<'a>, StateId)],
+        steps: &'a [(Action<'a>, StateId)],
+        result: (usize, Ty),
+        dst: usize,
     },
     /// Loads a slot without forcing a promise, handing the instruction to tier 0 when the
     /// variable is not a plain value. Only inlined calls use it.
@@ -767,6 +837,10 @@ pub struct Plan<'a> {
     /// the state along each, by target pc, the fallthrough edge included.
     edge_ranges: List<'a, u32>,
     edges: List<'a, (usize, StateId)>,
+    /// The registers boxed before instruction `position` are
+    /// `boxings[boxing_ranges[position]..boxing_ranges[position + 1]]`.
+    boxing_ranges: List<'a, u32>,
+    boxings: List<'a, usize>,
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
@@ -783,6 +857,16 @@ impl Plan<'_> {
 
     pub fn before(&self, position: usize) -> Option<StateRef<'_>> {
         self.before[position].map(|id| self.states.get(id))
+    }
+
+    /// The registers holding a [`Ty::Num`] that the instruction at `position` reads as objects,
+    /// which code generation boxes before it.
+    pub fn boxings(&self, position: usize) -> &[usize] {
+        let (start, end) = (
+            self.boxing_ranges[position] as usize,
+            self.boxing_ranges[position + 1] as usize,
+        );
+        &self.boxings[start..end]
     }
 
     pub fn edges(&self, position: usize) -> &[(usize, StateId)] {
@@ -869,6 +953,7 @@ impl Plan<'_> {
                 matches!(
                     action,
                     Action::Inline { .. }
+                        | Action::Traverse { .. }
                         | Action::Call { .. }
                         | Action::NativeCall { .. }
                         | Action::Arithmetic { .. }
@@ -918,6 +1003,7 @@ pub unsafe fn plan<'a>(
         hints: List::new_in(arena),
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
+        closure_code: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
@@ -933,6 +1019,8 @@ pub unsafe fn plan<'a>(
     before.resize(count, None);
     let mut edge_ranges = List::with_capacity_in(count + 1, arena);
     let mut edges = List::new_in(arena);
+    let mut boxing_ranges = List::with_capacity_in(count + 1, arena);
+    let mut boxings = List::new_in(arena);
     let mut state = State::bottom(arena, registers + TEMPORARIES, builder.slots.len());
     // Each instruction adds the row before it and usually a fallthrough edge.
     builder.states.reserve(2 * count + blocks.len());
@@ -941,11 +1029,15 @@ pub unsafe fn plan<'a>(
             for _ in block.start..block.end {
                 actions.push(Action::Skip);
                 edge_ranges.push(edges.len() as u32);
+                boxing_ranges.push(boxings.len() as u32);
             }
             continue;
         };
         builder.states.load(entry, &mut state);
         for position in block.start..block.end {
+            let start = boxings.len() as u32;
+            boxings.extend(builder.box_operands(position, &mut state));
+            boxing_ranges.push(start);
             before[position] = Some(builder.states.push(&state));
             builder.edges.clear();
             actions.push(builder.transfer(position, &mut state)?);
@@ -954,7 +1046,10 @@ pub unsafe fn plan<'a>(
         }
     }
     edge_ranges.push(edges.len() as u32);
+    boxing_ranges.push(boxings.len() as u32);
     Ok(Plan {
+        boxing_ranges,
+        boxings,
         temporaries: TEMPORARIES,
         insts: builder.insts,
         blocks,
@@ -990,6 +1085,41 @@ pub unsafe fn decode(arena: Arena<'_>, code: Sexp) -> Result<List<'_, Inst<'_>>,
         pc += 1 + count;
     }
     Ok(insts)
+}
+
+/// What each formal of a closure whose byte code is `code` has held: the type its signature
+/// declares for a scalar, or else the join of what tier 0 saw at the body's reads of it.
+unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<SmallVec<[Ty; 4]>> {
+    let constants = code.cdr();
+    let feedback = values::ints(constants.element(FEEDBACK));
+    let symbols: SmallVec<[Sexp; 4]> = values::pairlist_items(formals)
+        .iter()
+        .map(|(symbol, _)| *symbol)
+        .collect();
+    let mut hints: SmallVec<[Ty; 4]> = smallvec![Ty::Bottom; symbols.len()];
+    for inst in decode(arena, code).ok()? {
+        if inst.op != Op::GetVar {
+            continue;
+        }
+        let symbol = constants.element(inst.operand(1));
+        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+        if let Some(index) = symbols.iter().position(|&formal| formal == symbol)
+            && bits != 0
+        {
+            hints[index] = hints[index].join(from_feedback(bits));
+        }
+    }
+    let source = constants.element(bytecode::SOURCE);
+    let (declared, _) = annotations::declared_formals(formals, source);
+    for (hint, declared) in hints.iter_mut().zip(declared) {
+        if let Some(declared) = declared {
+            let ty = declared_ty(declared);
+            if ty.is_unboxed() {
+                *hint = ty;
+            }
+        }
+    }
+    Some(hints)
 }
 
 /// The base builtins that run no R code given plain arguments, so calling them leaves the
@@ -1117,6 +1247,9 @@ struct Builder<'a> {
     declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
+    /// The byte code of each `function` expression of this body that has run, by source body.
+    /// Its feedback says what the closure's arguments have been.
+    closure_code: Map<'a, Sexp, Sexp>,
     patient: bool,
     /// Every state the plan keeps, and the scratch rows of the fixpoint.
     states: States<'a>,
@@ -1446,6 +1579,7 @@ impl<'a> Builder<'a> {
         position: usize,
         state: &mut State<'a>,
     ) -> Result<Action<'a>, Refusal> {
+        self.box_operands(position, state);
         let inst = self.insts[position];
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
@@ -1789,6 +1923,13 @@ impl<'a> Builder<'a> {
                     ),
                 }
             }
+            // An error it raises may run a calling handler; otherwise it only reads `src`.
+            Op::SwitchArm => self.opaque_step(
+                state,
+                Some((operand(0), Ty::Boxed)),
+                &[],
+                Effect::PureUnlessObserved,
+            ),
             Op::Ast => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -1936,7 +2077,11 @@ impl<'a> Builder<'a> {
                 // what the runtime check compares.
                 let body = self.constant(operand(2));
                 let body = match body.kind() {
-                    SexpType::Bytecode => body.cdr().element(bytecode::SOURCE),
+                    SexpType::Bytecode => {
+                        let source = body.cdr().element(bytecode::SOURCE);
+                        self.closure_code.insert(source, body);
+                        source
+                    }
                     _ => body,
                 };
                 let ty = Ty::Closure(self.constant(operand(1)), body);
@@ -2020,6 +2165,51 @@ impl<'a> Builder<'a> {
         action
     }
 
+    /// Retypes as boxed every [`Ty::Num`] register the instruction at `position` cannot read
+    /// unboxed, returning them so code generation boxes them first. Only a copy, an assignment
+    /// and arithmetic whose result is a double whatever the flag says read one unboxed.
+    fn box_operands(&self, position: usize, state: &mut State<'a>) -> SmallVec<[usize; 2]> {
+        let inst = &self.insts[position];
+        let operands = reads(inst);
+        let mut boxed = SmallVec::new();
+        if operands
+            .iter()
+            .all(|&register| state.registers[register] != Ty::Num)
+        {
+            return boxed;
+        }
+        let keeps = match inst.op {
+            Op::Move | Op::SetVar => true,
+            Op::Arithmetic => {
+                let (a, b) = (
+                    state.registers[inst.operand(2)],
+                    state.registers[inst.operand(3)],
+                );
+                let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+                // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
+                // operand is a double; every other operator converts to double anyway.
+                scalar(a)
+                    && scalar(b)
+                    && (!matches!(
+                        ARITHS[inst.operand(0)].0,
+                        Arith::Add | Arith::Subtract | Arith::Multiply
+                    ) || a == Ty::Dbl
+                        || b == Ty::Dbl)
+            }
+            _ => false,
+        };
+        if keeps {
+            return boxed;
+        }
+        for register in operands {
+            if state.registers[register] == Ty::Num && !boxed.contains(&register) {
+                state.registers[register] = Ty::Boxed;
+                boxed.push(register);
+            }
+        }
+        boxed
+    }
+
     /// Adds a step to an inlined call, with the state before it.
     fn push_step(&mut self, lowering: &mut Lowering<'a>, action: Action<'a>) {
         let id = self.states.push(&lowering.state);
@@ -2074,6 +2264,156 @@ impl<'a> Builder<'a> {
         *state = after;
         Some(Action::Inline {
             steps: lowering.steps.leak(),
+        })
+    }
+
+    /// Compiles a call of a callback-taking library function into a loop when its callback is
+    /// a closure whose body inlines, given each element as an unboxed scalar of the type the
+    /// closure's own feedback (or its signature) says its arguments have been. The library
+    /// function checks its arguments in the same order, so a list that is not plain or an
+    /// element of another type only hands the call back to tier 0.
+    unsafe fn traverse(
+        &mut self,
+        state: &mut State<'a>,
+        traversal: Traversal,
+        call: Sexp,
+        args: &[usize],
+        dst: usize,
+    ) -> Option<Action<'a>> {
+        let (list, initial, callback) = match (traversal, args) {
+            (Traversal::Walk, &[list, initial, callback]) => (list, Some(initial), callback),
+            (Traversal::Walk, _) => return None,
+            (_, &[list, callback]) => (list, None, callback),
+            _ => return None,
+        };
+        if !matches!(state.registers[list], Ty::List | Ty::Boxed) {
+            return None;
+        }
+        let mut expected = None;
+        let mut speculation = None;
+        let named = match state.registers[callback] {
+            Ty::Closure(formals, body) => Err((formals, body, *self.closure_code.get(&body)?)),
+            Ty::Fun(function) => Ok(function),
+            // A callback passed by name is a variable the analysis knows no more about than that
+            // it is boxed, so the loop inlines what the name resolves to now and checks the
+            // register still holds that closure each time the call runs.
+            Ty::Boxed => {
+                let symbol = values::pairlist_items(call.cdr()).last()?.1;
+                if symbol.kind() != SexpType::Symbol || self.locals.contains(&symbol) {
+                    return None;
+                }
+                let found = resolve_variable(symbol, self.enclosure)?;
+                let function = found.function;
+                expected = Some((callback, function));
+                speculation = Some(found);
+                Ok(function)
+            }
+            _ => return None,
+        };
+        let (formals, body, closed, code) = match named {
+            Err((formals, body, code)) => (formals, body, None, code),
+            Ok(function) if function.kind() == SexpType::Closure => {
+                let code = function.cdr();
+                if code.kind() != SexpType::Bytecode {
+                    return None;
+                }
+                let body = bytecode::closure_body(function);
+                (function.car(), body, Some(function.tag()), code)
+            }
+            Ok(_) => return None,
+        };
+        let parameters = values::pairlist_items(formals);
+        if parameters.len() != args.len() - 1
+            || parameters
+                .iter()
+                .any(|(symbol, _)| *symbol == values::symbols().dots)
+        {
+            return None;
+        }
+        let hints = formal_hints(self.arena, code, formals)?;
+        let element_ty = *hints.last()?;
+        if !element_ty.is_unboxed() {
+            return None;
+        }
+        let mut lowering = Lowering {
+            state: state.clone(),
+            steps: List::new_in(self.arena),
+            next: self.registers,
+            scope: SmallVec::new(),
+            closed,
+        };
+        let mut accumulator = None;
+        if let Some(initial) = initial {
+            let ty = state.registers[initial];
+            if !ty.is_unboxed() || !matches!(hints[0], Ty::Bottom) && hints[0] != ty {
+                return None;
+            }
+            let register = lowering.temporary()?;
+            lowering.state.registers[register] = ty;
+            lowering.scope.push((parameters[0].0, register));
+            accumulator = Some((initial, register));
+        }
+        let element = lowering.temporary()?;
+        lowering.state.registers[element] = element_ty;
+        lowering
+            .scope
+            .push((parameters[parameters.len() - 1].0, element));
+        let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
+            .scope
+            .iter()
+            .map(|&(_, register)| lowering.state.registers[register].storage())
+            .collect();
+        let result = self.lower_expression(&mut lowering, body, 0)?;
+        let result_ty = lowering.state.registers[result];
+        let returned = result_ty.storage();
+        if !annotations::admits_inline(formals, body, &arguments, returned) {
+            return None;
+        }
+        let fits = match traversal {
+            Traversal::Walk => {
+                accumulator.is_some_and(|(initial, _)| state.registers[initial] == result_ty)
+            }
+            Traversal::Map => result_ty.is_unboxed(),
+            _ => result_ty == Ty::Lgl,
+        };
+        if !fits {
+            return None;
+        }
+        // The variables the callback reads load once, before the loop, so they are loaded on
+        // every path out of it, including the one that never enters it.
+        let mut prelude = List::new_in(self.arena);
+        let mut steps = List::new_in(self.arena);
+        for step in lowering.steps.iter().copied() {
+            match step.0 {
+                Action::Peek { .. } => prelude.push(step),
+                _ => steps.push(step),
+            }
+        }
+        let mut after = lowering.state;
+        for register in self.registers..after.registers.len() {
+            after.registers[register] = Ty::Bottom;
+        }
+        after.registers[dst] = match traversal {
+            Traversal::Walk => result_ty,
+            Traversal::Map | Traversal::Filter(_) => Ty::List,
+            Traversal::Any | Traversal::All => Ty::Lgl,
+            Traversal::CountIf => Ty::Int,
+        };
+        after.visible = Some(true);
+        *state = after;
+        // The speculation keeps the closure the loop inlines alive, and so keeps the identity
+        // check honest, and recompiles the body once the binding changes.
+        self.speculations.extend(speculation);
+        Some(Action::Traverse {
+            traversal,
+            list,
+            accumulator,
+            expected,
+            element: (element, element_ty),
+            prelude: prelude.leak(),
+            steps: steps.leak(),
+            result: (result, result_ty),
+            dst,
         })
     }
 
@@ -2523,8 +2863,9 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
-        if a.is_numeric_scalar() && b.is_numeric_scalar() {
-            let integers = !matches!(a, Ty::Dbl) && !matches!(b, Ty::Dbl);
+        let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+        if scalar(a) && scalar(b) {
+            let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
                 Arith::Equal
@@ -2602,6 +2943,13 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|&register| state.registers[register])
             .collect();
+        if untagged
+            && definition.accepts_native
+            && let Some(traversal) = Traversal::of(name)
+            && let Some(action) = self.traverse(state, traversal, call, args, dst)
+        {
+            return Ok(action);
+        }
         if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
@@ -2617,12 +2965,18 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
-        // A library leaf never dispatches, so even an object argument cannot run R code.
+        // A library leaf never dispatches, but reading an ALTREP argument runs its class's
+        // methods, which a package may write in R, so every boxed argument is observed.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
+            let observed = self.slice(
+                args.iter()
+                    .copied()
+                    .filter(|&register| !state.registers[register].in_variables()),
+            );
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                &[],
+                observed,
                 Effect::PureUnlessObserved,
             ));
         }
@@ -2867,6 +3221,36 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
     None
 }
 
+/// The closure a variable lookup of `symbol` finds from `start`, as tier 0 finds it but
+/// without forcing a promise or calling an active binding.
+unsafe fn resolve_variable(symbol: Sexp, start: Sexp) -> Option<Speculation> {
+    let heap = interp::heap();
+    let mut env = start;
+    let empty = heap.known().empty_env;
+    while env != empty {
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            if cell.has_gp(gp::ACTIVE_BINDING) {
+                return None;
+            }
+            let mut value = cell.cdr();
+            if value.kind() == SexpType::Promise {
+                if value.car() == values::unbound() {
+                    return None;
+                }
+                value = value.car();
+            }
+            return (value.kind() == SexpType::Closure).then_some(Speculation {
+                symbol,
+                env: start,
+                cell,
+                function: value,
+            });
+        }
+        env = env.enclosure();
+    }
+    None
+}
+
 pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
     match bytecode::value_kind(value) {
         feedback::INTEGER_SCALAR => Ty::Int,
@@ -2992,6 +3376,38 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     })
 }
 
+/// The registers an instruction reads.
+pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
+    let operand = |index: usize| inst.operand(index);
+    match inst.op {
+        Op::CallBuiltin => std::iter::once(operand(1))
+            .chain(operand(3)..operand(3) + operand(4))
+            .collect(),
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => smallvec![operand(1)],
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => smallvec![operand(0)],
+        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
+        Op::Move => smallvec![operand(1)],
+        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
+        Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+            smallvec![operand(0)]
+        }
+        Op::DispatchSubject => smallvec![operand(1), operand(3)],
+        Op::Arithmetic => smallvec![operand(2), operand(3)],
+        Op::SubAssign => smallvec![operand(2), operand(3)],
+        Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
+        Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
+        Op::LogicRight => smallvec![operand(1), operand(2)],
+        Op::SetVar => smallvec![operand(1)],
+        _ => SmallVec::new(),
+    }
+}
+
 pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
         Op::Jump => Some(inst.operand(0)),
@@ -3079,7 +3495,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::MatchCondition => {
+        Op::MatchCondition | Op::SwitchArm => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

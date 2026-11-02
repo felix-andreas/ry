@@ -24,8 +24,9 @@ hint @20list =
 parsed <- Str.to_$0
 
 #++++
-hover 10..17: Str.to_: Unknown
-definition: none
+hover 10..17: Str.to_
+hover-definition: installed Str.to_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed Str.to_ from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
 signature: none
@@ -101,7 +102,8 @@ action: Add inferred type annotation for `summarise`
 action: Add inferred type annotations for the whole file
   edit 139..139 -> ": list[Position]"
   edit 140..140 -> " -> double[]"
-completion (37): summarise, Summary, summary, summary.aov, summary.connection, Summary.data.frame, summary.data.frame, Summary.Date
-hint @117: fn(positions: list[Position]) -> double[]
+completion (37): summarise, summary, summary.aov, summary.connection, summary.data.frame, summary.Date, summary.default, summary.difftime
+hint @139: list[Position]
+hint @140 -> double[]
 hint @159FUN =
 hint @175FUN.VALUE =

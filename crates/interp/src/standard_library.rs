@@ -19,6 +19,7 @@
 
 use {
     crate::{
+        annotations::Entry,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval,
@@ -36,6 +37,7 @@ use {
         records::{Fields, Layout, NativeKind},
     },
     rustc_hash::{FxHashSet, FxHasher},
+    smallvec::SmallVec,
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
@@ -49,20 +51,85 @@ const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> Bu
 }
 
 /// The library builtins that never run R code: they read their arguments, compute natively and
-/// return or raise an error, so compiled code may call them without saving its state first.
+/// return or raise an error, so compiled code may call them without saving its state first. A
+/// function that takes a callback runs R code, and one that updates its first argument in place
+/// must not be handed a value compiled code still holds, so neither is a leaf; the test
+/// `leaves_are_the_functions_without_callbacks` keeps this list equal to that rule. Reading an
+/// ALTREP argument can still run R code through its class's methods, so compiled code checks
+/// each boxed argument's ALTREP flag before trusting the leaf.
 const LEAVES: &[&str] = &[
+    "Result.is_ok",
+    "Result.is_err",
+    "Result.with_default",
     "List.len",
     "List.is_empty",
     "List.get",
     "List.contains",
     "List.range",
+    "List.first",
+    "List.last",
+    "List.single",
+    "List.repeat",
+    "List.from_vector",
+    "List.to_vector",
+    "List.prepend",
+    "List.prepend_if_ok",
+    "List.reverse",
+    "List.join",
+    "List.take_first",
+    "List.take_last",
+    "List.drop_first",
+    "List.drop_last",
+    "List.drop_at",
+    "List.sublist",
+    "List.split_at",
+    "List.split_first",
+    "List.split_last",
+    "List.split_on",
+    "List.split_on_list",
+    "List.chunks_of",
+    "List.intersperse",
+    "List.starts_with",
+    "List.ends_with",
+    "List.replace",
+    "List.sort_asc",
+    "List.sort_desc",
+    "List.sum",
+    "List.product",
+    "List.min",
+    "List.max",
+    "List.with_capacity",
+    "List.release_excess_capacity",
+    "Dict.empty",
+    "Dict.with_capacity",
+    "Dict.single",
+    "Dict.from_list",
+    "Dict.to_list",
     "Dict.len",
     "Dict.is_empty",
     "Dict.get",
     "Dict.contains",
+    "Dict.remove",
+    "Dict.keys",
+    "Dict.values",
+    "Dict.keep_shared",
+    "Dict.remove_all",
+    "Dict.capacity",
+    "Dict.release_excess_capacity",
+    "Dict.clear",
+    "Set.empty",
+    "Set.with_capacity",
+    "Set.single",
+    "Set.from_list",
+    "Set.to_list",
     "Set.len",
     "Set.is_empty",
     "Set.contains",
+    "Set.remove",
+    "Set.intersection",
+    "Set.difference",
+    "Set.capacity",
+    "Set.release_excess_capacity",
 ];
 
 /// Whether the library builtin `name` is one of [`LEAVES`], or a `Num`, `Bool` or `Str`
@@ -271,6 +338,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Bool.is_eq", bool_is_eq),
     library("Bool.is_not_eq", bool_is_not_eq),
     library("Dict.empty", dict_empty),
+    library("Dict.with_capacity", dict_with_capacity),
     library("Dict.single", dict_single),
     library("Dict.from_list", dict_from_list),
     library("Dict.to_list", dict_to_list),
@@ -297,6 +365,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.release_excess_capacity", dict_release_excess_capacity),
     library("Dict.clear", dict_clear),
     library("Set.empty", set_empty),
+    library("Set.with_capacity", set_with_capacity),
     library("Set.single", set_single),
     library("Set.from_list", set_from_list),
     library("Set.to_list", set_to_list),
@@ -515,21 +584,78 @@ unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     })
 }
 
-unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Sexp> {
+unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback> {
     if !values::is_function(value) {
         return Err(wrong(call, parameter, "a function", value));
     }
-    Ok(value)
+    Callback::new(value)
 }
 
-/// Calls `function` with positional `arguments`, through the interpreter's ordinary call path.
-unsafe fn invoke(call: &Call<'_>, function: Sexp, arguments: &[Sexp]) -> R<Sexp> {
-    let arguments: Vec<Arg> = arguments
+/// A function the library calls back, checked once per library call. A closure whose formals
+/// have no `...` binds its arguments by position, which skips argument matching on every item.
+#[derive(Clone, Copy)]
+struct Callback {
+    function: Sexp,
+    /// The number of formals, for a closure without `...`.
+    formals: Option<usize>,
+}
+
+impl Callback {
+    unsafe fn new(function: Sexp) -> R<Callback> {
+        if function.kind() != SexpType::Closure {
+            return Ok(Callback {
+                function,
+                formals: None,
+            });
+        }
+        let mut count = 0;
+        let mut formal = function.car();
+        while formal.kind() == SexpType::Pairlist {
+            if formal.tag() == values::symbols().dots {
+                return Ok(Callback {
+                    function,
+                    formals: None,
+                });
+            }
+            count += 1;
+            formal = formal.cdr();
+        }
+        Ok(Callback {
+            function,
+            formals: Some(count),
+        })
+    }
+}
+
+/// Calls `callback` with positional `arguments`. A closure given an argument for each formal
+/// binds them directly; anything else takes the interpreter's ordinary call path.
+///
+/// The frame's call quotes the argument values, `(f)(5)`, as the ordinary path does. Naming the
+/// formals instead, as GNU R's `FUN(X[[i]], ...)` does, would be wrong here: `sys.call()` and
+/// `match.call()` evaluate such a call in the caller's frame, where the formal names find the
+/// caller's own variables.
+unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<Sexp> {
+    let arguments: SmallVec<[Arg; 4]> = arguments
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    crate::moves::calling_back(function)?;
-    eval::apply(nil(), function, &arguments, call.env)
+    match callback.formals {
+        Some(formals) if formals == arguments.len() => {
+            let function = callback.function;
+            let mut items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+            items.push((nil(), function));
+            items.extend(arguments.iter().map(|argument| (nil(), argument.value)));
+            let form = values::pairlist(&items, SexpType::Language)?;
+            crate::heap().root(form);
+            let env = eval::bind_arguments(form, function, &arguments, None)?;
+            let promargs = eval::args_pairlist(&arguments)?;
+            eval::run_closure(form, function, env, call.env, promargs, Entry::Unchecked)
+        }
+        _ => {
+            crate::moves::calling_back(callback.function)?;
+            eval::apply(nil(), callback.function, &arguments, call.env)
+        }
+    }
 }
 
 /// A predicate's answer, which must be `TRUE` or `FALSE`.
@@ -3293,7 +3419,7 @@ unsafe fn build_index(
                 "cannot index a collection with room for {room} keys"
             ))
         })?
-        .max(8);
+        .max(SMALLEST_INDEX);
     let mut index = Vec::new();
     index
         .try_reserve_exact(size)
@@ -3307,13 +3433,27 @@ unsafe fn build_index(
     Ok(index)
 }
 
+/// The smallest open-addressing index, which every collection has even when empty.
+const SMALLEST_INDEX: usize = 8;
+
+/// The room of an empty collection. It has no key vector until its first key fixes the key
+/// type, so its index, which is rebuilt at half load, is what says how many keys fit.
+fn empty_room(keys: Sexp, index: &[i32]) -> usize {
+    if keys == nil() { index.len() / 2 } else { 0 }
+}
+
 /// A dictionary or set with room for `spare` more keys without growing: `object` itself when the
-/// call owns it, and otherwise a copy. An empty collection has no key vector, and so nothing to
-/// reserve, until its first key fixes the key type.
+/// call owns it, and otherwise a copy.
 unsafe fn reserve_collection(call: &Call<'_>, object: Sexp, spare: usize) -> R<Sexp> {
     let count = entry_count(object);
     if count == 0 {
-        return Ok(object);
+        let keys = records::slot_value(object, 0)?;
+        let kind = records::native_kind(object);
+        let index = records::slot_value(object, index_slot(kind))?;
+        if empty_room(keys, values::ints(index)) >= spare {
+            return Ok(object);
+        }
+        return Collection::with_room(kind, spare)?.write();
     }
     let object = if owned_collection(call, object) {
         object
@@ -3518,6 +3658,8 @@ struct Collection {
     keys: Vec<Key>,
     values: Vec<Sexp>,
     index: Vec<i32>,
+    /// How many keys the written storage holds before it grows, when that is more than it has.
+    room: usize,
 }
 
 impl Collection {
@@ -3527,8 +3669,18 @@ impl Collection {
             key_kind: None,
             keys: Vec::new(),
             values: Vec::new(),
-            index: vec![0; 8],
+            index: vec![0; SMALLEST_INDEX],
+            room: 0,
         }
+    }
+
+    /// An empty collection with room for `room` keys.
+    unsafe fn with_room(kind: NativeKind, room: usize) -> R<Collection> {
+        Ok(Collection {
+            index: build_index(0, room, |_| Key::Logical(false))?,
+            room,
+            ..Collection::new(kind)
+        })
     }
 
     unsafe fn read(object: Sexp) -> R<Collection> {
@@ -3541,7 +3693,9 @@ impl Collection {
             keys: (0..count).map(|index| key_at(keys, index)).collect(),
             values: Vec::new(),
             index: values::ints(records::slot_value(object, index_slot(kind))?).to_vec(),
+            room: 0,
         };
+        collection.room = empty_room(keys, &collection.index);
         if kind == NativeKind::Dict {
             let stored = records::slot_value(object, 1)?;
             collection.values = (0..count).map(|index| stored.element(index)).collect();
@@ -3602,22 +3756,24 @@ impl Collection {
         self.index = build_index(self.keys.len(), self.keys.len(), |position| {
             self.keys[position]
         })?;
+        self.room = 0;
         Ok(())
     }
 
     unsafe fn write(&self) -> R<Sexp> {
         let count = self.keys.len();
+        let capacity = count.max(self.room);
         let keys = match self.key_kind {
             None => nil(),
             Some(KeyKind::Logical) => {
-                let vector = resizable(SexpType::Logical, count, count)?;
+                let vector = resizable(SexpType::Logical, count, capacity)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     *slot = i32::from(matches!(key, Key::Logical(true)));
                 }
                 vector
             }
             Some(KeyKind::Integer) => {
-                let vector = resizable(SexpType::Integer, count, count)?;
+                let vector = resizable(SexpType::Integer, count, capacity)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number as i32;
@@ -3626,7 +3782,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Double) => {
-                let vector = resizable(SexpType::Real, count, count)?;
+                let vector = resizable(SexpType::Real, count, capacity)?;
                 for (slot, key) in vector.slice_mut::<f64>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number;
@@ -3635,7 +3791,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Text) => {
-                let vector = resizable(SexpType::String, count, count)?;
+                let vector = resizable(SexpType::String, count, capacity)?;
                 for (position, key) in self.keys.iter().enumerate() {
                     if let Key::Text(text) = key {
                         crate::heap().set_element(vector, position, *text);
@@ -3646,7 +3802,7 @@ impl Collection {
         };
         let index = values::integer_vector(&self.index)?;
         let (fields, slots) = if self.kind == NativeKind::Dict {
-            let stored = resizable(SexpType::List, count, count)?;
+            let stored = resizable(SexpType::List, count, capacity)?;
             for (position, &value) in self.values.iter().enumerate() {
                 crate::heap().set_element(stored, position, value);
             }
@@ -3907,6 +4063,12 @@ unsafe fn dict(call: &Call<'_>, value: Sexp) -> R<Sexp> {
 unsafe fn dict_empty(call: &Call<'_>) -> R<Sexp> {
     arguments(call, [])?;
     Collection::new(NativeKind::Dict).write()
+}
+
+unsafe fn dict_with_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [capacity] = arguments(call, ["capacity"])?;
+    let capacity = count(call, "capacity", capacity)?;
+    Collection::with_room(NativeKind::Dict, capacity)?.write()
 }
 
 unsafe fn dict_single(call: &Call<'_>) -> R<Sexp> {
@@ -4221,10 +4383,14 @@ unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
 
 /// How many entries the collection holds before it must grow its storage.
 unsafe fn collection_capacity(object: Sexp) -> R<Sexp> {
-    let capacity = match object.record_handle(0) {
-        Some(keys) if crate::heap().is_resizable(keys) => keys.capacity() as usize,
-        Some(keys) => length(keys),
-        None => 0,
+    let keys = records::slot_value(object, 0)?;
+    let capacity = if keys == nil() {
+        let index = records::slot_value(object, index_slot(records::native_kind(object)))?;
+        empty_room(keys, values::ints(index))
+    } else if crate::heap().is_resizable(keys) {
+        keys.capacity() as usize
+    } else {
+        length(keys)
     };
     scalar_integer(i32::try_from(capacity).unwrap_or(i32::MAX))
 }
@@ -4236,7 +4402,7 @@ unsafe fn release_collection(object: Sexp) -> R<Sexp> {
     let excess = object
         .record_handle(0)
         .is_some_and(|keys| crate::heap().is_resizable(keys) && keys.capacity() as usize > count)
-        || length(index) > (count * 2).next_power_of_two().max(8);
+        || length(index) > (count * 2).next_power_of_two().max(SMALLEST_INDEX);
     if !excess {
         return Ok(object);
     }
@@ -4274,6 +4440,12 @@ unsafe fn set(call: &Call<'_>, value: Sexp) -> R<Sexp> {
 unsafe fn set_empty(call: &Call<'_>) -> R<Sexp> {
     arguments(call, [])?;
     Collection::new(NativeKind::Set).write()
+}
+
+unsafe fn set_with_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [capacity] = arguments(call, ["capacity"])?;
+    let capacity = count(call, "capacity", capacity)?;
+    Collection::with_room(NativeKind::Set, capacity)?.write()
 }
 
 unsafe fn set_single(call: &Call<'_>) -> R<Sexp> {

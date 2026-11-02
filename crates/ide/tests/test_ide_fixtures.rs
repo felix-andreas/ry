@@ -7,9 +7,9 @@ use {
     ide::{
         CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, HoverDefinition,
         call_hierarchy_item, code_actions, code_lenses, completion, definition, diagnostic_fixes,
-        document_symbols, folding_ranges, hover, incoming_calls, inlay_hints, outgoing_calls,
-        references, rename, selection_ranges, semantic_tokens, signature_help, type_definition,
-        workspace_symbols,
+        document_symbols, folding_ranges, hover, import_fixes, incoming_calls, inlay_hints,
+        outgoing_calls, references, rename, selection_ranges, semantic_tokens, signature_help,
+        type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -157,6 +157,11 @@ fn render_at(
                         output.push_str(&format!("hover-documentation: {line}\n"));
                     }
                 }
+                Some(HoverDefinition::Package(target)) => output.push_str(&format!(
+                    "hover-definition: installed {} from {}\n",
+                    target.name,
+                    target.packages.join(", "),
+                )),
                 None => {}
             }
         }
@@ -170,12 +175,20 @@ fn render_at(
             "{label}: stub source {}\n",
             stub_text(db, target.source_index, target.range),
         ),
+        Some(DefinitionTarget::Package(target)) => format!(
+            "{label}: installed {} from {}\n",
+            target.name,
+            target.packages.join(", "),
+        ),
         None => format!("{label}: none\n"),
     };
-    output.push_str(&render_target(
-        "definition",
-        definition(db, files, file, offset),
-    ));
+    let definitions = definition(db, files, file, offset);
+    if definitions.is_empty() {
+        output.push_str(&render_target("definition", None));
+    }
+    for target in definitions {
+        output.push_str(&render_target("definition", Some(target)));
+    }
     let references = references(db, files, file, offset, true);
     if references.is_empty() {
         output.push_str("references: none\n");
@@ -543,6 +556,16 @@ fn render_structure(source: &str) -> String {
                     output.push_str(&format!(
                         "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            for action in import_fixes(db, file, &diagnostics, whole) {
+                for edit in &action.edits {
+                    output.push_str(&format!(
+                        "fix {}: {} -> {:?}\n",
+                        action.title,
                         covered(edit.range),
                         edit.replacement
                     ));

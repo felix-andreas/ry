@@ -1,10 +1,9 @@
 #@ weight 2
 #@ param PATIENTS int 2 12
 # Patient records exchanged as JSON documents and stored through an injectable backend.
-#: @alias Patient@ID@ {list{resourceType: character, id: character, birthDate: character, observations: list[list{code: character, value: double}]}}
+alias Patient@ID@ = list{resourceType: character, id: character, birthDate: character, observations: list[list{code: character, value: double}]}
 
-#: fn(id: integer) -> Patient@ID@
-patient_document_@ID@ <- function(id) {
+patient_document_@ID@ <- function(id: integer) -> Patient@ID@ {
   list(
     resourceType = "Patient",
     id = sprintf("pat-%03d", id),
@@ -13,8 +12,7 @@ patient_document_@ID@ <- function(id) {
   )
 }
 
-#: fn(text: json | character) -> data.frame
-parse_documents_@ID@ <- function(text) {
+parse_documents_@ID@ <- function(text: json | character) -> data.frame {
   parsed <- RcppSimdJson::fparse(text)
   data.frame(
     id = parsed$id,
@@ -23,11 +21,9 @@ parse_documents_@ID@ <- function(text) {
   )
 }
 
-#: fn(documents: list[Patient@ID@], container: character, [backend]: (fn(container: character, name: character, body: character) -> character | NULL) | NULL) -> character[]
-store_documents_@ID@ <- function(documents, container, backend = NULL) {
+store_documents_@ID@ <- function(documents: list[Patient@ID@], container: character, backend: (fn(container: character, name: character, body: character) -> character | NULL) | NULL = NULL) -> character[] {
   if (is.null(backend)) {
-    #: fn(container: character, name: character, body: character) -> NULL
-    backend <- function(container, name, body) {
+    backend <- function(container: character, name: character, body: character) -> NULL {
       endpoint <- AzureStor::blob_endpoint("https://store.blob.core.windows.net")
       AzureStor::upload_blob(AzureStor::blob_container(endpoint, container), textConnection(body), name)
     }
@@ -47,7 +43,6 @@ test_that("records @ID@ round trip through JSON", {
   expect_equal(length(stored), @PATIENTS@)
   parsed <- parse_documents_@ID@(jsonlite::toJSON(documents, auto_unbox = TRUE))
   expect_equal(nrow(parsed), @PATIENTS@)
-  #: @if-unknown double[]
-  ages <- parsed$age_2024
+  ages: @if-unknown double[] <- parsed$age_2024
   expect_true(all(ages > 50))
 })

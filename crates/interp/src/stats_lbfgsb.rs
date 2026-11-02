@@ -137,7 +137,11 @@ pub unsafe fn minimize(
         if detail >= 0
             && let Some(i) = infeasible
         {
-            print(&format!("l({}) > u({}).  No feasible solution", i + 1, i + 1));
+            print(&format!(
+                "l({}) > u({}).  No feasible solution",
+                i + 1,
+                i + 1
+            ));
         }
         finish(0.0, 0, 52);
         return Ok(Outcome {
@@ -541,12 +545,10 @@ const CONVERGED_GRADIENT: &str = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGT
 const CONVERGED_REDUCTION: &str = "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH";
 const ABNORMAL: &str = "ERROR: ABNORMAL_TERMINATION_IN_LNSRCH";
 
-const SINGULAR_RESTART: &str =
-    "\n Singular triangular system detected;\n   refresh the lbfgs memory and restart the iteration.\n";
+const SINGULAR_RESTART: &str = "\n Singular triangular system detected;\n   refresh the lbfgs memory and restart the iteration.\n";
 const INDEFINITE_K_RESTART: &str = "\n Nonpositive definiteness in Cholesky factorization in formk;\n   refresh the lbfgs memory and restart the iteration.\n";
 const INDEFINITE_T_RESTART: &str = "\n Nonpositive definiteness in Cholesky factorization in formt;\n   refresh the lbfgs memory and restart the iteration.\n";
-const BAD_DIRECTION_RESTART: &str =
-    "\n Bad direction in the line search;\n   refresh the lbfgs memory and restart the iteration.\n";
+const BAD_DIRECTION_RESTART: &str = "\n Bad direction in the line search;\n   refresh the lbfgs memory and restart the iteration.\n";
 const DERIVATIVE_NOT_NEGATIVE: &str = "Derivative >= 0, backtracking line search impossible.";
 const LONG_LINE_SEARCH: &str =
     "Warning:  more than 10 function and gradient evaluations\n   in the last line search\n";
@@ -1035,7 +1037,7 @@ fn heap_sort(t: &mut [f64], order: &mut [usize], iheap: usize) {
         let entry = order[n - 1];
         loop {
             let mut j = i + i;
-            if j <= n - 1 {
+            if j < n {
                 if t[j] < t[j - 1] {
                     j += 1;
                 }
@@ -1073,7 +1075,14 @@ fn bmv(memory: &Memory, v: &[f64], p: &mut [f64]) -> i32 {
         }
         p[i2 - 1] = v[i2 - 1] + sum;
     }
-    let info = triangular_solve(&memory.wt, 0, m, col, &mut p[col..2 * col], Solve::Transposed);
+    let info = triangular_solve(
+        &memory.wt,
+        0,
+        m,
+        col,
+        &mut p[col..2 * col],
+        Solve::Transposed,
+    );
     if info != 0 {
         return info;
     }
@@ -1330,7 +1339,10 @@ fn form_k(
     }
     for is in col + 1..=col2 {
         for js in is..=col2 {
-            let product = ddot(&wn[at(1, is)..at(1, is) + col], &wn[at(1, js)..at(1, js) + col]);
+            let product = ddot(
+                &wn[at(1, is)..at(1, is) + col],
+                &wn[at(1, js)..at(1, js) + col],
+            );
             wn[at(is, js)] += product;
         }
     }
@@ -1880,7 +1892,10 @@ fn cholesky(a: &mut [f64], offset: usize, lda: usize, n: usize) -> i32 {
     for j in 1..=n {
         let mut s = 0.0;
         for k in 1..j {
-            let dot = ddot(&a[at(1, k)..at(1, k) + k - 1], &a[at(1, j)..at(1, j) + k - 1]);
+            let dot = ddot(
+                &a[at(1, k)..at(1, k) + k - 1],
+                &a[at(1, j)..at(1, j) + k - 1],
+            );
             let t = (a[at(k, j)] - dot) / a[at(k, k)];
             a[at(k, j)] = t;
             s += t * t;
@@ -1904,7 +1919,14 @@ enum Solve {
 
 /// LINPACK `dtrsl` for an upper triangular `T` stored column-major from `offset` with
 /// leading dimension `lda`. Returns the index of a zero diagonal element, or 0.
-fn triangular_solve(t: &[f64], offset: usize, lda: usize, n: usize, b: &mut [f64], job: Solve) -> i32 {
+fn triangular_solve(
+    t: &[f64],
+    offset: usize,
+    lda: usize,
+    n: usize,
+    b: &mut [f64],
+    job: Solve,
+) -> i32 {
     let at = |row: usize, column: usize| offset + (row - 1) + lda * (column - 1);
     for i in 1..=n {
         if t[at(i, i)] == 0.0 {

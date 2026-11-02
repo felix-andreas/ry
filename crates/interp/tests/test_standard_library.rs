@@ -879,7 +879,12 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     (
         "(function() { d <- Dict.reserve(Dict.single(\"a\", 1L), 20L); c(Dict.capacity(d) >= 21L, Dict.capacity(Dict.release_excess_capacity(d)), Dict.len(d), Dict.capacity(Dict.empty())) })()",
-        "[1] 1 1 1 0\n",
+        "[1] 1 1 1 4\n",
+    ),
+    // An empty collection keeps its room in its index until the first key fixes the key type.
+    (
+        "(function() { d <- Dict.with_capacity(100L); e <- Dict.insert(d, \"a\", 1L); s <- Set.insert(Set.reserve(Set.empty(), 30L), 2L); c(Dict.capacity(d), Dict.capacity(e), Dict.len(e), Set.capacity(s), Set.capacity(Set.release_excess_capacity(s)), Dict.capacity(Dict.reserve(d, 10L)), Dict.capacity(Dict.release_excess_capacity(d))) })()",
+        "[1] 128 128   1  32   1 128   4\n",
     ),
     (
         "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",
@@ -1534,10 +1539,10 @@ unsafe fn printed(code: &str) -> String {
     unsafe {
         match evaluate(code) {
             Ok(value) => {
-                if interp::interp().visible {
-                    if let Err(failure) = print::print_value_top(value, values::global_env()) {
-                        return format!("printing failed: {}", message(failure));
-                    }
+                if interp::interp().visible
+                    && let Err(failure) = print::print_value_top(value, values::global_env())
+                {
+                    return format!("printing failed: {}", message(failure));
                 }
                 take_output()
             }
@@ -1577,4 +1582,40 @@ fn message(unwind: Unwind) -> String {
         Unwind::Error(failure) => failure.message,
         _ => String::new(),
     }
+}
+
+/// Compiled code calls a leaf without saving its state, so a leaf must neither call back into R
+/// nor update its first argument in place. Every other `Result`, `List`, `Dict` and `Set`
+/// function is a leaf, so each one compiled code meets takes the fast call.
+#[test]
+fn leaves_are_the_functions_without_callbacks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.Rtypes");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", path.display()));
+    let mut calling_back = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for (name, signature) in text.lines().filter_map(|line| line.split_once(" : ")) {
+        if !["Result.", "List.", "Dict.", "Set."]
+            .iter()
+            .any(|module| name.starts_with(module))
+        {
+            continue;
+        }
+        names.insert(name);
+        if signature.matches("fn(").count() > 1 {
+            calling_back.insert(name);
+        }
+    }
+    let wrong: Vec<_> = names
+        .iter()
+        .filter(|&&name| {
+            let leaf =
+                !calling_back.contains(name) && !standard_library::reuses_first_argument(name);
+            standard_library::is_leaf(name) != leaf
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "leaf status disagrees with the rule: {wrong:?}"
+    );
 }

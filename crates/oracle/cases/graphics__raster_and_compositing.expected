@@ -1,0 +1,17 @@
+[stdout]
+| 
+| #0000ff #7fff7f #ff0000 #ffffff 
+|     729     729     729    1248 
+| 
+| #6666ff #b3004c #ff4c4c #ffffff 
+|     972     324     252    2052 
+| postscript FALSE 24 7107ceed11ae33ce91ed920dd0d1e348 
+| postscript TRUE 106134 4d312f96ec5baed9bab64f826e31e2fd 
+| pdf TRUE TRUE 
+| [1] "raw"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "raw"
