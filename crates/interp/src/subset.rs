@@ -236,9 +236,13 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let kind = object.kind();
-    if !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real) {
+    if !matches!(
+        kind,
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String | SexpType::List
+    ) {
         return Ok(None);
     }
+    let object = values::materialize(object)?;
     let index = values::materialize(index)?;
     match index.kind() {
         SexpType::Integer => {
@@ -298,13 +302,32 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     }
 }
 
-/// `object[positions]` for a logical, integer or double vector, NA past the end.
+/// `object[positions]` for a logical, integer, double, character or list vector that is not
+/// ALTREP, NA (or `NULL`) past the end.
 unsafe fn gather_kind(
     object: Sexp,
     positions: impl Iterator<Item = usize>,
     count: usize,
 ) -> R<Sexp> {
     let kind = object.kind();
+    if matches!(kind, SexpType::String | SexpType::List) {
+        let result = alloc(kind, count)?;
+        let source = object.slice::<Sexp>();
+        let missing = if kind == SexpType::String {
+            na_string()
+        } else {
+            nil()
+        };
+        let heap = crate::heap();
+        for (slot, position) in positions.take(count).enumerate() {
+            heap.set_element(
+                result,
+                slot,
+                source.get(position).copied().unwrap_or(missing),
+            );
+        }
+        return Ok(result);
+    }
     let result = values::alloc_uninit(kind, count)?;
     if kind == SexpType::Real {
         let source = values::reals(object);
@@ -1893,6 +1916,9 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         }
         return Ok(result);
     }
+    if scatter_plain(result, index, value, value_count)? {
+        return Ok(result);
+    }
     let (positions, new_names) = resolve(index, count, names, true, call)?;
     let positions: Vec<usize> = positions
         .into_iter()
@@ -1944,6 +1970,80 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         assign_element(result, target, value, position % value_count)?;
     }
     Ok(result)
+}
+
+/// `target[index] <- value` written straight from an attribute-free integer or double subscript
+/// whose positions all lie inside `target`, when `value` already has `target`'s type and its
+/// length divides the number of positions. Returns false, having written nothing, for every
+/// other shape, which the general path handles with GNU R's full rules.
+unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usize) -> R<bool> {
+    let kind = target.kind();
+    if index == missing_arg()
+        || values::has_attributes(index)
+        || value.kind() != kind
+        || target.is_altrep()
+        || value.is_altrep()
+        || value_count == 0
+        || !matches!(
+            kind,
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::String
+                | SexpType::List
+        )
+    {
+        return Ok(false);
+    }
+    let count = length(target);
+    let index = values::materialize(index)?;
+    let offsets: Vec<usize> = match index.kind() {
+        SexpType::Integer => {
+            let positions = values::ints(index);
+            if positions
+                .iter()
+                .any(|&position| position <= 0 || position as usize > count)
+            {
+                return Ok(false);
+            }
+            positions
+                .iter()
+                .map(|&position| position as usize - 1)
+                .collect()
+        }
+        SexpType::Real => {
+            let positions = values::reals(index);
+            // NaN fails both comparisons, so an NA subscript also declines.
+            if !positions
+                .iter()
+                .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
+            {
+                return Ok(false);
+            }
+            positions
+                .iter()
+                .map(|&position| position as usize - 1)
+                .collect()
+        }
+        _ => return Ok(false),
+    };
+    if !offsets.len().is_multiple_of(value_count) {
+        return Ok(false);
+    }
+    match kind {
+        SexpType::Real => recycle_into(values::reals_mut(target), &offsets, values::reals(value)),
+        SexpType::Logical | SexpType::Integer => {
+            recycle_into(values::ints_mut(target), &offsets, values::ints(value))
+        }
+        _ => {
+            let source = value.slice::<Sexp>();
+            let heap = crate::heap();
+            for (position, &offset) in offsets.iter().enumerate() {
+                heap.set_element(target, offset, source[position % value_count]);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// `vector` extended to `length`, padded with NA, keeping its attributes but not its dims.

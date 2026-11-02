@@ -453,11 +453,20 @@ static API_WARNINGS: Global<Vec<String>> = Global::new(Vec::new());
 
 /// Signals the warnings API functions raised, once no API function is still running. The
 /// result of the call stays rooted, because a handler runs R code.
+// Every API exit runs this check, so the common case of no queued warning stays inline and the
+// signalling work lives in a cold function.
+#[inline(always)]
 unsafe fn signal_api_warnings(result: Option<Sexp>) -> Result<(), Unwind> {
-    let runtime = runtime();
-    if runtime.api_depth != 0 || (*API_WARNINGS.as_ptr()).is_empty() {
+    if runtime().api_depth != 0 || (*API_WARNINGS.as_ptr()).is_empty() {
         return Ok(());
     }
+    signal_queued_warnings(result)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn signal_queued_warnings(result: Option<Sexp>) -> Result<(), Unwind> {
+    let runtime = runtime();
     let messages = std::mem::take(&mut *API_WARNINGS.as_ptr());
     let mark = runtime.heap.handle_mark();
     if let Some(value) = result {
