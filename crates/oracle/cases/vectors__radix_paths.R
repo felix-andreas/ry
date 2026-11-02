@@ -42,3 +42,10 @@ anyDuplicated(c(3, 1, 2, 1), fromLast = TRUE)
 digest(match(wide, sort(wide)))
 digest(which(duplicated(round(wide / 1000))))
 digest(match(dense * 1000003L, unique(dense * 1000003L)))
+# Integer keys with NA at either end, in either direction, including the extreme values.
+small <- c(3L, NA, -2147483647L, 2147483647L, 0L, NA, -1L, 3L)
+for (decreasing in c(FALSE, TRUE)) for (na.last in c(TRUE, FALSE, NA)) {
+  print(order(small, decreasing = decreasing, na.last = na.last, method = "radix"))
+  print(order(small, -small, decreasing = decreasing, na.last = na.last, method = "radix"))
+}
+print(sort(small, method = "radix", decreasing = TRUE))

@@ -568,6 +568,9 @@ fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
 
 /// The display width of text in a terminal.
 pub fn display_width(text: &str) -> usize {
+    if text.is_ascii() {
+        return text.len();
+    }
     text.chars()
         .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
         .sum()
@@ -902,6 +905,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let flag = values::require_string(call.arg(5), "flag")?;
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
+    let mut padded = String::new();
     for index in 0..count {
         let text = if mode == "character" {
             values::string_at(vector, index)
@@ -911,33 +915,32 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             let value = crate::subset::numeric_element(vector, index);
             c_format(value, &format, digits, &flag, mode == "integer")
         };
+        let width = width.unsigned_abs() as usize;
+        let shortfall = width.saturating_sub(display_width(&text));
         // GNU R writes an `fg` zero as a bare "0", whatever the width.
-        let text = if format == "fg" && text == "0" {
-            text
+        if shortfall == 0 || (format == "fg" && text == "0") {
+            values::set_mkchar(result, index, &text)?;
+            continue;
+        }
+        padded.clear();
+        if flag.contains('-') {
+            padded.push_str(&text);
+            padded.extend(std::iter::repeat_n(' ', shortfall));
+        } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
+            let (sign, digits) = match text.strip_prefix('-') {
+                Some(rest) => ("-", rest),
+                None => ("", text.as_str()),
+            };
+            padded.push_str(sign);
+            padded.extend(std::iter::repeat_n('0', shortfall));
+            padded.push_str(digits);
         } else {
-            apply_width(&text, width, &flag)
-        };
-        values::set_mkchar(result, index, &text)?;
+            padded.extend(std::iter::repeat_n(' ', shortfall));
+            padded.push_str(&text);
+        }
+        values::set_mkchar(result, index, &padded)?;
     }
     Ok(result)
-}
-
-fn apply_width(text: &str, width: i32, flag: &str) -> String {
-    let width = width.unsigned_abs() as usize;
-    if display_width(text) >= width {
-        return text.to_owned();
-    }
-    if flag.contains('-') {
-        pad(text, width, false)
-    } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
-        let (sign, digits) = match text.strip_prefix('-') {
-            Some(rest) => ("-", rest),
-            None => ("", text),
-        };
-        format!("{sign}{}{digits}", "0".repeat(width - display_width(text)))
-    } else {
-        pad(text, width, true)
-    }
 }
 
 /// One number in C `printf` style: `d`, `f`, `e`, `E`, `g`, `G`, `fg`.
