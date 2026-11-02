@@ -290,12 +290,22 @@ pub(crate) struct AnalyzedFile {
     pub file: SourceFile,
     pub requested: bool,
     pub diagnostics: Vec<Diagnostic>,
+    /// A literate document's own text. Analysis reads its prose blanked, but a reader of a
+    /// diagnostic's snippet needs to see the prose around the chunk.
+    pub document: Option<String>,
 }
 
 impl ProjectAnalysis {
     /// The text lives only in the database, so a large project holds one copy of it.
     pub fn source(&self, file: &AnalyzedFile) -> &str {
         file.file.text(&self.db)
+    }
+
+    /// The text a diagnostic's snippet shows: the document itself, prose included.
+    pub fn shown_source<'a>(&'a self, file: &'a AnalyzedFile) -> &'a str {
+        file.document
+            .as_deref()
+            .unwrap_or_else(|| self.source(file))
     }
 
     /// Resolves a related range against the document it lives in, which is often another file.
@@ -306,7 +316,7 @@ impl ProjectAnalysis {
             .find(|analyzed| analyzed.file == related.file)?;
         Some(RelatedNote {
             path: &analyzed.path,
-            source: self.source(analyzed),
+            source: self.shown_source(analyzed),
             range: related.range,
             message: related.message,
         })
@@ -461,11 +471,11 @@ fn analyze_project_with(
         stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
     }
 
-    let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
+    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
     for (path, read) in read_sources(paths) {
-        let source = match read {
-            Ok(source) => source,
+        let (source, document) = match read {
+            Ok(read) => read,
             Err(err) => {
                 failures += 1;
                 error_because(&format!("failed to read: {}", path.display()), &err);
@@ -476,7 +486,7 @@ fn analyze_project_with(
             .iter()
             .any(|target| path == *target || path.starts_with(target));
         reported.push(asked_about);
-        checked.push((path, source));
+        checked.push((path, source, document));
     }
 
     // Analysis follows the project order; diagnostics still print in discovery order.
@@ -486,7 +496,7 @@ fn analyze_project_with(
     let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
     let mut project = Vec::with_capacity(checked.len());
     for index in ordered {
-        let (path, source) = &mut checked[index];
+        let (path, source, _) = &mut checked[index];
         let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
         let file = SourceFile::builder(mem::take(source), kind)
@@ -526,7 +536,10 @@ fn analyze_project_with(
     let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
-    let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
+    let (paths, documents): (Vec<PathBuf>, Vec<Option<String>>) = checked
+        .into_iter()
+        .map(|(path, _, document)| (path, document))
+        .unzip();
     let mut plan = match cache {
         CacheUse::Off => Plan::Fresh,
         CacheUse::ReadWrite => {
@@ -550,7 +563,7 @@ fn analyze_project_with(
                 (Some(problems), Some(source)) => Some((namespace_path, source.clone(), problems)),
                 _ => None,
             };
-            let files = analyzed_files(paths, files, reported, per_file);
+            let files = analyzed_files(paths, documents, files, reported, per_file);
             let analysis = ProjectAnalysis {
                 db,
                 files,
@@ -781,7 +794,7 @@ fn analyze_project_with(
         }
     }
     let reused = matches!(plan, Plan::Partial { .. });
-    let files = analyzed_files(paths, files, reported, per_file);
+    let files = analyzed_files(paths, documents, files, reported, per_file);
     Ok((
         ProjectAnalysis {
             db,
@@ -796,6 +809,7 @@ fn analyze_project_with(
 
 fn analyzed_files(
     paths: Vec<PathBuf>,
+    documents: Vec<Option<String>>,
     files: Vec<SourceFile>,
     reported: Vec<bool>,
     per_file: Vec<Vec<Diagnostic>>,
@@ -805,24 +819,28 @@ fn analyzed_files(
         .zip(files)
         .zip(reported)
         .zip(per_file)
-        .map(|(((path, file), requested), diagnostics)| AnalyzedFile {
-            path,
-            file,
-            requested,
-            diagnostics,
-        })
+        .zip(documents)
+        .map(
+            |((((path, file), requested), diagnostics), document)| AnalyzedFile {
+                path,
+                file,
+                requested,
+                diagnostics,
+                document,
+            },
+        )
         .collect()
 }
 
 /// Reads every source across cores, in `paths` order. A cold check reads a thousand files
 /// before anything else can start, so a serial read is a visible slice of its wall time.
-fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<String>)> {
+fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
     let workers = thread::available_parallelism()
         .map_or(1, usize::from)
         .min(paths.len())
         .max(1);
     let chunk = paths.len().div_ceil(workers).max(1);
-    let read: Vec<io::Result<String>> = thread::scope(|scope| {
+    let read: Vec<io::Result<(String, Option<String>)>> = thread::scope(|scope| {
         let handles: Vec<_> = paths
             .chunks(chunk)
             .map(|chunk| {
@@ -830,7 +848,13 @@ fn read_sources(paths: Vec<PathBuf>) -> Vec<(PathBuf, io::Result<String>)> {
                     chunk
                         .iter()
                         .map(|path| {
-                            fs::read_to_string(path).map(|source| analysable_source(path, source))
+                            fs::read_to_string(path).map(|text| {
+                                if is_literate_path(path) {
+                                    (r_source_of_literate(&text), Some(text))
+                                } else {
+                                    (text, None)
+                                }
+                            })
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1182,7 +1206,10 @@ fn render_project_findings(
     min_severity: MinSeverity,
 ) -> Vec<(String, usize)> {
     let files = &analysis.files;
-    let sources: Vec<&str> = files.iter().map(|file| analysis.source(file)).collect();
+    let sources: Vec<&str> = files
+        .iter()
+        .map(|file| analysis.shown_source(file))
+        .collect();
     let mut positions: FxHashMap<SourceFile, usize> = FxHashMap::default();
     for (index, file) in files.iter().enumerate() {
         positions.entry(file.file).or_insert(index);

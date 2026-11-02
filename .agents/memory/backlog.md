@@ -3005,17 +3005,28 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
-  tabs, and `browser()` in code without a srcref does not stop.
+  tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
-  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`.
-- `browser()` typed at a console with no debugger attached runs past instead of giving GNU R's
-  text `Browse>` prompt.
-- The data viewer has no sorting, filtering or column search; each would be a request the
-  runtime answers per page (`interp::viewer`), never a client-side copy of the data.
+  only; Windows needs a named-pipe transport in `interp::console_server` and `ry::console_link`,
+  which waits for a Windows runner to test it on.
+- The `Browse[1]>` prompt always shows depth 1 (GNU R counts nested browsers), and `where` names
+  frames by function, not by call as GNU R does.
+- The data viewer filters by one text over all columns and sorts by one column; per-column
+  filters (a numeric range, a factor level) and multi-column sorts would extend the `ryTable`
+  request the same way.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+- Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
+  httr2 (`pkg::name`, `$` field, argument name, call head, variable):
+  - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
+    its `list(name = ...)` or `x$name <- ...` site; R6 `self$`/`private$` members are most of them.
+  - Goto and hover on calls into imported packages with no stub (rlang's `is_null`, `enquos`;
+    lifecycle) answer nothing; purrr's call heads answer 74%. More stubs, or reading an installed
+    package's R source for navigation, would close it.
+  - A named argument that R completes by partial matching (`f(fac = 1)` for `factor`) is not
+    linked to its parameter, so a parameter rename leaves it behind.
 - Not done from rust-analyzer's list, with the reason:
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.

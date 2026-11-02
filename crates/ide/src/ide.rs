@@ -18,7 +18,7 @@ use {
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
         metadata::is_own_package,
-        naming::{BindingId, BindingKind, dot_dot_variable},
+        naming::{BindingId, BindingKind, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
         types::{
@@ -132,6 +132,17 @@ pub fn hover(
         };
         return Some(Hover {
             range: member.range + position.item_offset,
+            lines: vec![line],
+            definition: None,
+        });
+    }
+    // An argument name is no expression; it shows the parameter it fills, as signature help
+    // renders it, rather than widening to the whole call.
+    if let Some(argument) = named_argument_at(hir, position.relative)
+        && let Some(line) = filled_parameter(db, file, offset, argument.name)
+    {
+        return Some(Hover {
+            range: argument.range + position.item_offset,
             lines: vec![line],
             definition: None,
         });
@@ -618,8 +629,9 @@ pub fn definition(
         Target::Slot { item, binding } => {
             let info = item_naming(db, item).as_ref()?.bindings.get(&binding)?;
             let item_offset = item_node(db, item)?.text_range().start();
+            // A named argument reaches the parameter of a function in another file.
             Some(DefinitionTarget::Project(NavigationTarget {
-                file,
+                file: *item.file(db),
                 range: info.range + item_offset,
             }))
         }
@@ -5194,51 +5206,15 @@ fn target_at<'db>(
     let position = position_in_item(db, file, offset)?;
     let naming = item_naming(db, position.item).as_ref()?;
 
-    if let Some(expression) = position.expression_at() {
-        // A call head skips bindings that hold no function, so it navigates where the call goes.
-        let callee_target = item_check(db, position.item)
-            .and_then(|check| check.callee_targets.get(&expression).copied());
-        let binding = match callee_target {
-            Some(CalleeTarget::Slot(binding)) => Some(binding),
-            Some(CalleeTarget::Project | CalleeTarget::Library) => {
-                let ExpressionKind::NameRef(name) =
-                    &item_hir(db, position.item).as_ref()?.kind(expression)
-                else {
-                    return None;
-                };
-                return Some(match callee_target {
-                    Some(CalleeTarget::Project) => Target::Global(name.to_string()),
-                    _ => Target::StubGlobal(name.to_string()),
-                });
-            }
-            None => naming.resolutions.get(&expression).copied(),
-        };
-        if let Some(binding) = &binding {
-            let info = naming.bindings.get(binding)?;
-            // Cross-item reads resolve to the name, so the item's own top-level binding is the
-            // global.
-            if info.kind == BindingKind::TopLevel {
-                return Some(Target::Global(info.name.to_string()));
-            }
-            return Some(Target::Slot {
-                item: position.item,
-                binding: *binding,
-            });
-        }
-        // A quiet read (data masking, an opaque operator) navigates like any cross-item read;
-        // only its diagnostic is withheld.
-        if let Some(name) = naming
-            .non_locals
-            .get(&expression)
-            .or_else(|| naming.quiet_reads.get(&expression))
-        {
-            if global_declaration_exists(db, files, name) {
-                return Some(Target::Global(name.to_string()));
-            }
-            if stub_declaration(db, name).is_some() {
-                return Some(Target::StubGlobal(name.to_string()));
-            }
-        }
+    if let Some(hir) = item_hir(db, position.item)
+        && let Some(argument) = named_argument_at(hir, position.relative)
+    {
+        return parameter_target(db, files, position.item, &argument);
+    }
+    if let Some(expression) = position.expression_at()
+        && let Some(target) = expression_target(db, files, position.item, naming, expression)
+    {
+        return Some(target);
     }
 
     // A generic the project defines is also an ordinary global function (`setGeneric` binds its
@@ -5275,6 +5251,267 @@ fn target_at<'db>(
     })
 }
 
+/// The signature-help label of the parameter a named argument at `offset` fills.
+fn filled_parameter(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    name: Symbol,
+) -> Option<String> {
+    let help = signature_help(db, file, offset)?;
+    let signature = help.signatures.get(help.active_signature)?;
+    let span = signature.parameters.get(signature.active_parameter?)?;
+    let label = signature.label.get(std::ops::Range::<usize>::from(*span))?;
+    let spelled = label.trim_start_matches('[').split([']', ':']).next()?;
+    (spelled == name.as_str()).then(|| label.to_owned())
+}
+
+/// Where a name read navigates, or `None` when it reaches nothing the project or a stub declares.
+fn expression_target<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    naming: &ItemNaming,
+    expression: ExprId,
+) -> Option<Target<'db>> {
+    if let ExpressionKind::Namespace {
+        package: Some(package),
+        name: Some(name),
+        ..
+    } = item_hir(db, item).as_ref()?.kind(expression)
+    {
+        if is_own_package(db, package.as_str()) {
+            return global_declaration_exists(db, files, name.as_str())
+                .then(|| Target::Global(name.to_string()));
+        }
+        // A stub declares names by their bare spelling, so the qualifier must name the package
+        // that declaration belongs to.
+        return (declaring_namespace(db, name.as_str()) == Some(package.as_str())
+            && stub_declaration(db, name.as_str()).is_some())
+        .then(|| Target::StubGlobal(name.to_string()));
+    }
+    // A call head skips bindings that hold no function, so it navigates where the call goes.
+    let callee_target =
+        item_check(db, item).and_then(|check| check.callee_targets.get(&expression).copied());
+    let binding = match callee_target {
+        Some(CalleeTarget::Slot(binding)) => Some(binding),
+        Some(CalleeTarget::Project | CalleeTarget::Library) => {
+            let ExpressionKind::NameRef(name) = &item_hir(db, item).as_ref()?.kind(expression)
+            else {
+                return None;
+            };
+            return Some(match callee_target {
+                Some(CalleeTarget::Project) => Target::Global(name.to_string()),
+                _ => Target::StubGlobal(name.to_string()),
+            });
+        }
+        None => naming.resolutions.get(&expression).copied(),
+    };
+    if let Some(binding) = &binding {
+        let info = naming.bindings.get(binding)?;
+        // Cross-item reads resolve to the name, so the item's own top-level binding is the
+        // global.
+        if info.kind == BindingKind::TopLevel {
+            return Some(Target::Global(info.name.to_string()));
+        }
+        return Some(Target::Slot {
+            item,
+            binding: *binding,
+        });
+    }
+    // A quiet read (data masking, an opaque operator) navigates like any cross-item read;
+    // only its diagnostic is withheld.
+    if let Some(name) = naming
+        .non_locals
+        .get(&expression)
+        .or_else(|| naming.quiet_reads.get(&expression))
+    {
+        if global_declaration_exists(db, files, name) {
+            return Some(Target::Global(name.to_string()));
+        }
+        if stub_declaration(db, name).is_some() {
+            return Some(Target::StubGlobal(name.to_string()));
+        }
+    }
+    None
+}
+
+/// A named argument in a call, `name` in `f(name = value)`.
+struct NamedArgument {
+    callee: ExprId,
+    name: Symbol,
+    /// Relative to the item.
+    range: TextRange,
+}
+
+fn named_argument_at(hir: &Module, relative: TextSize) -> Option<NamedArgument> {
+    hir.expressions().find_map(|expression| {
+        let ExpressionKind::Call { callee, arguments } = expression.kind else {
+            return None;
+        };
+        if !expression.range.contains_inclusive(relative) {
+            return None;
+        }
+        hir[arguments].iter().find_map(|argument| {
+            let range = hir.argument_name_range(argument)?;
+            range.contains_inclusive(relative).then_some(())?;
+            Some(NamedArgument {
+                callee: *callee,
+                name: hir.argument_name(argument)?,
+                range,
+            })
+        })
+    })
+}
+
+/// The parameter a named argument fills: a project function's parameter slot, or the library
+/// function itself when a stub declares the callee, since a stub parameter has no site of its own.
+/// R's partial matching (`f(fac = 1)` for `factor`) is not followed.
+fn parameter_target<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    argument: &NamedArgument,
+) -> Option<Target<'db>> {
+    let naming = item_naming(db, item).as_ref()?;
+    let callee = expression_target(db, files, item, naming, argument.callee)?;
+    match callee {
+        Target::Global(name) => {
+            let definition = declaring_item(db, files, &name)?;
+            let binding = item_naming(db, definition)
+                .as_ref()?
+                .bindings
+                .iter()
+                .find(|(_, info)| info.kind == BindingKind::TopLevel && info.name == name)
+                .map(|(binding, _)| *binding)?;
+            parameter_binding(db, definition, binding, argument.name)
+        }
+        Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
+        stub @ Target::StubGlobal(_) => Some(stub),
+        _ => None,
+    }
+}
+
+/// The parameter named `name` of the function last assigned to `function`.
+fn parameter_binding<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    function: BindingId,
+    name: Symbol,
+) -> Option<Target<'db>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let naming = item_naming(db, item).as_ref()?;
+    let parameter = hir
+        .expressions()
+        .filter_map(|expression| match expression.kind {
+            ExpressionKind::Assign { target, value, .. }
+                if naming.resolutions.get(target) == Some(&function) =>
+            {
+                match hir.kind(*value) {
+                    ExpressionKind::Function { parameters, .. } => Some(parameters),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .last()
+        .and_then(|parameters| {
+            hir[parameters]
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .copied()
+        })?;
+    let (binding, _) = naming
+        .bindings
+        .iter()
+        .find(|(_, info)| info.kind == BindingKind::Parameter && info.range == parameter.range)?;
+    Some(Target::Slot {
+        item,
+        binding: *binding,
+    })
+}
+
+/// The named arguments that fill a parameter at the calls of its function, so a rename of the
+/// parameter keeps those calls matching it.
+fn named_argument_occurrences(
+    db: &dyn Db,
+    files: ProjectFiles,
+    item: Item<'_>,
+    binding: BindingId,
+    result: &mut Vec<Occurrence>,
+) {
+    let (Some(hir), Some(naming)) = (item_hir(db, item), item_naming(db, item)) else {
+        return;
+    };
+    let Some(info) = naming.bindings.get(&binding) else {
+        return;
+    };
+    if info.kind != BindingKind::Parameter {
+        return;
+    }
+    let Some(function) = hir
+        .expressions()
+        .enumerate()
+        .find_map(|(index, expression)| {
+            let ExpressionKind::Function { parameters, .. } = expression.kind else {
+                return None;
+            };
+            hir[parameters]
+                .iter()
+                .any(|parameter| parameter.range == info.range)
+                .then(|| ExprId::new(index))
+        })
+    else {
+        return;
+    };
+    let Some(function_binding) = hir
+        .expressions()
+        .find_map(|expression| match expression.kind {
+            ExpressionKind::Assign { target, value, .. } if *value == function => {
+                naming.resolutions.get(target).copied()
+            }
+            _ => None,
+        })
+    else {
+        return;
+    };
+    let Some(function_info) = naming.bindings.get(&function_binding) else {
+        return;
+    };
+    let mut callers = Vec::new();
+    if function_info.kind == BindingKind::TopLevel {
+        callers = occurrences(db, files, &Target::Global(function_info.name.to_string()));
+    } else {
+        slot_occurrences(db, item, function_binding, &mut callers);
+    }
+    for caller in callers.iter().filter(|caller| !caller.is_declaration) {
+        let Some(position) = position_in_item(db, caller.file, caller.range.start()) else {
+            continue;
+        };
+        let Some(caller_hir) = item_hir(db, position.item) else {
+            continue;
+        };
+        let head = caller.range - position.item_offset;
+        for expression in caller_hir.expressions() {
+            let ExpressionKind::Call { callee, arguments } = expression.kind else {
+                continue;
+            };
+            let callee_range = caller_hir.range(*callee);
+            if callee_range.end() != head.end() || !callee_range.contains_range(head) {
+                continue;
+            }
+            result.extend(caller_hir[arguments].iter().filter_map(|argument| {
+                (caller_hir.argument_name(argument)? == info.name).then_some(())?;
+                Some(Occurrence {
+                    file: caller.file,
+                    range: caller_hir.argument_name_range(argument)? + position.item_offset,
+                    is_declaration: false,
+                })
+            }));
+        }
+    }
+}
+
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
@@ -5287,7 +5524,10 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         Target::StubGlobal(_) => {}
         Target::TypeParameter(occurrences) => result = occurrences.clone(),
         Target::Tag(name) => result = tag_occurrences(db, files, name),
-        Target::Slot { item, binding } => slot_occurrences(db, *item, *binding, &mut result),
+        Target::Slot { item, binding } => {
+            slot_occurrences(db, *item, *binding, &mut result);
+            named_argument_occurrences(db, files, *item, *binding, &mut result);
+        }
         Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {
             for &file in files.files(db) {

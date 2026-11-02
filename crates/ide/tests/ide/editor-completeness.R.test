@@ -284,3 +284,152 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: matrix\n"
 completion (17): grid, graphics.off, gray, gray.colors, grconvertX, grconvertY, gregexec, gregexpr
 hint @4: matrix
+
+#---- named_argument_navigates_to_its_parameter
+scale <- function(values, factor = 2) values * factor
+scale(c(1, 2), fac$0tor = 3)
+#++++
+hover 69..75: factor: double[] = 2
+definition 26..32
+references: 26..32*, 47..53, 69..75
+rename: 3 edit(s)
+signature: fn(values: double[], factor: double[] = 2) -> double[]
+parameters: values: double[] | [factor: double[] = 2]
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+
+#---- parameter_renames_its_named_arguments
+scale <- function(values, fac$0tor = 2) values * factor
+scale(c(1, 2), factor = 3)
+scale(factor = 4, values = 1)
+#++++
+hover 26..32: factor: T
+definition 26..32
+references: 26..32*, 47..53, 69..75, 87..93
+rename: 4 edit(s)
+signature: none
+action: Add inferred type annotation for `scale`
+  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+
+#---- named_argument_in_another_file_renames_with_its_parameter
+#~~~~ R/def.R
+scale <- function(values, factor = 2) values * factor
+#~~~~ R/use.R
+doubled <- scale(1, fac$0tor = 2)
+tripled <- scale(factor = 3, 1)
+#++++
+hover 20..26: factor: double = 2
+definition R/def.R:26..32
+references: R/def.R:26..32*, R/def.R:47..53, R/use.R:20..26, R/use.R:49..55
+rename: 4 edit(s)
+signature: fn(values: double, factor: double = 2) -> double
+parameters: values: double | [factor: double = 2]
+action: Add inferred type annotation for `doubled`
+  edit 0..0 -> "#: double\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: double\n"
+  edit 32..32 -> "#: double\n"
+completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @7: double
+hint @39: double
+
+#---- named_argument_of_a_local_function
+outer <- function() {
+  shift <- function(x, by) x + by
+  shift(1, b$0y = 2)
+}
+#++++
+hover 67..69: by: double
+definition 45..47
+references: 45..47*, 53..55, 67..69
+rename: 3 edit(s)
+signature: fn(x: double, by: double) -> double
+parameters: x: double | [by: double]
+action: Add inferred type annotation for `outer`
+  edit 0..0 -> "#: fn() -> double\n"
+action: Add inferred type annotations for the whole file
+  edit 22..22 -> "  #: fn(x: T, by: T) -> T\n"
+  edit 0..0 -> "#: fn() -> double\n"
+completion (72): break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default, bartlett.test
+hint @5: fn() -> double
+hint @29: fn(x: T, by: T) -> T
+
+#---- named_argument_of_a_different_function_stays
+scale <- function(values, fac$0tor = 2) values * factor
+other <- function(factor) factor
+other(factor = 1)
+scale(1, factor = 2)
+#++++
+hover 26..32: factor: T
+definition 26..32
+references: 26..32*, 47..53, 114..120
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `scale`
+  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+  edit 54..54 -> "#: <T> fn(factor: T) -> T\n"
+completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+hint @59: <T> fn(factor: T) -> T
+
+#---- named_argument_into_dots_widens_to_the_call
+wrap <- function(...) list(...)
+wrap(fi$0eld = 1)
+#++++
+hover 32..47: list[named: Unknown]
+definition: none
+references: none
+rename: none
+signature: fn(...: Any) -> list[named: Unknown]
+parameters: [...: Any]
+completion (47): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
+
+#---- qualified_library_name_navigates_to_its_stub
+x <- base::past$0e("a", "b")
+#++++
+hover 5..16: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+definition: stub source base at `paste`
+references: none
+rename: none
+signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+parameters: [...: Any] | [sep]: character | [collapse]: character | NULL | [recycle0]: logical
+action: Add inferred type annotation for `x`
+  edit 0..0 -> "#: character\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: character\n"
+completion (13): paste, paste0, packageStartupMessage, pairlist, print.NativeRoutineList, duplicated.POSIXlt, suppressPackageStartupMessages, .deparseOpts
+hint @1: character
+
+#---- qualified_name_of_another_package_stays_put
+x <- utils::past$0e("a", "b")
+#++++
+hover 5..17: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (6): package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
+
+
+#---- abbreviated_argument_is_not_followed
+grow <- function(principal, rate) principal * (1 + rate)
+grow(100, ra$0 = 0.05)
+#++++
+hover 57..77: double
+definition: none
+references: none
+rename: none
+signature: fn(principal: double, rate: double) -> double
+parameters: principal: double | [rate: double]
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double\n"
+completion (15): rainbow, randu, range, range.Date, range.default, range.POSIXct, rank, rapply
+hint @4: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double
