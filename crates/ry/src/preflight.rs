@@ -4,16 +4,16 @@
 
 use {
     crate::{
-        check_cache::CacheUse,
         cli::{
-            self, CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote,
-            analyze_project, collect_r_files, exclude_matcher, project_stub_paths, render_findings,
-            report, scan_data_files, warn_config,
+            self, CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis,
+            RelatedNote, check_package_code, collect_r_files, exclude_matcher, project_stub_paths,
+            render_findings, report, scan_data_files, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
     },
     repl::{Filtered, InputFilter},
+    rustc_hash::FxHashMap,
     salsa::Setter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -25,6 +25,7 @@ use {
         hash::{DefaultHasher, Hash, Hasher},
         io,
         path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
         thread,
         time::UNIX_EPOCH,
     },
@@ -185,32 +186,28 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     {
         return Ok(Verdict::Run);
     }
-    let analysis = thread::scope(|scope| {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut checks = PACKAGE_CHECKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let previous = checks.remove(&key);
+    let check = thread::scope(|scope| {
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
-            .spawn_scoped(scope, || {
-                let analysis = analyze_project(
-                    root,
-                    &sources,
-                    config.clone(),
-                    std::slice::from_ref(&sources),
-                    CacheUse::Off,
-                )?;
-                let errors = strict_errors(&analysis);
-                Ok::<_, CommandError>((analysis, errors))
-            });
+            .spawn_scoped(scope, || check_package_code(previous, root, config));
         match worker {
             Ok(handle) => handle
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
             Err(error) => panic!("the preflight thread should spawn: {error}"),
         }
-    });
-    let (analysis, errors) = analysis?;
+    })?;
+    let analysis = &check.analysis;
     // A file the analysis could not read went unchecked, and it has said which.
     if analysis.failures > 0 {
         return Err(CommandError);
     }
+    let errors = strict_errors(analysis);
     let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
     let mut problems = 0;
     for (file, errors) in analysis.files.iter().zip(&errors) {
@@ -223,6 +220,8 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             &resolve_note,
         );
     }
+    checks.insert(key, check);
+    drop(checks);
     if problems == 0 {
         // A file saved while the analysis ran would leave the earlier contents marked clean
         // although the analysis judged the later ones, so the verdict is kept only when the
@@ -237,6 +236,11 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     refuse(problems);
     Ok(Verdict::Refuse)
 }
+
+/// Each package's analysis from its last strict check in this process, by canonical root, so
+/// the check of a reload re-derives only what the edit changed.
+static PACKAGE_CHECKS: LazyLock<Mutex<FxHashMap<PathBuf, PackageCheck>>> =
+    LazyLock::new(Mutex::default);
 
 /// Hashes everything the strict check reads: the ry binary, the configuration, every R file
 /// in `R/`, the override stubs, the package metadata and the data files.

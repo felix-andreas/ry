@@ -918,8 +918,18 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
         "writeLines(c('# typing: strict', '#: fn(x: double) -> double', \
          'g <- function(x) x + \"a\"'), {file:?})\n\
          cat(tryCatch(load_all({root:?}), error = conditionMessage), '\\n')\n\
-         cat(g(1), '\\n')\n",
+         cat(g(1), '\\n')\n\
+         writeLines(c('# typing: strict', '#: fn(x: double) -> double', \
+         'g <- function(x) x + 2'), {file:?})\n\
+         writeLines(c('# typing: strict', '#: fn() -> double', 'h <- function() \"a\"'), \
+         {added:?})\n\
+         cat(tryCatch(load_all({root:?}), error = conditionMessage), '\\n')\n\
+         cat(g(1), '\\n')\n\
+         invisible(file.remove({added:?}))\n\
+         invisible(load_all({root:?}))\n\
+         cat('fixed', g(1), '\\n')\n",
         root = root.path().display().to_string(),
+        added = root.path().join("R/b.R").display().to_string(),
     );
     for runtime in RUNTIMES {
         fs::write(
@@ -927,6 +937,9 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
             "# typing: strict\n#: fn(x: double) -> double\ng <- function(x) x + 1\n",
         )
         .expect("write file");
+        if let Err(error) = fs::remove_file(root.path().join("R/b.R")) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        }
         let output = ry_load_on(runtime, root.path(), &[&script]);
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
@@ -936,6 +949,16 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
         );
         // The refused reload ran nothing, so the old definition stays.
         assert!(printed.contains("\n2 \n"), "{runtime}: {printed}");
+        // The check of each reload keeps the previous analysis: a file added with an error
+        // refuses the next reload, and deleting it lets the fixed code load.
+        assert_eq!(
+            printed
+                .matches("strictreload was not loaded, because strict mode refused it")
+                .count(),
+            2,
+            "{runtime}: {printed}"
+        );
+        assert!(printed.contains("fixed 3 \n"), "{runtime}: {printed}");
     }
 }
 
