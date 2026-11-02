@@ -411,6 +411,8 @@ fn read_sliced(
     };
     let start = rows.start;
     release(0..start)?;
+    // One range spanning the rows is the intended value, not a mistyped `(0..n).collect()`.
+    #[allow(clippy::single_range_in_vec_init)]
     let ranges = if malformed {
         // Polars opens a quoted field at any quote and ends it at the next one, where the slicer
         // follows the CSV grammar, so the two would split badly quoted text at different rows.
@@ -574,6 +576,8 @@ fn bitmap(validity: Option<MutableBitmap>) -> Option<Bitmap> {
 /// formed. A range ends just after a line break outside quotes.
 fn slices(bytes: &[u8], slice_bytes: usize, separator: u8) -> Vec<Range<usize>> {
     let Some(starts) = stretch_starts(bytes, slice_bytes, separator) else {
+        // One range spanning the file is the intended value, not a mistyped `(0..n).collect()`.
+        #[allow(clippy::single_range_in_vec_init)]
         return vec![0..bytes.len()];
     };
     let mut ranges = Vec::with_capacity(starts.len());

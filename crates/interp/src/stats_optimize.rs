@@ -809,15 +809,15 @@ unsafe fn nelder_mead(
     let mut point = vec![0.0; n];
     loop {
         if evaluate_vertices {
-            for j in 0..vertices {
+            for (j, vertex) in simplex[..vertices].iter_mut().enumerate() {
                 if j != best {
-                    point.copy_from_slice(&simplex[j][..n]);
+                    point.copy_from_slice(&vertex[..n]);
                     let mut f = problem.value(&point)?;
                     if !f.is_finite() {
                         f = BIG;
                     }
                     count += 1;
-                    simplex[j][n] = f;
+                    vertex[n] = f;
                 }
             }
             evaluate_vertices = false;
@@ -825,9 +825,9 @@ unsafe fn nelder_mead(
         let mut lowest = simplex[best][n];
         let mut highest = lowest;
         let mut worst = best;
-        for j in 0..vertices {
+        for (j, vertex) in simplex[..vertices].iter().enumerate() {
             if j != best {
-                let f = simplex[j][n];
+                let f = vertex[n];
                 if f < lowest {
                     best = j;
                     lowest = f;
@@ -944,6 +944,10 @@ const STEP_REDUCTION: f64 = 0.2;
 const ACCEPTANCE: f64 = 0.0001;
 const RELATIVE_TEST: f64 = 10.0;
 
+/// What a gradient minimizer returns: the solution, its value, the function and gradient
+/// evaluation counts, and the convergence code.
+type Minimum = (Vec<f64>, f64, (usize, usize), i32);
+
 /// Nash's variable metric method: BFGS updates of an inverse Hessian approximation, with a
 /// backtracking line search on an Armijo condition and a reset to steepest descent whenever
 /// the update fails.
@@ -951,7 +955,7 @@ unsafe fn variable_metric(
     problem: &mut Problem<'_>,
     start: &[f64],
     control: &Control,
-) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
+) -> R<Minimum> {
     let n = start.len();
     let trace = control.trace > 0;
     let report = control.report.max(1) as usize;
@@ -1118,7 +1122,7 @@ unsafe fn conjugate_gradients(
     start: &[f64],
     control: &Control,
     kind: i32,
-) -> R<(Vec<f64>, f64, (usize, usize), i32)> {
+) -> R<Minimum> {
     let n = start.len();
     let trace = control.trace > 0;
     let mut b = start.to_vec();
@@ -1991,7 +1995,7 @@ unsafe fn adaptive(
             } else {
                 last
             };
-            for _ in nr_max..=upper_bound {
+            while nr_max <= upper_bound {
                 max_error = order[nr_max - 1] as usize;
                 error_max = errors[max_error - 1];
                 if (upper[max_error - 1] - lower[max_error - 1]).abs() > small {
@@ -2240,11 +2244,7 @@ fn epsilon_algorithm(
         ib += 2;
     }
     if original != length_now {
-        let mut index = original - length_now + 1;
-        for i in 1..=length_now {
-            table[i] = table[index];
-            index += 1;
-        }
+        table.copy_within(original - length_now + 1..=original, 1);
     }
     *size = length_now;
     if *count < 4 {

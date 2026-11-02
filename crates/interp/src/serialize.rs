@@ -416,9 +416,7 @@ impl Reader<'_> {
                     5 => SexpType::Promise,
                     _ => SexpType::Dots,
                 };
-                let (car, cdr) = if object_kind == SexpType::Closure {
-                    (car, bytecode_expression(cdr))
-                } else if object_kind == SexpType::Promise {
+                let (car, cdr) = if matches!(object_kind, SexpType::Closure | SexpType::Promise) {
                     (car, bytecode_expression(cdr))
                 } else {
                     (car, cdr)

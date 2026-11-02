@@ -1509,7 +1509,7 @@ fn msd_sort<K: RadixKey>(
     for &(key, _) in pairs.iter() {
         sizes[digit(key.wide(), shift)] += 1;
     }
-    if sizes.iter().any(|&size| size == pairs.len()) {
+    if sizes.contains(&pairs.len()) {
         if shift == 0 {
             sink.emit(offset, pairs);
         } else {
@@ -1791,7 +1791,8 @@ fn singleton_sort<T: Copy + PartialOrd>(items: &mut [T], index: &mut [i32]) {
                         items[slot as usize] = items[(slot - 1) as usize];
                         index[slot as usize] = index[(slot - 1) as usize];
                         slot -= 1;
-                        if slot < 1 || !(value < get(items, slot)) {
+                        if slot < 1 || value.partial_cmp(&get(items, slot)) != Some(Ordering::Less)
+                        {
                             break;
                         }
                     }
@@ -1905,10 +1906,10 @@ unsafe fn duplicated_elements(
     } else {
         incomparable_keys(incomparables, x.kind())?
     };
-    if incomparables.is_none() {
-        if let Some(keys) = plain_keys(x) {
-            return Ok(duplicate_flags(keys, from_last));
-        }
+    if incomparables.is_none()
+        && let Some(keys) = plain_keys(x)
+    {
+        return Ok(duplicate_flags(keys, from_last));
     }
     let mut duplicated = vec![false; count];
     let visit: Box<dyn Iterator<Item = usize>> = if from_last {

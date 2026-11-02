@@ -526,7 +526,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let same =
                         self.builder
                             .ins()
-                            .icmp_imm(IntCC::Equal, held, function.as_ptr() as i64);
+                            .icmp_imm_u(IntCC::Equal, held, function.as_ptr() as i64);
                     self.hand_off_unless(position, &before, same);
                 }
                 for &(step, state) in prelude {

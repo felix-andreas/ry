@@ -500,3 +500,18 @@ frame: polars_data_frame
 doubled: polars_data_frame
 summary: polars_data_frame
 rows: integer
+
+#---- tidyr_and_tibble_verbs_mask_their_columns
+library(tidyr)
+d <- data.frame(a = 1, b = 2)
+long <- pivot_longer(d, cols = c(a, b))
+wide <- tidyr::pivot_wider(long, names_from = name, values_from = value)
+kept <- drop_na(d, a)
+t <- tibble(x = 1:3, y = x * 2)
+#++++
+Any
+d: data.frame
+long: Any
+wide: Any
+kept: data.frame
+t: data.frame

@@ -11,7 +11,10 @@ The quality bar is four things.
   An unsupported construct may be refused loudly, because sound-by-refusal is acceptable, and must
   never be silently mistyped.
 - **No false positive on the roughly 200 most-used base functions**, with `[check] typing = true`,
-  on an idiomatic call form.
+  on an idiomatic call form. `crates/semantics/tests/typing/base-functions.R.test` measures it: the
+  functions the corpus calls most, one idiomatic call each, with no diagnostic allowed. Its
+  remaining `Unknown` results (`Reduce` over an operator, a replacement call's value) are strict-mode
+  gaps, not false reports.
 - **Keystroke to diagnostics at a median of 30 ms or less and a 95th percentile of 100 ms or less,
   at 300k lines.** Read those against the raw-parse floor the instrument prints, because a latency
   number swings by about 1.4 times with machine load. `crates/semantics/tests/test_perf.rs` pins
@@ -25,7 +28,7 @@ The quality bar is four things.
 
 - **Byte strings print with GNU R's padding.** In a printed character vector, GNU R pads a `"bytes"` string by the width of its `\xNN` spelling before the backslash is escaped, one column narrower than ry. `formatC` on one pads by its byte count. Both are cosmetic.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 119.2k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 17.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 14.2k per reading against 4.5k, where `out[[i]] <- list(...)` runs through `complex_assign` and `do_list` instead of compiled code. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 14.2k per reading against 4.5k, where `out[[i]] <- list(...)` runs through `complex_assign` and `do_list` instead of compiled code. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
 
@@ -64,19 +67,21 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **`pkg::name` on an inactive shipped namespace is not validated.** `dplyr::mutat` in a script with
-  no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
-  `::` loads without attaching; validating it against the shipped manifest and stub types without
-  activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
-- **`with`, `subset` and `transform` are strict findings.** base declares them as bare `Any`
-  values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
-  `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
-  `-> Any` for `with`) would make these results deliberate too.
-- **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
-  the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
-  then, limitations.md recommends moving shared helpers into `R/`.
-- **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
-  c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
+- **Platform-conditional `pkg::name` reads are reported "not exported".** 17 corpus reads, such as
+  `utils::shortPathName`, `utils::readRegistry` and `grDevices::win.metafile`, name Windows-only
+  exports the Linux-generated manifests lack, and `parallel::splitList` and `base::check_tzones`
+  are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
+  `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
+  argument is a probe and could skip validation.
+- **A bare `NA` returned as a missing string is `logical | character`** (downlit
+  `extract_curly_package` returns `NA`, and the result reaches `system.file(package = )` after an
+  `is.na()` check: 2 corpus reports). `NA` coerces into any atomic type in R; a literal `NA` joining a
+  branch or return of another atomic type could take that type, which needs the literal's provenance
+  at the join. `type-checking/limitations.md` documents it.
+- **A nullable return that a correlated predicate excludes** (pkgload `ns_env()` returns `NULL` unless
+  `is_loaded(package)`, and `imports_env()` tests `is_loaded()` itself before
+  `parent.env(ns_env(package))`: 1 corpus report). Correct under the `T | NULL` rule, but R code
+  relies on it.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
   above `amount <- df$amount` still reports the origin and tells the user to "add a type
   annotation"; only `# ry: allow(strict)` clears it.
@@ -128,8 +133,10 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 63. About 22 of the rest are true bugs in the packages (NlcOptim calls the
-matrices `indall` and `A` as functions); the other 41
+lifecycle, and is down to 62. Typing `system.file()` and `asNamespace()` exposed three more
+(the bare `NA` and correlated-`NULL` items above), and after the `NULL`-placeholder, `length()`
+guard and numeric-rebind fixes it is 61. About 22 of the rest are true bugs in the packages
+(NlcOptim calls the matrices `indall` and `A` as functions); the other 39
 or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
 packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
 reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
@@ -146,8 +153,7 @@ forwarding to a `missing()`-tested parameter. The classes:
   argument type" (2), gmp `if (log)` with no `log` formal, httr `revoke_oauth2.0(x)` without
   `credentials`.
 - **Metaprogrammed bodies read names from a frame the checker cannot see.** R6's `generator_funs$new` reads `class` from the generator environment it is
-  copied into. openxlsx's Reference Class methods call sibling methods (`getBaseFont()`) that the
-  checker resolves to a same-named top-level function.
+  copied into.
 - **A conditional library read is taken as a force.** PerformanceAnalytics passes a missing
   `angle` to `rect(angle = angle)`, which reads it only when `density` is not `NULL`.
 - **A defaulted callback pins its slot to the first call's argument.** ks has
@@ -163,8 +169,8 @@ forwarding to a `missing()`-tested parameter. The classes:
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
   caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
   `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
-  has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
-  unannotated project functions, which needs the callee's annotation provenance at the argument check.
+  has not been isolated yet for these; the ks `mise.mixt` case (arithmetic-tied operands bound by a
+  literal) is fixed by `widen_numeric_binding`. The scalar-claim returns themselves remain.
 - **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
   another tests in a condition (brew `.extendedError`, rvest `new_chromote`).
 - **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
@@ -1391,10 +1397,6 @@ The message says to add a type annotation, and no annotation form silences it. `
 - **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
   a wider template, which the tester confirmed with `ry run` on
   `vapply(1:3, function(i) i, numeric(1))`.
-- **`source()` is not followed**, so a helpers file is pure noise in both directions. All ten helper
-  functions reported `unused`, and every correct call to them reported `unresolved`, which is
-  indistinguishable from the planted typo. It also killed the wrong-arity catch, which works well
-  within a file.
 - **A function name inside `mutate` and `filter` is swallowed** along with the column names.
 
 ### Two lints need a model change rather than a patch

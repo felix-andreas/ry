@@ -59,6 +59,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
 /// gives the session `load_all()`.
+///
+/// # Safety
+/// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn attach() -> R<()> {
     scope(|| {
         let runtime = values::new_env(values::base_env())?;

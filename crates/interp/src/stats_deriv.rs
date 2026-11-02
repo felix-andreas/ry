@@ -119,11 +119,11 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
                 Some(first) => first,
                 None => differentiate(call, values::duplicate(expression)?, variables[i])?,
             };
-            for j in i..count {
+            for &variable in &variables[i..count] {
                 if d2_index[k] != 0 {
                     entries.push(variable_for(d2_index[k])?);
                 } else {
-                    let second = differentiate(call, values::duplicate(first)?, variables[j])?;
+                    let second = differentiate(call, values::duplicate(first)?, variable)?;
                     entries.push(if d_index[i] == 0 && is_zero(second) {
                         slot
                     } else {

@@ -1,0 +1,39 @@
+# tidyr: a CONDITIONAL namespace, like dplyr. Its other exports come from
+# `tidyr.exports`; these declarations add what the manifest cannot say.
+#
+# The verbs are `@masked`: column selections (`cols = c(a, b)`) and the
+# arguments their `...` absorbs evaluate against the data's columns, so bare
+# column names there are never "unresolved", while the data argument resolves
+# normally. A verb that keeps the columns preserves the data's class; one that
+# reshapes them returns `Any`, because the result's columns depend on the data.
+
+pivot_longer : @masked fn(data: Any, ...: Any) -> Any
+pivot_wider : @masked fn(data: Any, ...: Any) -> Any
+gather : @masked fn(data: Any, ...: Any) -> Any
+spread : @masked fn(data: Any, ...: Any) -> Any
+drop_na : @masked <T> fn(data: T, ...: Any) -> T
+fill : @masked <T> fn(data: T, ...: Any) -> T
+complete : @masked <T> fn(data: T, ...: Any) -> T
+expand : @masked fn(data: Any, ...: Any) -> Any
+nest : @masked fn(.data: Any, ...: Any) -> Any
+unnest : @masked fn(data: Any, ...: Any) -> Any
+unnest_longer : @masked fn(data: Any, ...: Any) -> Any
+unnest_wider : @masked fn(data: Any, ...: Any) -> Any
+hoist : @masked fn(.data: Any, ...: Any) -> Any
+chop : @masked fn(data: Any, ...: Any) -> Any
+unchop : @masked fn(data: Any, ...: Any) -> Any
+pack : @masked fn(.data: Any, ...: Any) -> Any
+unpack : @masked fn(data: Any, ...: Any) -> Any
+separate : @masked fn(data: Any, ...: Any) -> Any
+separate_rows : @masked fn(data: Any, ...: Any) -> Any
+separate_wider_delim : @masked fn(data: Any, ...: Any) -> Any
+separate_wider_position : @masked fn(data: Any, ...: Any) -> Any
+separate_wider_regex : @masked fn(data: Any, ...: Any) -> Any
+separate_longer_delim : @masked fn(data: Any, ...: Any) -> Any
+separate_longer_position : @masked fn(data: Any, ...: Any) -> Any
+unite : @masked fn(data: Any, ...: Any) -> Any
+extract : @masked fn(data: Any, ...: Any) -> Any
+uncount : @masked fn(data: Any, ...: Any) -> Any
+
+# Re-exported from tibble, where it is explained.
+tibble : @masked fn(...: Any) -> data.frame

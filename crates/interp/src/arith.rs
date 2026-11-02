@@ -445,8 +445,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             }
         }
     }
-    for position in 0..outer {
-        if done[position] {
+    for (position, &finished) in done.iter().enumerate() {
+        if finished {
             continue;
         }
         let mut total = LongDouble::ZERO;
@@ -877,9 +877,9 @@ unsafe fn strict(
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
-    if arrays::check_operands(call.call, &name, class, &operands)? {
+    if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
-        return arrays::finish_result(call.call, &name, result);
+        return arrays::finish_result(call.call, name, result);
     }
     let result = compute(call)?;
     // R's operator may hand back an operand, which is an Array here and may still be bound to a
@@ -2318,8 +2318,8 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
                     NA_REAL
                 } else {
                     match base {
-                        Some(base) if base == 10.0 => x.log10(),
-                        Some(base) if base == 2.0 => x.log2(),
+                        Some(10.0) => x.log10(),
+                        Some(2.0) => x.log2(),
                         Some(base) => x.ln() / base.ln(),
                         None => x.ln(),
                     }
