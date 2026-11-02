@@ -841,7 +841,8 @@ pub unsafe extern "C" fn dtrco_(
 
 /// LINPACK's `dpofa`: the Cholesky factor `R` (upper, `A = R'R`) of a symmetric positive
 /// definite matrix, in place. `info` is the order of the leading minor that is not positive
-/// definite, or 0. Like R's copy, a pivot below a relative 1e-14 counts as not positive.
+/// definite, or 0. As in GNU R, a pivot of at most 1e-14 times its diagonal element counts as
+/// not positive, which `test_numerics` pins at the boundary.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dpofa_(a: *mut f64, lda: *const c_int, n: *const c_int, info: *mut c_int) {
     let a = Matrix::new(a, *lda);

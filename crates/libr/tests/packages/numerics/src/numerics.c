@@ -366,6 +366,15 @@ static void case_positive_definite(void)
     a[0] = -1;
     F77_CALL(dpofa)(a, &n, &n, &info);
     put_int(info);
+    /* A pivot of at most 1e-14 times its diagonal counts as not positive, so the first matrix
+       fails and the next two pass. */
+    double edges[3][4] = {{1, 1, 1, 1 + 1e-14}, {1, 1, 1, 1 + 1.1e-14}, {1e-300, 0, 0, 1}};
+    int two = 2;
+    for (int edge = 0; edge < 3; edge++) {
+        F77_CALL(dpofa)(edges[edge], &two, &two, &info);
+        put_int(info);
+        put_all(edges[edge], 4);
+    }
     /* Banded: tridiagonal with 4 on the diagonal and 1 off it, in LINPACK's layout. */
     double band[2 * 6], rhs[6];
     int m = 1, size = 6, lda = 2;
