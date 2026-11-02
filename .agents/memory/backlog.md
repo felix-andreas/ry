@@ -80,15 +80,6 @@ False reports on correct R, worst first:
   are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
   `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
   argument is a probe and could skip validation.
-- **A bare `NA` returned as a missing string is `logical | character`** (downlit
-  `extract_curly_package` returns `NA`, and the result reaches `system.file(package = )` after an
-  `is.na()` check: 2 corpus reports). `NA` coerces into any atomic type in R; a literal `NA` joining a
-  branch or return of another atomic type could take that type, which needs the literal's provenance
-  at the join. `type-checking/limitations.md` documents it.
-- **A nullable return that a correlated predicate excludes** (pkgload `ns_env()` returns `NULL` unless
-  `is_loaded(package)`, and `imports_env()` tests `is_loaded()` itself before
-  `parent.env(ns_env(package))`: 1 corpus report). Correct under the `T | NULL` rule, but R code
-  relies on it.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
   above `amount <- df$amount` still reports the origin and tells the user to "add a type
   annotation"; only `# ry: allow(strict)` clears it.
@@ -105,18 +96,13 @@ Smaller gaps:
   "did you mean".
 - After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
   finding.
-- An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
 - A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
   `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
   on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
   the generic argument check to carry which argument fixed the type variable.
-- `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
-  friendlier contract.
-- `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
-  function only takes 1". `greet(nam = "Ada")` gets the same message, although R partially matches
-  `nam` to `name`. After an invalid field write, a later field typo on the same record goes
+- After an invalid field write, a later field typo on the same record goes
   unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
 - From the final type-system review, each now documented as a known gap in the reference:
   - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
@@ -140,11 +126,12 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 62. Typing `system.file()` and `asNamespace()` exposed three more
-(the bare `NA` and correlated-`NULL` items above), and after the `NULL`-placeholder, `length()`
-guard and numeric-rebind fixes it is 61. About 22 of the rest are true bugs in the packages
-(NlcOptim calls the matrices `indall` and `A` as functions); the other 39
-or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
+lifecycle, and is down to 51 after the bare-`NA` return, correlated-`NULL` test, project
+predicate, `Reduce`-wrapper, `exists()` probe and branch-join fixes. About 26 of the rest are true
+bugs in the packages (NlcOptim calls the matrices `indall` and `A` as functions); the other 25 or
+so are false reports on correct R, mostly one per cause: diffobj (6), renv (3), gmp, ks,
+PerformanceAnalytics (2 each), and devtools, knitr, mgcv, R6, Rsolnp, bit64, htmltools, httr,
+pracma, roxygen2 and snakecase (1 or 2 each). The three generated benchmark
 packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
 reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
 flag-default return, `match.fun` value-read formals, logical callback slots, logical text,
@@ -167,11 +154,6 @@ forwarding to a `missing()`-tested parameter. The classes:
   `if (missing(col.fun)) col.fun <- function(n) ...`, then calls `col.fun(n = length(levels))` and
   `col.fun(n = length(levels) + 1)`. The join binds the lambda, so `n` is a variable bound to
   `integer` rather than an inferred scalar slot, and the `double` fails.
-- **`Reduce` through a wrapper that closes over its own formal** (vctrs' standalone purrr
-  `reduce(.x, .f, ..., .init)` calls `Reduce(function(x, y) .f(x, y, ...), .x, init = .init)`).
-  The fold path (`infer_reduce_fold`) skips a function that mentions the enclosing function's type
-  variables, so `.f` keeps the stub's `fn(U, T) -> U` and `c(output, list(...))` widening
-  `list{double}` to `list[Unknown]` is reported.
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
   caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
@@ -179,7 +161,8 @@ forwarding to a `missing()`-tested parameter. The classes:
   has not been isolated yet for these; the ks `mise.mixt` case (arithmetic-tied operands bound by a
   literal) is fixed by `widen_numeric_binding`. The scalar-claim returns themselves remain.
 - **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
-  another tests in a condition (brew `.extendedError`, rvest `new_chromote`).
+  another tests in a condition (brew `.extendedError`, rvest `new_chromote`). knitr's `NA` placeholder that `<<-`
+  fills later is the same class.
 - **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
   an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
 - **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
@@ -196,15 +179,6 @@ forwarding to a `missing()`-tested parameter. The classes:
   returned, so a `character` argument returns `character | list[character] | character[]`, which an
   inferred `character` parameter then rejects. Needs a bounded variable (`<P: list[T] | T[]>`) so the
   return names the argument's own type.
-- **A branch join pins a rebound formal to the other branch's type** (mgcv `Sl.fitChol`:
-  `rho <- if (is.null(L)) rho + rho0 else L %*% rho + rho0` exports `rho: matrix`, so
-  `rho = lsp[1:n.sp]` is reported). Joining the open `T` of `rho + rho0` with `matrix` unifies the
-  formal's variable instead of forming a union.
-- **Negating a parameter whose only type is a `NULL` default is reported** (pracma
-  `quadprog(A = NULL, b = NULL)` negates `b` under `if (!is.null(A))`: 2 corpus reports). Dropping
-  the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
-  `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
-  A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
 - **A computed-key write into a record leaves the record unchanged** (highs `globals[[key]] <<-
   value` on `list(threads = NA_integer_)`), so a later computed read claims only the declared
   fields' types. Combined with a `missing(key)` path that returns the whole record, the result is
@@ -343,14 +317,6 @@ type-level function the annotation language does not have.
 - A nominal union is unchecked through `$` while a structural union is exact. There is also no
   discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
   be narrowed at all.
-- An alias cycle is reported on the use, with a whole-statement caret, and never at the declaration.
-  An unused cyclic alias is not reported at all, although the reference says a definition cycle is
-  an error.
-- A second `#:` annotation on one line is silently swallowed, because the first wins, while harmless
-  trailing prose errors. The ambiguous input is the quiet one.
-- A missing-argument error does not name the parameter, although the sibling wrong-name error lists
-  all of them.
-- A near-miss suggestion has a length floor that misses a short field name, such as `person$nam`.
 - A generic lambda passed as an argument keeps its binders rigid, so
   `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
   on a function that is not bound should instantiate its binders like a call does.
