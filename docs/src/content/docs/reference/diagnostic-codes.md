@@ -267,6 +267,16 @@ mentions. Only `ry check` reports it.
 function from `base`, or from another package, such as defining your own `filter` while
 `stats::filter` exists.
 
+**`data-table`** (off by default): a call that creates a data.table, which is `data.table()`,
+`fread()`, `as.data.table()` or `setDT()`, bare or as `data.table::`. data.table code runs
+unchanged, so this only helps you find the code to move to the typed
+[DataFrame](/guides/from-data-table/) when you choose to. A file that defines its own function of
+that name is not flagged.
+
+```text
+! `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+```
+
 **`redundant-return`** (off by default): `return(x)` as a function's last expression, including
 both branches of a trailing `if`, where `x` alone returns the same value. A file that defines its
 own `return` gets no finding.

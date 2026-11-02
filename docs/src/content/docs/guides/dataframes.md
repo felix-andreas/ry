@@ -9,7 +9,8 @@ db-benchmark's questions at ten million rows takes about a quarter of the time d
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
 column is reported before the query runs. Code you already wrote for data.table keeps working, and
 most of its queries run on the same engine
-([Existing data.table code](#existing-datatable-code)).
+([Existing data.table code](#existing-datatable-code)). [Moving from data.table](/guides/from-data-table/)
+maps each common data.table idiom to its DataFrame equivalent.
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
