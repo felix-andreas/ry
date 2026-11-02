@@ -2673,7 +2673,13 @@ pub unsafe fn symbol(
                 }
                 _ => {}
             }
-            polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            // GNU R starts pch 23 at its bottom vertex and the others at their left one, and
+            // the starting vertex moves where an antialiased outline closes.
+            if pch == 23 {
+                polygon(&[x, x + xc, x, x - xc], &[y - yc, y, y + yc, y], gc, dd)
+            } else {
+                polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            }
         }
         7 => {
             let (xc, yc) = half(SYMBOL_RADIUS);

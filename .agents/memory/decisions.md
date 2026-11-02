@@ -2549,6 +2549,13 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - Labels are a `Label` (string lines, or an expression laid out by `plotmath.rs`), and every
     text path (`text`, `mtext`, `title`, `axis`, `strwidth`) goes through `push_label`, so
     plotmath is one code path rather than a deparse fallback per caller.
+  - Base graphics draws `pch` 0 to 25 through `graphics_engine::symbol` (GNU R's `GESymbol`),
+    which sizes symbols in device units. A second copy of the shapes in `push_symbol` had drawn
+    pch 0, 15 and 5 at different half-widths and started pch 23 at another vertex, which moves
+    where an antialiased outline closes.
+  - A missing `adj` or `at` in `mtext` defaults by `las` and side (`ComputeAdjValue`,
+    `ComputeAtValue`), not to `par("adj")`; `tck` below 0.5 is a fraction of the plot region's
+    shorter side, above it of its extent across the axis.
 - **Base graphics is checked against GNU R by a plot gallery.** `crates/oracle/gallery/*.R` holds
   about 150 figures (base graphics including the PerformanceAnalytics charts, grid, lattice,
   ggplot2), and `oracle gallery` renders each on both engines and every device, then compares.
