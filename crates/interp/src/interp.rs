@@ -154,7 +154,13 @@ pub struct Hooks {
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
+    /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
+    /// finds `user_unif_rand`.
+    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
+
+/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
+pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -390,6 +396,7 @@ pub fn default_hooks() -> Hooks {
             Ok(())
         },
         connection_vfprintf: None,
+        find_native_symbol: |_| None,
     }
 }
 

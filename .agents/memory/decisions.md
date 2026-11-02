@@ -4697,8 +4697,23 @@ check` releases its trees once, and memoized records are compact" below).
   `get_rng_state`/`put_rng_state`.
   `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
   hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
+  `RNGkind("user-supplied")` finds `user_unif_rand` and its seed routines through the
+  `find_native_symbol` interpreter hook, which `libr` fills with `dynload::find_symbol`
+  (randtoolbox's WELL tests need it).
 - **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
   exactly as under GNU R, and every kind the interpreter supports works from C at no extra cost.
+
+## Native code reads an environment as a cell
+
+- **Before.** `CAR`, `CDR` and `TAG` refused an environment ("bad CAR: a 'environment' has no
+  cells"), and `R_NewEnv` refused a `NULL` enclosure.
+- **Now.** GNU R lays an environment out as a cell (frame in `CAR`, enclosure in `CDR`, hash table
+  in `TAG`), and nanonext looks bindings up by walking `CAR(env)` because `findVarInFrame` is not
+  API. `CAR(env)` returns the same read-only frame snapshot as `FRAME`, `CDR(env)` the enclosure
+  and `TAG(env)` `NULL`, as `HASHTAB` does. `R_NewEnv(R_NilValue, ...)` gets the empty
+  environment as its enclosure, because GNU R stores the enclosure unchecked.
+- **Impact.** mirai, and purrr's `in_parallel` on top of it, run. A snapshot costs one cell per
+  binding on each `CAR(env)`, which is fine for nanonext's small aio environments.
 
 ## Typed checking costs per name, not per file
 
