@@ -1411,7 +1411,9 @@ fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
 
 /// Whether `a %% b` has a quotient beyond what extended precision holds, which GNU R warns
 /// about.
-fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
+/// Whether `a %% b` warns that its result has lost all accuracy, as R does when the
+/// quotient is too large for the remainder to mean anything.
+pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
     let quotient = a / b;
     quotient.is_finite() && quotient.abs() > 2f64.powi(63)
 }

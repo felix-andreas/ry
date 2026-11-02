@@ -526,7 +526,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let same =
                         self.builder
                             .ins()
-                            .icmp_imm(IntCC::Equal, held, function.as_ptr() as i64);
+                            .icmp_imm_u(IntCC::Equal, held, function.as_ptr() as i64);
                     self.hand_off_unless(position, &before, same);
                 }
                 for &(step, state) in prelude {
@@ -1823,6 +1823,17 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::Modulo(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);
                 let b = self.as_double(args[1], types[1]);
+                // Tier 0 raises the warning, so a modulus that loses accuracy hands off.
+                let loses = self
+                    .call(
+                        runtime::jit_modulus_loses_accuracy as *const () as usize,
+                        &[F64, F64],
+                        Some(I32),
+                        &[a, b],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let keeps = self.builder.ins().icmp_imm_u(IntCC::Equal, loses, 0);
+                self.hand_off_unless(position, before, keeps);
                 let result = self
                     .call(
                         runtime::jit_real_modulo as *const () as usize,

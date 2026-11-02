@@ -458,10 +458,8 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
             let mut signature = true;
             if let Some(signature_offset) = signature_offset {
                 signature =
-                    ide::signature_help_with(db, record.file, signature_offset, &mut |target| {
-                        installed.formals(target)
-                    })
-                    .is_some();
+                    ide::signature_help_with(db, record.file, signature_offset, &mut installed)
+                        .is_some();
                 tally.signature_total += 1;
                 tally.signature += usize::from(signature);
             }
@@ -584,9 +582,7 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Pat
                     .to(text);
                 let cursor = TextSize::from(prefix_end as u32);
                 let began = Instant::now();
-                let result = ide::completion_with(db, files, record.file, cursor, &mut |target| {
-                    installed.formals(target)
-                });
+                let result = ide::completion_with(db, files, record.file, cursor, &mut installed);
                 latencies.push(began.elapsed());
                 let labels: Vec<String> = result
                     .map(|result| {
@@ -627,11 +623,9 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Pat
                     match role {
                         IdentifierRole::ArgumentName => format!(
                             "   signature: {}",
-                            ide::signature_help_with(db, record.file, cursor, &mut |target| {
-                                installed.formals(target)
-                            })
-                            .and_then(|help| help.signatures.into_iter().next())
-                            .map_or_else(|| "none".to_owned(), |signature| signature.label)
+                            ide::signature_help_with(db, record.file, cursor, &mut installed)
+                                .and_then(|help| help.signatures.into_iter().next())
+                                .map_or_else(|| "none".to_owned(), |signature| signature.label)
                         ),
                         _ => String::new(),
                     },
@@ -967,9 +961,8 @@ fn names_a_dots_element(
     word: &str,
     installed: &mut InstalledPackages,
 ) -> bool {
-    let Some(signature) =
-        ide::signature_help_with(db, file, offset, &mut |target| installed.formals(target))
-            .and_then(|help| help.signatures.into_iter().next())
+    let Some(signature) = ide::signature_help_with(db, file, offset, installed)
+        .and_then(|help| help.signatures.into_iter().next())
     else {
         return false;
     };

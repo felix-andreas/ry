@@ -1034,11 +1034,11 @@ pub unsafe fn plan<'a>(
             continue;
         };
         builder.states.load(entry, &mut state);
-        for position in block.start..block.end {
+        for (slot, position) in before[block.start..block.end].iter_mut().zip(block.start..) {
             let start = boxings.len() as u32;
             boxings.extend(builder.box_operands(position, &mut state));
             boxing_ranges.push(start);
-            before[position] = Some(builder.states.push(&state));
+            *slot = Some(builder.states.push(&state));
             builder.edges.clear();
             actions.push(builder.transfer(position, &mut state)?);
             edge_ranges.push(edges.len() as u32);
@@ -3317,9 +3317,7 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         ("[[", [array, index]) if array.is_array() && matches!(index, Ty::Int | Ty::Dbl) => {
             (Intrinsic::Element, array.element())
         }
-        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
-            (Intrinsic::Element, Ty::Boxed)
-        }
+        ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
         ("length", [ty])
             if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
         {
