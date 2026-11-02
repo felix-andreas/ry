@@ -50,7 +50,11 @@ List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,
 or `Ops.gg`, or a subset method such as `[.xts`, `[[.Date`, or `$.request`, which types `x[i]`,
-`x[[i]]`, or `x$name` on that class. The operator spellings are how a stub gives a class arithmetic
+`x[[i]]`, or `x$name` on that class. An object whose members are reached with `$`, such as a
+polars frame or another environment-backed object, declares each member as `Class$member`:
+`polars_data_frame$select : fn(...: Any) -> polars_data_frame` types `frame$select(...)`, and
+`polars_data_frame$height : integer` types a property. A member the stub does not list stays
+`Unknown`. The operator spellings are how a stub gives a class arithmetic
 or comparison, and
 [operator methods on a class](/reference/type-system#operator-methods-on-a-class) describes the
 dispatch order. The suffix is the nominal type's own name, so a project stub line

@@ -158,6 +158,54 @@ call that returns `Any` (`readRDS()`, `eval()`, and S3 generics that dispatch th
 is a deliberate opt-out, so strict mode does not report it. A call to `stop()` never returns, so it
 types as `Any` too, and a guard such as `if (x < 0) stop("negative")` is not reported.
 
+## Moving a file to strict mode
+
+Most of what strict mode asks for is already known to inference: it only needs writing down.
+`ry check --annotate` writes the inferred type of each unannotated top-level function and binding,
+and then reports what is left, which is the code a person has to type. Take this file:
+
+```r
+area <- function(width, height = 1) width * height
+unit <- 1L
+label <- function(shape) shape$name
+```
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+area <- function<T: numeric>(width: T, height: T = 1) -> T width * height
+unit: integer <- 1L
+label <- function(shape) shape$name
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: <T: numeric> fn(width: T, [height]: T) -> T
+area <- function(width, height = 1) width * height
+#: integer
+unit <- 1L
+label <- function(shape) shape$name
+```
+
+</TabItem>
+</Tabs>
+
+```text
+  x strict mode: parameter `shape` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `shape: TYPE`
+...
+added 2 inferred annotations
+2 problems in 1 file
+```
+
+The annotations are inline unless the project sets `inline-annotations = false`, in which case they
+are `#:` comments. Nothing constrains `shape`, so inference has no type to write and the finding
+stays for you. A binding that already has an annotation is left alone, so running the command again
+changes nothing. The editor offers the same edit for one binding, including a local inside a
+function, and for the whole file.
+
 ## Known gaps
 
 Strict mode does not yet report R6 objects or bare names from packages ry knows only by name.

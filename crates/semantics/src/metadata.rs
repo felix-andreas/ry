@@ -4,7 +4,7 @@
 use {
     crate::{
         Db, SiteRole, SourceFile, file_syntax_sites, parse,
-        stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known},
+        stubs::{META_PACKAGE_MEMBERS, stubs},
     },
     std::{collections::BTreeSet, num::NonZero, thread},
     syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
@@ -233,15 +233,13 @@ pub fn imported_by_name(db: &dyn Db, name: &str) -> bool {
     let Some(metadata) = PackageMetadata::try_get(db) else {
         return false;
     };
+    let library = stubs(db);
     metadata
         .imports(db)
         .iter()
         .any(|(namespace, imported)| match imported {
             Some(imported) => imported == name,
-            None => {
-                namespace_known(db, namespace) == Some(true)
-                    && namespace_exports(db, namespace, name)
-            }
+            None => library.is_some_and(|library| library.exports(namespace, name)),
         })
 }
 
@@ -253,8 +251,10 @@ pub fn imports_every_name(db: &dyn Db) -> bool {
         return false;
     };
     let own = metadata.package(db).as_deref();
+    let library = stubs(db);
     let unknowable = |namespace: &String| {
-        Some(namespace.as_str()) != own && namespace_known(db, namespace) != Some(true)
+        Some(namespace.as_str()) != own
+            && !library.is_some_and(|library| library.knows_namespace(namespace))
     };
     metadata
         .imports(db)
