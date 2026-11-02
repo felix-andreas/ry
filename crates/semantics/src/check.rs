@@ -194,6 +194,13 @@ pub enum TypeErrorKind<'db> {
         left: Ty<'db>,
         right: Ty<'db>,
     },
+    /// An operator in a DataFrame expression that dates do not support, such as `col("day") * 2`
+    /// or a date compared with a number.
+    DateOperation {
+        operator: &'static str,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
     /// requires.
     ColumnNameCount {
@@ -1912,6 +1919,111 @@ pub fn argument_targets<'arena>(
         }
     }
     targets
+}
+
+/// The finding a call earns from where its arguments land alone, before any argument's type is
+/// read: an argument with no formal left, an unfilled positional slot, or a missing required
+/// formal. Forwarded `...` may fill anything, and an unknown name throws off positional
+/// accounting, so neither gets an arity verdict. An overload probe asks this before it
+/// instantiates a candidate, because the verdict is the same for every instantiation.
+fn shape_verdict<'db>(
+    db: &'db dyn Db,
+    callee_range: TextRange,
+    function: &FunctionType<'db>,
+    arguments: &[CallArgument<'db>],
+    targets: &[Option<ArgumentTarget>],
+) -> Option<TypeError<'db>> {
+    if arguments.iter().any(|argument| argument.forwards_dots) {
+        return None;
+    }
+    let named = |argument: &CallArgument<'db>| argument.name.is_some();
+    if let Some(index) = targets
+        .iter()
+        .position(|target| *target == Some(ArgumentTarget::Overflow))
+    {
+        let claimed_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                named(argument)
+                    && matches!(
+                        target,
+                        Some(ArgumentTarget::Named(_) | ArgumentTarget::UndeclaredName)
+                    )
+            })
+            .count();
+        return Some(TypeError {
+            // The first argument with no formal left is the one to remove.
+            range: arguments.get(index)?.range,
+            kind: TypeErrorKind::ArityMismatch {
+                expected: (function.positional.len() + function.named.len())
+                    .saturating_sub(claimed_by_name),
+                found: arguments.iter().filter(|argument| !named(argument)).count(),
+            },
+        });
+    }
+    if targets.contains(&Some(ArgumentTarget::UnmatchedName)) {
+        return None;
+    }
+    // Overflow is handled above, so a mismatch here leaves a positional slot empty. A named
+    // argument that went to `...` fills none, so only the filled slots count.
+    let positional_filled = targets
+        .iter()
+        .filter(|target| {
+            matches!(
+                target,
+                Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
+            )
+        })
+        .count();
+    if positional_filled != function.positional.len() {
+        let filled_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                named(argument) && **target == Some(ArgumentTarget::UndeclaredName)
+            })
+            .count();
+        return Some(TypeError {
+            range: callee_range,
+            kind: TypeErrorKind::ArityMismatch {
+                expected: function.positional.len() - filled_by_name,
+                found: positional_filled - filled_by_name,
+            },
+        });
+    }
+    let filled = |formal: usize| {
+        targets
+            .iter()
+            .any(|target| *target == Some(ArgumentTarget::Named(formal)))
+    };
+    let mut missing: Vec<String> = function
+        .named
+        .iter()
+        .enumerate()
+        .filter(|&(formal, field)| !field.optional && !filled(formal))
+        .map(|(_, field)| field.name.text(db).to_owned())
+        .collect();
+    let supplied = |name: Name<'db>| {
+        function
+            .named
+            .iter()
+            .position(|field| field.name == name)
+            .is_some_and(filled)
+    };
+    for read in &function.default_reads {
+        let name = read.formal.text(db);
+        if !supplied(read.formal)
+            && !supplied(read.default_of)
+            && !missing.iter().any(|missing| missing == name)
+        {
+            missing.push(name.to_owned());
+        }
+    }
+    (!missing.is_empty()).then(|| TypeError {
+        range: callee_range,
+        kind: TypeErrorKind::MissingArguments { names: missing },
+    })
 }
 
 /// Where a value is read as a condition: `if` and `while` read a string through `as.logical`,
@@ -8751,8 +8863,9 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns. `DataFrame.join_asof(left, right, on, by)` joins on
-    /// `by` and then `on`, with a left join's columns.
+    /// join keeps only the left's columns, and a cross join has no keys.
+    /// `DataFrame.join_asof(left, right, on, by)` joins on `by` and then `on`, with a left join's
+    /// columns.
     fn join_type(
         &mut self,
         lazy: bool,
@@ -8813,6 +8926,8 @@ impl<'db> Checker<'db, '_> {
             let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
                 (Some(on), None, None) => (on.clone()?, on?),
                 (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
+                // A cross join pairs every row with every row, so it has no keys.
+                (None, None, None) if how == "cross" => (Vec::new(), Vec::new()),
                 _ => return None,
             };
             (how, suffix, left_keys, right_keys)
@@ -9032,6 +9147,29 @@ impl<'db> Checker<'db, '_> {
                             ..column
                         })
                     }
+                    "Expr.over" => {
+                        let column = argument(self)?;
+                        for key in module[arguments].iter().skip(1) {
+                            let key = key.value?;
+                            let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(key)
+                            else {
+                                return None;
+                            };
+                            self.column_reference(&module[text], module.range(key), columns, frame);
+                        }
+                        Some(ComputedColumn {
+                            shape: Shape::PerRow,
+                            ..column
+                        })
+                    }
+                    "Expr.rank" => {
+                        let column = argument(self)?;
+                        Some(ComputedColumn {
+                            ty: vector(Atomic::Integer),
+                            ..column
+                        })
+                    }
                     "Expr.is_null" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
@@ -9130,6 +9268,20 @@ impl<'db> Checker<'db, '_> {
                 {
                     return None;
                 }
+                if is_date_column(db, left.ty) || is_date_column(db, right.ty) {
+                    let ty =
+                        self.date_operation(value, *operator, (*lhs, &left), (*rhs, &right))?;
+                    return Some(ComputedColumn {
+                        name: if left.reads_column || !right.reads_column {
+                            left.name
+                        } else {
+                            right.name
+                        },
+                        ty,
+                        reads_column: left.reads_column || right.reads_column,
+                        shape: left.shape.combine(right.shape),
+                    });
+                }
                 self.check_expression_operator(value, *operator, (*lhs, &left), (*rhs, &right));
                 let ty = match operator {
                     BinaryOperator::Add
@@ -9174,6 +9326,59 @@ impl<'db> Checker<'db, '_> {
             }
             _ => None,
         }
+    }
+
+    /// Types a binary operator with a `Date` operand, which the engine stores as whole days: a
+    /// date plus or minus a number of days is a date, one date minus another is the integer
+    /// number of days between them, and two dates compare. Anything else on a date is reported,
+    /// and gives `None` so that the enclosing expression is not reported again.
+    fn date_operation(
+        &mut self,
+        value: ExprId,
+        operator: BinaryOperator,
+        (lhs, left): (ExprId, &ComputedColumn<'db>),
+        (rhs, right): (ExprId, &ComputedColumn<'db>),
+    ) -> Option<Ty<'db>> {
+        let db = self.db;
+        let is_date = |ty| is_date_column(db, ty);
+        let days =
+            |ty| matches!(join_class(db, ty), None | Some(JoinClass::Number)) && !is_date(ty);
+        let result = match operator {
+            BinaryOperator::Add if is_date(left.ty) && days(right.ty) => Some(left.ty),
+            BinaryOperator::Add if days(left.ty) && is_date(right.ty) => Some(right.ty),
+            BinaryOperator::Subtract if is_date(left.ty) && days(right.ty) => Some(left.ty),
+            BinaryOperator::Subtract if is_date(left.ty) && is_date(right.ty) => {
+                Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))))
+            }
+            BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEq
+            | BinaryOperator::GreaterEq
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+                if is_date(left.ty) && is_date(right.ty) =>
+            {
+                Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Logical))))
+            }
+            _ => None,
+        };
+        if result.is_none() {
+            let operator = match operator {
+                BinaryOperator::And => "&",
+                BinaryOperator::Or => "|",
+                _ => operator_spelling(operator)?,
+            };
+            let kind = TypeErrorKind::DateOperation {
+                operator,
+                left: self.shown_operand_type(lhs, left),
+                right: self.shown_operand_type(rhs, right),
+            };
+            self.errors.push(TypeError {
+                range: self.blame_range(value),
+                kind,
+            });
+        }
+        result
     }
 
     /// Checks a binary operator's operands against what the table engine accepts: arithmetic
@@ -10825,6 +11030,27 @@ impl<'db> Checker<'db, '_> {
         call_arguments: &[CallArgument<'db>],
         courtesy: bool,
     ) -> Result<(Ty<'db>, FunctionType<'db>), Vec<TypeError<'db>>> {
+        // Instantiation renames type variables and keeps the parameter list, so a candidate
+        // the arguments cannot land on fails the same way uninstantiated. A courtesy probe
+        // records expectations as it checks, so it always runs in full.
+        if !courtesy && let TyKind::Function(function) = scheme.body.kind(self.db) {
+            let arena = self.arena;
+            let targets = &*argument_targets(
+                self.db,
+                arena,
+                function,
+                argument_shapes(arena, call_arguments),
+            );
+            if let Some(error) = shape_verdict(
+                self.db,
+                self.blame_range(callee),
+                function,
+                call_arguments,
+                targets,
+            ) {
+                return Err(vec![error]);
+            }
+        }
         let instantiated = self.instantiate(scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
@@ -11742,7 +11968,6 @@ impl<'db> Checker<'db, '_> {
         function: &FunctionType<'db>,
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
-        let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let arena = self.arena;
         let targets =
@@ -11857,33 +12082,10 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
                 ArgumentTarget::Overflow => {
-                    if !forwards_dots {
-                        let positional_arguments = arguments
-                            .iter()
-                            .filter(|argument| argument.name.is_none())
-                            .count();
-                        let claimed_by_name = targets
-                            .iter()
-                            .zip(arguments)
-                            .filter(|(target, argument)| {
-                                argument.name.is_some()
-                                    && matches!(
-                                        target,
-                                        Some(
-                                            ArgumentTarget::Named(_)
-                                                | ArgumentTarget::UndeclaredName
-                                        )
-                                    )
-                            })
-                            .count();
-                        return vec![TypeError {
-                            // The first argument with no formal left is the one to remove.
-                            range: argument.range,
-                            kind: TypeErrorKind::ArityMismatch {
-                                expected: total.saturating_sub(claimed_by_name),
-                                found: positional_arguments,
-                            },
-                        }];
+                    if let Some(error) =
+                        shape_verdict(self.db, callee_range, function, arguments, targets)
+                    {
+                        return vec![error];
                     }
                 }
             }
@@ -11908,76 +12110,13 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        let positional_filled = targets
-            .iter()
-            .filter(|target| {
-                matches!(
-                    target,
-                    Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
-                )
-            })
-            .count();
-        let filled_by_name = targets
-            .iter()
-            .zip(arguments)
-            .filter(|(target, argument)| {
-                argument.name.is_some() && *target == &Some(ArgumentTarget::UndeclaredName)
-            })
-            .count();
-        if forwards_dots || unknown_name {
+        if unknown_name {
             return findings;
         }
-        // Overflow is reported above, so a mismatch here leaves a positional slot empty. A
-        // named argument that went to `...` fills none, so only the filled slots count.
-        if positional_filled != function.positional.len() {
-            return vec![TypeError {
-                range: callee_range,
-                kind: TypeErrorKind::ArityMismatch {
-                    expected: function.positional.len() - filled_by_name,
-                    found: positional_filled - filled_by_name,
-                },
-            }];
+        match shape_verdict(self.db, callee_range, function, arguments, targets) {
+            Some(error) => vec![error],
+            None => findings,
         }
-        let missing: Vec<String> = function
-            .named
-            .iter()
-            .enumerate()
-            .filter(|(formal, field)| {
-                !field.optional
-                    && !targets.iter().any(
-                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if filled == formal),
-                    )
-            })
-            .map(|(_, field)| field.name.text(self.db).to_owned())
-            .collect();
-        let supplied = |name: Name<'db>| {
-            function
-                .named
-                .iter()
-                .position(|field| field.name == name)
-                .is_some_and(|formal| {
-                    targets.iter().any(
-                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if *filled == formal),
-                    )
-                })
-        };
-        let mut missing = missing;
-        for read in &function.default_reads {
-            let name = read.formal.text(self.db);
-            if !supplied(read.formal)
-                && !supplied(read.default_of)
-                && !missing.iter().any(|missing| missing == name)
-            {
-                missing.push(name.to_owned());
-            }
-        }
-        if !missing.is_empty() {
-            return vec![TypeError {
-                range: callee_range,
-                kind: TypeErrorKind::MissingArguments { names: missing },
-            }];
-        }
-        findings
     }
 
     /// Binds a type variable that two or more parameters share (`<T> fn(first: T, second: T)`,
@@ -15581,6 +15720,10 @@ fn element_atomic(db: &dyn Db, ty: Ty<'_>) -> Option<Atomic> {
         TyKind::Scalar(atomic) => Some(*atomic),
         _ => None,
     }
+}
+
+fn is_date_column(db: &dyn Db, ty: Ty<'_>) -> bool {
+    matches!(column_element(db, ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Date")
 }
 
 fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {

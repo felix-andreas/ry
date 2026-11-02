@@ -4,12 +4,14 @@
 
 use {
     crate::{
-        Parse, SyntaxElement,
+        NodeOrToken, Parse, SyntaxElement,
         kind::SyntaxKind::{self, *},
         lexer::lex,
         parse,
+        tree::{element_index, splice},
     },
-    rowan::{GreenNode, NodeOrToken, TextRange, TextSize},
+    std::sync::Arc,
+    text_size::{TextRange, TextSize},
 };
 
 pub fn try_splice(
@@ -116,17 +118,21 @@ pub fn try_splice(
     {
         return None;
     }
-    let new_children: Vec<_> = children[..prefix_end]
-        .iter()
-        .cloned()
-        .chain(middle.syntax_node().children_with_tokens())
-        .chain(children[suffix_start..].iter().cloned())
-        .map(|element| match element {
-            NodeOrToken::Node(node) => NodeOrToken::Node(node.green().into_owned()),
-            NodeOrToken::Token(token) => NodeOrToken::Token(token.green().to_owned()),
-        })
-        .collect();
-    let green = GreenNode::new(SOURCE_FILE.into(), new_children);
+    let old_tree = old.tree();
+    let prefix = 1..element_index(&children[prefix_end]);
+    let suffix = match children.get(suffix_start) {
+        Some(first) => element_index(first)..old_tree.len() as u32,
+        None => 0..0,
+    };
+    let tree = splice(
+        SOURCE_FILE,
+        new_text,
+        &[
+            (old_tree, prefix),
+            (middle.tree(), 1..middle.tree().len() as u32),
+            (old_tree, suffix),
+        ],
+    );
 
     let mut errors = Vec::new();
     for error in old.errors() {
@@ -151,7 +157,7 @@ pub fn try_splice(
         errors.push(rebased);
     }
 
-    Some(Parse::new(green, errors))
+    Some(Parse::new(Arc::new(tree), errors))
 }
 
 /// A NEWLINE next to an annotation is not a statement boundary: consecutive

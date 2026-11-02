@@ -700,7 +700,7 @@ finalization and a shared member map. Performance: a per-module candidate scan b
 size, which is negligible. The backlog records the open remainder, which is strict attribution for
 the deliberately `Unknown` self-recursive schemes.
 
-# Decision record: the shipping stack is a hand-written parser, rowan trees, and salsa
+# Decision record: the shipping stack is a hand-written parser, a lossless tree, and salsa
 
 `docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
 record holds the reasoning behind it and the risks that come with it, so that no session
@@ -727,11 +727,10 @@ cost and tree size, and single-threadedness. The last one is a division by the c
 the first three are asymptotic or large per-operation wins. The ultimate ceiling is R's dynamic
 semantics, which is a semantics budget rather than an infrastructure one.
 
-## Why rowan rather than a hand-written tree
+## Why a lossless tree, and why ry's own
 
-The parser is hand-written either way. rowan is not a parser. It is the tree data structure the
-hand-written parser emits, and nothing about parsing is delegated to it. The green and red design
-beats a classic typed AST of structs with spans for four reasons.
+The parser is hand-written, and it emits a lossless concrete syntax tree rather than a typed AST of
+structs with spans, for four reasons.
 
 - **Losslessness.** Every byte lives in the tree, trivia included, and reprints exactly. A `#:`
   comment is type syntax here, so the formatter, the byte-exact round trip and the annotation
@@ -739,29 +738,23 @@ beats a classic typed AST of structs with spans for four reasons.
 - **Error resilience.** Every parse yields a tree whose error nodes are local to the break, and the
   typed AST layer returns `Option`, so a consumer never carries a parallel data model for broken
   code.
-- **Position independence.** A green node carries a width and no absolute offset, so an untouched
-  item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
-  per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
+- **Position independence.** An item is analyzed as its own subtree, rebased to offset zero, so an
+  untouched item stays equal after an edit elsewhere in the file. That is the property per-item
+  cutoffs are built on. An AST that carries absolute spans shifts every span after any edit, which
   kills sub-file incrementality at the root.
-- **Structural sharing.** Immutable refcounted subtrees share identical tokens through the
-  builder, and a splice reparse shares every untouched subtree with the previous tree.
+- **Cheap splicing.** A statement-splice reparse copies the untouched top-level runs of the previous
+  tree and parses only the edited middle.
 
-Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
-over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
-splicing. Hand-rolling reproduces that code without the hardening and gains no design freedom.
-rowan is small and dependency-free enough to vendor or fork if divergence is ever needed, and Biome
-forked it, which is precedent for both its maturity and the exit hatch.
+The tree was rowan's green and red design until it was replaced by ry's own flat preorder tree
+(`crates/syntax/src/tree.rs`; see "The syntax tree is ry's own flat preorder arena" below for why).
+The cost both share is that traversal is dynamically kinded, which is why inference never walks the
+tree: the checker runs on per-item HIR, and the tree serves the fidelity layers, which are the IDE,
+the formatter and refactorings.
 
-The acknowledged cost is that rowan traversal is dynamically kinded and slower than direct structs.
-That is why inference never walks it. The checker runs on per-item HIR, and rowan serves the
-fidelity layers, which are the IDE, the formatter and refactorings.
-
-Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
-pointer fast path, and ry's tree builder shares only tokens, never nodes (see "The cold check's
-per-call work" below), so a from-scratch reparse shares no subtree. rust-analyzer's barriers are likewise value equality
-on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
-compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
-correctness never depends on splicing.
+Value equality is the mechanism for cutoffs, not pointer identity. An item's subtree compares
+structurally (kinds, subtree ends and item-relative offsets), and rust-analyzer's barriers are likewise value
+equality on its `ItemTree` and `AstIdMap`. Parse stays a pure per-file query and correctness never
+depends on splicing.
 
 ## Why salsa rather than an in-house engine
 
@@ -775,7 +768,7 @@ split.
 Four salsa risks are recorded so they stay managed.
 
 - **Pin the version and upgrade deliberately.** The public API churns hard and often, with several
-  breaking releases a year. Vendoring or forking is the exit hatch, exactly as for rowan.
+  breaking releases a year. Vendoring or forking is the exit hatch.
 - **Fixpoint non-convergence is a hard panic at 200 iterations.** The pin-to-`Unknown` rule lives
   inside the cycle function. Reaching salsa's cap is a bug, never a fallback.
 - **Interned-value garbage collection is young.** rust-analyzer used about four times the memory on
@@ -1836,6 +1829,17 @@ for the argument list, rooting only its head. This is safe because the caller ke
 values alive and the defaults are reachable from the closure; anything the batch reads that is
 not, such as `match_args`' result, is computed before the reservation.
 
+**Compiled `x[[i]] <- v` updates in place before it falls back to `complex_assign`.**
+`Op::SubAssign` used to hand every element assignment to `complex_assign`, which builds `*tmp*`
+promises and a replacement call per assignment. `assign_element_in_place` (bytecode.rs) now writes
+the element directly when the result is certain to equal what `[[<-` or `[<-` returns: a local,
+unlocked, unshared, classless, non-Array vector, a scalar position inside it, and either a
+non-`NULL` value under `[[` on a list or an attribute-free scalar of the vector's own atomic type.
+It applies the same sharing checks as `complex_assign` (`moves::modifying`, `maybe_shared`,
+`reuse_permitted`) and clears the binding's missing bits as an assignment does. Everything else,
+including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
+(oracle case `assignment__element_in_place`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
@@ -2358,8 +2362,8 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   from the analysis, and forcing lowers the node spanning `start..end` with
   `interp::lower::lower_node`. The plan carries byte offsets (`SourceSpan::source_start/end`) so the
   node is found without text.
-- **Why a tree, not text:** the analysis already parsed every file, the rowan green tree is shared
-  and cheap to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
+- **Why a tree, not text:** the analysis already parsed every file, the tree is an `Arc` and cheap
+  to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
   the analysis already holds. The finalizer drops a tree after no promise of its file remains, at the
   collector's next finalizer point (a native call's return, `gc()`, or exit), not immediately.
 - **Why `.Internal`s and not `.Call`:** the interpreter registers Rust builtins directly, so the
@@ -2958,10 +2962,15 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
-- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+- **Compile thresholds are 3000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
   At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
   few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
-  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  about 200 ms of its cold `ry run`. finbench test slices then picked 3000 over 1000
+  (callgrind instructions against `RY_JIT=off`): on 2 files, entries 300 cost +2.9%, 1000 +1.4%,
+  3000 +0.6% and 10,000 +1.0%; on 21 files, 1000 cost +2.7% and 3000 +1.5%, and raising back
+  edges to 30,000 changed nothing. The
+  remaining overhead is per-call tier bookkeeping (`enter`, `compiled_for`, `valid`) and
+  Cranelift, not deoptimization. Hot code crosses 3000 calls within milliseconds, so the
   benchmarks time the same. Lower them only together with a cheaper first tier or background
   compilation.
 - **A fully typed closure compiles at its first call** (`jit.rs`, `fully_typed` and
@@ -3021,14 +3030,19 @@ first lines R had already read, leaving R mid-command.
   such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
   callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
   on top of the higher entry threshold's 280M.
-- **Function speculation is validated by the binding epoch alone.** Compiling marks each
-  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
-  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
-  speculated binding). A call site then checks one integer instead of re-walking the environment
-  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
-  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
-  re-resolved from the environment its lookup started in, which for a function looked up inside an
-  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **Function speculation is validated by the binding epoch, then by per-symbol stamps.**
+  Compiling marks each speculated symbol and binding cell `WATCHED`, and the heap bumps one global
+  epoch, and the symbol's lookup stamp, when a watched cell is assigned or a watched symbol is
+  defined in any function frame (which could shadow the speculated binding). An unchanged epoch
+  proves every speculation with one compare. The epoch also moves on every binding outside a
+  function frame, which a test suite does constantly, so `valid` (`crates/jit/src/runtime.rs`)
+  then compares each speculated symbol's `Heap::lookup_stamp` with the one recorded at its last
+  check; re-walking every lookup on each epoch move cost a finbench test slice more than the
+  compiled code saved. Only when a stamp moved is each speculation re-resolved from the
+  environment its lookup started in, which for a function looked up inside an inlined or directly
+  called closure is that closure's environment, not the compiled body's. A lookup that passes a
+  non-function binding is not speculated (`resolve_function`), because only the binding found is
+  watched, as for the tier-0 inline caches.
 - **A call to a speculated closure is direct and binds plain values.** Arguments that are
   effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
   skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
@@ -3287,7 +3301,7 @@ first lines R had already read, leaving R mid-command.
 ## The cold check searches green trees and caches globals per item check
 
 - **Before.** Every whole-file tree reader (parse-stage diagnostics, annotation sites, attached namespaces, used tokens) walked the red tree with `descendants()`, building a red node per element, about 8 ns each. One item check read `frame_definition` and `package_name` through salsa for every reference, and each read interned a key tuple and verified a memo. `map_child_types` re-interned every type it visited, even when nothing changed.
-- **Shape.** `syntax::matching_nodes` filters on green nodes and builds red nodes only for matches (and, lazily, their shared ancestors); `syntax::for_each_token` reads token text with no red nodes. `testing::check_parse_invariants` pins both to the red walks. `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
+- **Shape.** `syntax::matching_nodes` filters with borrowed `NodeRef` cursors and makes owned `SyntaxNode`s only for matches; `syntax::for_each_token` reads token text with no owned cursors. `testing::check_parse_invariants` pins both to the owned-cursor walks. (With the flat tree an owned cursor is only a refcount bump, so the gap is now small.) `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
 - **Why it is safe for salsa.** The first read inside a query records the dependency edge, and repeats only dedupe, so caching a read within one query execution changes no edge set. The cache lives as long as one `item_check` execution and is never shared.
 - **Allocator.** mimalloc's eager arena commit made the kernel zero transparent huge pages the process never used. `crates/ry/src/main.rs` turns it off from an `.init_array` constructor, before the first allocation. It cut peak RSS on the benchmark code bases from about 790 MiB to about 520 MiB.
 - **Counters.** `infer::RESOLVE_CALLS` is thread-local: a shared atomic bumped on every resolve step was a contended cache line across the worker threads.
@@ -3464,9 +3478,9 @@ first lines R had already read, leaving R mid-command.
   atomics shared across cores on every type intern, and a deep verification of every syntax-pass
   memo once the attached namespaces were set.
 - **Target shape.**
-  - `file_syntax_sites` collects every per-file site in one `syntax::walk_green` pass, and
-    `lints::syntax_lints` walks the green tree, building a red node only where `may_lint` says a
-    lint can fire.
+  - `file_syntax_sites` collects every per-file site in one `syntax::walk_tree` pass, and
+    `lints::syntax_lints` walks the tree with borrowed cursors, making an owned node only where
+    `may_lint` says a lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
   - `Name` and `Ty` are never garbage-collected. That costs nothing in a one-shot check. In the
@@ -3554,6 +3568,11 @@ first lines R had already read, leaving R mid-command.
   namespace, and the left side of a function assignment. Everything else stays with the editor's R
   grammar, so tokens add facts rather than replace the grammar. The server also answers range
   requests, so a large file only pays for the viewport.
+- **Member names are `property` or `method` tokens.** `x$name` and `x@name` decide from the
+  syntax alone (a called member is a method), and so do record-literal and pattern fields. R6
+  members and S4 slots are named by call arguments, so `semantic_tokens` reads them from the
+  outline's `classify_symbol_call` rather than a second classifier: one definition of what an R6
+  member or S4 slot is serves the outline and the highlighting.
 - **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
   `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
   finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
@@ -4185,8 +4204,7 @@ check` releases its trees once, and memoized records are compact" below).
   `Text` span addresses (`module[text]` is the `&str`), so every HIR kind is `Copy`. It is not a
   `Symbol`, because the interner leaks by design: interning literals would keep every
   intermediate spelling of a string literal typed in the editor for the life of the server. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
-  per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
-  plus absolute start), collects each list on a scratch stack and seals it into its side array
+  per-kind child vector. Lowering reads the tree through borrowed `syntax::NodeRef` cursors, collects each list on a scratch stack and seals it into its side array
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
   the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
   rule of the data-oriented record above.
@@ -4374,6 +4392,9 @@ check` releases its trees once, and memoized records are compact" below).
   the lazy planner and the readers. That change is a factor type of its own, worth doing only once
   a real workload reads multi-million-level factors; at db-benchmark's sizes the conversion
   already beats `fread` by 3x to 6x.
+- That condition is now met: db-benchmark's join inputs at 1e8 rows carry up to 1e8 distinct
+  levels, and the Enum's roughly 135 bytes per level keep `join_x` alone from fitting next to
+  `join_big` in 15 GB (backlog, "Open: DataFrame", top item). The replacement is the next step.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 
@@ -5757,6 +5778,19 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   .Primitive("name")`.
 - The LSP simulator runs with `installed_packages: false`, because the machine's library would
   make it nondeterministic. No stub is generated from what is read: this is navigation only.
+- The host answers through the `ide::Installed` trait (formals, exports), which signature help,
+  completion and the import quick fix take; `()` answers nothing, and the fixture harness answers
+  for one fake package. An installed package's exports are its `NAMESPACE` `export` names plus
+  the `.rdx` index names an `exportPattern` matches. Completion offers them after `pkg::` for a
+  package the stubs do not declare, and bare for the packages the project imports whole or
+  attaches. The import quick fix looks only in the packages the project already depends on,
+  attaches or reads with `::`, so it never scans the whole library.
+- Completion ranks a name local to the enclosing function ahead of library names at the same
+  match quality, unless a `(` follows the cursor: then it ranks with the globals by use, because
+  most locals hold data. Measured with `ry debug analysis-stats`, this raised httr2's
+  two-character variable completion from 91% to 95% with no role falling on R6, purrr, httr2 or
+  finbench; ranking locals first unconditionally cost call heads (`req |> req_url(...)` lost to
+  the local `req`).
 
 ## One-shot checks record coarse dependencies
 
@@ -5778,8 +5812,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     item, salsa keeps that capacity in the handle's reused query-stack frame, and every later query
     at the same depth then cleared a table sized for the project (about 0.75 G instructions,
     depending on which thread ran the walk).
-  - The tree builder shares nodes of at most three children again, keyed by kind and the
-    addresses of their already shared children, so the key never reads text.
+  - Node sharing in the tree builder is gone with rowan; the flat tree (the record "The syntax
+    tree is ry's own flat preorder arena") stores each file once without it.
+  - A one-shot check reads each name's project layer once per lookup: `NameLookup` resolves the
+    project maps (`package_definitions` and the conditional-writer maps, or their test
+    counterparts) once per query instead of two salsa fetches per name, and the incremental path
+    keeps the `projected_name_layer` firewall, cross-checked under `enable_invariants()`.
+  - On a one-shot check an unlisted frame binder (a name the item interface did not list, looked up
+    in an enclosing function's frame) is answered by building `FrameBinders::of` once per item
+    instead of one `frame_binder` query execution per name, which recorded about 216 k query
+    executions on the finance bench.
   - The global allocator enters mimalloc through `mi_malloc` and friends when the alignment is at
     most 16 and no larger than the size; the `mimalloc` crate always took the aligned path.
 - **Impact.** Callgrind on the finance bench went from 22.8 G to 22.0 G instructions, and
@@ -5928,6 +5970,46 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 ## A formula's dot expands to the sum GNU R prints
 
 - `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
+## The data.table migration is one engine in `ide`, read off the checker's types
+
+- **Where it lives.** `crates/ide/src/migrate.rs` (`data_table_rewrites`, `apply_data_table_rewrites`) is a pure read of the analysis database, like every editor feature. `code_actions` offers each rewrite that overlaps the viewport plus one whole-file action, and `ry migrate data-table` (`cli::migrate_data_table`) analyzes the requested files exactly as `ry check` does and applies the same list, so the editor and the CLI cannot disagree. It is not a lint fix: a lint's fix is local to its diagnostic and needs no types, while a rewrite needs the target's type and the columns it knows.
+- **What counts as a table.** A query `x[...]` is rewritten only when `item_check`'s type of `x` is a `Frame` (data.table or DataFrame) or the `data.table` named type, so a vector index is never touched.
+- **Column or variable.** With the frame's columns known, a bare name is a column exactly when it is one of them; data.table also looks columns up first, so a same-named variable loses there too. With unknown columns, a name is a column unless it resolves to a local binding (`item_naming().resolutions`), is a project global name (`project_global_names`), is a base constant (`T`, `F`, `pi`, `letters`, ...), or is one of data.table's own symbols. A guess cannot be wrong silently in the other direction: a name taken for a column that is not one makes the DataFrame query fail with a missing-column error at run time.
+- **Nothing approximate.** Every unsupported shape returns `None` and produces no rewrite. Updates in place (`:=`, `setorder`, `setDT`) are rewritten only as top-level statements outside any function, as `x <- x |> ...`, because inside a function the caller would stop seeing the change. `dt[i, col := v]` needs known columns: an existing column is rewritten only for a literal of its own type, as `Expr.if_else(test & !Expr.is_null(test), v, col("col"))`, since data.table leaves a row whose test is `NA` unchanged. A keyed join (`setkey` then `X[Y]`) is skipped because it needs statement order.
+- **Accepted differences.** DataFrame aggregations skip `NA` (so `na.rm = TRUE` is dropped and `sum(x)` without it no longer gives `NA`), `DataFrame.sort` puts `NA` last where `setorder` puts it first, and a join lists the left table's columns first. The guide's own mapping makes the same choices; `docs/.../guides/from-data-table.md` states them.
+
+## Dates, windows, ranks, cross joins and pivots in the table engine
+
+- **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `interp::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
+- **`Ops.Expr` beats `Ops.Date`.** `col("day") >= as.Date(...)` has two S3 `Ops` methods, which R refuses as incompatible. `chooseOpsMethod.Expr` returns `TRUE` (R >= 4.3 protocol, honored by `interp::dispatch`), so the expression method always wins; the stub's `Ops.Expr` accepts `Date` on either side.
+- **Windows and ranks lower to Polars.** `Expr.over(e, keys)` is `Expr::Window` and `Expr.rank` is `Expr::Rank` (ordinal, ties broken by row, `NA` last). The fast kernels decline both, so they run in Polars; the checker types `over` as per-row with its argument's type and `rank` as `integer[]`. The ordinal row number is `is_null().cum_count()`, because a constant `TRUE` mask is folded by Polars into a scalar of length one.
+- **Cross join is a `How`.** `How::Cross` takes no keys (`check_join_keys` rejects any), renames clashing right columns with the suffix, and keeps left-major order; the checker's `join_type` treats it as a join with empty keys.
+- **Pivot is eager.** `DataFrame.pivot` and `LazyFrame.pivot` collect first and run `table::ops::dcast`, because the output columns depend on the data, so no lazy plan can know its schema. The checker types the result as an unrefined `DataFrame` for the same reason.
+- **A pivot addresses cells by dense ids.** `dcast_dense` in `crates/table/src/ops.rs` turns the row keys and the spread column into dense ids from their order digits (the same per-column sort codes `sort_frame` uses), so each cell is `row_id * labels + label_id` and one pass fills or aggregates it. The earlier path grouped by every row key and the label and then looked each group up by its label text, which took 4.5 s for a 1e7-row pivot against 0.7 s now. The grouped path stays as the fallback for keys whose digits do not fit a u64 or a cell count past `i32`.
+- **Pushdown respects order and groups.** A filter that reads a window, rank or aggregate depends on which rows it sees, so it moves only below a sort, and a filter that also reads row order (`first`, `last`, `head`, `rank`: `lazy::reads_order`) does not move below a sort either. Every pass that needs the columns an expression reads goes through `query::column_references`, which includes window keys, so projection pushdown never drops a key.
+
+## Seeded batteries replay through one loop
+
+- **Previous shape.** Each battery looped over its own seed range and printed its own replay hint, if any, so replaying a failure meant reading the test to find how its seed was formed.
+- **Shape.** `syntax::testing::for_each_seed(default, |seed| ...)` runs seeds `0..default` scaled by `FUZZ_ITERS`, runs only `FUZZ_SEED` when it is set, and on a panic prints `FUZZ_SEED=<seed> cargo test -p <package> <target> <test> -- --exact`. A battery whose seeds are offset (`1000 + seed`) keeps the offset inside the closure, so the printed seed is still the one to pass.
+
+## A reload diffs S3 registrations per table entry
+
+- **Previous shape.** The reload diff compared `S3method` directives as a set, and registered a directive whenever its function was rebound.
+- **Why that was wrong.** R registers directives in order into one entry per generic and class, so a later directive for the same pair wins. Rebinding the function of a losing directive re-registered it and made it win, and dropping one of two directives for a pair unregistered an entry that still exists (found by `test_reload_fuzz`, pinned in `crates/loader/tests/reload/edits.test`).
+- **Shape.** `loader::diff` maps each pair to its winning directive and registers or unregisters only winners. The same diff's `keeps_names` claim (no binding appears or disappears) now also requires every name a rerun statement may write to be bound already, and a statement whose writes are unknown rules the claim out.
+
+## `R CMD` make variables expand as GNU make expands them
+
+- **Shape.** `make_assignments` and `expand_make` (`crates/rcmd/src/makeconf.rs`) follow GNU make 4.3: recursive (`=`) values expand at use, simple (`:=`) values expand at assignment, `?=` assigns once, `+=` keeps the flavor of the original and adds no space to an empty value, a backslash-newline run collapses to one space, `$$` is a literal dollar, a lone trailing `$` stays, and a variable that references itself expands to nothing at the inner reference instead of recursing (GNU make stops there with an error). There is no depth bound, so a non-cyclic doubling chain expands exponentially, exactly as it does under GNU make. `R_HOME` is ry's home whatever the makefile assigns, because R passes it on make's command line.
+- **Why.** A package's `Makevars` is written against GNU make, and any difference in expansion changes compiler flags silently. `make_expansion_agrees_with_gnu_make` checks generated makefiles against the real `make`, so the rule is GNU make's behavior, not a reading of its manual.
+
+## The JIT leaves a lossy double modulus to tier 0
+
+- **Previous shape.** Compiled `%%` on doubles computed `a - floor(a / b) * b` directly.
+- **Why that was wrong.** GNU R warns "probable complete loss of accuracy in modulus" when the finite quotient `|a / b|` exceeds 2^63, and compiled code skipped the warning.
+- **Shape.** Both the bytecode codegen and native code call `runtime::jit_modulus_loses_accuracy` (`interp::arith::modulus_loses_accuracy`, the single rule) and hand the operation to tier 0 when it is true, so the warning has one implementation.
+
 ## The young generation allocates by bumping a cursor
 
 - **Previous shape.** Each small allocation went through `allocate_with`, a non-inlined call that ran the collection check, claimed a bitmap word on a miss and took the next free bit by trailing-zero count, then wrote the header. The write barrier looked up the parent's mark bit in its page's side bitmap and cached the last unmarked parent in `Heap::young_parent`. `sd` on 20 doubles cost 121.5k instructions per call against GNU R's 70.6k, and a loop of `cons` + `root` + a scalar vector cost 298 instructions per iteration, 191 of them in `allocate_with`.
@@ -6079,3 +6161,62 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+# Decision record: the syntax tree is ry's own flat preorder arena
+
+- **Previous shape.** rowan's green tree: every node a refcounted heap allocation (`GreenNode::new`
+  about 660 instructions per node, plus a per-thread node cache), and every consumer that wanted
+  parent links or offsets built red nodes, one more allocation per visited node. Metadata's
+  namespace and call scans, `item_declared_pure`, `lower_type`, `statement_annotations` and the
+  inline-annotation sites all built red nodes, and a second borrowed walker (`GreenRef`,
+  `walk_green`) existed beside the red API only to avoid that cost. Two traversal APIs over one tree
+  was the structural weakness.
+- **Target shape.** `syntax::Tree` stores one file as struct-of-arrays columns in preorder: `kinds`,
+  `starts` (absolute offsets), `ends` (the index one past the subtree) and `parents`, plus the text.
+  Indices are dense `u32`s. A node's children are the run between its index and `ends`; the next
+  sibling is `ends[i]`. The parser's builder records postorder events and `finish` scatters them
+  into preorder in one pass, so building a file is a handful of `Vec` pushes, not one allocation
+  per node.
+- **Cursors.** `SyntaxNode` and `SyntaxToken` are an `Arc<Tree>` plus an index, so making one is a
+  refcount bump; their API mirrors rowan's so the typed AST, the formatter and the IDE did not
+  change shape. `NodeRef` and `TokenRef` are borrowed `Copy` cursors for hot walks, and
+  `walk_tree` is a flat index scan. The one cursor model replaced `GreenRef` and `walk_green`.
+- **Items.** A `Tree` is a window over shared columns: an `Arc` of the file's columns plus the
+  window's first index, its length and its base offset. An item's syntax is `Tree::subtree`, which
+  bumps the refcount and records the window, so every accessor reports indices and offsets
+  relative to the item and nothing is copied. Equality compares kinds, subtree ends and
+  item-relative offsets, which keeps per-item cutoffs position independent without rowan's
+  widths-only encoding. A first version copied each item's index range into fresh columns; that
+  copied the whole file's columns once more (about 114 MiB on the finance bench, 14 bytes per
+  element) and raised peak memory by about 80 MiB, which is why the window shape won.
+- **Splice.** `tree::splice` concatenates index runs from the old tree and the reparsed middle,
+  rebasing offsets and indices; `enable_invariants()` cross-checks it against a full parse, and
+  `syntax::testing` cross-checks every navigation primitive (`token_at_offset`, sibling steps,
+  `next_token`, `child_or_token_at_range`) against a naive reference on every fuzzed tree, on the
+  root and on nested windows. The splice invariant also compares parents, which equality omits.
+- **What was given up.** Token sharing across files and the node cache. An old tree held by a
+  window keeps its whole file's columns alive, which is fine because an edit replaces the item
+  trees of that file too.
+- **Impact.** One source of truth per file instead of green plus transient red copies, no
+  per-node allocation, and contiguous columns that a walk reads sequentially. Together with the
+  name-lookup, frame-binder and overload-shape changes (the records "One-shot checks record coarse
+  dependencies" and "Overload probes reject by call shape first"), a whole-process callgrind run
+  of the finance bench went from 23.6 G to 22.5 G instructions and from 19.8 M to 11.1 M `mi_malloc`
+  calls; in two sets of seven interleaved runs the wall median fell from 1.35-1.45 s to 1.11-1.15 s,
+  CPU from 4.4-4.7 s to 3.6-3.7 s and peak memory from 431 MiB to 371 MiB, with byte-identical
+  findings. The windows cost about 0.85 G instructions of offset arithmetic over copied item
+  trees but measured faster, because the copies' memory traffic cost more. The 1 s cold-check target is still not met.
+
+## Overload probes reject by call shape first
+
+- **Previous shape.** Each overload candidate was instantiated and its arguments matched with full
+  type inference before arity was known to fit, and the finance bench ran about 155 k probes for
+  17 k overloaded calls.
+- **Target shape.** `shape_verdict` in `crates/semantics/src/check.rs` decides arity, overflow and
+  missing required arguments from the argument targets alone. `match_arguments` uses it for its
+  own arity findings, so the two never disagree, and `probe_overload_candidate` runs it before
+  instantiating a candidate's scheme and rejects a candidate whose shape cannot fit. A call that
+  forwards `...` gets no shape verdict, and neither does one that names an unmatched argument
+  unless an argument also overflows the parameters; those fall through to full matching.
+- **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
+  stay byte-identical because the verdict is the same one full matching reached.

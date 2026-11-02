@@ -4,12 +4,17 @@
 use {
     R::{
         altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
-        attributes::get_attrib,
+        attributes::{get_attrib, set_attrib},
         frame_altrep::{expose_column, expose_table, import_column},
         globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol},
+        memory::scalar_string,
         runtime,
+        strings::mk_char,
     },
-    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    heap::{
+        object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+        strings::Encoding,
+    },
     std::sync::{Mutex, MutexGuard},
     table::{
         Table,
@@ -236,6 +241,26 @@ fn a_plain_r_vector_imports_with_na_as_validity() {
                 .map(|values| values.iter().collect::<Vec<_>>()),
             Some(vec![Some(5), None, Some(6)])
         );
+    }
+}
+
+#[test]
+fn an_integer_date_imports_as_a_date() {
+    let _session = session();
+    unsafe {
+        let vector = R::memory::alloc_vector(SexpType::Integer, 2)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        vector
+            .slice_mut::<i32>()
+            .copy_from_slice(&[19753, NA_INTEGER]);
+        let class = mk_char(b"Date", Encoding::Native)
+            .and_then(|name| scalar_string(name))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        set_attrib(vector, R_ClassSymbol.get(), class).unwrap_or_else(|error| panic!("{error:?}"));
+        let series =
+            import_column("day".into(), vector).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(series.dtype().to_string(), "date");
+        assert_eq!(series.null_count(), 1);
     }
 }
 

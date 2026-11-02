@@ -169,6 +169,11 @@ on purpose.
   R names, the quick fixes the diagnostics and default lints offer, and, when the source has a `$0`
   marker, every step of selection expansion from it. Run it with
   `cargo test -p ide --test test_ide_fixtures structure`.
+- **`crates/ide/tests/migrate`**: the data.table to DataFrame rewrites behind the code actions and
+  `ry migrate data-table`. Each case is one script whose attached packages are the ones it attaches,
+  and the expectation lists every rewrite as its title, the original lines (`- `) and the
+  replacement (`+ `), or `no rewrite`. A `$0` marker also lists the code actions offered there. Run
+  it with `cargo test -p ide --test test_ide_fixtures migrate`.
 
 ## Fuzzing and property tests
 
@@ -260,6 +265,9 @@ on the right thing. Wherever the cursor sits on a name, two stronger properties 
 
 An off-by-one injected where item-relative ranges convert back to absolute offsets passes the
 containment check and fails name identity on the first seed.
+
+The data.table rewrites are checked once per input: they never overlap, every range lies inside
+the text, and when the input parses cleanly, so does the text with every rewrite applied.
 
 Completion is sampled once per completion context (the kind of token the cursor sits in or after)
 rather than at every offset, because it costs far more per call than any other feature and its

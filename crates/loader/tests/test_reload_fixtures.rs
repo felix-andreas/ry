@@ -188,6 +188,9 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
     if plan.exports_changed {
         output.push_str("sync exports\n");
     }
+    if plan.keeps_names && !plan.is_noop() {
+        output.push_str("keeps names\n");
+    }
     if plan.run_on_load {
         output.push_str("run .onLoad\n");
     }

@@ -94,8 +94,8 @@ the system's library path first, then in the directories GNU R's `etc/Makeconf` 
 `BLAS_LIBS` and `LAPACK_LIBS` (which is how it finds them on NixOS), then for GNU R's own
 `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every place it searched;
 start ry with `LD_LIBRARY_PATH` set to a directory that holds `liblapack.so.3` and
-`libblas.so.3`. On macOS the fallback is Accelerate, and on Windows the libraries are R's own
-`bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
+`libblas.so.3`. On macOS, Accelerate is tried right after the system's library path, and on
+Windows the libraries are R's own `bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
 installs links the same libraries, because ry's R home takes `BLAS_LIBS` and `LAPACK_LIBS` from
 GNU R's `Makeconf`.
 
