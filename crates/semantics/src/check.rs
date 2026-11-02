@@ -10715,6 +10715,19 @@ impl<'db> Checker<'db, '_> {
                 }
                 continue;
             }
+            // `match.fun` takes a function or its name, so a formal the body also reads as a
+            // value (kernlab's `apply(x, 2, var)` beside `if (var < 10^-3)`, diffobj's
+            // `lapply(hunk[nm], op, n)` beside `if (op == "tail")`) is not pinned to a function
+            // here. A formal used only as a function still infers as one.
+            if let Some(&binding) = self.naming.resolutions.get(&value)
+                && matches!(resolved.kind(self.db), TyKind::Var(_))
+                && (self.no_default_formals.contains(&binding)
+                    || self.defaulted_formals.contains(&binding))
+                && self.reads_as_value(binding)
+            {
+                argument.named_function = Some(unknown(self.db));
+                continue;
+            }
             if !is_character(self.db, resolved) {
                 continue;
             }
@@ -10727,6 +10740,17 @@ impl<'db> Checker<'db, '_> {
             };
             argument.named_function = Some(named.unwrap_or_else(|| unknown(self.db)));
         }
+    }
+
+    /// Whether some read of the binding is neither a call's callee nor one of its arguments.
+    fn reads_as_value(&self, binding: BindingId) -> bool {
+        let module = self.module;
+        let reads = |child: ExprId| self.naming.resolutions.get(&child) == Some(&binding);
+        module.expression_ids().any(|id| match module.kind(id) {
+            ExpressionKind::Call { .. } => false,
+            ExpressionKind::Assign { value, .. } => reads(*value),
+            _ => module.any_child(id, reads),
+        })
     }
 
     fn is_whole_double(&self, value: ExprId) -> bool {

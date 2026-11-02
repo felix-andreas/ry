@@ -49,6 +49,30 @@ g: <T> fn(m: T) -> Any
 h: <T> fn(xs: list[T] | T[]) -> character[]
 k: <T, U> fn(xs: list[T] | T[]) -> U
 
+#---- a_formal_read_as_a_value_may_name_the_function_it_passes
+# `match.fun` takes a function or its name, and looks a bare name up as a function: kernlab's
+# `apply(x, 2, var)` calls base `var` even though the formal `var` holds a number, and diffobj
+# passes `op = "tail"` to `lapply`.
+spread <- function(x, var = 1) {
+  co <- apply(x, 2, var)
+  if (var < 10^-3) stop("small")
+  co
+}
+trim <- function(op, n) {
+  chunks <- list(c(1, 2, 3), c(4, 5))
+  stopifnot(op %in% c("head", "tail"))
+  out <- lapply(chunks, op, n)
+  if (op == "tail") out else rev(out)
+}
+#++++
+spread: <T, U> fn(x: T, [var]: U) -> Any
+trim: <T, U, V> fn(op: T, n: U) -> list[V]
+
+#---- a_formal_used_only_as_a_function_still_infers_as_one
+each <- function(f) lapply(list(1, 2), f)
+#++++
+each: <T> fn(f: fn(double) -> T) -> list[T]
+
 #---- the_apply_family_takes_r_s_own_argument_names
 f <- function(xs) lapply(X = xs, FUN = function(v) v)
 #++++
