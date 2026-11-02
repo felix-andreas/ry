@@ -526,7 +526,7 @@ fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
 /// reserved inaccessible up front and committed a run of pages at a time, so the heap's pages
 /// stay contiguous without claiming physical memory before they are used.
 #[cfg(unix)]
-mod virtual_memory {
+pub(crate) mod virtual_memory {
     /// Reserves `bytes` of inaccessible, page-aligned address space.
     pub fn reserve(bytes: usize) -> Option<*mut u8> {
         // SAFETY: an anonymous private mapping with no access rights only reserves addresses.
@@ -552,10 +552,31 @@ mod virtual_memory {
     pub unsafe fn release(start: *mut u8, bytes: usize) -> bool {
         unsafe { libc::munmap(start.cast(), bytes) == 0 }
     }
+
+    /// Maps `bytes` of zeroed, readable and writable memory.
+    pub fn map(bytes: usize) -> Option<*mut u8> {
+        // SAFETY: an anonymous private mapping aliases nothing.
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        (mapping != libc::MAP_FAILED).then_some(mapping.cast())
+    }
+
+    /// Returns a mapping from [`map`] to the system.
+    pub unsafe fn unmap(start: *mut u8, bytes: usize) -> bool {
+        unsafe { release(start, bytes) }
+    }
 }
 
 #[cfg(windows)]
-mod virtual_memory {
+pub(crate) mod virtual_memory {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
         VirtualFree,
@@ -577,5 +598,24 @@ mod virtual_memory {
     /// Returns a whole reservation to the system; `MEM_RELEASE` takes the size 0.
     pub unsafe fn release(start: *mut u8, _bytes: usize) -> bool {
         unsafe { VirtualFree(start.cast(), 0, MEM_RELEASE) != 0 }
+    }
+
+    /// Reserves and commits `bytes` of zeroed, readable and writable memory.
+    pub fn map(bytes: usize) -> Option<*mut u8> {
+        // SAFETY: a fresh reservation aliases nothing.
+        let start = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                bytes,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            )
+        };
+        (!start.is_null()).then_some(start.cast())
+    }
+
+    /// Returns a mapping from [`map`] to the system.
+    pub unsafe fn unmap(start: *mut u8, bytes: usize) -> bool {
+        unsafe { release(start, bytes) }
     }
 }
