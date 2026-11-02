@@ -168,6 +168,13 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                     ),
                     ("classes".into(), strings(&deferred.classes)),
                     ("generics".into(), strings(&deferred.generics)),
+                    (
+                        "cache_key".into(),
+                        deferred
+                            .cache_key
+                            .as_ref()
+                            .map_or(RValue::Null, |key| RValue::Character(vec![key.clone()])),
+                    ),
                     ("names".into(), strings(&deferred.names)),
                 ])
             }),
