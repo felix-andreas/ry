@@ -3042,6 +3042,14 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     for arg in call.args {
         if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
             finite = values::as_logical_scalar(arg.value) == 1;
+        } else if arg.value.kind() == SexpType::List && arg.tag != symbols().na_rm {
+            // GNU R's `range.default` flattens its arguments with `c(..., recursive = TRUE)`,
+            // so a list of numbers has a range where `min` and `max` refuse it.
+            let unlist = values::call(values::install("unlist")?, &[arg.value])?;
+            args.push(Arg {
+                tag: arg.tag,
+                value: crate::eval::eval(unlist, values::base_namespace())?,
+            });
         } else {
             args.push(*arg);
         }

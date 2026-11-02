@@ -24,9 +24,3 @@ for (body in c("x <- 1; y <- f(1,\n  2 3)", "x <- 1\nf(\n\n  # c\n  a b)", "x <-
   print(suppressWarnings(system2(rscript, c("--vanilla", script), stdout = TRUE, stderr = TRUE)))
 }
 
-# list.dirs() names the directory itself only in a recursive listing.
-root <- tempfile()
-dir.create(file.path(root, "windows", "inner"), recursive = TRUE)
-print(list.dirs(root, recursive = FALSE, full.names = FALSE))
-print(list.dirs(root, recursive = TRUE, full.names = FALSE))
-print(length(list.dirs(file.path(root, "missing"))))

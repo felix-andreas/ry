@@ -3092,15 +3092,13 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
     let attributes = call.arg(1);
-    if object == nil() {
-        if attributes == nil() {
-            return Ok(nil());
-        }
-        return Err(call.error("attempt to set an attribute on NULL"));
-    }
-    let object = modifiable(object)?;
+    // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
+    let object = match call.arg(0) {
+        object if object != nil() => modifiable(object)?,
+        _ if attributes == nil() => return Ok(nil()),
+        _ => alloc(SexpType::List, 0)?,
+    };
     let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {

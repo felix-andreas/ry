@@ -2642,14 +2642,45 @@ unsafe fn do_file_rename(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
+    let show_warnings = values::as_logical_scalar(call.arg(1)) == 1;
     let recursive = values::as_logical_scalar(call.arg(2)) == 1;
-    let path = crate::connections::expand_path(&path);
-    let outcome = if recursive {
-        std::fs::create_dir_all(&path)
-    } else {
-        std::fs::create_dir(&path)
+    let expanded = crate::connections::expand_path(&path);
+    let path = match expanded.trim_end_matches('/') {
+        "" => expanded.as_str(),
+        trimmed => trimmed,
     };
-    scalar_bool(outcome.is_ok())
+    let cannot_create = |directory: &str, failure: std::io::Error| -> R<Sexp> {
+        if show_warnings {
+            crate::conditions::warning(format!(
+                "cannot create dir '{directory}', reason '{}'",
+                crate::connections::os_message(&failure)
+            ))?;
+        }
+        scalar_bool(false)
+    };
+    // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
+    // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
+    if recursive {
+        for (index, _) in path.match_indices('/').filter(|(index, _)| *index > 0) {
+            let parent = &path[..index];
+            match std::fs::create_dir(parent) {
+                Err(failure) if failure.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return cannot_create(parent, failure);
+                }
+                _ => {}
+            }
+        }
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => scalar_bool(true),
+        Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {
+            if show_warnings {
+                crate::conditions::warning(format!("'{path}' already exists"))?;
+            }
+            scalar_bool(false)
+        }
+        Err(failure) => cannot_create(path, failure),
+    }
 }
 
 unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {

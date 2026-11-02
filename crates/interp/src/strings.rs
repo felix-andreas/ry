@@ -2191,13 +2191,22 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         None
     } else {
         let text = translate_regex(&String::from_utf8_lossy(&needle));
-        let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
-        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
-            call.error(format!(
-                "invalid regular expression '{}': {failure}",
-                String::from_utf8_lossy(&needle)
-            ))
-        })?;
+        // Byte mode lets `.` match any byte, but the translated POSIX classes (`\s`,
+        // `[[:alpha:]]`) name Unicode characters, which only Unicode mode accepts; there they
+        // still match their ASCII members byte for byte.
+        let (bytes, unicode) = if ignore_case {
+            ("(?i-u)", "(?i)")
+        } else {
+            ("(?-u)", "")
+        };
+        let compiled = regex::bytes::Regex::new(&format!("{bytes}{text}"))
+            .or_else(|_| regex::bytes::Regex::new(&format!("{unicode}{text}")))
+            .map_err(|failure| {
+                call.error(format!(
+                    "invalid regular expression '{}': {failure}",
+                    String::from_utf8_lossy(&needle)
+                ))
+            })?;
         Some(compiled)
     };
     let find = |from: usize| -> Option<(usize, usize)> {

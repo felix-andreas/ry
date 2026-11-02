@@ -2210,6 +2210,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
+  - `R` without `--no-echo` does not echo its input. GNU R prints each line it reads after the
+    `> ` or `+ ` prompt (and a last `> ` at the end of input), so `R --silent -e 'expr'` output
+    starts with `> expr`; sys's "Jobs can be nested" reads the second line of that output.
   - tcltk is unavailable: `dyn.load` refuses GNU R's own `tcltk.so` (`decisions.md`, "Package-test
     compatibility details"), so code that needs Tcl/Tk gets an error. A tcltk built against ry
     would bring it back.

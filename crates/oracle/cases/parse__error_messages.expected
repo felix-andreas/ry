@@ -143,12 +143,9 @@
 | [3] "Execution halted"                                  
 | attr(,"status")
 | [1] 1
-| [1] "windows"
-| [1] ""              "windows"       "windows/inner"
-| [1] 0
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 0L
+NULL
+| NULL

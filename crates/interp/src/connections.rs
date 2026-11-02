@@ -673,10 +673,15 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (path, temporary, open) = if description.is_empty() {
-        let open = if open.is_empty() {
-            "w+".to_owned()
-        } else {
-            open
+        let open = match open.as_str() {
+            "" => "w+".to_owned(),
+            "w+" | "w+b" => open,
+            _ => {
+                crate::conditions::warning(
+                    "file(\"\") only supports open = \"w+\" and open = \"w+b\": using the former",
+                )?;
+                "w+".to_owned()
+            }
         };
         (temporary_path(), true, open)
     } else if description == "stdin" {
