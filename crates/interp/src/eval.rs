@@ -185,8 +185,25 @@ unsafe fn lexical_call(env: Sexp) -> Sexp {
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
     match find_cell(symbol, env) {
         Some(cell) => cell_value(cell),
+        None if symbol == symbols().tmp => Ok(tmp_value(env)),
         None => Ok(unbound()),
     }
+}
+
+/// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
+/// or `R_UnboundValue`.
+unsafe fn tmp_value(env: Sexp) -> Sexp {
+    let empty = values::empty_env();
+    for &(assignment_env, value) in interp().tmp_values.iter().rev() {
+        let mut scope = env;
+        while scope != empty {
+            if scope == assignment_env {
+                return value;
+            }
+            scope = scope.enclosure();
+        }
+    }
+    unbound()
 }
 
 /// The value bound to `symbol` in `env`'s own frame, or `R_UnboundValue`.
@@ -2598,6 +2615,9 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
 pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
     let dots = symbols().dots;
     let mut items: Vec<(Sexp, Sexp)> = Vec::new();
+    // GNU R reuses the spliced dots cells, so a call whose head comes from `...` becomes a
+    // pairlist: `substitute(...())` is how code captures the dots unevaluated.
+    let mut kind = list.kind();
     let mut cell = list;
     while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
         let element = cell.car();
@@ -2605,6 +2625,9 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
             let value = crate::heap().frame_cell(env, dots).map(|cell| cell.cdr());
             match value {
                 Some(value) if value.kind() == SexpType::Dots => {
+                    if items.is_empty() {
+                        kind = SexpType::Pairlist;
+                    }
                     let mut dot = value;
                     while dot.kind() == SexpType::Dots {
                         let code = if dot.car().kind() == SexpType::Promise {
@@ -2625,7 +2648,7 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
         }
         cell = cell.cdr();
     }
-    let result = values::pairlist(&items, list.kind())?;
+    let result = values::pairlist(&items, kind)?;
     if result != nil() && list.attrib() != nil() {
         crate::heap().set_attrib(result, list.attrib());
     }
@@ -2996,83 +3019,99 @@ pub unsafe fn complex_assign(
         base = values::shallow_duplicate(base)?;
         base.set_array(was_array);
     }
-    // Values of each level, innermost first: the variable, then each getter applied to it.
-    let mut levels = vec![base];
-    let tmp_symbol = symbols.tmp;
-    let mut shared = false;
-    for getter in getters.iter().skip(1).rev() {
-        let previous = *levels.last().unwrap_or(&base);
-        let promise = forced_promise(tmp_symbol, previous)?;
-        crate::heap().untrack_references(promise);
-        // The call names `*tmp*`, as GNU R's does, while the argument it is evaluated with is
-        // the promise holding the level below.
-        let rest = getter.cdr().cdr();
-        let getter_call = values::lcons(
-            getter.car(),
-            values::cons_tagged(tmp_symbol, rest, getter.cdr().tag())?,
-        )?;
-        crate::heap().root(getter_call);
-        let arguments = values::cons_tagged(promise, rest, getter.cdr().tag())?;
-        crate::heap().root(arguments);
-        let function = call_head_function(getter.car(), env)?;
-        let mut level = apply_call(getter_call, function, arguments, env)?;
-        if values::maybe_shared(level) || shared {
-            shared = true;
-            let was_array = level.is_array();
-            level = values::shallow_duplicate(level)?;
-            level.set_array(was_array);
+    crate::heap().root(base);
+    interp().tmp_values.push((env, base));
+    let replaced: R<Sexp> = (|| unsafe {
+        // Values of each level, innermost first: the variable, then each getter applied to it.
+        let mut levels = vec![base];
+        let tmp_symbol = symbols.tmp;
+        let mut shared = false;
+        for getter in getters.iter().skip(1).rev() {
+            let previous = *levels.last().unwrap_or(&base);
+            let promise = forced_promise(tmp_symbol, previous)?;
+            crate::heap().untrack_references(promise);
+            // The call names `*tmp*`, as GNU R's does, while the argument it is evaluated with is
+            // the promise holding the level below.
+            let rest = getter.cdr().cdr();
+            let getter_call = values::lcons(
+                getter.car(),
+                values::cons_tagged(tmp_symbol, rest, getter.cdr().tag())?,
+            )?;
+            crate::heap().root(getter_call);
+            let arguments = values::cons_tagged(promise, rest, getter.cdr().tag())?;
+            crate::heap().root(arguments);
+            let function = call_head_function(getter.car(), env)?;
+            let mut level = apply_call(getter_call, function, arguments, env)?;
+            if values::maybe_shared(level) || shared {
+                shared = true;
+                let was_array = level.is_array();
+                level = values::shallow_duplicate(level)?;
+                level.set_array(was_array);
+            }
+            levels.push(level);
         }
-        levels.push(level);
-    }
-    let mut replacement = value;
-    for (depth, getter) in getters.iter().enumerate() {
-        let object = levels[levels.len() - 1 - depth];
-        let setter = replacement_function(getter.car(), whole)?;
-        // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
-        // the replacement function would always see its target as shared and copy it.
-        let object_promise = forced_promise(tmp_symbol, object)?;
-        crate::heap().untrack_references(object_promise);
-        // The outermost replacement's value promise carries the right-hand side's expression,
-        // which `substitute(value)` returns; an inner one carries the value itself, as in GNU R.
-        let value_code = if depth == 0 {
-            whole.cdr().cdr().car()
-        } else {
-            replacement
+        let right_hand_side = match whole.cdr().cdr().kind() {
+            SexpType::Pairlist | SexpType::Language => whole.cdr().cdr().car(),
+            _ => value,
         };
-        // GNU R's value promise does not count either, so a replacement that updated its target
-        // in place stays uniquely referenced for the next update.
-        let value_promise = forced_promise(value_code, replacement)?;
-        crate::heap().untrack_references(value_promise);
-        let mut call_items = vec![(nil(), setter), (nil(), tmp_symbol)];
-        let mut argument_items = vec![(nil(), object_promise)];
-        for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
-            call_items.push((tag, argument));
-            argument_items.push((tag, argument));
+        let mut replacement = value;
+        for (depth, getter) in getters.iter().enumerate() {
+            let object = levels[levels.len() - 1 - depth];
+            let setter = replacement_function(getter.car(), whole)?;
+            // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
+            // the replacement function would always see its target as shared and copy it.
+            let object_promise = forced_promise(tmp_symbol, object)?;
+            crate::heap().untrack_references(object_promise);
+            // The outermost replacement's value promise carries the right-hand side's expression,
+            // which `substitute(value)` returns; an inner one carries the value itself, as in GNU R.
+            let value_code = if depth == 0 {
+                right_hand_side
+            } else {
+                replacement
+            };
+            // GNU R's value promise does not count either, so a replacement that updated its target
+            // in place stays uniquely referenced for the next update.
+            let value_promise = forced_promise(value_code, replacement)?;
+            crate::heap().untrack_references(value_promise);
+            let mut call_items = vec![(nil(), setter), (nil(), tmp_symbol)];
+            let mut argument_items = vec![(nil(), object_promise)];
+            for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
+                call_items.push((tag, argument));
+                argument_items.push((tag, argument));
+            }
+            call_items.push((symbols.value, value_promise));
+            argument_items.push((symbols.value, value_promise));
+            let setter_call = values::pairlist(&call_items, SexpType::Language)?;
+            crate::heap().root(setter_call);
+            let arguments = values::pairlist(&argument_items, SexpType::Pairlist)?;
+            crate::heap().root(arguments);
+            let function = call_head_function(setter, env)?;
+            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
+            // as GNU R's does, so only a builtin replacement names the assignment.
+            if function.kind() == SexpType::Closure {
+                replacement = apply_call(setter_call, function, arguments, env)?;
+                continue;
+            }
+            // A level past the first reports its errors as GNU R does, against the assignment of
+            // that level's target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
+            let reported = if depth == 0 {
+                whole
+            } else {
+                values::call(whole.car(), &[*getter, symbols.vtmp])?
+            };
+            crate::heap().root(reported);
+            let frame_depth = interp().frames.len();
+            let outer = interp()
+                .assignment_call
+                .replace((setter_call, reported, frame_depth));
+            let result = apply_call(setter_call, function, arguments, env);
+            interp().assignment_call = outer;
+            replacement = result?;
         }
-        call_items.push((symbols.value, value_promise));
-        argument_items.push((symbols.value, value_promise));
-        let setter_call = values::pairlist(&call_items, SexpType::Language)?;
-        crate::heap().root(setter_call);
-        let arguments = values::pairlist(&argument_items, SexpType::Pairlist)?;
-        crate::heap().root(arguments);
-        let function = call_head_function(setter, env)?;
-        // A level past the first reports its errors as GNU R does, against the assignment of
-        // that level's target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
-        let reported = if depth == 0 {
-            whole
-        } else {
-            values::call(whole.car(), &[*getter, symbols.vtmp])?
-        };
-        crate::heap().root(reported);
-        let frame_depth = interp().frames.len();
-        let outer = interp()
-            .assignment_call
-            .replace((setter_call, reported, frame_depth));
-        let result = apply_call(setter_call, function, arguments, env);
-        interp().assignment_call = outer;
-        replacement = result?;
-    }
-    assign_symbol(inner, replacement, env, superassign)
+        Ok(replacement)
+    })();
+    interp().tmp_values.pop();
+    assign_symbol(inner, replaced?, env, superassign)
 }
 
 unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bool {

@@ -285,7 +285,8 @@ pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
         }
         return text;
     }
-    scientific_text(value, format.decimals)
+    // Adding zero turns `-0` into `0`, which is how it prints.
+    scientific_text(value + 0.0, format.decimals)
 }
 
 /// `value` in scientific notation with `decimals` mantissa decimals and at least two exponent

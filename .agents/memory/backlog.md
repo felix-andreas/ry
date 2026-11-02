@@ -35,49 +35,41 @@ The quality bar is four things.
 - **Grouping and tabulation:** `match` on integers 2.7x (a hash table where GNU R uses a direct-address table for small ranges), `order` on two keys 1.6x, `split` 1.5x, `cut` 1.5x, `table` on two factors 1.25x, `sort` on integers and strings 1.1 to 1.2x.
 - **Matrix and time series:** `apply` over rows 1.8x (per-call interpreter cost, which the tier-0 work owns), xts `period.apply` 1.7x, zoo `na.locf` 1.5x.
 - **Correctness gaps found beside the kernels** (unverified against every GNU R version): `sum` over several arguments keeps one long double total, so `sum(1e308, 1e308, -1e308)` is `1e+308` where GNU R, which adds each argument's sum in double, gives `Inf`. A logical subscript longer than the vector does not stretch it on assignment (`y <- NA; y[c(TRUE, TRUE, FALSE, TRUE, FALSE)] <- 1:3` gives length 4, GNU R 5), which breaks `rank(c(2, 1, NA, 2, NaN), ties.method = "first")`. `format(-0)` under `options(scipen = -5)` writes `-0e+00` (GNU R `0e+00`). `order(<raw>, method = "radix")` succeeds where GNU R errors.
-- **Peak memory** (`run.py --memory`) is 1.1 to 1.45 times GNU R's at 1e6 rows, about 30 MB above it on kernels that allocate little. ry starts 10 MB higher (60 MB against 50 MB for an empty script). Most of the rest is freed large vectors that mimalloc keeps resident for its purge delay while the next allocation takes fresh pages; GNU R's large vectors come from glibc `malloc`, which unmaps them on `free`. `MIMALLOC_PURGE_DELAY=0` brings the setup of `tools/bench/base/kernels.R` level with GNU R but slows several kernels by about 20%, so the fix is a reuse policy for large vectors rather than that setting. Tightening the collector's young budget (a quarter of the old generation instead of half) did not lower the peak.
+- **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
+  - **data.table subsetting:** `dt[i]` on a 1e6-row, three-column table raises RSS by about 95 MB per call where GNU R adds 17 MB for a 28 MB result, so a data.table script that orders and subsets peaks at about 360 MB against GNU R's 173 MB. The heap's old generation stays at 55 to 116 MB, so the memory is live outside the heap's counted bytes: suspect a C API path in `CsubsetDT` that materializes or caches (`DATAPTR`, `STRING_PTR`, `R_alloc`). `forderv` itself costs little.
+  - **Base `order` on several keys** holds about 50 to 70 MB of Rust scratch at 1e6 rows in `sort.rs` (a `Vec<Vec<u64>>` of keys, 16-byte key and index pairs plus their scratch, a dense histogram, and a result `Vec<i32>` copied into the heap). Ordering in place on an `alloc_uninit` integer result and narrowing keys would cut most of it.
 
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **A console does not watch a package whose first load failed**: `Loader::changed_roots` skips
-  packages with no committed state, so after `ry run` starts on a package with a syntax error,
-  fixing the file reloads nothing until `load_all()`. Fix: record the fingerprint on a failed
-  plan too, and let `.ry_autoreload()` learn the root from the loader rather than `.ry_packages`.
-
 - **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
   `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
   GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
   loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
   on ry, would make the build ry's own.
-- **Strict mode guards only `ry load`'s first load.** The package load the `ry R` console makes at startup,
-  and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
-- **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
-  name no file. The loader has the byte range of every definition, so a srcref could be built from
-  it now that the interpreter keeps srcrefs for parsed code.
 - **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
-  326,000-line bench package, shared by both runtimes; the next item is the fix.
-
-- **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
-  read bundled files at load time (`.onLoad`) fail until this exists.
-- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
-  sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
+  326,000-line bench package, shared by both runtimes; the last item of this list is the fix.
 - **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
   and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
   or `src/` does not trigger a rerun.
-- **Importers of a development package keep stale copies** of its changed bindings; only one
-  development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
-  reload that re-registers it and never removed.
-- **A declared `S3method` whose function does not exist** registers a promise that fails at
-  dispatch; R refuses the load instead.
-- **Sources must be UTF-8**; a package with `Encoding: latin1` fails to load.
+- **A strict package's reload checks the whole package**: every load that changes something runs
+  `preflight::check_package`, a fresh analysis of all of `R/` (the clean verdict is cached by
+  fingerprint, so an unchanged package costs a hash). Checking only the files the plan changed, in
+  the loader's own salsa database, would make a reload of a large strict package cheap.
+- **A reload that runs statements refuses a missing S3 method late**: `.ry_refuse_missing_s3`
+  checks before anything changes only when the reload runs no statement and keeps
+  `sysdata.rda`, since either could define the function; otherwise `.ry_register_s3` refuses
+  after the namespace already holds the new code. Knowing every name a statement may bind would
+  close it.
+- **On GNU R, a srcref after a non-ASCII character on its line has its column off** by the
+  character's extra UTF-8 bytes (`gnur.R`, `.ry_parse` pads by bytes so byte offsets and
+  printing are right); ry's runtime is exact. Documented under Source references.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 - **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
@@ -418,10 +410,6 @@ protects construction but nothing after it.
   escape check on the closure's body; closures the helper creates itself are already covered
   (`decisions.md`, "Moving a collection into a helper's parameter").
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
-- `l[[i]]` on a list compiles to `Intrinsic::Element` with a boxed result, so arithmetic on the
-  element runs in tier 0. Tuple items and record fields speculate on the site's type feedback
-  (`Analysis::slot_read`) and stay native; a list element read should do the same, with a type
-  check that hands off to tier 0 on a mismatch.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
 - The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
@@ -545,6 +533,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
   and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
   give native entry a stack-limit check, before raising the depth limit.
+- **An integer and a double joined at a merge point leave the value untyped.** A `match` whose
+  arms return `v` (integer) and `0` (double), summed into a double, runs at tier-0 speed: 0.67 s
+  per 2M iterations against 0.10 s when the arm is `0L`. Join `Int` and `Dbl` to `Dbl` with a
+  coercion at the merge instead of widening to unknown.
 - **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
@@ -593,8 +585,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
   `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
   `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
-- **One oracle case fails under both `ry` and `ry-jit`** (`stats__lbfgsb` differs from GNU R
-  in late digits), so it is a native gap, not a JIT one. Run the oracle against a release build with `ORACLE_RY=target/release/ry` after building
+- **Run the oracle against a release build** with `ORACLE_RY=target/release/ry` after building
   both `ry-lang` and `libr`: the JIT lives in `libR`, so building `ry-lang` alone tests a stale JIT.
 - **Base gaps seen while benchmarking:** `sum()` of doubles does not follow GNU R's long-double
   accumulation or its NaN-before-NA precedence exactly; a factor inside a list prints its codes;
@@ -605,8 +596,8 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   overload set for `seq` and `seq_len` would remove that.
 - **The oracle's `stats__*` cases depend on the BLAS build.** Their expectations come from
   reference BLAS; under OpenBLAS, `stats__formulas_and_least_squares` and
-  `stats__models_and_tests` differ in the last printed digits and `stats__lbfgsb` takes one more
-  L-BFGS-B iteration and warns in `HoltWinters`, so `recorded_outcomes_match_gnu_r` fails there.
+  `stats__models_and_tests` differ in the last printed digits and `stats__lbfgsb` warns in
+  `HoltWinters`, so `recorded_outcomes_match_gnu_r` fails there.
   Force reference BLAS with
   `R_LD_LIBRARY_PATH=/usr/lib/R/lib:/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack`
   (Debian's `ldpaths` otherwise puts the OpenBLAS alternative first), or make those cases print
@@ -2224,12 +2215,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - Passed before the merge of the PCRE2 work with main's parallel runtime fixes and fail after
-    it (`--installed`; first failures in `.corpus/tests/summary-installed.md`): fs (`file_copy`
-    into another directory), purrr (`compose` dots), tibble (`[<-` with a matrix), pillar, plyr
-    (`names<-` on an immutable data frame), cachem (disk cache `set`), sessioninfo (subprocess
-    exit), randtoolbox (`test-WELL.R`), PerformanceAnalytics (tinytest), Matrix (`lengths` of a
-    `which` result). Bisect against the two parents of the merge first.
+  - sessioninfo crashes in `external_info()`: GNU R's own `tcltk.so` is built with R's internals
+    and reads `SEXPREC` fields directly, so it segfaults on ry's layout. ry's R home needs a tcltk
+    built against ry, or a `tclVersion()` that errors cleanly when Tcl is unavailable.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
@@ -2270,6 +2258,18 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
     may not be a real one.
+  - Matrix's `indexing.R` stops at `identical5(m[L, drop = FALSE], M[L, drop = FALSE], ...)` with
+    "logical subscript too long" from `.subscript.2ary`: a method sees a `j`, so the one-index
+    path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
+    the test set up is involved; bisect the file to find it.
+  - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
+    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
+    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
+  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
+    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
+    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
+    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
+    directory).
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -2281,9 +2281,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
-- **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
-  `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
-  values agree to about seven digits only.
 - **Source references differ in console srcfiles.** In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
   expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
@@ -2299,7 +2296,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`prmatrix`,
-  `format.Date`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `stem`, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -2308,7 +2305,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`exists(name, registry)` on the namespace registry segfaults** (its enclosure is NULL, as in
   GNU R, where the lookup errors "use of NULL environment is defunct" instead).
 - **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
-- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+- **Connections gaps:** `fifo()` and non-file URL connections are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Extract_subset`** is registered but subsetting does not call it yet.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -2349,8 +2346,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
   out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
   with a release build.
-- **Default-package routines still failing on purpose:** tools' `parseLatex`, utils' sockets and `internal` download method. `Rprof` and
-  `Rprofmem` warn and do nothing.
+- **The help server is not implemented** (`tools::startDynamicHelp`). `Rprof` samples only the
+  call stack, without memory, GC or line profiling.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
   length enough to allocate before the read fails. Bound the allocation by the bytes remaining
@@ -2361,10 +2358,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   asymptotic expansions or argument limits when a package hits them.
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
-- **Routines left to audit clean room:** `lbfgsb`, the `optif9`/UNCMIN helpers, `fdhess`, the
-  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
-  `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
-  `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
+- **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
+  GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
+  `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
   follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
   `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
@@ -3088,19 +3084,14 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.4-1.5 s on 4 cores (4.3 s on one core) and already uses about 3.3 of
-  them, so the 1 s cold target still needs about a third less CPU work. Under callgrind the finance
-  bench went from 27.6 to 24.6 G instructions with green walks and direct descent, then to about
-  22.6-22.8 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
-  symbol-keyed `GlobalEnv` lookups, a token-only green builder, lexer fast paths and parallel
-  rendering (`decisions.md`, "The cold check's per-call work"). In interleaved runs against the
-  build before them, one-core wall went from 4.6-4.8 s to 4.2-4.5 s and 4-core medians from about
-  1.6 s to about 1.48 s, while peak RSS rose from about 440 to 510 MiB because green nodes are no
-  longer deduplicated. What is left is flat: mimalloc about 1.4 G, salsa bookkeeping about 1.1 G
-  (dependency edges, memo setup), hashbrown about 1.1 G spread over many tables, parse about 3.4 G
-  inclusive, HIR lowering about 3.6 G inclusive (much of it red-cursor allocation, 3.6 M
-  `NodeData::new`), naming `resolve` about 2.9 G inclusive, and item checking about 7 G. A real third
-  needs a structural change rather than local cuts: lowering HIR straight from the green tree during
-  or right after the parse (no red cursors), and a one-shot check path that does not record salsa
-  dependency edges per item (`package_name` and `test_name` are fetched about 340 k times only to
-  record edges a cold check never replays).
+- A cold check of the finance bench is about 1.48 s median on 4 cores (4.8 s of CPU, 431 MiB peak
+  RSS), so the 1 s target still needs about a third less CPU work. Under callgrind it is 22.0 G
+  instructions, after the one-shot check path, shared small green nodes, unaligned mimalloc entry
+  points and green walks in the annotation and lint passes (`decisions.md`, "One-shot checks record
+  coarse dependencies"). HIR already lowers from the green tree; the red nodes left (about 3.7 M
+  `NodeData::new`) come from `first_child` and `child_or_token_at_range` in the syntax sites, the
+  annotation queries and the lints' `node_at`. What is left is flat: item checking about 7.7 G
+  inclusive, parse about 3.1 G (lexing 0.7 G, about 105 instructions per token in the tree builder
+  and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
+  mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
+  (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.

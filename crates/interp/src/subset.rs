@@ -607,24 +607,11 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     match object.kind() {
         SexpType::Nil => return Ok(nil()),
-        SexpType::Environment => {
-            return Err(crate::unwind::error_in(
-                call,
-                "object of type 'environment' is not subsettable",
-            ));
-        }
-        SexpType::Closure | SexpType::Builtin | SexpType::Special => {
-            return Err(crate::unwind::error_in(
-                call,
-                "object of type 'closure' is not subsettable",
-            ));
-        }
-        SexpType::Symbol => {
-            return Err(crate::unwind::error_in(
-                call,
-                "object of type 'symbol' is not subsettable",
-            ));
-        }
+        SexpType::Environment
+        | SexpType::Closure
+        | SexpType::Builtin
+        | SexpType::Special
+        | SexpType::Symbol => return Err(not_subsettable(call, object)),
         SexpType::Pairlist | SexpType::Language => {
             let list = values::pairlist_to_list(object)?;
             let result = subset(list, indices, drop, call)?;
@@ -1091,13 +1078,7 @@ unsafe fn subset2_level(
         return subset2_level(list, indices, exact, call, Some(object), recursive);
     }
     if !object.kind().is_vector() {
-        return Err(crate::unwind::error_in(
-            call,
-            format!(
-                "object of type '{}' is not subsettable",
-                object.kind().name()
-            ),
-        ));
+        return Err(not_subsettable(call, object));
     }
     if indices.len() >= 2 {
         let Some(dims) = values::dims(object) else {
@@ -1464,10 +1445,11 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
                 "$ operator not defined for this S4 class",
             ))
         }
-        _ => Err(crate::unwind::error_in(
+        kind if kind.is_atomic() => Err(crate::unwind::error_in(
             call,
             "$ operator is invalid for atomic vectors",
         )),
+        _ => Err(not_subsettable(call, object)),
     }
 }
 
@@ -1733,6 +1715,15 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
+    // R's `SubassignN`; Matrix reorders its results this way.
+    let value = if value == object {
+        let copy = values::shallow_duplicate(value)?;
+        crate::heap().root(copy);
+        copy
+    } else {
+        value
+    };
     // A value an Array cannot hold, such as an NA, makes the result a plain R vector.
     let object = if object.is_array() {
         match crate::arrays::subassign(object, indices, value, call)? {
@@ -1815,13 +1806,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         object
     };
     if !object.kind().is_vector() {
-        return Err(crate::unwind::error_in(
-            call,
-            format!(
-                "object of type '{}' is not subsettable",
-                object.kind().name()
-            ),
-        ));
+        return Err(not_subsettable(call, object));
     }
     // Deleting list elements.
     if value == nil()
@@ -2288,6 +2273,14 @@ unsafe fn subassign2_one(
     if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         return subassign2(object, &[index], value, call);
     }
+    // A symbol subscript names the element, so the rest of the assignment sees it as a string.
+    let index = if index.kind() == SexpType::Symbol {
+        let name = values::scalar_string_charsxp(index.car())?;
+        crate::heap().root(name);
+        name
+    } else {
+        index
+    };
     let is_list = object == nil() || matches!(object.kind(), SexpType::List | SexpType::Expression);
     let count = length(index);
     if count > 1 {
@@ -2408,6 +2401,15 @@ unsafe fn one_index(extent: usize, names: Sexp, index: Sexp) -> R<Slot> {
     }
     match index.kind() {
         SexpType::String => {
+            // NA selects the first NA name, as GNU R compares the string pointers.
+            if index.element(0) == values::na_string() {
+                let position = (names != nil())
+                    .then(|| {
+                        (0..length(names)).find(|&at| names.element(at) == values::na_string())
+                    })
+                    .flatten();
+                return Ok(position.map_or(Slot::Named, Slot::At));
+            }
             let wanted = index.element(0).bytes();
             if wanted.is_empty() {
                 return Ok(Slot::Named);
@@ -2424,7 +2426,8 @@ unsafe fn one_index(extent: usize, names: Sexp, index: Sexp) -> R<Slot> {
         }
         SexpType::Real => {
             let value = values::reals(index)[0];
-            if value.is_nan() || value == f64::INFINITY {
+            // Past the longest vector R allows (2^52), a position selects nothing.
+            if value.is_nan() || value > 4_503_599_627_370_496.0 {
                 return Ok(Slot::Absent);
             }
             // Truncated toward zero, saturating at the integer range.
@@ -2466,6 +2469,19 @@ unsafe fn atomic_replacement_check(value: Sexp) -> R<()> {
         1 => Ok(()),
         _ => Err(error("more elements supplied than there are to replace")),
     }
+}
+
+/// GNU R's `notSubsettableError`, which carries the object.
+unsafe fn not_subsettable(call: Sexp, object: Sexp) -> Unwind {
+    crate::conditions::classed_error(
+        call,
+        &format!(
+            "object of type '{}' is not subsettable",
+            object.kind().name()
+        ),
+        &["notSubsettableError", "error", "condition"],
+        &[("object", object)],
+    )
 }
 
 unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
@@ -2555,10 +2571,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
             let index = values::scalar_string_charsxp(name)?;
             subassign2(list, &[index], value, call)
         }
-        _ => Err(crate::unwind::error_in(
-            call,
-            "invalid type for $ assignment",
-        )),
+        _ => Err(not_subsettable(call, object)),
     }
 }
 
@@ -2989,9 +3002,14 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     let use_names = values::as_logical_scalar(call.arg(1)) != 0;
     let count = length(object);
     let result = alloc(SexpType::Integer, count)?;
+    crate::heap().root(result);
     for index in 0..count {
         let element = match object.kind() {
-            SexpType::List | SexpType::Expression => length(object.element(index)),
+            // A classed element answers with its own `length` method, S4 ones included
+            // (Matrix's sparse vectors).
+            SexpType::List | SexpType::Expression => {
+                dispatch_length(object.element(index), call.env)?
+            }
             _ => 1,
         };
         values::ints_mut(result)[index] = element as i32;
@@ -3054,6 +3072,22 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     } else {
         coerce_vector(names, SexpType::String)?
     };
+    let is_vector_or_list = matches!(
+        object.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+            | SexpType::Pairlist
+            | SexpType::Language
+    );
+    if !is_vector_or_list && !object.has_gp(gp::S4_OBJECT) {
+        return Err(error("names() applied to a non-vector"));
+    }
     let count = length(object);
     if length(names) > count {
         return Err(error(format!(

@@ -134,6 +134,8 @@ pub struct Hooks {
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
+    /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
+    pub run_exit_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
     /// succeeded, and whether the value was visible.
     pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
@@ -154,7 +156,13 @@ pub struct Hooks {
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
+    /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
+    /// finds `user_unif_rand`.
+    pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
+
+/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
+pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -199,6 +207,11 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
+    /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
+    /// ry answers a lookup that finds no binding from here instead, so an assignment neither
+    /// adds a binding nor invalidates the lookup caches.
+    pub tmp_values: Vec<(Sexp, Sexp)>,
     /// The environments of the loops the tree-walking interpreter is running, innermost last.
     pub loop_envs: Vec<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
@@ -329,6 +342,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
+        tmp_values: Vec::new(),
         loop_envs: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
@@ -374,6 +388,7 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
+        run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))
@@ -390,6 +405,7 @@ pub fn default_hooks() -> Hooks {
             Ok(())
         },
         connection_vfprintf: None,
+        find_native_symbol: |_| None,
     }
 }
 
@@ -486,6 +502,10 @@ impl RootSource for InterpRoots {
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);
+            }
+            for &(env, value) in &interp.tmp_values {
+                marker.mark(env);
+                marker.mark(value);
             }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);

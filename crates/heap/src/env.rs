@@ -124,7 +124,8 @@ impl Frame {
     }
 
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
-    /// positive).
+    /// positive). Environments are hashed when they are created, so the bindings a frame
+    /// already holds are entered as if inserted afterwards, in order.
     pub fn set_hashed(&mut self, size: i32) {
         let size = if size > 0 {
             size as u32

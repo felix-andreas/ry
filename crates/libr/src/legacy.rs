@@ -172,23 +172,28 @@ unsafe fn checked(object: Sexp, kind: SexpType, what: &str) -> ApiResult<Sexp> {
 pub unsafe extern "C" fn FRAME(env: Sexp) -> Sexp {
     enter(|| {
         let env = checked(env, SexpType::Environment, "FRAME")?;
-        let runtime = runtime();
-        let mut list = runtime.nil();
-        for symbol in runtime.heap.frame_symbols(env).into_iter().rev() {
-            let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
-                continue;
-            };
-            list = runtime
-                .heap
-                .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
-            runtime.heap.root(list);
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                list.set_gp_bits(gp::ACTIVE_BINDING, true);
-            }
-        }
-        Ok(Pinned(list))
+        Ok(Pinned(frame_pairlist(env)?))
     })
     .0
+}
+
+/// The pairlist `FRAME` hands out, which `CAR` of an environment returns too.
+pub unsafe fn frame_pairlist(env: Sexp) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let mut list = runtime.nil();
+    for symbol in runtime.heap.frame_symbols(env).into_iter().rev() {
+        let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
+            continue;
+        };
+        list = runtime
+            .heap
+            .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
+        runtime.heap.root(list);
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            list.set_gp_bits(gp::ACTIVE_BINDING, true);
+        }
+    }
+    Ok(list)
 }
 
 /// `HASHTAB(env)`: `NULL`, which tells code that walks frames to use `FRAME` instead.
