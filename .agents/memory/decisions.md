@@ -4490,10 +4490,62 @@ check` releases its trees once, and memoized records are compact" below).
   `List.walk` 0.734 to 0.463 s, `List.map` 0.516 to 0.406 s, `List.keep_if` 0.488 to 0.350 s,
   `List.find_first` 0.501 to 0.324 s, `Dict.walk` (x10 over 100,000 entries) 0.670 to 0.598 s.
   The typed benchmark folds use no library callbacks and are unchanged.
+- **One loop, described by a struct.** `analysis::Traversal` is a fold (`Walk { until }`, `Map`,
+  `Filter`, `Any`, `All`, `CountIf`, `Find { index }`), a source (`List`, `Dict`, `Set`) and
+  three flags (`backwards`, `indexed`, `from`), and `Traversal::of` decodes every looped name
+  into it, so `List.walk_backwards_until` or `List.find_last_index` is a combination rather than
+  a new code path. Codegen emits one loop: a list reads the `VECSXP`, a `Dict` or `Set` gets its
+  keys vector and values list from `jit_collection_parts` (count `-1` hands off), `backwards`
+  counts down, `indexed` passes the 1-based position as an integer, `from` takes an integer or
+  whole double start of at least 1, and a find stops at the first match and builds its
+  `Result` through `jit_found` after the loop.
+- **Until steps.** A `walk_until` body lowers through `lower_step` into a (break, value) pair:
+  `:Break(s)` and `:Continue(s)` give a constant flag, `{`/`(` unwrap, and `if` merges both arms
+  with `Action::Select`. Any other body shape refuses, so the call stays generic.
+- **`if` in inlined bodies.** `lower_expression` lowers `if (c) a else b` with a logical `c` to
+  `Action::Select`, which evaluates both arms and picks one; that is sound because an inlined
+  body has no effects, and an `NA` condition hands off so tier 0 raises R's error.
+- **Unused formals.** A callback formal whose value cannot be unboxed (the key of a
+  string-keyed `Dict`, say) binds to `UNUSED`, so a body that reads it refuses instead of
+  resolving the name to a frame variable of the caller.
 - **Impact.** Values, errors and warnings are unchanged (`traversals_agree_across_tiers` in
-  `crates/jit/tests/test_tiers.rs` runs each shape in both tiers, including the hand-off cases),
-  and analysis is unaffected. `List.find_first`, `Dict.walk` and the `walk_until` functions are
-  not looped yet (`backlog.md`).
+  `crates/jit/tests/test_tiers.rs` runs each shape in both tiers, including the hand-off cases;
+  `fuzz_stdlib_traversals_agree_with_model` compares random traversals in every tier against a
+  Rust model of the library), and analysis is unaffected. What still runs each callback through
+  `standard_library::invoke` is in `backlog.md`.
+
+## The standard library is measured against GNU R, function by function
+
+- **Previous state.** Nothing compared a library function with what R code would write instead,
+  so several functions were quadratic without anyone noticing: `List.len`, `List.get`,
+  `List.first` and the other accessors copied the whole list into a `Vec` per call (8.6 s for
+  100,000 `List.is_empty` calls), and `Dict.update` rebuilt the dictionary per call.
+- **Target.** `just bench-stdlib` (`tools/bench/stdlib`) times every `List`, `Str`, `Dict` and
+  `Result` function at 1e6 against the fastest of base R, purrr, stringr and stringi, with
+  checksums, and `tools/bench/stdlib/results.md` holds the last full run. A row slower than R
+  is either fixed or listed in `backlog.md` ("Open: standard library rows slower than GNU R")
+  with its reason. Where the input is a vector, ry's side also runs on an Array, because R's
+  vectorized functions work on unboxed storage too and the fair comparison is ry's unboxed
+  vector.
+- **Accessors read in place.** `list_count`, `list_item` and `list_slice` read a list or an
+  Array without materializing it, so the accessors, `take_*`/`drop_*`, `sublist`, `split_at`
+  and `starts_with`/`ends_with` cost what they return. `List.contains` compares a number by
+  value against an Array's storage or a list's plain scalars, which is what `identical`
+  decides for a number that is not `NaN`.
+- **Leaf callbacks skip the call.** A callback that is a leaf builtin (`Str.trim` passed to
+  `List.map`) is called through its `BuiltinFn` directly (`Callback::leaf`, `call_leaf`), not
+  through `eval::apply`, which built a call and matched arguments per element. A leaf reports
+  errors against its own function object, and `call_leaf` swaps in the call `eval::apply` would
+  have built only when an error escapes, so the condition is unchanged.
+- **Updates in place.** `Dict.update` and `List.update` reuse their first argument
+  (`reusing_first_argument`) and update an owned value in place after the callback returns,
+  re-checking ownership then, because the callback may have stored the collection. Removal
+  through `Dict.update` and `Dict.remove` still rebuild, because a `Dict` keeps insertion order
+  and an ordered removal shifts every later entry.
+- **Impact.** Values and errors are unchanged (the docs tests run every library example, and
+  `fuzz_stdlib_traversals_agree_with_model` feeds Arrays as well as lists); the accessors went
+  from O(n) to O(1) per call and `Dict.update` from O(n) to amortized O(1). Analysis is
+  unaffected.
 
 ## Moving a collection into a helper's parameter
 
@@ -4563,9 +4615,10 @@ check` releases its trees once, and memoized records are compact" below).
   so forcing a promise made there is covered too. At return, `closures_dead` releases the
   parameter only when no created closure is the result and each one's refcount is covered by the
   tracked frames' own cells, which means none escaped. 40,000 calls of
-  `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.12 s, against 6.9 s
-  for the tail form, which still copies because `Op::CallTailUpdate` stays off for a body that
-  may capture its frame.
+  `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.14 s, and the tail
+  form `{ inc <- ...; List.append(xs, inc(i)) }` scales linearly too (0.06, 0.14 and 0.26 s at
+  20,000, 40,000 and 80,000 calls), although `Op::CallTailUpdate` stays off for a body that may
+  capture its frame.
 - **Base replacements end the move.** `xs[[i]] <- v`, `xs$a <- v`, `xs[i] <- v` and nested forms
   on a moved list modify it in place without reporting to the journal, so `subset::modifiable` and
   complex assignment in `eval.rs` call `moves::modifying` first, which ends a move whose value is

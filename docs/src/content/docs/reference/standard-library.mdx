@@ -192,9 +192,7 @@ caller's variable gets its value back first. If the helper fails, the variable k
 had before the call, even when the helper had already updated the collection.
 
 A helper may define and call its own closures, as in `inc <- function(x) x + 1`, as long as each
-closure's body passes the same check and none of them outlives the call. Such a helper updates in
-place only through the reassignment form (`xs <- List.append(xs, inc(i)); xs`); its tail form,
-`List.append(xs, inc(i))` as the last expression, copies.
+closure's body passes the same check and none of them outlives the call.
 
 Other helpers copy, as in GNU R, and so does a call whose result goes to another variable, as in
 `y <- helper(x, k)`. A helper that reads a variable through an environment, as in `env$x`, ends the

@@ -376,15 +376,72 @@ protects construction but nothing after it.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- Compiled loops cover `List.walk`, `List.map`, `List.keep_if`, `List.drop_if`, `List.any`,
-  `List.all` and `List.count_if` (`decisions.md`, "Library traversals compile to loops").
-  `List.find_first` (returns a `Result`), `Dict.walk` (two-element callback over keys and
-  values), `List.walk_until` and `Dict.update` still run each callback through
-  `standard_library::invoke`. A callback that reads a defaulted formal of the caller that has not
-  been forced yet, or returns a non-scalar, also stays on that path.
+- Compiled loops cover the `List` walks (backwards, until, with index, from), `map`,
+  `map_with_index`, `keep_if`, `drop_if`, `any`, `all`, `count_if` and the `find` family, plus
+  `Dict.walk`, `Dict.walk_until`, `Set.walk` and `Set.walk_until` (`decisions.md`, "Library
+  traversals compile to loops"). Still on `standard_library::invoke`, by reason:
+  - a rebuilt collection: `Dict.map`, `Dict.keep_if`, `Dict.drop_if`, `Set.map`, `Set.keep_if`
+    (the loop would have to rebuild the hash index);
+  - several lists: `List.map2`, `map3`, `map4`, and `join_map` (the callback returns a list);
+  - `Result` callbacks: `List.keep_oks`, `map_try`, `walk_try`, `keep_if_try` and the `Result.*`
+    functions, whose callbacks return tags the inliner cannot build unboxed;
+  - `Dict.update`, `List.update`, `List.sort_with` and `Str.walk_utf8`;
+  - `List.for_each`: an inlined body has no effects, so a looped `for_each` would do nothing.
+  A callback that cannot inline (it calls a function, returns a non-scalar, or reads a defaulted
+  formal of the caller that has not been forced yet) stays generic too; a guarded fast call for
+  those is the next step. No test builds an ALTREP list, which R code cannot create. The stdlib
+  fuzz feeds Arrays instead, and they fail the same `ALTREP_FLAG | ARRAY_FLAG` test in the loop's
+  type guard, so the hand-back to tier 0 is covered but a genuine ALTREP list is not.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
+
+## Open: standard library rows slower than GNU R
+
+`just bench-stdlib` compares each function with its fastest R equivalent at n = 1e6, and
+`tools/bench/stdlib/results.md` has the numbers. These rows are still slower, grouped by cause:
+
+- **One string call per element against one vectorized call.** `Str.starts_with`,
+  `ends_with`, `contains`, the `trim`, `replace`, prefix and suffix functions, `repeat`,
+  `with_prefix`, the case conversions, `split_first`/`split_last` and the UTF-8, 16 and 32
+  conversions run through `List.map` or a closure, one builtin call per string with a boxed
+  result each (about 400 to 1,200 ns), while `startsWith`, `grepl(fixed = TRUE)` or stringi make
+  one C call over the whole character vector (15 to 350 ns per string). A leaf callback already
+  skips building a call (`decisions.md`, "The standard library is measured against GNU R"), and
+  the leaves borrow their input. The next step is a kernel per unary `Str` leaf that `List.map`
+  and the predicates run straight over a character Array's storage into one result vector, then
+  the same inside compiled loops.
+- **A callback loop entered from tier 0.** `List.walk`, `walk_until`, `walk_with_index`,
+  `walk_backwards`, `walk_from`, `for_each`, `Dict.walk_until` and `Str.walk_utf8` are 1.1 to
+  3.5 times GNU R's `for` loop when called once from code that is not compiled: the loop only
+  compiles inside a compiled body (`decisions.md`, "Library traversals compile to loops"), so
+  a one-shot call runs the callback as a full closure call per element (about 3,800
+  instructions: a frame, argument binding, entering the compiled body, loading the arguments
+  back from the frame). Fix: let the tier-0 builtin ask the JIT for the traversal loop over the
+  callback once the list is long enough to pay for compiling it.
+- **A callback against a vectorized whole-vector answer.** `List.sort_with` calls its comparator
+  about n log n times (12 s against `order` at 1e6), and `Dict.update` counting words calls its
+  callback once per key (3.6 s, linear, against `tabulate(match())`). The callback API cannot
+  reach one C call; sort by a key with `List.sort_asc` where the order is numeric.
+- **One lookup per key against a vectorized index.** `Dict.get` and `Dict.contains` in a `for`
+  loop pay an interpreted iteration, a builtin call and a `Result` per key (about 1 to 1.9 us),
+  against `v[keys]` or `keys %in% names(v)` as one call. A bulk lookup function would close it.
+- **Boxed lists against atomic vectors.** `List.range`, `from_vector`, `concat`, `prepend`,
+  `reverse`, the `take`/`drop` family, `drop_at`, `split_*`, `starts_with`/`ends_with`,
+  `join`, `concat_utf8`, `sort_asc`/`sort_desc` and `min`/`max` on a list copy or compare
+  boxed elements where R copies or scans 8 bytes per element (and `seq_len` is a compact ALTREP
+  sequence that costs nothing). They are 1.1 to 2.4 times R; on an Array the same functions
+  work on unboxed storage.
+- **Quadratic, by design for now.** `Dict.remove` rebuilds the dictionary per call, because a
+  `Dict` keeps insertion order and removing one entry in place shifts every later entry and
+  renumbers the index. Tombstones (a removed marker plus a live count, compacting when half
+  the entries are dead) would make it O(1), but every reader of the key vector (`Collection`,
+  `entries`, `collection_parts` in compiled loops) must then skip them. `List.replace` returns
+  a record, so `r <- List.replace(xs, i, v); xs <- r$list` leaves `xs` held twice and every call
+  copies; in-place reuse would need the reuse analysis to see through the record. `List.get`
+  followed by `List.set` updates in place.
+- **Small fixed costs.** `List.len`, `Str.is_empty` and `Str.count_utf8_bytes` per element are
+  1.7 to 6 times R, which is the builtin call against R's `length()` or vectorized `nchar`.
 
 ## Open: Arrays
 
