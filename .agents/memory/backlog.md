@@ -933,6 +933,15 @@ The live workflow tests only `crates/ry` (`default-members`). Its staged replace
 ignored suite, so a human moving it into place closes this (`decisions.md`, "CI runs `just gate`
 against GNU R 4.3.3").
 
+### `just clippy` fails on main, so the staged CI goes red at its clippy step
+
+`cargo fmt --all --check` passes, but `just clippy` stops on lint errors before it reaches every
+crate: 6 in `semantics/src/lints.rs` (needless borrows, a lazy `then`), 2 in `table/src/io.rs`
+(`single_range_in_vec_init` on deliberate one-range vectors; `once(0..n).collect()` silences it), 73
+in `interp`'s library (redundant guards, large enum variants, manual `div_ceil` and
+`is_multiple_of`, and others), and 1 in `sniff`'s `test_fuzz`. Fix them crate by crate and rerun,
+because a crate that fails hides its dependents' lints.
+
 ### `ide::fuzz_deep` cannot be shortened
 
 `ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
