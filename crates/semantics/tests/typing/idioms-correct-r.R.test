@@ -836,7 +836,7 @@ rel <- function(is_abs, rc_ref, fo = "A1") {
 h <- function() rel(TRUE, fo = "A1")
 #++++
 rel: <T, U, V> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
-h: <T> fn() -> character | T
+h: fn() -> Unknown
 
 #---- a_formal_read_before_an_early_return_is_required
 rel <- function(is_abs, rc_ref, fo = "A1") {
@@ -879,7 +879,7 @@ container <- function(x, gap = NULL) {
 h <- function() container()
 #++++
 container: <T, U> fn([x]: T, [gap]: U) -> U | T
-h: <T> fn() -> T | NULL
+h: fn() -> Unknown
 
 #---- a_function_whose_formals_are_rewritten_takes_any_call
 make <- function(args) {
@@ -1769,3 +1769,68 @@ parts <- function() lapply(y ~ x + z, 42)
 #++++
 parts: Unknown
 38..40 error[type-mismatch] expected `fn(T) -> U`, found `double`
+
+#---- a_call_returns_the_arm_of_an_echoed_list_or_vector_parameter_it_passed
+normalize <- function(path) {
+  path[1] <- "a"
+  vapply(path, nchar, 1L)
+  path
+}
+one <- function() nchar(normalize(tempfile()))
+#++++
+normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+one: fn() -> integer
+
+#---- a_union_argument_keeps_the_echoed_union
+normalize <- function(path) {
+  path[1] <- "a"
+  vapply(path, nchar, 1L)
+  path
+}
+either <- function(flag) normalize(if (flag) "a" else list("a"))
+#++++
+normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+either: fn(flag: logical) -> list[character] | character[]
+
+#---- a_getter_call_to_a_getter_and_setter_closure_is_not_the_setter_value
+store <- local({
+  globals <- list(threads = NA_integer_)
+  function(key, value) {
+    if (missing(key)) return(globals)
+    if (missing(value)) globals[[key]] else globals[[key]] <<- value
+  }
+})
+infinity <- function() {
+  if (is.null(store("Inf"))) store("Inf", 1e30)
+  store("Inf")
+}
+lower <- function(n) rep.int(-infinity(), n)
+#++++
+store: <T, U> fn([key]: T, [value]: U) -> list{threads: integer} | integer | U
+infinity: fn() -> Unknown
+lower: <T> fn(n: T) -> Unknown
+
+#---- a_union_return_over_an_argument_variable_is_kept
+pick <- function(flag, x) if (flag) x else NULL
+forward <- function(y) pick(TRUE, y)
+#++++
+pick: <T> fn(flag: logical, [x]: T) -> T | NULL
+forward: <T> fn([y]: T) -> T | NULL
+
+#---- a_formal_used_as_a_vector_passes_a_scalar_parameter
+unpack <- function(file, tmpdir = tempdir()) {
+  scratch <- tempfile(tmpdir = tmpdir)
+  untar(file, exdir = tmpdir)
+  scratch
+}
+#++++
+unpack: <T> fn(file: T, [tmpdir]: character[]) -> character
+
+#---- a_local_vector_is_still_not_a_scalar
+unpack <- function(file) {
+  dirs <- c("a", "b")
+  untar(file, exdir = dirs)
+}
+#++++
+unpack: Unknown
+71..75 error[type-mismatch] expected `character`, found `character[]`

@@ -15,11 +15,13 @@ use {
 /// `id :: name` schemes known not to round-trip. Keep it to schemes whose written-back form
 /// is checked on purpose: an inferred `NULL` default passes on as a placeholder, while the same
 /// `NULL` once declared is checked at the call, and an inferred scalar parameter takes a vector
-/// or a number that the same scalar once declared rejects. A callback shape inferred from a call
+/// or a number that the same scalar once declared rejects, and an inferred vector parameter
+/// passes to a scalar parameter that the same vector once declared does not. A callback shape inferred from a call
 /// lets a later call name its slots, while the same shape once declared has no names to match.
 /// A callback the body calls with two arities after testing `formals()` has no single declared
 /// shape that admits both calls.
-const KNOWN_UNWRITABLE: [&str; 10] = [
+const KNOWN_UNWRITABLE: [&str; 11] = [
+    "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
     "semantics/tests/typing::correct_r__a_condition_parameter_takes_a_number :: skip",

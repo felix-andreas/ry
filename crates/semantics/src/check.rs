@@ -10547,8 +10547,13 @@ impl<'db> Checker<'db, '_> {
             TyKind::Function(function) => {
                 let function = function.clone();
                 let findings = self.match_arguments(callee_range, &function, arguments);
+                let narrowed = findings.is_empty() && function.inferred;
                 self.errors.extend(findings);
-                function.ret
+                if narrowed {
+                    self.narrow_echoed_parameter_unions(&function, arguments)
+                } else {
+                    function.ret
+                }
             }
             TyKind::Any | TyKind::Unknown => unknown(self.db),
             TyKind::Var(_) => {
@@ -10783,6 +10788,65 @@ impl<'db> Checker<'db, '_> {
     /// Checks every argument (a failed `compatible` leaves the table untouched, so
     /// verdicts are independent); empty means the call matches. A structural failure is
     /// returned alone: per-argument mismatches under a mis-shaped call mislead.
+    /// The return of a call to an inferred signature whose return is a union.
+    ///
+    /// An inferred parameter typed `list[T] | T[]` takes a list or a vector, and a body that
+    /// hands the parameter back returns that same union. A call that passes one of the two
+    /// returns what it passed: `normalize(tempfile())` is a `character`, not also a
+    /// `list[character]`.
+    fn narrow_echoed_parameter_unions(
+        &mut self,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Ty<'db> {
+        let ret = self.table.resolve(self.db, function.ret);
+        let TyKind::Union(returned) = ret.kind(self.db) else {
+            return function.ret;
+        };
+        let targets = argument_targets(self.db, function, &argument_shapes(arguments));
+        let mut members: Vec<Ty<'db>> = returned.clone();
+        for (argument, target) in arguments.iter().zip(&targets) {
+            let expected = match target {
+                Some(ArgumentTarget::Positional(slot)) => function.positional.get(*slot).copied(),
+                Some(ArgumentTarget::Named(formal)) => {
+                    function.named.get(*formal).map(|parameter| parameter.ty)
+                }
+                _ => None,
+            };
+            let (Some(expected), Some(passed)) = (expected, argument.ty) else {
+                continue;
+            };
+            let expected = self.table.resolve(self.db, expected);
+            let passed = self.table.resolve(self.db, passed);
+            let TyKind::Union(accepted) = expected.kind(self.db) else {
+                continue;
+            };
+            if matches!(passed.kind(self.db), TyKind::Union(_) | TyKind::Var(_))
+                || !accepted.iter().all(|member| members.contains(member))
+            {
+                continue;
+            }
+            members.retain(|member| !accepted.contains(member));
+            members.push(passed);
+        }
+        // A member that is a variable no argument binds is the value of a parameter the call
+        // left out, as in a getter and setter `function(key, value)` called as a getter. It
+        // stands for anything, so the union does too.
+        let mut bound = FxHashSet::default();
+        for argument in arguments {
+            if let Some(ty) = argument.ty {
+                collect_vars(self.db, self.table.resolve(self.db, ty), &mut bound);
+            }
+        }
+        if members
+            .iter()
+            .any(|member| matches!(member.kind(self.db), TyKind::Var(var) if !bound.contains(var)))
+        {
+            return unknown(self.db);
+        }
+        union_of(self.db, members)
+    }
+
     fn match_arguments(
         &mut self,
         callee_range: TextRange,
@@ -11008,7 +11072,7 @@ impl<'db> Checker<'db, '_> {
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
                 let ty = self.without_inferred_null(expected, ty);
-                Some(self.without_inferred_length(expected, ty))
+                Some(self.without_inferred_length(expected, ty, self.binds_parameter(value)))
             }
             _ => Some(ty),
         }
@@ -11174,7 +11238,12 @@ impl<'db> Checker<'db, '_> {
     /// a vector on some path, is presumably one string where a parameter takes one: renv's
     /// `pattern <- sprintf("^%s=", name)` feeds `sub(pattern, "", spec)`. So such an argument
     /// passes to a scalar parameter of its atomic type as that scalar.
-    fn without_inferred_length(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+    fn without_inferred_length(
+        &self,
+        expected: Ty<'db>,
+        ty: Ty<'db>,
+        undeclared_formal: bool,
+    ) -> Ty<'db> {
         let expected = self.table.resolve(self.db, expected);
         let TyKind::Scalar(atomic) = expected.kind(self.db) else {
             return ty;
@@ -11188,7 +11257,10 @@ impl<'db> Checker<'db, '_> {
             _ => false,
         };
         // Only a value that may be one string or many: a plain vector is known to be a vector.
+        // An undeclared formal's vector type comes from a use that takes many, such as
+        // `tempfile(tmpdir = tmpdir)`, which says nothing about how many the caller passes.
         let fits = match resolved.kind(self.db) {
+            TyKind::Vector(_) if undeclared_formal => same_atomic(resolved),
             TyKind::Union(members) => {
                 members.iter().all(|&member| same_atomic(member))
                     && members
