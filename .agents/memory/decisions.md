@@ -5596,3 +5596,34 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `diagnostics::namespace_read_message` reports a missing name as "not exported".
 - A package with stubs but no shipped manifest is not checked, since partial stubs would report
   real exports. `:::` reads stay unchecked as everywhere.
+
+## A name inside a string's `{...}` is a read for liveness
+
+- **Before.** A local used only in a glue or cli template (`n <- length(x); cli_abort("{n} files")`)
+  was reported unused: about 280 of the corpus's 3,180 unused warnings.
+- **Shape.** naming scans every string literal for `{...}` segments, lexes each with the R lexer,
+  and marks the binding each identifier would resolve to as read (`interpolated_names`). It records
+  no resolution and no unresolved read, since the string may be plain text, so rename and hover
+  ignore template names. It applies to every string, not a list of interpolating functions,
+  because wrappers that forward `parent.frame()` (devtools' `ui_*`, waldo's `should_be`) are as
+  common as direct glue and cli calls; the cost of a false read is only a missed unused warning.
+- `{{` is glue's escape, a `.`-led segment is cli markup whose first name is a style, a `?`-led one
+  is pluralization text, and a name after `$`, `@` or `::` is a member.
+
+## An `if` with an `Any` branch is `Any`; a two-path write still unifies
+
+- **Before.** `join_types` unified the branch values, and `Any` unifies with anything, so
+  `if (is.null(f)) order else f` with `f: Any` typed as `order`'s signature and the `Any` path was
+  then checked as a function (sets `as.list.cset`).
+- **Shape.** `join_branch_values` returns `Any` when either side is `Any`, matching the union rule.
+  `join_written_values` keeps unifying, so a variable written `Any` on one path keeps the typed
+  path's type and a later misuse is still reported; applying the rule there too dropped NlcOptim's
+  two true positives (a matrix called as a function).
+
+## tidyr and tibble ship masked-verb stubs beside their manifests
+
+- `types/tidyr.Rtypes` and `types/tibble.Rtypes` declare only the `@masked` verbs; every other
+  export still comes from the `.exports` manifest. Masking is keyed by stub declarations, so a
+  manifest-only package could not mask, and `pivot_longer(d, cols = c(a, b))` reported its columns.
+  Reshaping verbs return `Any` because their columns depend on the data; row-preserving ones
+  (`drop_na`, `fill`, `complete`) keep `<T>`. tidyr re-exports `tibble`, so it declares it too.

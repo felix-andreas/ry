@@ -298,3 +298,46 @@ f <- function(d) {
   72..77 total -> b2
   89..94 total -> non-local deferred
   unused out 21..24
+
+#==== string_interpolation
+#---- a_name_inside_a_glue_template_keeps_its_binding_alive
+f <- function(who) {
+  greeting <- "hello"
+  unused <- "bye"
+  glue::glue("{greeting}, {who}! {{unused}}")
+}
+#++++
+# f
+  b0 who parameter 14..17
+  b1 greeting local 23..31
+  b2 unused local 45..51
+  b3 f top-level 0..1
+  0..1 f <- b3
+  23..31 greeting <- b1
+  45..51 unused <- b2
+  63..73 glue::glue -> namespace
+  unused unused 45..51
+
+#---- cli_markup_and_pluralization_are_not_reads
+f <- function(path) {
+  n <- length(path)
+  cls <- "x"
+  s <- "y"
+  cli::cli_abort("Found {n} file{?s} in {.cls {path}} and {path$cls}")
+}
+#++++
+# f
+  b0 path parameter 14..18
+  b1 n local 24..25
+  b2 cls local 44..47
+  b3 s local 57..58
+  b4 f top-level 0..1
+  0..1 f <- b4
+  24..25 n <- b1
+  29..35 length -> non-local deferred
+  36..40 path -> b0
+  44..47 cls <- b2
+  57..58 s <- b3
+  68..82 cli::cli_abort -> namespace
+  unused cls 44..47
+  unused s 57..58

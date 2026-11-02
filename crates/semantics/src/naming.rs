@@ -15,7 +15,7 @@ use {
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
     },
-    syntax::TextRange,
+    syntax::{SyntaxKind, TextRange, lex},
     thin_vec::ThinVec,
 };
 
@@ -388,6 +388,14 @@ impl Context<'_> {
         match module.kind(id) {
             ExpressionKind::Missing | ExpressionKind::Next => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
+            // glue and cli evaluate `{...}` inside a string in the caller's frame, and so does
+            // any wrapper that forwards `parent.frame()`, so a name there keeps its binding
+            // alive. It is never an unresolved read, because the string may be plain text.
+            ExpressionKind::Literal(LiteralKind::String(text)) => {
+                for name in interpolated_names(&module[text]) {
+                    self.mark_slot_read(Symbol::new(name));
+                }
+            }
             ExpressionKind::Literal(_) => {}
             ExpressionKind::NameRef(name) => self.resolve_read(id, *name),
             ExpressionKind::Assign {
@@ -1813,6 +1821,73 @@ pub(crate) fn data_argument_flags(
             }
         })
         .collect()
+}
+
+/// The names a `{...}` segment of a glue or cli template reads. `{{` is glue's escaped brace;
+/// a segment opening with `.` is cli markup (`{.cls {x}}`) whose style name is not a read, and
+/// one opening with `?` is cli pluralization text (`{?s}`); a name after `$`, `@` or `::` is a member, not a variable.
+fn interpolated_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    if !text.contains('{') {
+        return names;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut segment_start = None;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if depth == 0 && bytes.get(index + 1) == Some(&b'{') => index += 1,
+            b'{' => {
+                if depth == 0 {
+                    segment_start = Some(index + 1);
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0
+                    && let Some(start) = segment_start.take()
+                    && let Some(segment) = text.get(start..index)
+                {
+                    collect_segment_names(segment, &mut names);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    names
+}
+
+fn collect_segment_names<'a>(segment: &'a str, names: &mut Vec<&'a str>) {
+    if segment.starts_with('?') {
+        return;
+    }
+    let markup = segment.starts_with('.');
+    let (tokens, _) = lex(segment);
+    let mut offset = 0usize;
+    let mut previous = None;
+    let mut first = true;
+    for token in tokens {
+        let start = offset;
+        offset += usize::from(token.len);
+        if token.kind.is_trivia() {
+            continue;
+        }
+        if token.kind == SyntaxKind::IDENT
+            && !(first && markup)
+            && !matches!(
+                previous,
+                Some(SyntaxKind::DOLLAR | SyntaxKind::AT | SyntaxKind::COLON2 | SyntaxKind::COLON3)
+            )
+            && let Some(name) = segment.get(start..offset)
+        {
+            names.push(name);
+        }
+        previous = Some(token.kind);
+        first = false;
+    }
 }
 
 /// A slot present on only one path was unassigned on the other.

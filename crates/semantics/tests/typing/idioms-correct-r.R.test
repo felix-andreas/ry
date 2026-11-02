@@ -1976,7 +1976,7 @@ lower <- function(n) rep.int(-infinity(), n)
 #++++
 store: <T, U> fn([key]: T, [value]: U) -> list{threads: integer} | integer | U
 infinity: fn() -> Unknown
-lower: <T> fn(n: T) -> Unknown
+lower: <T, U> fn(n: T) -> U[]
 
 #---- a_union_return_over_an_argument_variable_is_kept
 pick <- function(flag, x) if (flag) x else NULL
@@ -2199,3 +2199,17 @@ getBaseFont: <T> fn(wb: T) -> Unknown
 Workbook: Unknown
 Unknown
 Unknown
+
+#---- a_branch_holding_any_makes_the_if_any
+# `attr()` is `Any`, so the `else` path may hold anything; the `if` is not the function.
+pick <- function(x) {
+  f <- attr(x, "order")
+  if (is.null(f)) order else f
+}
+use <- function(x) {
+  f <- pick(x)
+  if (is.function(f)) f(1:3) else c(1.5, 2.5)[f]
+}
+#++++
+pick: <T> fn(x: T) -> Any
+use: <T> fn(x: T) -> Unknown

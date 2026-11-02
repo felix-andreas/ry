@@ -778,7 +778,10 @@ way. Every union, written or inferred, is normalized:
 - Member order does not affect meaning. Rendering keeps first-occurrence order, except that `NULL`
   always renders last.
 - A union whose members collapse to one type is that type, so `integer | integer` is `integer`.
-- A union with an `Any` member is `Any`, because every value already satisfies `Any`.
+- A union with an `Any` member is `Any`, because every value already satisfies `Any`. So an `if`
+  whose branch is `Any` is `Any` (`if (is.null(f)) order else f` with `f <- attr(x, "f")`), and
+  not the other branch's type. A variable that two paths write is different: it keeps the typed
+  path's type, so a later use of it is still checked.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
 
 A call's result drops a union member that is a type parameter of the called function when the
@@ -2980,6 +2983,20 @@ with_transaction <- function(con, body) {
 }
 ```
 
+A string template reads too. glue and cli evaluate each `{...}` segment of a string in the calling
+frame, and so does any wrapper that forwards `parent.frame()`, so a name inside the braces of any
+string literal keeps the binding it would resolve to alive. Such a name is never reported as
+unresolved, because the string may be plain text. `{{` is glue's escaped brace, a segment that opens
+with `.` is cli markup whose style name is not a read (`{.path {file}}` reads only `file`), a segment
+that opens with `?` is cli pluralization text, and a name after `$`, `@` or `::` is a member:
+
+```r
+report <- function(files) {
+  n <- length(files)          # read by the template, not a dead store
+  cli::cli_inform("Found {n} file{?s}: {.path {files}}")
+}
+```
+
 #### Names bound at run time
 
 In a file that calls `R6Class`, the names `self`, `private`, and `super` resolve and type as
@@ -3578,6 +3595,12 @@ Four packages have shipped stubs that do not join name resolution by default:
 - `ggplot2`, with the `ggplot` and `gg` nominals, `+.ggplot`, the geoms and scales, and the `@masked`
   `aes`;
 - `testthat`, with the expectations and `test_that`.
+
+`tidyr` and `tibble` are conditional the same way. Their shipped stubs declare only the `@masked`
+verbs (`pivot_longer`, `drop_na`, `unnest`, `tibble`, `add_column` and the rest), and every other
+export comes from the package's export manifest. A column selection such as
+`pivot_longer(d, cols = c(a, b))` and a later column read such as `tibble(x = 1:3, y = x * 2)` are
+therefore not unresolved names.
 
 R does not attach these packages by default either, and their names must not suppress typo warnings
 in projects that never use them. So a conditional namespace activates only when:

@@ -11,7 +11,10 @@ The quality bar is four things.
   An unsupported construct may be refused loudly, because sound-by-refusal is acceptable, and must
   never be silently mistyped.
 - **No false positive on the roughly 200 most-used base functions**, with `[check] typing = true`,
-  on an idiomatic call form.
+  on an idiomatic call form. `crates/semantics/tests/typing/base-functions.R.test` measures it: the
+  functions the corpus calls most, one idiomatic call each, with no diagnostic allowed. Its
+  remaining `Unknown` results (`Reduce` over an operator, a replacement call's value) are strict-mode
+  gaps, not false reports.
 - **Keystroke to diagnostics at a median of 30 ms or less and a 95th percentile of 100 ms or less,
   at 300k lines.** Read those against the raw-parse floor the instrument prints, because a latency
   number swings by about 1.4 times with machine load. `crates/semantics/tests/test_perf.rs` pins
@@ -93,8 +96,15 @@ False reports on correct R, worst first:
   are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
   `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
   argument is a probe and could skip validation.
-- **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
-  c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
+- **A bare `NA` returned as a missing string is `logical | character`** (downlit
+  `extract_curly_package` returns `NA`, and the result reaches `system.file(package = )` after an
+  `is.na()` check: 2 corpus reports). `NA` coerces into any atomic type in R; a literal `NA` joining a
+  branch or return of another atomic type could take that type, which needs the literal's provenance
+  at the join. `type-checking/limitations.md` documents it.
+- **A nullable return that a correlated predicate excludes** (pkgload `ns_env()` returns `NULL` unless
+  `is_loaded(package)`, and `imports_env()` tests `is_loaded()` itself before
+  `parent.env(ns_env(package))`: 1 corpus report). Correct under the `T | NULL` rule, but R code
+  relies on it.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
   above `amount <- df$amount` still reports the origin and tells the user to "add a type
   annotation"; only `# ry: allow(strict)` clears it.
@@ -146,7 +156,8 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 62. About 22 of the rest are true bugs in the packages (NlcOptim calls the
+lifecycle, and is down to 62. Typing `system.file()` and `asNamespace()` exposed three more
+(the bare `NA` and correlated-`NULL` items above), so it is 65. About 22 of the rest are true bugs in the packages (NlcOptim calls the
 matrices `indall` and `A` as functions); the other 40
 or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
 packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call

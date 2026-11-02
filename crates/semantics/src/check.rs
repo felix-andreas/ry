@@ -14523,6 +14523,15 @@ impl<'db> Checker<'db, '_> {
     fn join_branch_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
+        // `Any` unifies with everything, so unifying would type the `if` as the other branch
+        // and check the `Any` path's value against it; a union with `Any` is `Any`. A variable
+        // written on two paths still joins by unification (`join_written_values`), so a later
+        // use is checked against what the typed path established.
+        if matches!(left_resolved.kind(self.db), TyKind::Any)
+            || matches!(right_resolved.kind(self.db), TyKind::Any)
+        {
+            return any(self.db);
+        }
         let left_open = self.table.contains_unbound_var(self.db, left_resolved);
         let right_open = self.table.contains_unbound_var(self.db, right_resolved);
         if left_open != right_open {
