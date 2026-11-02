@@ -172,7 +172,10 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect evaluated "value"` / `expect debug-output "needle"` / `expect exited N` | The last evaluation, the program's output so far, and its exit status. |
 | `run ry ARGS...` | Run the `ry` binary in the workspace. |
 | `install DIR` | Install a source package through ry's `R CMD INSTALL` into `library/`. |
-| `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run` or `install`. |
+| `spawn ry ARGS...` | Start the `ry` binary in the workspace and leave it running, as a watcher runs. |
+| `await stdout\|stderr "needle" [before "other"]` | Read the spawned process's output until a line contains the needle, failing if none does within two minutes, or if a line with `other` comes first. |
+| `stop` | Kill the spawned process and everything it started; its output becomes the last run's, for `expect stdout\|stderr`. |
+| `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run`, `install` or `stop`. |
 
 `cargo test -p ry-lang --test test_scenarios` runs them all, and `just scenarios <name>` runs one.
 
