@@ -12,7 +12,7 @@
 use {
     crate::{
         R_xlen_t, SEXPTYPE,
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Pinned, enter, error},
         runtime,
         vectors::sexp_type,
     },
@@ -186,8 +186,9 @@ pub unsafe extern "C" fn FRAME(env: Sexp) -> Sexp {
                 list.set_gp_bits(gp::ACTIVE_BINDING, true);
             }
         }
-        Ok(list)
+        Ok(Pinned(list))
     })
+    .0
 }
 
 /// `HASHTAB(env)`: `NULL`, which tells code that walks frames to use `FRAME` instead.

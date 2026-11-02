@@ -36,6 +36,7 @@ use {
     std::{
         mem,
         ops::Range,
+        rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
@@ -1485,6 +1486,10 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 /// forces it.
 #[derive(Default)]
 struct FormalUses {
+    /// The formals of the function being walked. Only their reads and writes are recorded,
+    /// because every question asked of the walk is about a formal, and every other name
+    /// would only grow the sets that each branch clones and joins.
+    tracked: Rc<[Symbol]>,
     missing_tested: FxHashSet<Symbol>,
     /// Names read on every path before any write of them on that path.
     forced: FxHashSet<Symbol>,
@@ -1510,8 +1515,21 @@ impl FormalUses {
                 .is_none_or(|returned| returned.contains(&name))
     }
 
+    fn nested(&self) -> FormalUses {
+        FormalUses {
+            tracked: self.tracked.clone(),
+            ..FormalUses::default()
+        }
+    }
+
+    fn record_read(&mut self, name: Symbol) {
+        if self.tracked.contains(&name) && !self.assigned.contains(&name) {
+            self.forced.insert(name);
+        }
+    }
+
     fn record_write(&mut self, name: Symbol) {
-        if !self.forced.contains(&name) {
+        if self.tracked.contains(&name) && !self.forced.contains(&name) {
             self.assigned.insert(name);
         }
     }
@@ -1998,10 +2016,7 @@ impl<'db> Checker<'db, '_> {
         }
         // A standard-library type such as `data.frame` comes from its own constructors, so the
         // advice to wrap a value with `@new` would be wrong there.
-        let declared = self
-            .table
-            .definitions
-            .and_then(|definitions| definitions.get(self.db, *name));
+        let declared = self.table.definition(self.db, *name);
         let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;
@@ -2387,9 +2402,7 @@ impl<'db> Checker<'db, '_> {
                 let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
-                let mut uses = FormalUses::default();
-                self.collect_formal_uses(*body, &mut uses);
-                self.collect_forced_default_uses(&module[parameters], &mut uses);
+                let uses = self.formal_uses(&module[parameters], *body);
                 let mut probed = FxHashSet::default();
                 self.collect_type_probed(*body, &mut probed);
                 let mut named = Vec::new();
@@ -4505,17 +4518,26 @@ impl<'db> Checker<'db, '_> {
     /// first assigns that name. A nested function's `missing()` tests and writes cover its
     /// own frame, but its reads of an outer formal count: the closure usually runs, and
     /// when it does it forces the promise.
+    fn formal_uses(&self, parameters: &[Formal], body: ExprId) -> FormalUses {
+        let mut uses = FormalUses {
+            tracked: parameters.iter().map(|parameter| parameter.name).collect(),
+            ..FormalUses::default()
+        };
+        self.collect_formal_uses(body, &mut uses);
+        self.collect_forced_default_uses(parameters, &mut uses);
+        uses
+    }
+
     fn collect_formal_uses(&self, id: ExprId, uses: &mut FormalUses) {
         let kind = self.module.kind(id);
         match kind {
             ExpressionKind::Function { parameters, body } => {
-                let mut nested = FormalUses {
-                    assigned: self.module[parameters]
-                        .iter()
-                        .map(|parameter| parameter.name)
-                        .collect(),
-                    ..FormalUses::default()
-                };
+                let mut nested = uses.nested();
+                nested.assigned = self.module[parameters]
+                    .iter()
+                    .map(|parameter| parameter.name)
+                    .filter(|name| uses.tracked.contains(name))
+                    .collect();
                 self.collect_formal_uses(*body, &mut nested);
                 for &name in &nested.forced {
                     if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
@@ -4525,9 +4547,7 @@ impl<'db> Checker<'db, '_> {
                 return;
             }
             ExpressionKind::NameRef(name) => {
-                if !uses.assigned.contains(name) {
-                    uses.forced.insert(*name);
-                }
+                uses.record_read(*name);
                 return;
             }
             // `<<-` writes an enclosing frame, never the local formal, and reads its target
@@ -4648,6 +4668,7 @@ impl<'db> Checker<'db, '_> {
                     let mut entry = before.clone();
                     for &binding in &self.module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = self.module.kind(binding)
+                            && uses.tracked.contains(name)
                             && !uses.forced.contains(name)
                         {
                             entry.insert(*name);
@@ -4878,10 +4899,8 @@ impl<'db> Checker<'db, '_> {
         } = self.module.kind(condition)
         {
             self.collect_true_edge_reads(*lhs, uses);
-            let mut right = FormalUses {
-                assigned: uses.assigned.clone(),
-                ..FormalUses::default()
-            };
+            let mut right = uses.nested();
+            right.assigned = uses.assigned.clone();
             self.collect_formal_uses(*rhs, &mut right);
             self.collect_true_edge_reads(*rhs, &mut right);
             uses.forced.extend(right.forced);
@@ -4901,7 +4920,7 @@ impl<'db> Checker<'db, '_> {
                 }
                 visited[index] = true;
                 if let Some(default) = parameter.default {
-                    let mut from_default = FormalUses::default();
+                    let mut from_default = uses.nested();
                     self.collect_formal_uses(default, &mut from_default);
                     uses.forced.extend(from_default.forced);
                     grew = true;
@@ -6704,9 +6723,7 @@ impl<'db> Checker<'db, '_> {
         };
         let range = module.range(expression);
 
-        let mut uses = FormalUses::default();
-        self.collect_formal_uses(*body, &mut uses);
-        self.collect_forced_default_uses(&module[parameters], &mut uses);
+        let uses = self.formal_uses(&module[parameters], *body);
         // A call may omit a formal the body never forces, but only a default or a
         // `missing()` test makes optionality part of the formal's contract. Laziness only
         // relaxes what nothing declares: a declared required parameter stays required.

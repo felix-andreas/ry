@@ -1,0 +1,5 @@
+Package: capibench
+Version: 0.1
+Title: C API Boundary Benchmarks
+Description: Tight loops over R's C API accessors.
+License: UPL-1.0
