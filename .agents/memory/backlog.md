@@ -697,17 +697,6 @@ lines, and is sixteen times off for the package shape. Memory attribution in the
 parse at 82 MiB, lowering and naming at 158 MiB, typecheck at 47 MiB and diagnostics at 28 MiB. HIR
 and naming dominate resident memory at rest, not interned types.
 
-### Fan the formatter out
-
-On an identical file set of ggplot2's 339 files, 64,302 lines and 2.0 MiB, single-threaded on both
-sides, `fmt --check` takes 1.01 s and `check` takes 2.26 s. The formatter costs half what the type
-checker does.
-
-Format is 113 ms of parse plus about 890 ms of render, so the render is about eight times the parse,
-at 1.9 MiB/s against about 18 MiB/s for parsing. The actionable part is to fan `fmt` out the way
-`check` already does. The render's factor of eight was not localized and needs its own profile
-before anyone touches it.
-
 ### Open from a fixed entry: the `BTreeMap` choice in `ItemNaming`
 
 `resolutions`, `bindings`, `non_locals`, `quiet_reads` and `namespace_reads` are pure lookups with
@@ -2794,8 +2783,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **The formatter is not slower than the type checker.** The original reading compared a parallel
   command against a sequential one, because `ry check .` fans out over `available_parallelism()`
   while `ry fmt` is a plain loop. On an identical file set with both single-threaded, the formatter
-  costs 1.01 s against the checker's 2.26 s. Fanning `fmt` out is still open, as is the unlocalized
-  fact that the render is about eight times the parse, at 1.9 MiB/s against about 18 MiB/s.
+  costs 1.01 s against the checker's 2.26 s. `ry fmt` has since been fanned out and sped up (see
+  `MEMORY.md`, "Formatter speed").
 
 - **The overload corpus is not inflated by a missing grammar feature.** The constrained binder works
   in a `#:` annotation and in a `.Rtypes` file alike, and shape-mirroring falls out of it: a project
