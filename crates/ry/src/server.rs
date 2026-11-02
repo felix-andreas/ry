@@ -800,8 +800,9 @@ impl Worker {
 
     /// The findings of the last `ry check` that still hold, by file. `ry check` and the server
     /// key the record the same way ([`check_cache::key`]), and [`check_cache::plan`] decides
-    /// which files kept their findings, so a file is restored exactly when a fresh `ry check`
-    /// would have reused its findings. Only files the server loaded are restored.
+    /// which files kept their findings. A changed file's surface is computed over the server's
+    /// own files, so the plan can be stricter than a fresh `ry check` but never reuses findings
+    /// whose file changed. Only files the server loaded are restored.
     fn restore_recorded_diagnostics(
         &self,
         executable: &Path,
@@ -836,9 +837,14 @@ impl Worker {
                 .iter()
                 .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
         );
+        // The server keys its files by the root as the client spelled it, which differs from
+        // the canonical root when the project is opened through a symbolic link.
         let loaded: Vec<Option<SourceFile>> = paths
             .iter()
-            .map(|path| self.files.get(path).copied())
+            .map(|path| {
+                let relative = path.strip_prefix(&root).unwrap_or(path);
+                self.files.get(&self.workspace_root.join(relative)).copied()
+            })
             .collect();
         let mut contents = Vec::with_capacity(paths.len());
         for (path, file) in paths.iter().zip(&loaded) {

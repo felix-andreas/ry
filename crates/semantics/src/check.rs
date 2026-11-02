@@ -1487,8 +1487,8 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 #[derive(Default)]
 struct FormalUses {
     /// The formals of the function being walked. Only their reads and writes are recorded,
-    /// because every question asked of the walk is about a formal, and keeping every local
-    /// name made the sets that each branch clones and joins grow with the body.
+    /// because every question asked of the walk is about a formal, and every other name
+    /// would only grow the sets that each branch clones and joins.
     tracked: Rc<[Symbol]>,
     missing_tested: FxHashSet<Symbol>,
     /// Names read on every path before any write of them on that path.
