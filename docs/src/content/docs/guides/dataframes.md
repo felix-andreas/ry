@@ -61,8 +61,9 @@ and warnings. Otherwise data.table answers it. These go to data.table:
 - a keyed table, and a table with extra attributes or classes;
 - code inside data.table's own namespace, except a grouped query without `:=`, which is how
   `dcast` aggregates;
-- a `j` that only picks whole columns of every row, such as `x[, .(a, b)]` or
-  `x[, cols, with = FALSE]`, because data.table copies them faster;
+- a query without `by` that only picks rows and whole columns, such as `x[i]`,
+  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
+  data.table copies them faster and with less memory;
 - a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
 - `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
   summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
