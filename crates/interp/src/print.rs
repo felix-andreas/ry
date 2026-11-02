@@ -600,7 +600,8 @@ unsafe fn print_matrix_rows(
     while start < cols {
         let mut end = start;
         let mut used = row_label_width;
-        while end < cols && (end == start || used + widths[end] + options.gap <= options.width) {
+        // GNU R starts a new block once a line would reach the full width, not only exceed it.
+        while end < cols && (end == start || used + widths[end] + options.gap < options.width) {
             used += widths[end] + options.gap;
             end += 1;
         }

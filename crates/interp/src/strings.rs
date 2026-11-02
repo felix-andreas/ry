@@ -1543,30 +1543,31 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(error("'sep' must be a character string")),
     };
-    let original: Vec<String> = strings(names)
-        .into_iter()
-        .map(|name| name.unwrap_or_else(|| "NA".to_owned()))
-        .collect();
-    let mut taken: FxHashSet<String> = original.iter().cloned().collect();
-    let mut seen: FxHashSet<&str> = FxHashSet::default();
-    let mut counters: FxHashMap<&str, usize> = FxHashMap::default();
-    let mut made = Vec::with_capacity(original.len());
+    // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA, and
+    // a repeat is made unique from the text "NA", as in GNU R.
+    let original: Vec<Option<String>> = strings(names);
+    let mut taken: FxHashSet<String> = original.iter().flatten().cloned().collect();
+    let mut seen: FxHashSet<Option<&str>> = FxHashSet::default();
+    let mut counters: FxHashMap<Option<&str>, usize> = FxHashMap::default();
+    let mut made: Vec<Option<String>> = Vec::with_capacity(original.len());
     for name in &original {
-        if seen.insert(name.as_str()) {
+        let key = name.as_deref();
+        if seen.insert(key) {
             made.push(name.clone());
             continue;
         }
-        let counter = counters.entry(name.as_str()).or_insert(1);
-        let mut candidate = format!("{name}{separator}{counter}");
+        let text = key.unwrap_or("NA");
+        let counter = counters.entry(key).or_insert(1);
+        let mut candidate = format!("{text}{separator}{counter}");
         while taken.contains(&candidate) {
             *counter += 1;
-            candidate = format!("{name}{separator}{counter}");
+            candidate = format!("{text}{separator}{counter}");
         }
         *counter += 1;
         taken.insert(candidate.clone());
-        made.push(candidate);
+        made.push(Some(candidate));
     }
-    string_vector(&made)
+    values::string_vector_na(&made)
 }
 
 unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {

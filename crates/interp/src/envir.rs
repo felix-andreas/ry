@@ -1421,8 +1421,11 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
     for index in 0..length(arguments) {
         let tag = if names != nil() {
             let name = names.element(index);
-            if name.bytes().is_empty() || name == values::na_string() {
+            // An NA name tags its argument `NA`, as GNU R's `install` of the NA string does.
+            if name.bytes().is_empty() {
                 nil()
+            } else if name == values::na_string() {
+                values::install("NA")?
             } else {
                 crate::heap().install_char(name)?
             }

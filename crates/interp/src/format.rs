@@ -995,11 +995,9 @@ fn write_c_format(
     } else if flag.contains(' ') && value >= 0.0 {
         out.push(' ');
     }
-    let precision = if digits < 0 {
-        None
-    } else {
-        Some(digits as usize)
-    };
+    // formatC negates `digits` for a `#` flag, so a negative count is still the precision;
+    // only NULL digits (sent as NA) leaves C's default.
+    let precision = (digits != NA_INTEGER).then_some(digits.unsigned_abs() as usize);
     match format {
         "d" => write!(out, "{}", value.round() as i64)?,
         "f" => {
@@ -1075,9 +1073,16 @@ fn write_fixed_fast(out: &mut String, value: f64, decimals: usize) -> bool {
 }
 
 /// C's `%g`: the shorter of `%e` and `%f` at `significant` digits, without trailing zeros.
+///
+/// `keep_zeros` is C's `#` flag: trailing zeros stay, and the decimal point stays even with no
+/// digits after it.
 pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     if value == 0.0 {
-        return "0".into();
+        return match (keep_zeros, significant) {
+            (false, _) => "0".into(),
+            (true, 0 | 1) => "0.".into(),
+            (true, significant) => format!("0.{}", "0".repeat(significant - 1)),
+        };
     }
     let text = format!("{:.*e}", significant.saturating_sub(1), value.abs());
     let exponent: i32 = text
@@ -1085,7 +1090,9 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
     if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
-        if keep_zeros {
+        if keep_zeros && significant <= 1 {
+            text.replacen('e', ".e", 1)
+        } else if keep_zeros {
             text
         } else {
             let (mantissa, rest) = text.split_once('e').unwrap_or((&text, ""));
@@ -1095,7 +1102,9 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     } else {
         let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
         let text = format!("{value:.decimals$}");
-        if keep_zeros {
+        if keep_zeros && decimals == 0 {
+            format!("{text}.")
+        } else if keep_zeros {
             text
         } else {
             trim_zeros(&text).to_owned()
