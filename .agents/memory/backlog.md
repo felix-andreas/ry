@@ -83,6 +83,7 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
+- **A function inside a block argument lost its inferred signature.** In `editor_completeness__block_function_argument` (`crates/ide/tests/ide/editor-completeness.R.test`), `f <- function(x, envir = NULL) ...` written inside `encapsulate({ ... })` no longer gets a signature, hover shows `envir` as required, and the inlay and annotation edits for `f` and `g` are gone. The fixture still expects the signature, so `test_ide_fixtures` fails on it.
 - **`pkg::name` on an inactive shipped namespace is not validated.** `dplyr::mutat` in a script with
   no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
   `::` loads without attaching; validating it against the shipped manifest and stub types without

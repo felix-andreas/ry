@@ -195,6 +195,7 @@ pub fn lint_levels_mut(config: &mut LintConfig) -> Vec<(&'static str, &mut LintL
             &mut config.unnecessary_concatenation,
         ),
         ("line-length", &mut config.line_length),
+        ("data-table", &mut config.data_table),
     ]
 }
 
