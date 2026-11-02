@@ -3049,9 +3049,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- Completion at two characters is weakest on call heads (httr2 68%, purrr 74%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them, and project-wide use counts favor testthat's `expect_*` over `exec`. A signal beyond use counts (the types the call site expects) would be needed.
+- Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
-- Semantic tokens: frame columns inside `[` queries and `col("name")` strings are not colored as properties.
+- Semantic tokens: `col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
@@ -3065,7 +3065,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
-  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls. The
+  coverage roles in `ry debug analysis-stats` (incoming, outgoing, workspace symbols) are 99% or
+  more on R6, purrr, httr2 and finbench.
 - Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
   httr2 (`pkg::name`, `$` field, argument name, call head, variable):
   - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
@@ -3086,6 +3088,10 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+- Keystroke to settled diagnostics on finbench (4 cores, 40 runs) meets the targets (median at most
+  30 ms, 95th percentile at most 100 ms): a body edit settles at a 4 ms median and 6 ms p95, a
+  signature edit at 4 ms and 5 ms. The slow spots left are the first open below and a cold hover
+  (342 ms max, the first hover after startup).
 - A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
 - A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions.md`, "a file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 

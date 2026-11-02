@@ -1,0 +1,118 @@
+#==== inline_variable
+#---- single_read
+f <- function(x) {
+  $0scaled <- x * 2
+  sum(scaled)
+}
+#++++
+action Inline variable `scaled`
+  f <- function(x) {
+    sum(x * 2)
+  }
+
+#---- several_reads_of_a_pure_value
+f <- function(x) {
+  twice <- x * 2
+  twice + $0twice
+}
+#++++
+action Inline variable `twice`
+  f <- function(x) {
+    (x * 2) + (x * 2)
+  }
+
+#---- call_with_several_reads_is_refused
+f <- function() {
+  $0now <- Sys.time()
+  c(now, now)
+}
+#++++
+no refactors
+
+#---- parentheses_kept_for_precedence
+f <- function(a, b) {
+  $0total <- a + b
+  total * 2
+}
+#++++
+action Inline variable `total`
+  f <- function(a, b) {
+    (a + b) * 2
+  }
+
+#---- rebound_operand_is_refused
+f <- function(a) {
+  $0doubled <- a * 2
+  a <- 0
+  doubled
+}
+#++++
+no refactors
+
+#---- annotated_binding_is_refused
+f <- function(a) {
+  $0doubled: double <- a * 2
+  doubled
+}
+#++++
+action Convert to `#:` annotation
+  f <- function(a) {
+    #: double
+    doubled <- a * 2
+    doubled
+  }
+
+#---- read_in_a_loop
+f <- function(xs) {
+  $0limit <- 10
+  for (x in xs) if (x > limit) break
+}
+#++++
+action Inline variable `limit`
+  f <- function(xs) {
+    for (x in xs) if (x > 10) break
+  }
+
+#---- top_level_used_in_another_function
+$0rate <- 0.05
+grow <- function(x) x * (1 + rate)
+#++++
+action Inline variable `rate`
+  grow <- function(x) x * (1 + 0.05)
+#==== inline_keeps_evaluation
+#---- call_moved_past_a_statement
+f <- function() {
+  $0start <- Sys.time()
+  work()
+  print(Sys.time() - start)
+}
+#++++
+no refactors
+
+#---- call_moved_into_a_branch
+f <- function(v) {
+  $0x <- file.remove(v)
+  if (FALSE) print(x)
+}
+#++++
+no refactors
+
+#---- call_into_the_next_statement
+f <- function(v) {
+  $0x <- read(v)
+  print(x)
+}
+#++++
+action Inline variable `x`
+  f <- function(v) {
+    print(read(v))
+  }
+
+#---- chained_assignment
+f <- function() {
+  $0x <- y <- 0
+  print(y)
+  g(x)
+}
+#++++
+no refactors

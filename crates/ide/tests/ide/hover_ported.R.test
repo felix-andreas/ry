@@ -783,7 +783,7 @@ definition: installed c from base, stats, utils, methods, graphics, grDevices, d
 references: none
 rename: none
 signature: none
-completion (128+): a, b, x, f, c, function, break, else
+completion (128+): c, a, b, x, f, function, break, else
 
 #---- base_argument_name
 f <- function(env) {
