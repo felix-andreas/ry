@@ -340,7 +340,7 @@ fn namespace_conditionals_resolve_to_the_taken_branches() {
         let mut values = FxHashMap::default();
         for directive in &directives {
             taken_plain(directive, &mut expected);
-            conditional_values(&mut rng, directive, &source, &mut values);
+            conditional_values(directive, &source, &mut values);
         }
         let resolved = resolve_namespace_conditionals(&source, &values);
         assert!(resolved.resolved, "unresolved:\n{source}");
@@ -501,7 +501,6 @@ fn taken_plain(directive: &Directive, out: &mut Vec<String>) {
 /// alone, keyed by its source text: its condition, then depth first the conditions on the
 /// branch it takes.
 fn conditional_values(
-    rng: &mut SplitMix64,
     directive: &Directive,
     source: &str,
     values: &mut FxHashMap<String, Vec<bool>>,
@@ -510,7 +509,7 @@ fn conditional_values(
         Directive::Plain(_) => {}
         Directive::Block(inner) => {
             for directive in inner {
-                conditional_values(rng, directive, source, values);
+                conditional_values(directive, source, values);
             }
         }
         Directive::If { condition, .. } => {
