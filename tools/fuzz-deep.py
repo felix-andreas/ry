@@ -129,17 +129,22 @@ def main():
                 break
             depth = options.depth * (4 if harness["test"] in HEAVY else 1)
             environment = {"FUZZ_SEED": str(start), "FUZZ_DEPTH": str(depth)}
+            # Cargo sets these for a test it runs; the harness's printed replay command reads them.
+            identity = {"CARGO_PKG_NAME": harness["package"],
+                        "CARGO_MANIFEST_DIR": os.path.join(ROOT, harness["directory"])}
             if harness["test"] == "simulated_sessions_match_a_fresh_start":
                 environment["SIMULATION_ACTIONS"] = "150"
             if harness["path"] is None:
                 arguments = []
             else:
                 arguments = [harness["path"], "--exact"] + (["--ignored"] if harness["ignored"] else [])
-            outcome, output = run(harness["executable"], arguments, environment, harness["directory"], deadline)
+            outcome, output = run(harness["executable"], arguments, {**environment, **identity},
+                                  harness["directory"], deadline)
             if outcome == "ok" and harness["path"] is not None and "running 1 test" not in output:
                 outcome, output = "fail", f"the filter ran no test\n{output}"
             label = f"{harness['package']} {harness['target'] or 'lib'} {harness['path'] or 'main'} from seed {start} at depth {depth}"
-            replays = sorted(set(REPLAY.findall(output)))
+            replays = sorted(set(line + (" --ignored" if harness["ignored"] else "")
+                                 for line in REPLAY.findall(output)))
             report(outcome, label, " | ".join(replays) or replay(harness, environment), output)
         if time.monotonic() < deadline and not options.only:
             executable = executables.get(("oracle", "test_cases"))

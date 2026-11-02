@@ -160,6 +160,8 @@ const REGRESSIONS: &[&str] = &[
     "{ repeat commentt\n}",
     "f <-#: Pers function(x, y) y\non\nx\n",
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
+    // A `[[` opening two nested array literals, which the formatter breaks onto two lines.
+    "n <- [[1L], \n[2L, 3L]]\n",
 ];
 
 /// Whole-file and range formatting share every generated input: a range
