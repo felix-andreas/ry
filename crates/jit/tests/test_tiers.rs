@@ -727,7 +727,7 @@ fn program(rng: &mut SplitMix64) -> String {
             "c(s, total)",
             "c(.Internal(typeof(s)), .Internal(typeof(total)))",
         ][rng.below(5)]
-            .to_owned(),
+        .to_owned(),
     );
     statements.join("\n")
 }

@@ -1609,9 +1609,13 @@ fn leaves_are_the_functions_without_callbacks() {
     let wrong: Vec<_> = names
         .iter()
         .filter(|&&name| {
-            let leaf = !calling_back.contains(name) && !standard_library::reuses_first_argument(name);
+            let leaf =
+                !calling_back.contains(name) && !standard_library::reuses_first_argument(name);
             standard_library::is_leaf(name) != leaf
         })
         .collect();
-    assert!(wrong.is_empty(), "leaf status disagrees with the rule: {wrong:?}");
+    assert!(
+        wrong.is_empty(),
+        "leaf status disagrees with the rule: {wrong:?}"
+    );
 }

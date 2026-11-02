@@ -40,11 +40,7 @@ use {
         RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
         VECTOR_DATA_OFFSET,
     },
-    interp::{
-        annotations,
-        bytecode::Arith,
-        values,
-    },
+    interp::{annotations, bytecode::Arith, values},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{cell::RefCell, sync::atomic::AtomicBool},
@@ -2351,7 +2347,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                     .builder
                     .ins()
                     .iconst(I32, representation::DOUBLE as i64);
-                let kind = self.builder.ins().select(integer, integer_kind, double_kind);
+                let kind = self
+                    .builder
+                    .ins()
+                    .select(integer, integer_kind, double_kind);
                 return self.flush_call(slot, kind, bits);
             }
             _ => (representation::BOXED, self.builder.ins().iconst(I64, 0)),
@@ -2433,8 +2432,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     .ok_or(Refusal("a jump to unreachable code"))?,
             );
             let state = self.plan.state(edge.state);
-            for (register, (&from, &to)) in
-                state.registers.iter().zip(entry.registers).enumerate()
+            for (register, (&from, &to)) in state.registers.iter().zip(entry.registers).enumerate()
             {
                 if !converts(from, to) {
                     continue;

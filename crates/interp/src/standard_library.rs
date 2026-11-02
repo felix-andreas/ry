@@ -4316,16 +4316,14 @@ unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
 
 /// How many entries the collection holds before it must grow its storage.
 unsafe fn collection_capacity(object: Sexp) -> R<Sexp> {
-    let capacity = match object.record_handle(0) {
-        Some(keys) if crate::heap().is_resizable(keys) => keys.capacity() as usize,
-        Some(keys) => length(keys),
-        None => empty_room(
-            nil(),
-            values::ints(records::slot_value(
-                object,
-                index_slot(records::native_kind(object)),
-            )?),
-        ),
+    let keys = records::slot_value(object, 0)?;
+    let capacity = if keys == nil() {
+        let index = records::slot_value(object, index_slot(records::native_kind(object)))?;
+        empty_room(keys, values::ints(index))
+    } else if crate::heap().is_resizable(keys) {
+        keys.capacity() as usize
+    } else {
+        length(keys)
     };
     scalar_integer(i32::try_from(capacity).unwrap_or(i32::MAX))
 }
