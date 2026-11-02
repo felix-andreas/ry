@@ -3083,9 +3083,14 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     } else {
         heap::Collection::Minor
     };
+    // As in GNU R, `verbose` alone decides whether this collection is reported, whatever
+    // `gcinfo()` set for the collections that allocation triggers.
     let heap = crate::heap();
+    let reporter = heap.policy().reporter;
+    heap.update_policy(|policy| policy.reporter = None);
     heap.collect(kind);
-    if verbose && heap.policy().reporter.is_none() {
+    heap.update_policy(|policy| policy.reporter = reporter);
+    if verbose {
         write_collection_report(&heap.report(kind));
     }
     (interp().hooks.run_finalizers)();

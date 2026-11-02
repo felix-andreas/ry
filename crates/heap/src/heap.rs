@@ -1866,7 +1866,10 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
-        let started = self.policy.timing.then(|| (Instant::now(), process_times()));
+        let started = self
+            .policy
+            .timing
+            .then(|| (Instant::now(), process_times()));
         self.space.marked_vector_cells = 0;
         if kind == Collection::Major {
             self.clear_marks();
@@ -2658,7 +2661,10 @@ fn process_times() -> (Duration, Duration) {
         return (Duration::ZERO, Duration::ZERO);
     }
     let duration = |time: libc::timeval| {
-        Duration::new(time.tv_sec.max(0) as u64, (time.tv_usec.max(0) as u32) * 1000)
+        Duration::new(
+            time.tv_sec.max(0) as u64,
+            (time.tv_usec.max(0) as u32) * 1000,
+        )
     };
     (duration(usage.ru_utime), duration(usage.ru_stime))
 }
@@ -2676,8 +2682,15 @@ fn process_times() -> (Duration, Duration) {
     };
     let (mut creation, mut exit, mut kernel, mut user) = (empty, empty, empty, empty);
     // SAFETY: `GetProcessTimes` only writes the four structs it is given.
-    if unsafe { GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user) }
-        == 0
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
     {
         return (Duration::ZERO, Duration::ZERO);
     }

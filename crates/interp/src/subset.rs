@@ -184,6 +184,22 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
+    // An ALTREP string or list reads only the selected elements through its class's `Elt`
+    // method, so `as.character(x)[1:5]` converts five numbers, not all of `x`.
+    if vector.is_altrep() && matches!(vector.kind(), SexpType::String | SexpType::List) {
+        let count = length(vector);
+        let result = alloc(vector.kind(), indices.len())?;
+        crate::heap().root(result);
+        for (position, &index) in indices.iter().enumerate() {
+            if index < count {
+                values::set_elt(result, position, vector.element(index));
+                crate::unwind::raise_parked()?;
+            } else {
+                set_na(result, position);
+            }
+        }
+        return Ok(result);
+    }
     let vector = values::materialize(vector)?;
     let kind = if vector == nil() {
         SexpType::Nil
@@ -594,7 +610,12 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     if object.is_array() {
         return crate::arrays::subset(object, indices, call);
     }
-    let object = values::materialize(object)?;
+    // String and list elements read through the class's `Elt` method in `select_elements`.
+    let object = if matches!(object.kind(), SexpType::String | SexpType::List) {
+        object
+    } else {
+        values::materialize(object)?
+    };
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
         if data == nil() {

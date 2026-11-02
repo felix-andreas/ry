@@ -1515,6 +1515,8 @@ pub unsafe fn deferred_string(source: Sexp) -> ApiResult<Sexp> {
     source.mark_not_mutable();
     let scipen = heap.alloc_vector(SexpType::Integer, 1)?;
     heap.root(scipen);
+    // Elements read later format as they would have now, whatever `scipen` is then.
+    scipen.slice_mut::<i32>()[0] = interp::format::Settings::current_scipen();
     let state = heap.cons(source, scipen)?;
     heap.root(state);
     let nil = heap.nil();
@@ -1550,14 +1552,20 @@ unsafe fn deferred_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
     let Some(source) = deferred_source(object) else {
         return Err(error("a deferred string lost its source"));
     };
-    runtime().heap.root(object);
-    let element = vectors::element_as_charsxp(source, index as usize)?;
-    runtime().heap.root(element);
+    // The storage is allocated before the element, so nothing allocates between converting the
+    // element and storing it where the collector finds it.
     let converted = deferred_storage(object)?;
+    let element =
+        interp::coerce::number_as_charsxp(source, index as usize, deferred_scipen(object))?;
     runtime()
         .heap
         .set_element(converted, index as usize, element);
     Ok(element)
+}
+
+/// The `scipen` option as it was when the conversion was deferred.
+unsafe fn deferred_scipen(object: Sexp) -> i32 {
+    object.car().cdr().slice::<i32>()[0]
 }
 
 unsafe fn deferred_storage(object: Sexp) -> ApiResult<Sexp> {
@@ -1566,6 +1574,7 @@ unsafe fn deferred_storage(object: Sexp) -> ApiResult<Sexp> {
     if object.cdr() != nil {
         return Ok(object.cdr());
     }
+    heap.root(object);
     let length = deferred_length(object)?;
     let heap = &mut runtime().heap;
     let converted = heap.alloc_vector(SexpType::String, length)?;
@@ -1574,14 +1583,19 @@ unsafe fn deferred_storage(object: Sexp) -> ApiResult<Sexp> {
     Ok(converted)
 }
 
-/// Converts every element and drops the source.
+/// Converts every element and drops the source. When no element has been read yet, the whole
+/// vector converts in one batch, as an eager `as.character` would.
 unsafe fn deferred_expand(object: Sexp) -> ApiResult<Sexp> {
-    if deferred_source(object).is_some() {
+    if let Some(source) = deferred_source(object) {
         runtime().heap.root(object);
-        let length = deferred_length(object)?;
-        deferred_storage(object)?;
-        for index in 0..length {
-            deferred_elt(object, index)?;
+        let untouched = object.cdr() == runtime().nil();
+        let converted = deferred_storage(object)?;
+        if untouched {
+            interp::coerce::write_number_strings(source, converted, deferred_scipen(object))?;
+        } else {
+            for index in 0..deferred_length(object)? {
+                deferred_elt(object, index)?;
+            }
         }
         let nil = runtime().nil();
         runtime().heap.set_car(object, nil);
@@ -1842,6 +1856,11 @@ unsafe fn wrapper_unserialize(class: Sexp, state: Sexp) -> ApiResult<Sexp> {
 /// A regular vector with an ALTREP object's elements and no attributes.
 pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
     runtime().heap.root(object);
+    // A deferred string keeps its converted elements in an ordinary vector, so that vector is
+    // the materialized form, and reading the strings again costs no further copy.
+    if object.tag() == builtins()?.deferred_string.pointer {
+        return deferred_expand(object);
+    }
     let kind = object.kind();
     let count = length(object)?;
     let copy = runtime().heap.alloc_vector(kind, count)?;

@@ -548,43 +548,9 @@ pub unsafe fn coerce_atomic(
                 };
             }
         }
-        SexpType::String if source == SexpType::Real => {
+        SexpType::String if matches!(source, SexpType::Real | SexpType::Integer) => {
             let object = values::materialize(object)?;
-            let scipen = crate::format::Settings::current_scipen();
-            for index in 0..count {
-                let value = values::reals(object)[index];
-                if is_na_real(value) {
-                    values::set_elt(result, index, na_string());
-                } else {
-                    values::set_mkchar(result, index, &real_as_text(value, scipen))?;
-                }
-            }
-        }
-        SexpType::String if source == SexpType::Integer => {
-            let object = values::materialize(object)?;
-            // Integer codes are mostly small and repeat (factor() converts its codes to
-            // character), so their strings are interned once per call, and the rest are written
-            // into a stack buffer rather than an allocated string.
-            const SMALL: usize = 1024;
-            let mut small = [None::<Sexp>; SMALL];
-            let mut buffer = [0u8; 12];
-            for index in 0..count {
-                let value = values::ints(object)[index];
-                let charsxp = if value == NA_INTEGER {
-                    na_string()
-                } else if let Some(slot) = usize::try_from(value)
-                    .ok()
-                    .and_then(|value| small.get_mut(value))
-                {
-                    match *slot {
-                        Some(charsxp) => charsxp,
-                        None => *slot.insert(integer_charsxp(value, &mut buffer)?),
-                    }
-                } else {
-                    integer_charsxp(value, &mut buffer)?
-                };
-                values::set_elt(result, index, charsxp);
-            }
+            write_number_strings(object, result, crate::format::Settings::current_scipen())?;
         }
         SexpType::String => {
             for index in 0..count {
@@ -651,6 +617,57 @@ pub unsafe fn coerce_atomic(
 
 /// The caller stores the string at once into a vector it keeps rooted, so the string skips the
 /// root handle `values::mkchar` would push for it.
+/// Writes `as.character` of the integer or double vector `numbers` into the string vector
+/// `result`, of the same length, formatting doubles under scientific-notation penalty `scipen`.
+pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
+    if numbers.kind() == SexpType::Real {
+        for (index, &value) in values::reals(numbers).iter().enumerate() {
+            if is_na_real(value) {
+                values::set_elt(result, index, na_string());
+            } else {
+                values::set_mkchar(result, index, &real_as_text(value, scipen))?;
+            }
+        }
+        return Ok(());
+    }
+    // Integer codes are mostly small and repeat (factor() converts its codes to character), so
+    // their strings are interned once per call, and the rest are written into a stack buffer
+    // rather than an allocated string.
+    const SMALL: usize = 1024;
+    let mut small = [None::<Sexp>; SMALL];
+    let mut buffer = [0u8; 12];
+    for (index, &value) in values::ints(numbers).iter().enumerate() {
+        let charsxp = if value == NA_INTEGER {
+            na_string()
+        } else if let Some(slot) = usize::try_from(value)
+            .ok()
+            .and_then(|value| small.get_mut(value))
+        {
+            match *slot {
+                Some(charsxp) => charsxp,
+                None => *slot.insert(integer_charsxp(value, &mut buffer)?),
+            }
+        } else {
+            integer_charsxp(value, &mut buffer)?
+        };
+        values::set_elt(result, index, charsxp);
+    }
+    Ok(())
+}
+
+/// Element `index` of the integer or double vector `numbers` as `as.character` gives it, with
+/// doubles formatted under scientific-notation penalty `scipen`.
+pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<Sexp> {
+    if numbers.kind() == SexpType::Real {
+        real_as_charsxp(values::reals(numbers)[index], scipen)
+    } else {
+        match values::ints(numbers)[index] {
+            NA_INTEGER => Ok(na_string()),
+            value => integer_charsxp(value, &mut [0u8; 12]),
+        }
+    }
+}
+
 unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
     let mut cursor = &mut buffer[..];
     // Eleven bytes hold every `i32`, so the write cannot run out of room.
@@ -954,6 +971,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
 ];
 
+/// The shortest number vector `as.character` converts lazily. Below it, the conversion costs
+/// less than the deferred vector's own allocations.
+const DEFERRED_STRINGS_MINIMUM: usize = 256;
+
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
@@ -970,6 +991,17 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
             values::clear_attributes(result);
             result
         });
+    }
+    // As in GNU R, a long number vector without attributes converts to character lazily, so
+    // the strings are made only when something reads them.
+    if kind == SexpType::String
+        && matches!(object.kind(), SexpType::Integer | SexpType::Real)
+        && !values::has_attributes(object)
+        && !object.is_altrep()
+        && length(object) >= DEFERRED_STRINGS_MINIMUM
+        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+    {
+        return Ok(deferred);
     }
     let result = match object.kind() {
         SexpType::Symbol | SexpType::Language | SexpType::Pairlist if kind == SexpType::String => {
