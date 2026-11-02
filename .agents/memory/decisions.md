@@ -4189,8 +4189,9 @@ check` releases its trees once, and memoized records are compact" below).
   (`moves::reaching_environment`, in `subset.rs`). A local assignment of the caller's variable's
   name does not shadow it, since a read before the assignment, or on a path that skips it,
   finds the caller's variable, so such a body is not movable; only a parameter shadows. A closure
-  created in the body captures the frame without entering a closure, so a body or default that
-  may create one gets no tail update and no frame release (`moves::may_capture_frame`).
+  created in the body captures the frame without entering a closure, so every live move records
+  each closure created (`moves::created_closure`), and the frame release and the tail update
+  both require that each is referenced only from the move's private frames (`closures_dead`).
 - **A shared start does not stick.** A value something else also holds, such as `.Last.value`
   holding the dict a top-level `d <- Dict.empty()` created, cannot move, but the call still runs
   tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
@@ -4199,9 +4200,12 @@ check` releases its trees once, and memoized records are compact" below).
 - **Tail update.** A helper whose body ends in `f(p, ...)`, `f` a library builtin that reuses its
   first argument and `p` the first parameter, compiles that call to `Op::CallTailUpdate`
   (`bytecode::tail_update`). It updates `p`'s value in place only when, after its arguments are
-  evaluated, a move into this frame still lasts (`moves::frame_private`): then nothing has
-  captured the frame, and nothing in it runs after the call, so no one sees the parameter
-  change. The AST evaluator never does this, so the first two calls, before tier 0 compiles the
+  evaluated, a move into this frame still lasts and every closure created while it lasted is
+  dead once the frame is, with none among the call's other arguments, whose values the heap does
+  not count (`moves::frame_private`): then nothing outlives the frame, and nothing in it runs
+  after the call, so no one sees the parameter change. A body that creates closures used to be
+  refused statically; the dynamic rule turned 20,000 calls of `h <- function(d, k) { inc <-
+  function(x) x + 1L; Dict.insert(d, k, inc(k)) }` from 30.6 s into 0.85 s (debug build). The AST evaluator never does this, so the first two calls, before tier 0 compiles the
   body, copy.
 - **Why static types do not prove it.** A type says what a value is, not which frames a
   function reads or whether it captures its environment, so a typed helper needs the same body

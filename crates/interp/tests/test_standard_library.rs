@@ -408,6 +408,20 @@ const PRINTS: &[(&str, &str)] = &[
         "{ h <- function(d, k) { each <- function(x) Dict.insert(x, k, 1); d <- each(d); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:4) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(d), Dict.len(keep)) }; f() }",
         "[1] 5 4\n",
     ),
+    // The tail form in a helper that creates closures: in place while every closure dies with
+    // the frame, copied when one escapes as an argument or inside one.
+    (
+        "{ h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)) }; f() }",
+        "[1]  6  5 10\n",
+    ),
+    (
+        "{ h <- function(d) { g <- function() length(d); List.append(d, g) }; f <- function() { for (i in 1) NULL; d <- list(1, 2); for (i in 1:4) d <- h(d); c(length(d), d[[6L]](), d[[3L]]()) }; f() }",
+        "[1] 6 5 2\n",
+    ),
+    (
+        "{ h <- function(d) { g <- function() length(d); List.append(d, list(g)) }; f <- function() { for (i in 1) NULL; d <- list(1, 2); for (i in 1:4) d <- h(d); c(length(d), d[[6L]][[1L]](), d[[3L]][[1L]]()) }; f() }",
+        "[1] 6 5 2\n",
+    ),
     (
         "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
         "[1] 4 5\n",

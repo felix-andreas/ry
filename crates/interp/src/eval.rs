@@ -2711,7 +2711,7 @@ pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
 /// first parameter `target` as the first argument (`bytecode::tail_update`). Unlike
 /// [`rebind_call`], nothing assigns the result to `target`, so the parameter's value may be
 /// updated in place only when no one can see the parameter afterwards: a move into this frame
-/// still lasts once the arguments are evaluated, which shows that nothing has reached the frame
+/// still lasts once the arguments are evaluated and no closure made in the frame can outlive it
 /// (`moves::frame_private`).
 pub unsafe fn tail_update(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
@@ -2733,7 +2733,10 @@ unsafe fn reuse_first_argument(
     // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
-            && (!private_frame || moves::frame_private(env))
+            && (!private_frame || {
+                let others: Vec<Sexp> = args[1..].iter().map(|arg| arg.value).collect();
+                moves::frame_private(env, &others)
+            })
             && solely_held(target, subject, env)
             && !args[1..]
                 .iter()

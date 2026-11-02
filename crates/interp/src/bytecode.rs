@@ -965,8 +965,7 @@ unsafe fn tail_update(body: Sexp, function: Sexp) -> Option<(Sexp, Sexp)> {
     let arguments = last.cdr();
     let matches = arguments.kind() == SexpType::Pairlist
         && arguments.tag() == nil()
-        && arguments.car() == parameter
-        && !crate::moves::may_capture_frame(function);
+        && arguments.car() == parameter;
     matches.then_some((last, parameter))
 }
 
