@@ -2007,6 +2007,22 @@ unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    if list.is_array() && list.kind() == SexpType::Real {
+        // An Array holds no `NA`, so every comparison is defined.
+        let mut items = values::reals(list).iter().copied();
+        let Some(first) = items.next() else {
+            return err("ListWasEmpty");
+        };
+        let best = items.fold(first, |best, item| {
+            if item.partial_cmp(&best) == Some(wanted) {
+                item
+            } else {
+                best
+            }
+        });
+        return ok(scalar_real(best)?);
+    }
     let numbers = list_numbers(call)?;
     let Some(mut best) = numbers.first().copied() else {
         return err("ListWasEmpty");

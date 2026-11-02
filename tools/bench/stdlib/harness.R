@@ -151,7 +151,9 @@ scalar_type <- function(element) {
 
 # Inputs that both sides build the same way. `scrambled` is a permutation of 1..n in a fixed
 # order, so sorting has work to do without relying on either engine's random number generator.
-doubles <- function(count) as.double(seq_len(count))
+# GNU R keeps `as.double(seq_len(n))` as a compact ALTREP sequence whose `sum` and `max` take
+# constant time, so `doubles` adds zero to store every element.
+doubles <- function(count) as.double(seq_len(count)) + 0
 scrambled <- function(count) as.double((seq_len(count) * 7919) %% count + 1)
 keys <- function(count) sprintf("k%d", seq_len(count))
 words <- function(count) sprintf("item_%07d_value", seq_len(count))
