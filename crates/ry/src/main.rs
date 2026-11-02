@@ -1,5 +1,6 @@
 use {
     clap::Parser,
+    loader::package_cache_path,
     ry::{
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
@@ -149,7 +150,7 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(path, expressions, file.as_deref(), *runtime);
+        return run_load(path, "", expressions, file.as_deref(), *runtime);
     }
 
     if let Command::Test {
@@ -167,6 +168,15 @@ fn main() -> ExitCode {
             *watch,
             *runtime,
         );
+    }
+
+    if let Command::Document {
+        path,
+        roclets,
+        runtime,
+    } = &cli.command
+    {
+        return run_document(path, roclets, *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -254,6 +264,7 @@ fn main() -> ExitCode {
         | Command::Repl { .. }
         | Command::Load { .. }
         | Command::Test { .. }
+        | Command::Document { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -416,8 +427,6 @@ fn run_debug_adapter() -> ExitCode {
     runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
-/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
-/// it, and exits with the session's status.
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
 fn run_test(
     path: &Path,
@@ -442,11 +451,45 @@ fn run_test(
         reporter = argument(reporter),
         watch = if watch { "TRUE" } else { "FALSE" },
     );
-    run_load(path, &[run], None, runtime)
+    run_load(path, "", &[run], None, runtime)
 }
 
+/// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
+fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    let roclets = if roclets.is_empty() {
+        "NULL".to_owned()
+    } else {
+        let quoted: Vec<String> = roclets
+            .iter()
+            .map(|roclet| load::r_string(roclet))
+            .collect();
+        format!("c({})", quoted.join(", "))
+    };
+    let cache = package_cache_path(&root, "roxygen").map_or_else(
+        || "NULL".to_owned(),
+        |path| load::r_string(&path.to_string_lossy()),
+    );
+    let run = format!(
+        "({driver})({root}, {roclets}, {cache})",
+        driver = include_str!("document.R").trim_end(),
+        root = load::r_string(&root.to_string_lossy()),
+    );
+    // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
+    run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+}
+
+/// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
+/// `file` against it, and exits with the session's status.
 fn run_load(
     path: &Path,
+    prelude: &str,
     expressions: &[String],
     file: Option<&Path>,
     runtime: Option<Runtime>,
@@ -459,7 +502,7 @@ fn run_load(
         }
     };
     // A new session has nothing loaded, so its first load is always a full one.
-    let mut input = load::load_statement(&root, false);
+    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
     for expression in expressions {
         input.push('\n');
         input.push_str(expression);

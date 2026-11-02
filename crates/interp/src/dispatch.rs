@@ -16,6 +16,7 @@ use {
         },
     },
     heap::object::{Sexp, SexpType, gp},
+    rustc_hash::FxHashMap,
     smallvec::SmallVec,
 };
 
@@ -183,16 +184,8 @@ unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
 /// `topenv`: the nearest enclosing global environment, base environment, namespace or package
 /// environment.
 pub unsafe fn top_env(mut env: Sexp) -> Sexp {
-    let empty = values::empty_env();
-    let package_name = symbols().dot_package_name;
-    while env != empty {
-        if env == values::global_env()
-            || env == values::base_env()
-            || env == values::base_namespace()
-            || crate::envir::is_namespace(env)
-            || crate::envir::is_package_env(env)
-            || crate::heap().frame_cell(env, package_name).is_some()
-        {
+    while env != values::empty_env() {
+        if is_top_env(env) {
             return env;
         }
         env = env.enclosure();
@@ -200,31 +193,112 @@ pub unsafe fn top_env(mut env: Sexp) -> Sexp {
     values::global_env()
 }
 
+unsafe fn is_top_env(env: Sexp) -> bool {
+    env == values::global_env()
+        || env == values::base_env()
+        || env == values::base_namespace()
+        || crate::envir::is_namespace(env)
+        || crate::envir::is_package_env(env)
+        || crate::heap()
+            .frame_cell(env, symbols().dot_package_name)
+            .is_some()
+}
+
+/// The bindings S3 dispatch found from a top environment onward, so a repeated dispatch skips
+/// the walk through the namespace imports, the base namespace and the search path, which is most
+/// of what a method lookup costs when the method lives in a package or does not exist.
+///
+/// An entry holds the binding cell, not its value, because assigning a new value to an existing
+/// binding outside a function frame does not move [`heap::Heap::binding_epoch`]: a hit reads the
+/// cell afresh, and falls back to the walk when the value is no longer a function. An entry is
+/// valid while the binding epoch and the collection count are unchanged. The epoch moves when a
+/// binding outside a function frame appears or disappears or an enclosure changes, and a
+/// collection may free an environment whose address a later key then reuses.
+#[derive(Default)]
+pub struct MethodCache {
+    stamp: (u64, u64),
+    entries: FxHashMap<(Sexp, Sexp, Sexp, bool), Option<Sexp>>,
+}
+
 /// Looks up the S3 method `name`: from the calling environment to its top environment, then in
 /// the generic's namespace's registered-methods table, then along the search path.
 pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Option<Sexp>> {
-    let top = top_env(call_env);
     let mut env = call_env;
-    loop {
+    // A frame chain that ends without a top environment continues at the base environment, as
+    // in GNU R: the global frame is not searched.
+    let (top, search_top) = loop {
+        if env == values::empty_env() {
+            break (values::global_env(), false);
+        }
+        if is_top_env(env) {
+            break (env, true);
+        }
         if let Some(function) = function_in_frame(name, env)? {
             return Ok(Some(function));
         }
-        if env == top || env == values::empty_env() {
-            break;
-        }
         env = env.enclosure();
-    }
-    let def_top = top_env(def_env);
-    let table = eval::find_var_in_frame(symbols().dot_s3_methods_table, def_top)?;
+    };
+    // The table is resolved before the cache, because replacing the value of an existing
+    // `.__S3MethodsTable__.` binding does not move the binding epoch.
+    let table = eval::find_var_in_frame(symbols().dot_s3_methods_table, top_env(def_env))?;
     let table = value_of(table)?;
-    if table.kind() == SexpType::Environment {
-        let value = eval::find_var_in_frame(name, table)?;
-        if value != unbound() {
-            let value = value_of(value)?;
+    let table = if table.kind() == SexpType::Environment {
+        Some(table)
+    } else {
+        None
+    };
+    let heap = crate::heap();
+    let stats = heap.stats();
+    let stamp = (
+        heap.binding_epoch(),
+        stats.minor_collections + stats.major_collections,
+    );
+    let key = (name, top, table.unwrap_or(values::empty_env()), search_top);
+    let cache = &mut interp().method_cache;
+    if cache.stamp != stamp {
+        cache.entries.clear();
+        cache.stamp = stamp;
+    }
+    match cache.entries.get(&key) {
+        Some(None) => return Ok(None),
+        Some(Some(cell)) => {
+            let value = value_of(eval::cell_value(*cell)?)?;
             if values::is_function(value) {
                 return Ok(Some(value));
             }
         }
+        None => {}
+    }
+    let mut cacheable = true;
+    let found = method_cell_from(name, top, search_top, table, &mut cacheable)?;
+    let cache = &mut interp().method_cache;
+    // Forcing a lazily loaded binding can run code that defines bindings or collects, and an
+    // entry stamped before that would claim a validity it never had.
+    if cacheable && cache.stamp == stamp {
+        cache.entries.insert(key, found.map(|(cell, _)| cell));
+    }
+    Ok(found.map(|(_, function)| function))
+}
+
+/// The part of [`lookup_method`] from the top environment `top` on: the cell binding the method
+/// and its function. `top`'s own frame is searched only when `search_top` is set. `cacheable`
+/// turns false when the walk saw something whose change would not move the binding epoch: a
+/// function frame, an active binding, or a binding of `name` that holds something other than a
+/// function, which a later assignment could turn into one.
+unsafe fn method_cell_from(
+    name: Sexp,
+    top: Sexp,
+    search_top: bool,
+    table: Option<Sexp>,
+    cacheable: &mut bool,
+) -> R<Option<(Sexp, Sexp)>> {
+    if search_top && let Some(found) = method_cell_in_frame(name, top, cacheable)? {
+        return Ok(Some(found));
+    }
+    if let Some(table) = table
+        && let Some(found) = method_cell_in_frame(name, table, cacheable)?
+    {
+        return Ok(Some(found));
     }
     let mut env = if top == values::global_env() {
         values::base_env()
@@ -232,8 +306,8 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
         top.enclosure()
     };
     while env != values::empty_env() {
-        if let Some(function) = function_in_frame(name, env)? {
-            return Ok(Some(function));
+        if let Some(found) = method_cell_in_frame(name, env, cacheable)? {
+            return Ok(Some(found));
         }
         if env == values::global_env() {
             env = values::base_env();
@@ -242,9 +316,31 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
         env = env.enclosure();
     }
     match crate::standard_library::builtins_env() {
-        Some(env) => function_in_frame(name, env),
+        Some(env) => method_cell_in_frame(name, env, cacheable),
         None => Ok(None),
     }
+}
+
+unsafe fn method_cell_in_frame(
+    name: Sexp,
+    env: Sexp,
+    cacheable: &mut bool,
+) -> R<Option<(Sexp, Sexp)>> {
+    if env.has_gp(gp::FUNCTION_FRAME) {
+        *cacheable = false;
+    }
+    let Some(cell) = crate::heap().frame_cell(env, name) else {
+        return Ok(None);
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        *cacheable = false;
+    }
+    let value = value_of(eval::cell_value(cell)?)?;
+    if values::is_function(value) {
+        return Ok(Some((cell, value)));
+    }
+    *cacheable = false;
+    Ok(None)
 }
 
 unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {

@@ -36,7 +36,7 @@ The quality bar is four things.
 
 - **Strings:** `paste(collapse =)` 1.7x, `format` 1.25x, `sub` 1.2x, `gsub(perl = TRUE)` 1.15x. `as.character(double)` looks infinitely slower because GNU R defers it through ALTREP. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
 - **Grouping:** `order` on two keys is at parity. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
-- **Matrix and time series:** `apply` over rows 1.9x and xts `period.apply` 1.3x are both per-call interpreter cost (about 33k `mean(xt[i])` calls through `[.xts`), which the tier-0 work owns; zoo `rollmean` 1.4x.
+- **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes about 1.3 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s, so code layout is the lever here: profile-guided optimization or BOLT on the release binary, and keeping cold paths out of `execute_code` and the call path. The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Heap-state dependence (heap work):** with 1e7 live strings already in the session, `formatC` went from 5.9 s to 7.8 s on ry while GNU R stays level, because the session-wide string table's probes miss cache. `values::StringMemo` hides this per call in `substr` and `formatC`, but every other string producer still pays it. ry's `gc.time()` returns zeros, so collector time cannot be attributed from R.
 - **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
   - **Base `order` on several keys** peaks about 13% above GNU R at 1e6 rows (166 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
@@ -46,11 +46,18 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
-  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
-  or `src/` does not trigger a rerun.
+- **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
+  the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
+- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
+  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
+  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
+  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
+  with a block cache and linear topic ordering").
+- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
+  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
+  after `ry load`, `ry test` and `ry document`.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
-  3 ms and preparing 4 to 5 ms. One `stat` per file (about 2 ms) finds the edit, and the diff still
+  3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for
   building the salsa inputs once. A strict reload spends about 100 ms of its 0.1 s re-verifying
   diagnostics, plus a fingerprint of about 16 ms taken twice (before and after the check).
@@ -3008,9 +3015,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- Completion at two characters is weakest on call heads (httr2 68%, purrr 74%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them, and project-wide use counts favor testthat's `expect_*` over `exec`. A signal beyond use counts (the types the call site expects) would be needed.
+- Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
-- Semantic tokens: frame columns inside `[` queries and `col("name")` strings are not colored as properties.
+- Semantic tokens: `col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
@@ -3024,7 +3031,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
-  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
+  is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls. The
+  coverage roles in `ry debug analysis-stats` (incoming, outgoing, workspace symbols) are 99% or
+  more on R6, purrr, httr2 and finbench.
 - Gaps measured by the editor-coverage table of `ry debug analysis-stats` on CRAN R6, purrr and
   httr2 (`pkg::name`, `$` field, argument name, call head, variable):
   - Goto on a `$` field answers 0% of the time. A field of a list built in the project could go to
@@ -3045,6 +3054,10 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+- Keystroke to settled diagnostics on finbench (4 cores, 40 runs) meets the targets (median at most
+  30 ms, 95th percentile at most 100 ms): a body edit settles at a 4 ms median and 6 ms p95, a
+  signature edit at 4 ms and 5 ms. The slow spots left are the first open below and a cold hover
+  (342 ms max, the first hover after startup).
 - A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
 - A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions.md`, "a file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 
