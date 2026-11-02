@@ -35,6 +35,16 @@ empty: environment
 missing_probe: integer | NULL
 
 #==== joins
+#---- a_bounded_branch_does_not_pin_its_variable_to_a_matrix
+fit <- function(rho, L = NULL, rho0 = 0) {
+  rho <- if (is.null(L)) rho + rho0 else L %*% rho + rho0
+  rho
+}
+y <- fit(c(1, 2))
+#++++
+fit: <T: numeric, U> fn(rho: T, [L]: U | NULL, [rho0]: T) -> T | matrix
+y: double[] | matrix
+
 #---- if_unifies_or_unions
 same <- function(flag) if (flag) 1L else 2L
 mixed <- function(flag) if (flag) 1L else "foo"

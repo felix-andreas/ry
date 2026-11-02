@@ -26,7 +26,7 @@ use {
         stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, NullUnless, FunctionType, InferenceVar,
+            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, NullUnless, ReduceForward, FunctionType, InferenceVar,
             Name, NativeField, Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty,
             TyKind, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
@@ -2713,6 +2713,11 @@ impl<'db> Checker<'db, '_> {
                 };
                 let null_unless =
                     self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
+                let reduces = if early_returns.is_empty() {
+                    self.reduce_forward(&module[parameters], *body)
+                } else {
+                    None
+                };
                 // The body may settle a formal on a type its default does not have
                 // (`function(class = NULL) { if (!length(class)) class <- ""; ... }`), yet a call
                 // that passes the default's own value is always fine.
@@ -2774,6 +2779,7 @@ impl<'db> Checker<'db, '_> {
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect(),
                         null_unless,
+                        reduces,
                     }),
                 )
             }
@@ -7585,6 +7591,7 @@ impl<'db> Checker<'db, '_> {
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
             null_unless: None,
+            reduces: None,
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -7886,6 +7893,124 @@ impl<'db> Checker<'db, '_> {
             default: *default,
             when_true: *self.recorded.get(then_branch)?,
             when_false: *self.recorded.get(else_branch)?,
+        })
+    }
+
+    /// The body's tail is `Reduce(f, x, init = init)` over formals it never rebinds, with `f`
+    /// a formal or a local `function(a, b) formal(a, b, ...)`.
+    fn reduce_forward(&self, parameters: &[Formal], body: ExprId) -> Option<ReduceForward<'db>> {
+        let module = self.module;
+        let strip = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(id) {
+                id = *inner;
+            }
+            id
+        };
+        let mut statements: &[ExprId] = &[];
+        let mut tail = strip(body);
+        while let ExpressionKind::Block { statements: inner } = module.kind(tail) {
+            statements = &module[inner];
+            tail = strip(*statements.last()?);
+        }
+        let ExpressionKind::Call { callee, arguments } = module.kind(tail) else {
+            return None;
+        };
+        if variable_name(module, *callee).as_deref() != Some("Reduce")
+            || self.naming.resolutions.contains_key(callee)
+        {
+            return None;
+        }
+        let mut slots: [Option<ExprId>; 3] = [None; 3];
+        let mut next = 0;
+        for argument in &module[arguments] {
+            let value = argument.value?;
+            let index = match argument.name {
+                None => {
+                    while slots.get(next).is_some_and(Option::is_some) {
+                        next += 1;
+                    }
+                    next
+                }
+                Some(name) => match &*module.name(name) {
+                    "f" => 0,
+                    "x" => 1,
+                    "init" => 2,
+                    _ => return None,
+                },
+            };
+            let slot = slots.get_mut(index)?;
+            if slot.is_some() {
+                return None;
+            }
+            *slot = Some(value);
+        }
+        let formal = |value: ExprId| -> Option<Symbol> {
+            let ExpressionKind::NameRef(name) = module.kind(strip(value)) else {
+                return None;
+            };
+            parameters.iter().find(|formal| formal.name == *name)?;
+            (!self.writes_name(body, *name)).then_some(*name)
+        };
+        let function = slots[0]?;
+        let function = formal(function).or_else(|| {
+            let ExpressionKind::NameRef(local) = module.kind(strip(function)) else {
+                return None;
+            };
+            let [definition] = statements
+                .iter()
+                .filter(|&&statement| {
+                    matches!(module.kind(statement), ExpressionKind::Assign { target, .. }
+                        if matches!(module.kind(*target), ExpressionKind::NameRef(name) if name == local))
+                })
+                .collect::<Vec<_>>()[..]
+            else {
+                return None;
+            };
+            let ExpressionKind::Assign { value, .. } = module.kind(*definition) else {
+                return None;
+            };
+            let ExpressionKind::Function {
+                parameters: closure_parameters,
+                body: closure_body,
+            } = module.kind(strip(*value))
+            else {
+                return None;
+            };
+            let [first, second] = &module[closure_parameters][..] else {
+                return None;
+            };
+            let ExpressionKind::Call { callee, arguments } = module.kind(strip(*closure_body))
+            else {
+                return None;
+            };
+            let forwarded = &module[arguments];
+            let reads = |argument: Option<&Argument>, name: Symbol| {
+                argument.is_some_and(|argument| {
+                    argument.name.is_none()
+                        && argument.value.is_some_and(|value| {
+                            matches!(module.kind(strip(value)), ExpressionKind::NameRef(read) if *read == name)
+                        })
+                })
+            };
+            let only_dots = forwarded.iter().skip(2).all(|argument| {
+                argument.name.is_none()
+                    && argument.value.is_some_and(|value| {
+                        matches!(module.kind(value), ExpressionKind::NameRef(read) if *read == "...")
+                    })
+            });
+            (reads(forwarded.first(), first.name) && reads(forwarded.get(1), second.name) && only_dots)
+                .then(|| formal(*callee))
+                .flatten()
+        })?;
+        let x = formal(slots[1]?)?;
+        let init = match slots[2] {
+            Some(init) => Some(formal(init)?),
+            None => None,
+        };
+        Some(ReduceForward {
+            function: Name::new(self.db, function),
+            x: Name::new(self.db, x),
+            init: init.map(|init| Name::new(self.db, init)),
         })
     }
 
@@ -11661,6 +11786,11 @@ impl<'db> Checker<'db, '_> {
         };
         match resolved.kind(self.db) {
             TyKind::Function(function) => {
+                if let Some(folded) =
+                    self.forwarded_reduce(range, callee_range, function, arguments)
+                {
+                    return folded;
+                }
                 let findings = self.match_arguments(callee_range, function, arguments);
                 let narrowed = findings.is_empty() && function.inferred;
                 self.errors.extend(findings);
@@ -11711,6 +11841,7 @@ impl<'db> Checker<'db, '_> {
                         missing_tested: Vec::new(),
                         condition_only: Vec::new(),
                         null_unless: None,
+                        reduces: None,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -11948,6 +12079,72 @@ impl<'db> Checker<'db, '_> {
         } else {
             flag.when_false
         })
+    }
+
+    /// A call to a function whose body forwards its formals to `Reduce` folds like `Reduce`
+    /// itself. The other arguments are matched as usual, with the callback left to the fold.
+    fn forwarded_reduce(
+        &mut self,
+        range: TextRange,
+        callee_range: TextRange,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Option<Ty<'db>> {
+        let forward = function.reduces?;
+        let db = self.db;
+        let arena = self.arena;
+        let targets: Vec<Option<ArgumentTarget>> =
+            argument_targets(db, arena, function, argument_shapes(arena, arguments)).to_vec();
+        let passed = |formal: Name<'db>| {
+            let index = function
+                .named
+                .iter()
+                .position(|parameter| parameter.name == formal)?;
+            arguments.iter().zip(&targets).position(
+                |(_, target)| matches!(target, Some(ArgumentTarget::Named(at)) if *at == index),
+            )
+        };
+        let function_at = passed(forward.function)?;
+        let x_at = passed(forward.x)?;
+        let init_at = forward.init.and_then(passed);
+        let callback = arguments.get(function_at)?.value?;
+        let x = arguments.get(x_at)?.value?;
+        let recorded_errors = self.errors.len();
+        let recorded_origins = self.strict_origins.len();
+        let first_var = self.table.next_var().0;
+        let callback_ty = self.infer(callback);
+        let callback_ty = self.table.resolve(db, callback_ty);
+        self.errors.truncate(recorded_errors);
+        self.strict_origins.truncate(recorded_origins);
+        if !matches!(callback_ty.kind(db), TyKind::Function(_))
+            || self.mentions_var_before(callback_ty, first_var)
+        {
+            return None;
+        }
+        let x_ty = arguments.get(x_at)?.ty?;
+        let x_ty = self.structural(x_ty);
+        let (elements, _) = element_types(db, x_ty);
+        let element = self.join_all(&elements);
+        let (start, accumulator) = match init_at {
+            Some(at) => (arguments.get(at)?.value?, arguments.get(at)?.ty?),
+            None => (x, element),
+        };
+        let mut rest = arguments.to_vec();
+        if let Some(argument) = rest.get_mut(function_at) {
+            argument.ty = Some(unknown(db));
+        }
+        let findings = self.match_arguments(callee_range, function, &rest);
+        self.errors.extend(findings);
+        Some(self.fold_reduce(
+            range,
+            callee_range,
+            callback,
+            callback_ty,
+            start,
+            x,
+            accumulator,
+            element,
+        ))
     }
 
     /// The return without `NULL` when the caller already showed the predicate that guards the
@@ -14396,12 +14593,39 @@ impl<'db> Checker<'db, '_> {
         let (elements, _) = element_types(db, x_ty);
         let element = self.join_all(&elements);
         let init = bound.value(2);
-        let mut accumulator = match init {
+        let accumulator = match init {
             Some(init) => self.infer(init),
             None => element,
         };
         let range = module.range(id);
         let callee_range = self.blame_range(function);
+        Some(self.fold_reduce(
+            range,
+            callee_range,
+            function,
+            callback_ty,
+            init.unwrap_or(x),
+            x,
+            accumulator,
+            element,
+        ))
+    }
+
+    /// Calls the callback with the accumulator and an element until the accumulator stops
+    /// widening. `function` is re-inferred each round so a generic lambda instantiates afresh.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_reduce(
+        &mut self,
+        range: TextRange,
+        callee_range: TextRange,
+        function: ExprId,
+        callback_ty: Ty<'db>,
+        start: ExprId,
+        x: ExprId,
+        mut accumulator: Ty<'db>,
+        element: Ty<'db>,
+    ) -> Ty<'db> {
+        let module = self.module;
         let argument = |value: ExprId, ty: Ty<'db>| CallArgument {
             name: None,
             name_range: None,
@@ -14418,10 +14642,7 @@ impl<'db> Checker<'db, '_> {
         for round in 0..4 {
             let step_errors = self.errors.len();
             let step_origins = self.strict_origins.len();
-            let arguments = [
-                argument(init.unwrap_or(x), accumulator),
-                argument(x, element),
-            ];
+            let arguments = [argument(start, accumulator), argument(x, element)];
             let returned = self.dispatch_call(
                 range,
                 callee_range,
@@ -14431,7 +14652,7 @@ impl<'db> Checker<'db, '_> {
             );
             let widened = self.join_types(accumulator, returned);
             if widened == accumulator || round == 3 || self.errors.len() > step_errors {
-                return Some(widened);
+                return widened;
             }
             accumulator = widened;
             self.errors.truncate(step_errors);
@@ -14442,7 +14663,7 @@ impl<'db> Checker<'db, '_> {
             self.errors.truncate(step_errors);
             self.strict_origins.truncate(step_origins);
         }
-        Some(accumulator)
+        accumulator
     }
 
     /// Whether `ty` mentions an inference variable created before `first`, which is one the
@@ -15331,12 +15552,26 @@ impl<'db> Checker<'db, '_> {
             // adds no new requirement and lets recursion converge. One nested in a list is
             // protected too, so sessioninfo's `if (identical(dp, FALSE)) list(character(),
             // character()) else list(dp, dp)` leaves `dp` open.
+            // A bounded one is protected from a type outside the atomic scalars and vectors its
+            // bound describes: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho + rho0` must
+            // not make every caller pass a matrix `rho`.
+            let closed = if left_open {
+                right_resolved
+            } else {
+                left_resolved
+            };
+            let atomic = matches!(closed.kind(self.db), TyKind::Scalar(_) | TyKind::Vector(_));
             let mut vars = FxHashSet::default();
             self.table.collect_unbound_vars(self.db, open, &mut vars);
             if vars.into_iter().any(|var| {
-                self.table
+                match self
+                    .table
                     .open_constraint(self.db, Ty::new(self.db, TyKind::Var(var)))
-                    == Some(Constraint::Unconstrained)
+                {
+                    Some(Constraint::Unconstrained) => true,
+                    Some(_) => !atomic,
+                    None => false,
+                }
             }) {
                 return union_of(self.db, [left_resolved, right_resolved]);
             }

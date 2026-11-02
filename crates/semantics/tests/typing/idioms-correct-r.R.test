@@ -1140,10 +1140,10 @@ none <- split_deps(FALSE)
 split_deps: <T> fn(dp: T) -> list{character[], character[]} | list{T, T}
 none: list{character[], character[]} | list{logical, logical}
 
-#---- a_list_branch_whose_variable_is_constrained_still_unifies
+#---- a_list_branch_keeps_a_constrained_variable_open
 pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
 #++++
-pair: fn(dp: integer) -> list{integer, integer}
+pair: <T: numeric> fn(dp: T) -> list{T, T} | list{integer, integer}
 
 #---- unlink_takes_a_vector_as_its_recursive_flag
 remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
@@ -2157,6 +2157,24 @@ use <- function(x) wrapper(x, valueOnly = FALSE)
 p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
 wrapper: <T: numeric> fn(x: T, ...: Any) -> double
 use: <T: numeric> fn(x: T) -> double
+
+#---- a_wrapper_that_forwards_to_reduce_folds_like_reduce
+reduce <- function(.x, .f, ..., .init) {
+  f <- function(x, y) .f(x, y, ...)
+  Reduce(f, .x, init = .init)
+}
+locations <- function(sizes) {
+  reduce(sizes, .init = list(0), function(output, input) {
+    n <- output[[1]]
+    c(output, list(seq(n + 1, n + input)))
+  })
+}
+starts <- function() reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")
+#++++
+reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+locations: <T> fn(sizes: list[T] | T[]) -> list{double} | list[Unknown]
+starts: Unknown
+356..362 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_string_naming_the_reduce_function_is_accepted
 op <- "sum"

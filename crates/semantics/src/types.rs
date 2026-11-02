@@ -344,6 +344,19 @@ pub struct FunctionType<'db> {
     /// call where the caller already showed `predicate` holds of its argument returns the
     /// other members alone. Inferred only.
     pub null_unless: Option<NullUnless<'db>>,
+    /// The body ends in `Reduce(f, x, init = init)` over its own formals, with `f` a formal
+    /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
+    /// accumulator may widen past the start. Inferred only.
+    pub reduces: Option<ReduceForward<'db>>,
+}
+
+/// purrr's `reduce(.x, .f, ..., .init)` calling `Reduce(function(x, y) .f(x, y, ...), .x,
+/// init = .init)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct ReduceForward<'db> {
+    pub function: Name<'db>,
+    pub x: Name<'db>,
+    pub init: Option<Name<'db>>,
 }
 
 /// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`.
@@ -817,6 +830,7 @@ fn mapped_kind<'db>(
             missing_tested: function.missing_tested.clone(),
             condition_only: function.condition_only.clone(),
             null_unless: function.null_unless,
+            reduces: function.reduces,
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -1058,6 +1072,7 @@ mod tests {
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
                 null_unless: None,
+                reduces: None,
             }),
         );
 
@@ -1090,6 +1105,7 @@ mod tests {
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
                 null_unless: None,
+                reduces: None,
             }),
         );
         let f2 = Ty::new(
@@ -1106,6 +1122,7 @@ mod tests {
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
                 null_unless: None,
+                reduces: None,
             }),
         );
         assert_eq!(f1, f2);
