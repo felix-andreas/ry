@@ -47,8 +47,10 @@ You get:
   variables it reads, and a variable it assigns that later code reads becomes the result), inline
   a variable, and move a function's or a binding's types between a `#:` comment and inline syntax
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
-  functions and sections under the function that defines them, lists R6 members, S4 slots and a
-  type definition's tags under their class or type, plus workspace symbol search
+  functions and sections under the function that defines them, and lists R6 members, S4 slots and a
+  type definition's tags under their class or type
+- workspace symbol search over every file's outline entries, where a backquoted name such as
+  `` `pluck<-` `` finds its definition
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
   from a name to its argument, call, statement and block
 - semantic highlighting of parameters, called functions, package namespaces and member names
