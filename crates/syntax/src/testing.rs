@@ -696,7 +696,7 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
     let subtrees = root.children().take(3);
     for node in std::iter::once(root.clone()).chain(subtrees) {
         for modulus in [1, 3, 7] {
-            let wanted = |kind: crate::SyntaxKind| (kind as u16) % modulus == 0;
+            let wanted = |kind: crate::SyntaxKind| (kind as u16).is_multiple_of(modulus);
             let expected: Vec<crate::SyntaxNode> = node
                 .descendants()
                 .filter(|node| wanted(node.kind()))

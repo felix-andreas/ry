@@ -683,17 +683,45 @@ pub fn map_child_types<'db>(
         // Members can collapse once mapped, so re-normalize.
         return union_of(db, members.iter().map(|&member| map(member)));
     }
-    // Most maps leave most types alone, and re-interning an unchanged type costs a hash of
-    // the whole kind and a table lookup.
-    let mut changed = false;
-    let kind = mapped_kind(db, ty, &mut |child| {
-        let mapped = map(child);
-        changed |= mapped != child;
-        mapped
+    // Most maps leave most types alone, so the children are mapped first and the kind is
+    // rebuilt (allocating its child vectors and re-interning) only once one of them changed.
+    // `mapped` stays unallocated until the first change, when it takes the unchanged prefix.
+    let kind = ty.kind(db);
+    let mut mapped: Vec<Ty<'db>> = Vec::new();
+    let mut unchanged = 0;
+    for_each_child(kind, &mut |child| {
+        let result = map(child);
+        if mapped.is_empty() {
+            if result == child {
+                unchanged += 1;
+                return;
+            }
+            let mut count = 0;
+            for_each_child(kind, &mut |_| count += 1);
+            mapped.reserve_exact(count);
+            let mut prefix = 0;
+            for_each_child(kind, &mut |original| {
+                if prefix < unchanged {
+                    mapped.push(original);
+                    prefix += 1;
+                }
+            });
+        }
+        mapped.push(result);
     });
-    match kind {
-        Some(kind) if changed => Ty::new(db, kind),
-        _ => ty,
+    if mapped.is_empty() {
+        return ty;
+    }
+    let mut children = mapped.into_iter();
+    let rebuilt = mapped_kind(db, ty, &mut |child| children.next().unwrap_or(child));
+    // `for_each_child` and `mapped_kind` must visit the same children in the same order.
+    debug_assert!(
+        children.next().is_none(),
+        "mapped_kind visited fewer children than for_each_child"
+    );
+    match rebuilt {
+        Some(kind) => Ty::new(db, kind),
+        None => ty,
     }
 }
 
@@ -840,36 +868,48 @@ pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
     ty.entry.contents & TypeEntry::HAS_VAR != 0
 }
 
-/// Unmapped rigid variables are left intact.
+/// Unmapped rigid variables are left intact. A name bound twice takes its last binding.
 pub fn substitute_rigid<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    substitution: &FxHashMap<Name<'db>, Ty<'db>>,
+    substitution: &[(Name<'db>, Ty<'db>)],
 ) -> Ty<'db> {
-    substitute_rigid_memo(db, ty, substitution, &mut FxHashMap::default())
+    // Interning makes types DAGs, so an unmemoized walk re-walks a shared subtree once per
+    // path, exponential in depth. The tree size bounds that re-walk, and below this size it
+    // costs less than building a memo table.
+    if ty.entry.size <= UNMEMOIZED_SUBSTITUTION_SIZE {
+        return substitute_rigid_memo(db, ty, substitution, None);
+    }
+    substitute_rigid_memo(db, ty, substitution, Some(&mut FxHashMap::default()))
 }
 
-/// Memoized because interning makes types DAGs: unmemoized, shared subtrees are
-/// re-walked per path, exponential in depth. Per call, since the substitution is fixed.
+const UNMEMOIZED_SUBSTITUTION_SIZE: u64 = 64;
+
 fn substitute_rigid_memo<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    substitution: &FxHashMap<Name<'db>, Ty<'db>>,
-    memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
+    substitution: &[(Name<'db>, Ty<'db>)],
+    mut memo: Option<&mut FxHashMap<Ty<'db>, Ty<'db>>>,
 ) -> Ty<'db> {
     if ty.entry.contents & TypeEntry::HAS_RIGID == 0 {
         return ty;
     }
-    if let Some(&done) = memo.get(&ty) {
+    if let Some(&done) = memo.as_deref().and_then(|memo| memo.get(&ty)) {
         return done;
     }
     let substituted = match ty.kind(db) {
-        TyKind::Rigid(name) => substitution.get(name).copied().unwrap_or(ty),
+        TyKind::Rigid(name) => substitution
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
+            .map_or(ty, |(_, replacement)| *replacement),
         _ => map_child_types(db, ty, &mut |child| {
-            substitute_rigid_memo(db, child, substitution, memo)
+            substitute_rigid_memo(db, child, substitution, memo.as_deref_mut())
         }),
     };
-    memo.insert(ty, substituted);
+    if let Some(memo) = memo {
+        memo.insert(ty, substituted);
+    }
     substituted
 }
 

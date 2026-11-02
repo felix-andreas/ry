@@ -1037,7 +1037,7 @@ fn heap_sort(t: &mut [f64], order: &mut [usize], iheap: usize) {
         let entry = order[n - 1];
         loop {
             let mut j = i + i;
-            if j <= n - 1 {
+            if j < n {
                 if t[j] < t[j - 1] {
                     j += 1;
                 }

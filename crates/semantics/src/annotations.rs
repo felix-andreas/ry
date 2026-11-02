@@ -14,11 +14,11 @@ use {
         },
     },
     rowan::{Language, NodeOrToken},
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashSet,
     std::mem::take,
     syntax::{
         GreenRef, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
-        is_green_inline_annotation, matching_nodes,
+        is_green_inline_annotation, matching_nodes, node_text,
     },
 };
 
@@ -427,7 +427,7 @@ pub fn merge_annotations<'db>(
     };
     // Type parameters pair by position, so the comment's types are read in the inline
     // names before slots mix.
-    let renaming: FxHashMap<Name<'db>, Ty<'db>> = comment_scheme
+    let renaming: Vec<_> = comment_scheme
         .binders
         .iter()
         .zip(&inline_scheme.binders)
@@ -1016,16 +1016,22 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
         .and_then(|name| name.text())
 }
 
+/// Read off the green tree, since type lowering asks this of most annotation nodes and red
+/// children are an allocation each.
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| token.kind() == kind)
+    node.green().children().any(|child| {
+        child
+            .into_token()
+            .is_some_and(|token| RLanguage::kind_from_raw(token.kind()) == kind)
+    })
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {
-    node.children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == word)
+    node.green().children().any(|child| {
+        child.into_token().is_some_and(|token| {
+            RLanguage::kind_from_raw(token.kind()) == SyntaxKind::IDENT && token.text() == word
+        })
+    })
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the
@@ -1502,7 +1508,7 @@ impl<'db> Lowering<'db> {
                     self.errors.push((
                         format!(
                             "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
-                            argument.text().to_string().trim()
+                            node_text(&argument).trim()
                         ),
                         argument.text_range(),
                     ));
