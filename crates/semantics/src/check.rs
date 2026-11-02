@@ -3267,6 +3267,19 @@ impl<'db> Checker<'db, '_> {
         {
             return ty;
         }
+        // A package's export list or the project's imports name the binding, but no stub
+        // types it. An unresolved name is not an origin: naming reports it.
+        if let Some(name) = naming.non_locals.get(&id)
+            && (self
+                .globals
+                .is_some_and(|globals| globals.library_candidates(name).is_some())
+                || imported_by_name(self.db, name))
+        {
+            self.record_strict_origin(
+                id,
+                StrictOriginKind::UndeterminedReference(name.to_string()),
+            );
+        }
         unknown(self.db)
     }
 
@@ -4855,6 +4868,12 @@ impl<'db> Checker<'db, '_> {
             false,
             loop_slot.map(|slot| (slot, element)),
         );
+        // R leaves the variable at the last element, or sets it to `NULL` when the sequence
+        // is empty, whatever it held before the loop.
+        if let Some(slot) = loop_slot {
+            let after = union_of(self.db, [element, null(self.db)]);
+            self.environment.set(slot, EnvEntry::Mono(after));
+        }
         null(self.db)
     }
 
@@ -8113,7 +8132,14 @@ impl<'db> Checker<'db, '_> {
                 }
                 let ty = match candidates.last() {
                     Some(scheme) => self.instantiate(scheme),
-                    None => unknown(self.db),
+                    // An export list names the function but no stub types it.
+                    None => {
+                        self.record_strict_origin(
+                            callee,
+                            StrictOriginKind::UndeterminedReference(name.to_string()),
+                        );
+                        unknown(self.db)
+                    }
                 };
                 Some(self.record(callee, ty))
             }
