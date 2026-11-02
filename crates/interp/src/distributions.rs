@@ -32,7 +32,7 @@ use {
         rmath::*,
         unwind::{R, error},
         values::{
-            alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
+            alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
             ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
         },
     },
@@ -350,10 +350,14 @@ unsafe fn random_vector(
         lengths[index] = length(original);
     }
     let integer = integer && interface == Interface::Stats;
-    let mut drawn = vec![NA_REAL; count];
+    // The draws go straight into the result, so a large `n` costs one vector rather than a
+    // scratch buffer and a copy.
+    let result = alloc_uninit(SexpType::Real, count)?;
+    let drawn = reals_mut(result);
     if count > 0 && lengths[..parameters].contains(&0) {
+        drawn.fill(NA_REAL);
         warning("NAs produced")?;
-        return random_result(&drawn, integer);
+        return integer_if_requested(result, integer);
     }
     if count > 0 {
         random::get_rng_state()?;
@@ -381,11 +385,11 @@ unsafe fn random_vector(
         random::put_rng_state()?;
         outcome?;
         raise_warnings()?;
-        if drawn.iter().any(|value| value.is_nan()) {
+        if reals(result).iter().any(|value| value.is_nan()) {
             warning("NAs produced")?;
         }
     }
-    random_result(&drawn, integer)
+    integer_if_requested(result, integer)
 }
 
 /// The number of draws `n` asks for: the value of a scalar, or the length of a longer vector.
@@ -417,22 +421,22 @@ unsafe fn random_count(value: Sexp) -> R<usize> {
     Ok(count as usize)
 }
 
-unsafe fn random_result(drawn: &[f64], integer: bool) -> R<Sexp> {
+/// The draws in `result` as an integer vector when the distribution counts and every draw fits,
+/// which is what GNU R's `rbinom` and friends return.
+unsafe fn integer_if_requested(result: Sexp, integer: bool) -> R<Sexp> {
     let fits = |value: &f64| value.is_nan() || value.abs() <= f64::from(i32::MAX);
-    if integer && drawn.iter().all(fits) {
-        let result = alloc(SexpType::Integer, drawn.len())?;
-        for (slot, value) in ints_mut(result).iter_mut().zip(drawn) {
-            *slot = if value.is_nan() {
-                NA_INTEGER
-            } else {
-                *value as i32
-            };
-        }
+    if !integer || !reals(result).iter().all(fits) {
         return Ok(result);
     }
-    let result = alloc(SexpType::Real, drawn.len())?;
-    reals_mut(result).copy_from_slice(drawn);
-    Ok(result)
+    let counts = alloc_uninit(SexpType::Integer, length(result))?;
+    for (slot, value) in ints_mut(counts).iter_mut().zip(reals(result)) {
+        *slot = if value.is_nan() {
+            NA_INTEGER
+        } else {
+            *value as i32
+        };
+    }
+    Ok(counts)
 }
 
 /// `rmultinom(n, size, prob)`: `n` draws of the counts of `size` objects put into

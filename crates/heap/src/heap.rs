@@ -34,10 +34,10 @@ use {
             VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
         records::Layouts,
-        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, virtual_memory},
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
         strings::{Encoding, StringTable},
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
 };
@@ -49,10 +49,7 @@ pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
     space: Space,
-    /// Every large object, with the bytes its allocation took.
-    large: FxHashMap<Sexp, usize>,
-    /// Freed bodies of mapped large objects, kept for reuse until the end of the next collection.
-    mapped_cache: MappedCache,
+    large: FxHashSet<Sexp>,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
@@ -357,8 +354,7 @@ impl Heap {
     pub fn with_policy(policy: GcPolicy) -> Heap {
         let mut heap = Heap {
             space: Space::new(),
-            large: FxHashMap::default(),
-            mapped_cache: MappedCache::default(),
+            large: FxHashSet::default(),
             young_large: Vec::new(),
             remembered: Vec::new(),
             young_parent: None,
@@ -1369,7 +1365,6 @@ impl Heap {
         zeroed: usize,
     ) -> HeapResult<Sexp> {
         let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
-        let mut large_bytes = 0;
         let (memory, size_class) = match class {
             Some(class) => {
                 let class = class as usize;
@@ -1385,24 +1380,6 @@ impl Heap {
                 }
                 (memory, class as u8)
             }
-            None if size >= MAPPED_MINIMUM => {
-                let (memory, bytes) = match self.mapped_cache.take(size) {
-                    Some((memory, bytes)) => {
-                        std::ptr::write_bytes(memory.as_ptr(), 0, zeroed.min(size));
-                        (memory, bytes)
-                    }
-                    // A fresh mapping is already zero.
-                    None => {
-                        let bytes = size.next_multiple_of(MAPPED_GRANULE);
-                        let memory = virtual_memory::map(bytes)
-                            .and_then(NonNull::new)
-                            .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                        (memory, bytes)
-                    }
-                };
-                large_bytes = bytes;
-                (memory, LARGE_CLASS)
-            }
             None => {
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
@@ -1414,7 +1391,6 @@ impl Heap {
                     })
                 }
                 .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                large_bytes = size;
                 (memory, LARGE_CLASS)
             }
         };
@@ -1427,7 +1403,7 @@ impl Heap {
         };
         object.init_header(kind, size_class, 0, nil);
         if size_class == LARGE_CLASS {
-            self.large.insert(object, large_bytes);
+            self.large.insert(object);
             self.young_large.push(object);
             self.young_large_bytes += size;
         } else {
@@ -1571,7 +1547,6 @@ impl Heap {
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
         }
-        self.mapped_cache.age();
         self.young_bytes = 0;
         self.young_large_bytes = 0;
         self.inhibit -= 1;
@@ -1842,14 +1817,14 @@ impl Heap {
         for object in self.space.marked_objects() {
             check(object);
         }
-        for &object in self.large.keys() {
+        for &object in &self.large {
             check(object);
         }
     }
 
     unsafe fn clear_marks(&mut self) {
         self.space.clear_marks();
-        for &object in self.large.keys() {
+        for &object in &self.large {
             object.set_gc_bit(gc_bits::MARK, false);
         }
         for parent in self.remembered.drain(..) {
@@ -1879,7 +1854,7 @@ impl Heap {
     unsafe fn sweep_all(&mut self) {
         let mut swept = Swept::default();
         let mut old_bytes = self.space.sweep_all(&mut swept);
-        let large: Vec<Sexp> = self.large.keys().copied().collect();
+        let large: Vec<Sexp> = self.large.iter().copied().collect();
         for object in large {
             if object.gc_bits() & gc_bits::MARK != 0 {
                 old_bytes += self.size_of(object);
@@ -1915,19 +1890,12 @@ impl Heap {
     }
 
     unsafe fn free_large(&mut self, object: Sexp) {
-        let Some(bytes) = self.large.remove(&object) else {
-            return;
-        };
-        if bytes >= MAPPED_MINIMUM
-            && let Some(memory) = NonNull::new(object.as_ptr().cast::<u8>())
-        {
-            self.mapped_cache.fresh.push((memory, bytes));
-        } else {
-            std::alloc::dealloc(
-                object.as_ptr().cast(),
-                Layout::from_size_align_unchecked(bytes, 16),
-            );
-        }
+        let size = self.size_of(object);
+        self.large.remove(&object);
+        std::alloc::dealloc(
+            object.as_ptr().cast(),
+            Layout::from_size_align_unchecked(size, 16),
+        );
     }
 
     unsafe fn create_well_known(&mut self) {
@@ -1996,60 +1964,6 @@ impl Heap {
     }
 }
 
-/// Large objects from this size up get a mapping of their own, which is returned to the system
-/// when the object dies, as glibc `malloc` does for GNU R's large vectors. The global allocator
-/// would keep a freed body resident and serve the next large vector from fresh pages, so a
-/// session that allocates many large temporaries peaked well above GNU R.
-const MAPPED_MINIMUM: usize = 256 * 1024;
-
-/// The unit a mapped body is rounded up to: a page on every supported system.
-const MAPPED_GRANULE: usize = 4096;
-
-/// Freed mapped bodies. Reusing one skips the kernel's zeroing of fresh pages, which a loop
-/// that allocates a temporary of the same size each iteration would otherwise pay every time,
-/// and a body nothing reused by the end of the next collection is unmapped, so resident memory
-/// follows the live data.
-#[derive(Default)]
-struct MappedCache {
-    /// Freed since the last collection ended.
-    fresh: Vec<(NonNull<u8>, usize)>,
-    /// Freed before that, unmapped when the current collection ends.
-    aging: Vec<(NonNull<u8>, usize)>,
-}
-
-impl MappedCache {
-    /// The smallest cached body that holds `size` bytes without wasting more than a quarter.
-    fn take(&mut self, size: usize) -> Option<(NonNull<u8>, usize)> {
-        let fits = |&(_, bytes): &(NonNull<u8>, usize)| bytes >= size && bytes - size <= size / 4;
-        let best = |list: &Vec<(NonNull<u8>, usize)>| {
-            list.iter()
-                .enumerate()
-                .filter(|(_, body)| fits(body))
-                .min_by_key(|(_, (_, bytes))| *bytes)
-                .map(|(index, (_, bytes))| (index, *bytes))
-        };
-        match (best(&self.fresh), best(&self.aging)) {
-            (Some((index, fresh)), Some((_, aging))) if fresh <= aging => {
-                Some(self.fresh.swap_remove(index))
-            }
-            (_, Some((index, _))) => Some(self.aging.swap_remove(index)),
-            (Some((index, _)), None) => Some(self.fresh.swap_remove(index)),
-            (None, None) => None,
-        }
-    }
-
-    /// Unmaps the bodies that waited a whole collection unused, and starts the next wait.
-    fn age(&mut self) {
-        for (memory, bytes) in self.aging.drain(..) {
-            // SAFETY: the body was mapped with exactly these bytes and nothing references it.
-            if !unsafe { virtual_memory::unmap(memory.as_ptr(), bytes) } {
-                panic!("cannot return {bytes} bytes of a dead vector to the system");
-            }
-        }
-        std::mem::swap(&mut self.fresh, &mut self.aging);
-    }
-}
-
 impl Default for Heap {
     fn default() -> Self {
         Heap::new()
@@ -2061,12 +1975,14 @@ impl Drop for Heap {
         // SAFETY: the heap owns every large object, and nothing outlives it. The space drops
         // its own objects.
         unsafe {
-            let large: Vec<Sexp> = self.large.keys().copied().collect();
+            let large: Vec<Sexp> = self.large.iter().copied().collect();
             for object in large {
-                self.free_large(object);
+                let size = self.size_of(object);
+                std::alloc::dealloc(
+                    object.as_ptr().cast(),
+                    Layout::from_size_align_unchecked(size, 16),
+                );
             }
-            self.mapped_cache.age();
-            self.mapped_cache.age();
         }
     }
 }
