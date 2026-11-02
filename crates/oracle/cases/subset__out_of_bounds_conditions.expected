@@ -1,0 +1,47 @@
+[stdout]
+| subscriptOutOfBoundsError x[[5]] | subscript out of bounds |1:3 integer NA double 5
+| subscriptOutOfBoundsError x[["a"]] | subscript out of bounds |1:3 integer NA character "a"
+| ok
+| subscriptOutOfBoundsError l[[5]] | subscript out of bounds |list(a = 1, b = 2) integer NA double 5
+| subscriptOutOfBoundsError l[[c(1, 5)]] | subscript out of bounds |1 integer NA double c(1, 5)
+| subscriptOutOfBoundsError l[[c("a", "z")]] | subscript out of bounds |1 integer NA character c("a", "z")
+| subscriptOutOfBoundsError m[3, 1] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 3
+| subscriptOutOfBoundsError m[1, 3] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 3
+| subscriptOutOfBoundsError m["r3", 1] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 character "r3"
+| subscriptOutOfBoundsError m[[3, 1]] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 double 3
+| subscriptOutOfBoundsError m[[1, 5]] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 2 double 5
+| subscriptOutOfBoundsError m[[5]] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 5
+| simpleError x[[-1]] | invalid negative subscript in get1index <real> |
+| subscriptOutOfBoundsError x[[2.5e+09]] | subscript out of bounds |1:3 integer NA double 2.5e+09
+| ok
+| subscriptOutOfBoundsError x[[NA_integer_]] | subscript out of bounds |1:3 integer NA integer NA_integer_
+| simpleError x[5, 1] | incorrect number of dimensions |
+| ok
+| subscriptOutOfBoundsError m[[3, 1]] <- 1 | [[ ]] subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 double 3
+| subscriptOutOfBoundsError `[<-`(`*tmp*`, 3, 1, value = 1) | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 3
+| simpleError x[[0]] | attempt to select less than one element in get1index <real> |
+| subscriptOutOfBoundsError as.pairlist(l)[[5]] | subscript out of bounds |pairlist(a = 1, b = 2) integer NA double 5
+| subscriptOutOfBoundsError quote(f(a))[[5]] | subscript out of bounds |f(a) integer NA double 5
+| simpleError e[[1]] | wrong arguments for subsetting an environment |
+| subscriptOutOfBoundsError array(1:8, c(2, 2, 2))[1, 1, 3] | subscript out of bounds |structure(1:8, dim = c(2L, 2L, 2L)) integer NA double 3
+| subscriptOutOfBoundsError m[c(1, 3), 1] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 3
+| subscriptOutOfBoundsError m[c("r1", "r3"), 1] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 character "r3"
+| simpleError m[1, c(TRUE, TRUE, TRUE)] | (subscript) logical subscript too long |
+| subscriptOutOfBoundsError m[cbind(3, 1)] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 double 3
+| subscriptOutOfBoundsError `[<-`(`*tmp*`, c(1, 3), 1, value = 0) | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer NA double 3
+| simpleError x[[5]] <- 1:2 | more elements supplied than there are to replace |
+| subscriptOutOfBoundsError x[[NaN]] <- 1 | [[ ]] subscript out of bounds |1:3 integer NA double NaN
+| subscriptOutOfBoundsError l[[Inf]] <- 1 | [[ ]] subscript out of bounds |list(a = 1) integer NA double Inf
+| subscriptOutOfBoundsError m[["r3", 1]] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 character "r3"
+| subscriptOutOfBoundsError m[[NA, 1]] | subscript out of bounds |structure(1:4, dim = c(2L, 2L), dimnames = list(c("r1", "r2"),      NULL)) integer 1 logical NA
+| simpleError l[[c(1, 2, 3)]] | recursive indexing failed at level 2
+|  |
+| ok
+| subscriptOutOfBoundsError list(1, list(2))[[c(2, 5)]] | subscript out of bounds |list(2) integer NA double c(2, 5)
+| ok
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

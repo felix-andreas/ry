@@ -1,0 +1,16 @@
+[stdout]
+| [1] Inf
+| [1] 1e+308
+| [1] 0
+| [1] 2
+| [1] 0
+| [1] 1
+| [1] FALSE
+| [1] 6.5
+| [1] 4.5
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 4.5

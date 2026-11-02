@@ -1900,7 +1900,7 @@ unsafe fn set_par(
         }
         "fin" => {
             let size = par_reals(value, name, 2)?;
-            if size.iter().any(|size| !(*size > 0.0)) {
+            if size.iter().any(|size| size.is_nan() || *size <= 0.0) {
                 return Err(invalid_par(name));
             }
             pars.figure_region = FigureRegion::Size([size[0], size[1]]);
@@ -1912,7 +1912,7 @@ unsafe fn set_par(
         "font.sub" => pars.font_sub = par_font(value, name)?,
         "lab" => {
             let lab = par_reals(value, name, 3)?;
-            if lab.iter().any(|count| !(*count >= 0.0)) {
+            if lab.iter().any(|count| count.is_nan() || *count < 0.0) {
                 return Err(invalid_par(name));
             }
             pars.lab = [lab[0] as i32, lab[1] as i32, lab[2] as i32];
@@ -1953,7 +1953,7 @@ unsafe fn set_par(
         "mex" => pars.mex = par_positive(value, name)?,
         "mfrow" | "mfcol" => {
             let shape = par_reals(value, name, 2)?;
-            if shape.iter().any(|count| !(*count >= 1.0)) {
+            if shape.iter().any(|count| count.is_nan() || *count < 1.0) {
                 return Err(invalid_par(name));
             }
             let (rows, columns) = (shape[0] as usize, shape[1] as usize);
@@ -2013,7 +2013,7 @@ unsafe fn set_par(
         "pch" => pars.pch = par_pch(value)?,
         "pin" => {
             let size = par_reals(value, name, 2)?;
-            if size.iter().any(|size| !(*size > 0.0)) {
+            if size.iter().any(|size| size.is_nan() || *size <= 0.0) {
                 return Err(invalid_par(name));
             }
             pars.plot_region = PlotRegion::Size([size[0], size[1]]);
@@ -3260,7 +3260,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     let (theta, phi, distance, viewing) = (scalar(6), scalar(7), scalar(8), scalar(9));
     let scale = values::as_logical_scalar(call.arg(10)) == 1;
     let expand = scalar(11);
-    if !(viewing > 0.0) || !(distance.is_finite()) || !expand.is_finite() {
+    if viewing.is_nan() || viewing <= 0.0 || !distance.is_finite() || !expand.is_finite() {
         return Err(error("invalid viewing parameters"));
     }
     let centre = boxes.map(|limits| (limits[0] + limits[1]) / 2.0);

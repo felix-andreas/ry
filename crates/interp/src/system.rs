@@ -232,7 +232,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
-            if !(seconds >= 0.0) {
+            if seconds.is_nan() || seconds < 0.0 {
                 return Err(error("invalid 'time' value"));
             }
             if seconds.is_finite() && seconds > 0.0 {
@@ -516,7 +516,7 @@ unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
 /// to the console. Only the rows an editor scrolls to are ever formatted.
 unsafe fn do_ry_view(call: &Call<'_>) -> R<Sexp> {
     let title = values::as_string_scalar(call.arg(1))?.unwrap_or_default();
-    crate::console_server::show(call.arg(0), &title).map_err(|message| error(message))?;
+    crate::console_server::show(call.arg(0), &title).map_err(error)?;
     Ok(call.arg(0))
 }
 
@@ -3110,13 +3110,15 @@ unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn set_gc_stress(on: bool) -> bool {
-    let policy = crate::heap().policy_mut();
-    let previous = matches!(policy.stress, GcStress::EveryAllocation);
-    policy.stress = if on {
-        GcStress::EveryAllocation
-    } else {
-        GcStress::Off
-    };
+    let heap = crate::heap();
+    let previous = matches!(heap.policy().stress, GcStress::EveryAllocation);
+    heap.update_policy(|policy| {
+        policy.stress = if on {
+            GcStress::EveryAllocation
+        } else {
+            GcStress::Off
+        }
+    });
     previous
 }
 
@@ -3572,6 +3574,8 @@ pub unsafe fn platform() -> R<Sexp> {
 }
 
 unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
+    // GNU R reports the file its BLAS routines came from.
+    let blas = crate::linalg::blas_library_path().unwrap_or_default();
     let entries = [
         ("zlib", "1.3"),
         ("bzlib", ""),
@@ -3581,7 +3585,7 @@ unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
         ("TRE", ""),
         ("iconv", "glibc"),
         ("readline", ""),
-        ("BLAS", ""),
+        ("BLAS", blas.as_str()),
     ];
     let result = string_vector(
         &entries

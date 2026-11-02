@@ -165,6 +165,12 @@ impl Fingerprinter {
     }
 }
 
+impl Default for Fingerprinter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn fingerprint(text: &str) -> Fingerprint {
     Fingerprinter::new().text(text).finish()
 }

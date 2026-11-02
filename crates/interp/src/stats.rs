@@ -476,8 +476,8 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
                     .collect();
                 let statistic = pair_statistic(
-                    &x_data[i],
-                    &y_data[j],
+                    x_data[i],
+                    y_data[j],
                     &used,
                     correlate,
                     kendall,
@@ -1192,7 +1192,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
         loop {
             let mut rest = candidate;
             for &factor in &factors {
-                while rest % factor as u64 == 0 {
+                while rest.is_multiple_of(factor as u64) {
                     rest /= factor as u64;
                 }
             }
@@ -1240,7 +1240,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
         })
         .collect();
     if overflow {
-        call.warning(&format!(
+        call.warning(format!(
             "nextn() found no solution < {} = INT_MAX (the maximal integer); pass '0+ n' instead of 'n'",
             i32::MAX
         ))?;

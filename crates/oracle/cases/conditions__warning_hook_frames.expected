@@ -1,0 +1,21 @@
+[stdout]
+|  [1] "local"                "eval.parent"          "eval"                
+|  [4] "eval"                 "eval"                 "eval"                
+|  [7] "withCallingHandlers"  "tryCatch"             "tryCatchList"        
+| [10] "tryCatchOne"          "doTryCatch"           "withVisible"         
+| [13] "eval"                 "eval"                 "withRestarts"        
+| [16] "withOneRestart"       "doWithOneRestart"     "withCallingHandlers" 
+| [19] "f"                    "warning"              ".signalSimpleWarning"
+| [22] "withRestarts"         "withOneRestart"       "doWithOneRestart"    
+| [25] ".handleSimpleError"   "h"                   
+| .signalSimpleWarning("boom", base::quote(f()))
+| NULL
+| [1] "done"
+[messages]
+[warnings]
+- boom (in f())
+- deferred (in g())
+[errors]
+[value]
+character
+| "done"

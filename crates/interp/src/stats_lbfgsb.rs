@@ -1037,7 +1037,7 @@ fn heap_sort(t: &mut [f64], order: &mut [usize], iheap: usize) {
         let entry = order[n - 1];
         loop {
             let mut j = i + i;
-            if j <= n - 1 {
+            if j < n {
                 if t[j] < t[j - 1] {
                     j += 1;
                 }
@@ -1202,8 +1202,7 @@ fn form_k(
     let at = |row: usize, column: usize| (row - 1) + m2 * (column - 1);
     let wy = |row: usize, column: usize| memory.wy(row, column);
     let ws = |row: usize, column: usize| memory.ws(row, column);
-    let upcl;
-    if memory.updated {
+    let upcl = if memory.updated {
         if memory.updates > m {
             // Shift the old part of wn1 up and left by one row and column.
             for jy in 1..m {
@@ -1254,10 +1253,10 @@ fn form_k(
             ipntr = memory.next(ipntr);
             wn1[at(is, jy)] = temp3;
         }
-        upcl = col - 1;
+        col - 1
     } else {
-        upcl = col;
-    }
+        col
+    };
     let entering = &changes.indices[..changes.entering];
     let leaving = &changes.indices[changes.leaving..n];
     // Modify the old parts of blocks (1,1) and (2,2) for the changed free set.

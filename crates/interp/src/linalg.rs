@@ -3,10 +3,10 @@
 //! (`dqrdc2` and the `dqrsl` family, `dtrco`).
 //!
 //! Results must match GNU R bit for bit, so the numerical work runs in the same libraries GNU R
-//! links: the system's BLAS and LAPACK, opened at runtime (the workspace builds without them),
-//! called with the same arguments, the same workspace queries and the same Fortran calling
-//! convention (every argument by reference, a hidden length after the arguments for each
-//! character argument). `dqrdc2` is R's own variant of LINPACK's QR, which no system library
+//! links: its BLAS and LAPACK, found at runtime (the workspace builds without them; see
+//! `library_candidates`), called with the same arguments, the same workspace queries and the
+//! same Fortran calling convention (every argument by reference, a hidden length after the
+//! arguments for each character argument). `dqrdc2` is R's own variant of LINPACK's QR, which no system library
 //! ships, so it is written here from its description: Householder QR whose column pivoting only
 //! moves a column to the end once its remaining norm falls below `tol` times its original norm.
 
@@ -16,6 +16,7 @@ use {
         coerce::coerce_vector,
         conditions,
         format::format_g,
+        makeconf::{expand_make, make_assignments},
         platform,
         unwind::{R, error},
         values::{
@@ -28,6 +29,7 @@ use {
         cell::Cell,
         ffi::{CStr, c_char, c_int, c_void},
         ops::Deref,
+        path::Path,
         sync::OnceLock,
     },
 };
@@ -2948,7 +2950,7 @@ type Text = *const c_char;
 type TextLength = usize;
 
 macro_rules! fortran_library {
-    ($library:ident, $description:literal, [$($candidate:literal),*], {
+    ($library:ident, $search:expr, {
         $($routine:ident: fn($($argument:ty),*) $(-> $result:ty)?;)*
     }) => {
         struct $library {
@@ -2957,22 +2959,57 @@ macro_rules! fortran_library {
 
         impl $library {
             unsafe fn open() -> Result<$library, String> {
-                let handle = open_library(&[$($candidate),*], $description)?;
-                Ok($library {
+                let candidates = library_candidates(&$search, Path::new(&crate::system::r_home()));
+                open_library(&candidates, &$search, |handle| Ok($library {
                     $($routine: std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($argument),*) $(-> $result)?>(
-                        library_symbol(handle, concat!(stringify!($routine), "_\0"), $description)?,
+                        library_symbol(handle, concat!(stringify!($routine), "_\0"))?,
                     ),)*
-                })
+                }))
             }
         }
     };
 }
 
+/// Where to look for a BLAS or LAPACK library (see `library_candidates`).
+struct LibrarySearch {
+    description: &'static str,
+    /// The library's name as the linker spells it after `-l`.
+    name: &'static str,
+    /// Absolute paths that hold the library on macOS.
+    macos: &'static [&'static str],
+    /// The `Makeconf` variables that name the libraries GNU R links, in the order to try them.
+    makeconf: &'static [&'static str],
+    /// The library GNU R builds from its own sources when it uses no external one.
+    own: &'static str,
+}
+
 // macOS has no `libblas.dylib` on the default search path; Accelerate's vecLib carries the
-// reference Fortran interface. Windows has no system BLAS, so ry uses the R installation's own
-// `Rblas.dll` and `Rlapack.dll` from `R_HOME/bin/x64` (see `open_library`).
-fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib", "Rblas.dll",
-    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib"], {
+// reference Fortran interface, and it comes before the R installation's libraries (see
+// `library_candidates`).
+const BLAS_SEARCH: LibrarySearch = LibrarySearch {
+    description: "BLAS",
+    name: "blas",
+    macos: &[
+        "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib",
+    ],
+    makeconf: &["BLAS_LIBS"],
+    own: "Rblas",
+};
+
+// An R whose BLAS carries LAPACK, as OpenBLAS does, records an empty `LAPACK_LIBS` and takes
+// LAPACK from `BLAS_LIBS`, so those are candidates too; a library without every routine is
+// passed over.
+const LAPACK_SEARCH: LibrarySearch = LibrarySearch {
+    description: "LAPACK",
+    name: "lapack",
+    macos: &[
+        "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib",
+    ],
+    makeconf: &["LAPACK_LIBS", "BLAS_LIBS"],
+    own: "Rlapack",
+};
+
+fortran_library!(Blas, BLAS_SEARCH, {
     dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
     dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
     dsyrk: fn(Text, Text, Integer, Integer, Double, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
@@ -2985,8 +3022,7 @@ fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib", "
     dscal: fn(Integer, Double, DoubleOut, Integer);
 });
 
-fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib", "Rlapack.dll",
-    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib"], {
+fortran_library!(Lapack, LAPACK_SEARCH, {
     ilaver: fn(IntegerOut, IntegerOut, IntegerOut);
     dgesv: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, DoubleOut, Integer, IntegerOut);
     dgetrf: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, IntegerOut);
@@ -3059,11 +3095,27 @@ fn blas() -> R<DirectFortran<Blas>> {
 
 fn lapack() -> R<DirectFortran<Lapack>> {
     // SAFETY: as for `blas`.
-    let library = LAPACK.get_or_init(|| unsafe { Lapack::open() });
+    let library = LAPACK.get_or_init(|| unsafe {
+        // A LAPACK needs a BLAS, and the loader satisfies that dependency with a library already
+        // loaded under its soname, also where its search path holds none (a LAPACK in a directory
+        // of its own beside its BLAS). A BLAS that does not load leaves LAPACK to bring its own;
+        // the operations that need BLAS report the failure.
+        BLAS.get_or_init(|| Blas::open());
+        Lapack::open()
+    });
     library
         .as_ref()
         .map(DirectFortran::new)
         .map_err(|message| error(message.clone()))
+}
+
+/// The file the BLAS routines came from, as the loader opened it, which `extSoftVersion()`
+/// reports as GNU R does. It is `None` when no BLAS loads; the operations that need one report
+/// why.
+pub fn blas_library_path() -> Option<String> {
+    // SAFETY: as for `blas`.
+    let library = BLAS.get_or_init(|| unsafe { Blas::open() }).as_ref().ok()?;
+    platform::library_path(library.dgemm as *const c_void)
 }
 
 thread_local! {
@@ -3105,51 +3157,317 @@ pub extern "C" fn ry_direct_fortran_active() -> c_int {
     DIRECT_FORTRAN_DEPTH.with(|depth| c_int::from(depth.get() > 0))
 }
 
-unsafe fn open_library(candidates: &[&str], description: &str) -> Result<*mut c_void, String> {
-    let candidates: Vec<String> = candidates
+/// The file names a library called `name` (as `-l` spells it) has on this platform, the
+/// runtime soname first. `-l:file` names the file itself.
+fn library_files(name: &str) -> Vec<String> {
+    if let Some(file) = name.strip_prefix(':') {
+        return vec![file.to_owned()];
+    }
+    let suffixes: &[&str] = if cfg!(target_os = "macos") {
+        &[".dylib"]
+    } else {
+        &[".so.3", ".so"]
+    };
+    suffixes
         .iter()
-        .filter(|candidate| candidate.ends_with(".dll") == cfg!(windows))
-        .map(|candidate| {
-            if cfg!(windows) {
-                format!("{}/bin/x64/{candidate}", crate::system::r_home())
-            } else {
-                candidate.to_string()
+        .map(|suffix| format!("lib{name}{suffix}"))
+        .collect()
+}
+
+/// The files to try for a BLAS or LAPACK library, in order:
+///
+/// - the library by soname, which the loader looks up on its own search path, so
+///   `LD_LIBRARY_PATH` stays the user's override and a distribution's R, which links `-lblas`,
+///   gets the very library it links;
+/// - Accelerate on macOS;
+/// - each library the GNU R installation at `r_home` links, as its `etc/Makeconf` records it:
+///   in that line's `-L` directories, which is where an R without a global library path finds
+///   it (nixpkgs records `-L/nix/store/...-blas-3/lib -lblas`), then by soname;
+/// - the library GNU R builds from its own sources, `R_HOME/lib/libRblas.so` (`.dylib`).
+///
+/// The installation's libraries come after the system's because the soname on the search path
+/// is what a distribution's R links (`-lblas`), and R's own
+/// `libRblas` and `libRlapack` are a last resort: they leave the routines' error handler
+/// `xerbla_` to GNU R's `libR`, which ry exports only on Windows. On Windows the only candidate is
+/// the installation's `Rblas.dll` or `Rlapack.dll` under `bin/x64`.
+fn library_candidates(search: &LibrarySearch, r_home: &Path) -> Vec<String> {
+    let home = platform::path_text(r_home);
+    if cfg!(windows) {
+        return vec![format!("{home}/bin/x64/{}.dll", search.own)];
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    let mut add = |candidate: String| {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+    library_files(search.name).into_iter().for_each(&mut add);
+    if cfg!(target_os = "macos") {
+        search
+            .macos
+            .iter()
+            .map(|path| (*path).to_owned())
+            .for_each(&mut add);
+    }
+    // An installation without a readable `Makeconf` names no libraries, which leaves the others.
+    if let Ok(text) = std::fs::read_to_string(r_home.join("etc").join("Makeconf")) {
+        let variables = make_assignments(&text);
+        for variable in search.makeconf {
+            let value = variables.get(*variable).map_or("", String::as_str);
+            let link = link_line(&expand_make(value, &variables, &home, 0));
+            link.files.into_iter().for_each(&mut add);
+            for library in &link.libraries {
+                for directory in &link.directories {
+                    for file in library_files(library) {
+                        add(format!("{directory}/{file}"));
+                    }
+                }
+                library_files(library).into_iter().for_each(&mut add);
             }
-        })
-        .collect();
-    let mut failure = String::new();
-    for candidate in &candidates {
+        }
+    }
+    for file in library_files(search.own) {
+        add(format!("{home}/lib/{file}"));
+    }
+    candidates
+}
+
+/// The parts of a link line such as `-L"/opt/R/lib" -lRblas` that say where a library is.
+#[derive(Debug, Default, PartialEq)]
+struct LinkLine {
+    /// The `-L` directories, in order.
+    directories: Vec<String>,
+    /// The `-l` names, in order.
+    libraries: Vec<String>,
+    /// Shared libraries named by absolute path.
+    files: Vec<String>,
+}
+
+/// Splits a link line into words as the shell would for these lines (whitespace outside double
+/// quotes separates them, and the quotes go) and keeps the words that locate a library.
+fn link_line(line: &str) -> LinkLine {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    for character in line.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            character => word.push(character),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let mut link = LinkLine::default();
+    let mut words = words.into_iter();
+    while let Some(word) = words.next() {
+        if let Some(directory) = word.strip_prefix("-L") {
+            // The linker also takes the directory as the next word.
+            let directory = match directory {
+                "" => words.next().unwrap_or_default(),
+                directory => directory.to_owned(),
+            };
+            if !directory.is_empty() {
+                link.directories.push(directory);
+            }
+        } else if let Some(library) = word.strip_prefix("-l") {
+            if !library.is_empty() {
+                link.libraries.push(library.to_owned());
+            }
+        } else if Path::new(&word).is_absolute()
+            && (word.ends_with(".so") || word.contains(".so.") || word.ends_with(".dylib"))
+        {
+            link.files.push(word);
+        }
+    }
+    link
+}
+
+/// Opens the first candidate that loads and defines every routine `bind` looks up. A library
+/// that loads without them, such as a BLAS tried for LAPACK, is passed over.
+unsafe fn open_library<T>(
+    candidates: &[String],
+    search: &LibrarySearch,
+    bind: impl Fn(*mut c_void) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut failures: Vec<String> = Vec::new();
+    let mut soname_failed = false;
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        let absolute = path.is_absolute();
+        // A path that does not exist says nothing worth reporting; the loader's message for the
+        // first soname it cannot find does, because it may name a dependency instead.
+        if absolute && !path.exists() {
+            continue;
+        }
         match platform::open_library(candidate, true) {
-            Ok(handle) => return Ok(handle),
-            Err(message) if failure.is_empty() => failure = message,
+            Ok(handle) => match bind(handle) {
+                Ok(library) => return Ok(library),
+                Err(message) => failures.push(format!("{candidate}: {message}")),
+            },
+            Err(message) if absolute || !soname_failed => {
+                soname_failed |= !absolute;
+                failures.push(message);
+            }
             Err(_) => {}
         }
     }
-    let first = candidates.first().map_or("", String::as_str);
-    Err(if cfg!(windows) {
-        format!(
-            "linear algebra needs R's {description} library ({first}), which could not be loaded: {failure}"
-        )
-    } else {
-        format!(
-            "linear algebra needs the system {description} library ({first}), which could not be loaded: {failure}"
-        )
-    })
+    Err(missing_library_message(candidates, search, &failures))
 }
 
-unsafe fn library_symbol(
-    handle: *mut c_void,
-    name: &str,
-    description: &str,
-) -> Result<*mut c_void, String> {
+/// Why no BLAS or LAPACK loaded: where ry looked, what failed, and what the user can do.
+fn missing_library_message(
+    candidates: &[String],
+    search: &LibrarySearch,
+    failures: &[String],
+) -> String {
+    let description = search.description;
+    let fix = if cfg!(windows) {
+        format!(
+            "set R_HOME to a GNU R installation whose bin/x64 directory holds {}.dll",
+            search.own
+        )
+    } else {
+        let soname = library_files(search.name)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let variable = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        format!(
+            "install {description}, or start ry with {variable} set to a directory that holds \
+             {soname}"
+        )
+    };
+    let mut message = format!(
+        "linear algebra needs a {description} library, and none could be loaded\n  \
+         searched: {}",
+        candidates.join(", ")
+    );
+    for failure in failures {
+        message.push_str("\n  failed: ");
+        message.push_str(failure);
+    }
+    message.push_str("\n  fix: ");
+    message.push_str(&fix);
+    message
+}
+
+unsafe fn library_symbol(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> {
     let symbol = CStr::from_bytes_with_nul(name.as_bytes()).map_or(std::ptr::null_mut(), |name| {
         platform::library_symbol(handle, name)
     });
     if symbol.is_null() {
         return Err(format!(
-            "the system {description} library has no routine '{}'",
+            "it has no routine '{}'",
             name.trim_end_matches(['_', '\0'])
         ));
     }
     Ok(symbol)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_lines_keep_directories_libraries_and_files() {
+        assert_eq!(
+            link_line(r#"-L"/My R/lib" -L /opt/lib -lRblas -lgfortran -framework Accelerate"#),
+            LinkLine {
+                directories: vec!["/My R/lib".to_owned(), "/opt/lib".to_owned()],
+                libraries: vec!["Rblas".to_owned(), "gfortran".to_owned()],
+                files: Vec::new(),
+            }
+        );
+        assert_eq!(
+            link_line("/usr/lib/libopenblas.so.0 -Wl,-rpath,/x").files,
+            vec!["/usr/lib/libopenblas.so.0".to_owned()]
+        );
+    }
+
+    /// An R home laid out as nixpkgs lays out GNU R: `Makeconf` records where BLAS and LAPACK
+    /// are, and nothing is on a global library path.
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn candidates_follow_the_libraries_gnu_r_makeconf_names() {
+        let home = std::env::temp_dir().join(format!("ry-linalg-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("etc")).expect("create etc");
+        std::fs::write(
+            home.join("etc/Makeconf"),
+            "BLAS_LIBS = -L/nix/store/b-blas-3/lib -lblas\n\
+             LAPACK_LIBS = -L/nix/store/l-lapack-3/lib \\\n  -llapack\n",
+        )
+        .expect("write Makeconf");
+        let home_text = platform::path_text(&home);
+        let blas = library_candidates(&BLAS_SEARCH, &home);
+        let lapack = library_candidates(&LAPACK_SEARCH, &home);
+        std::fs::remove_dir_all(&home).expect("remove the home");
+        assert_eq!(
+            blas,
+            [
+                "libblas.so.3".to_owned(),
+                "libblas.so".to_owned(),
+                "/nix/store/b-blas-3/lib/libblas.so.3".to_owned(),
+                "/nix/store/b-blas-3/lib/libblas.so".to_owned(),
+                format!("{home_text}/lib/libRblas.so.3"),
+                format!("{home_text}/lib/libRblas.so"),
+            ]
+        );
+        assert_eq!(
+            lapack,
+            [
+                "liblapack.so.3".to_owned(),
+                "liblapack.so".to_owned(),
+                "/nix/store/l-lapack-3/lib/liblapack.so.3".to_owned(),
+                "/nix/store/l-lapack-3/lib/liblapack.so".to_owned(),
+                "/nix/store/b-blas-3/lib/libblas.so.3".to_owned(),
+                "/nix/store/b-blas-3/lib/libblas.so".to_owned(),
+                "libblas.so.3".to_owned(),
+                "libblas.so".to_owned(),
+                format!("{home_text}/lib/libRlapack.so.3"),
+                format!("{home_text}/lib/libRlapack.so"),
+            ]
+        );
+        // Without a `Makeconf`, the system's sonames and R's own library remain.
+        assert_eq!(
+            library_candidates(&BLAS_SEARCH, &home),
+            [
+                "libblas.so.3".to_owned(),
+                "libblas.so".to_owned(),
+                format!("{home_text}/lib/libRblas.so.3"),
+                format!("{home_text}/lib/libRblas.so"),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn a_missing_library_names_where_ry_looked_and_the_fix() {
+        let candidates = [
+            "liblapack.so.3".to_owned(),
+            "/r/lib/libRlapack.so".to_owned(),
+        ];
+        let message = missing_library_message(
+            &candidates,
+            &LAPACK_SEARCH,
+            &["liblapack.so.3: cannot open shared object file".to_owned()],
+        );
+        assert_eq!(
+            message,
+            "linear algebra needs a LAPACK library, and none could be loaded\n  \
+             searched: liblapack.so.3, /r/lib/libRlapack.so\n  \
+             failed: liblapack.so.3: cannot open shared object file\n  \
+             fix: install LAPACK, or start ry with LD_LIBRARY_PATH set to a directory that \
+             holds liblapack.so.3"
+        );
+    }
 }

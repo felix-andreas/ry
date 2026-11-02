@@ -30,6 +30,15 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
 
+/// ry's C headers, `crates/libr/include` as built, by path relative to `include/`.
+mod headers {
+    include!(concat!(env!("OUT_DIR"), "/headers.rs"));
+}
+
+mod makeconf;
+
+use makeconf::{expand_make, make_assignments};
+
 #[derive(Debug)]
 pub enum Error {
     Io(PathBuf, io::Error),
@@ -212,17 +221,50 @@ impl Toolchain {
     }
 
     /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
-    /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
-    /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
-    /// uses Apple's clang, the gfortran in `/opt/gfortran` and its own `libRblas`, Homebrew's
-    /// uses Homebrew's gcc and OpenBLAS, and neither has a usable default.
+    /// On macOS it is the one GNU R's own `etc/Makeconf` names, because the compilers and
+    /// libraries vary by installer: CRAN's R uses Apple's clang, the gfortran in `/opt/gfortran`
+    /// and its own `libRblas`, Homebrew's uses Homebrew's gcc and OpenBLAS, and neither has a
+    /// usable default. On Linux it is [`Toolchain::default`] linking the BLAS and LAPACK that
+    /// `Makeconf` names (see [`Toolchain::with_makeconf_libraries`]). On Windows it is Rtools.
     pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
-        if !cfg!(target_os = "macos") {
+        if cfg!(windows) {
             return Ok(Toolchain::default());
         }
         let path = gnu_r_home.join("etc").join("Makeconf");
         let text = fs::read_to_string(&path).map_err(io_error(&path))?;
-        Ok(Toolchain::from_makeconf(&text, gnu_r_home))
+        Ok(if cfg!(target_os = "macos") {
+            Toolchain::from_makeconf(&text, gnu_r_home)
+        } else {
+            Toolchain::default().with_makeconf_libraries(&text, gnu_r_home)
+        })
+    }
+
+    /// This toolchain linking the BLAS and LAPACK that GNU R's `Makeconf` names, where it names
+    /// one. A distribution's R names the bare `-lblas` and `-llapack` the default has, but an R
+    /// on a system without a global library path records where they are (nixpkgs writes
+    /// `-L/nix/store/...-blas-3/lib -lblas`), and the linker finds them nowhere else. An empty
+    /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
+    /// which packages link after `$(LAPACK_LIBS)` anyway.
+    pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
+        let variables = make_assignments(text);
+        let home = gnu_r_home.display().to_string();
+        let get = |name: &str| {
+            expand_make(
+                variables.get(name).map_or("", String::as_str),
+                &variables,
+                &home,
+                0,
+            )
+        };
+        let blas_libs = get("BLAS_LIBS");
+        if blas_libs.is_empty() {
+            return self;
+        }
+        Toolchain {
+            blas_libs,
+            lapack_libs: get("LAPACK_LIBS"),
+            ..self
+        }
     }
 
     /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
@@ -263,120 +305,6 @@ impl Toolchain {
     }
 }
 
-/// The `NAME = value` assignments of a makefile, with backslash continuations joined. `+=`
-/// appends and `?=` assigns only once, as make does.
-fn make_assignments(text: &str) -> BTreeMap<String, String> {
-    let mut variables = BTreeMap::new();
-    let mut logical = String::new();
-    for line in text.lines() {
-        // make joins a continuation and the whitespace around it into one space.
-        let line = if logical.is_empty() {
-            line
-        } else {
-            line.trim_start()
-        };
-        if let Some(stripped) = line.strip_suffix('\\') {
-            logical.push_str(stripped.trim_end());
-            logical.push(' ');
-            continue;
-        }
-        logical.push_str(line);
-        let statement = std::mem::take(&mut logical);
-        if statement.starts_with(['\t', '#']) {
-            continue;
-        }
-        let Some((name, value)) = statement.split_once('=') else {
-            continue;
-        };
-        // A `#` starts a comment anywhere on an assignment line, as in make.
-        let value = value.split('#').next().unwrap_or("").trim().to_owned();
-        let (name, operator) = match name.trim_end().strip_suffix(['+', '?', ':']) {
-            Some(stripped) => (stripped.trim(), name.trim_end().chars().last()),
-            None => (name.trim(), None),
-        };
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            continue;
-        }
-        match operator {
-            Some('+') => {
-                let entry: &mut String = variables.entry(name.to_owned()).or_default();
-                if !entry.is_empty() {
-                    entry.push(' ');
-                }
-                entry.push_str(&value);
-            }
-            Some('?') => {
-                variables.entry(name.to_owned()).or_insert(value);
-            }
-            _ => {
-                variables.insert(name.to_owned(), value);
-            }
-        }
-    }
-    variables
-}
-
-/// Expands `$(NAME)` and `${NAME}` in `value`, including a name built by a nested reference
-/// (`$(CXX$(STD))`), and `$$` to `$`. An unknown name expands to nothing, as in make, and the
-/// depth bound stops a self-referencing assignment. Whitespace inside the value is kept, so a
-/// quoted path with a space survives.
-fn expand_make(
-    value: &str,
-    variables: &BTreeMap<String, String>,
-    home: &str,
-    depth: usize,
-) -> String {
-    let mut expanded = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(start) = rest.find('$') {
-        expanded.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let (open, close) = match after.chars().next() {
-            Some('(') => ('(', ')'),
-            Some('{') => ('{', '}'),
-            Some('$') => {
-                expanded.push('$');
-                rest = &after[1..];
-                continue;
-            }
-            _ => {
-                expanded.push('$');
-                rest = after;
-                continue;
-            }
-        };
-        let mut level = 0usize;
-        let end = after.char_indices().find_map(|(index, character)| {
-            if character == open {
-                level += 1;
-            } else if character == close {
-                level -= 1;
-                if level == 0 {
-                    return Some(index);
-                }
-            }
-            None
-        });
-        let Some(end) = end else {
-            expanded.push_str(&rest[start..]);
-            rest = "";
-            break;
-        };
-        let name = expand_make(&after[1..end], variables, home, depth + 1);
-        let name = name.as_str();
-        if name == "R_HOME" {
-            expanded.push_str(home);
-        } else if depth < 16
-            && let Some(inner) = variables.get(name)
-        {
-            expanded.push_str(&expand_make(inner, variables, home, depth + 1));
-        }
-        rest = &after[end + 1..];
-    }
-    expanded.push_str(rest);
-    expanded.trim().to_owned()
-}
-
 /// Where the pieces of an R home come from.
 pub struct HomeSources<'a> {
     /// ry's headers (`crates/libr/include`).
@@ -399,6 +327,12 @@ const OWN_SCRIPTS: &[&str] = &["R", "Rscript", "Rcmd", "INSTALL", "SHLIB", "conf
 /// `share/make/shlib.mk` and the `bin/` front ends, with base R's packages in `library/` and
 /// the rest of `share/`, `etc/` and `bin/` linked from GNU R.
 pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
+    assemble_as(root, root, sources)
+}
+
+/// [`assemble`] into `root` a home whose scripts and `Makeconf` name it `home`, where it will be
+/// moved.
+fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()> {
     for directory in ["bin", "etc", "lib", "share/make", "library"] {
         let path = root.join(directory);
         fs::create_dir_all(&path).map_err(io_error(&path))?;
@@ -414,8 +348,11 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         fs::create_dir_all(parent).map_err(io_error(parent))?;
     }
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
+    // A hard link costs no space, and a rebuild writes a new file rather than into this one.
     remove_file_if_present(&libr)?;
-    fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
+    if fs::hard_link(sources.libr, &libr).is_err() {
+        fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
+    }
     // A Windows linker resolves `-lR` through the import library the build wrote next to R.dll.
     let import_library = sources.libr.with_file_name("libR.dll.a");
     if cfg!(windows) && import_library.exists() {
@@ -424,7 +361,7 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     }
     write(
         &root.join("etc/Makeconf"),
-        &makeconf(root, &sources.toolchain, Platform::HOST),
+        &makeconf(home, &sources.toolchain, Platform::HOST),
     )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
@@ -487,7 +424,7 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         }
     }
 
-    let home = root.display();
+    let home = home.display();
     let rcmd = sources.rcmd.display();
     let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
@@ -578,6 +515,101 @@ exec "$cmd" $extra "$@"
              exec '{rcmd}' Rscript \"$@\"\n"
         ),
     )
+}
+
+/// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
+/// first time it is asked for, with ry's embedded headers and the base R of `gnu_r_home`.
+/// The home is named by everything it is built from, so a rebuilt `libR` or another GNU R gets
+/// a home of its own, and a home in use is never rewritten.
+pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+    let stamp = |path: &Path| -> Result<String> {
+        let metadata = fs::metadata(path).map_err(io_error(path))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |time| time.as_nanos());
+        Ok(format!(
+            "{}\0{}\0{modified}",
+            path.display(),
+            metadata.len()
+        ))
+    };
+    let key = [
+        env!("CARGO_PKG_VERSION").to_owned(),
+        stamp(libr)?,
+        stamp(rcmd)?,
+        gnu_r_home.display().to_string(),
+    ]
+    .join("\n");
+    let home = cache.join(format!("{:016x}", fnv1a(key.as_bytes())));
+    if home.join("etc").join("Makeconf").exists() {
+        return Ok(home);
+    }
+    fs::create_dir_all(cache).map_err(io_error(cache))?;
+    // Assembled beside its final place and renamed into it, so a process that finds the home
+    // finds it whole, and two processes assembling at once both succeed.
+    let staging = cache.join(format!(
+        ".{}-{}",
+        home.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
+    }
+    let include = staging.join(".headers");
+    for (relative, contents) in headers::HEADERS {
+        let path = include.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error(parent))?;
+        }
+        fs::write(&path, contents).map_err(io_error(&path))?;
+    }
+    let assembled = assemble_as(
+        &staging,
+        &home,
+        &HomeSources {
+            include: &include,
+            libr,
+            rcmd,
+            gnu_r_home,
+            toolchain: Toolchain::for_gnu_r_home(gnu_r_home)?,
+        },
+    )
+    .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
+    if let Err(error) = assembled {
+        // The assembly error is the one to report. A staging directory left behind is named by
+        // this process's id and removed first by the next assembly under that id.
+        drop(fs::remove_dir_all(&staging));
+        return Err(error);
+    }
+    // The runtime a home was built for, so a home for a rebuilt `libR` replaces the old one.
+    let source = libr.display().to_string();
+    write(&staging.join(".libr"), &source)?;
+    match fs::rename(&staging, &home) {
+        Ok(()) => {
+            for entry in read_directory(cache)? {
+                let stale = entry != home
+                    && fs::read_to_string(entry.join(".libr")).is_ok_and(|other| other == source);
+                // A session still running from a stale home keeps its mapping of that `libR`.
+                // Pruning only saves disk once the new home is in place, so a home that cannot
+                // be removed now is tried again when the next home is built.
+                if stale {
+                    drop(fs::remove_dir_all(&entry));
+                }
+            }
+            Ok(home)
+        }
+        // Another process renamed its home into place first.
+        Err(_) if home.join("etc").join("Makeconf").exists() => fs::remove_dir_all(&staging)
+            .map(|()| home)
+            .map_err(io_error(&staging)),
+        Err(error) => {
+            // The rename error is the one to report, as for a failed assembly above.
+            drop(fs::remove_dir_all(&staging));
+            Err(Error::Io(home, error))
+        }
+    }
 }
 
 /// The Windows front ends: `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` are copies of
@@ -1159,6 +1191,9 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "--no-test-load" => options.test_load = false,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
+                        // A single-architecture build has nothing to skip, and every build
+                        // starts from a fresh copy, so there is nothing to clean beforehand.
+                        "--no-multiarch" | "--preclean" => {}
                         "--no-data" | "--no-inst" | "--no-demo" | "--no-exec" | "--no-R" => {
                             options.driver_flags.push(argument.clone());
                         }
@@ -1380,6 +1415,13 @@ pub fn install(
     result
 }
 
+/// The FNV-1a hash of `bytes`, which names a cached home the same way in every build of ry.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 fn tempdir(near: &Path) -> Result<PathBuf> {
     for attempt in 0..1000u32 {
         let path = near.join(format!("ry-install-{}-{attempt}", std::process::id()));
@@ -1560,53 +1602,28 @@ fn install_source(
     fs::create_dir_all(&target_staging).map_err(io_error(&target_staging))?;
     let platform = Platform::of_home(home)?;
     let paths = library_paths(home, library);
-    let environment = build_environment(home, platform, name, &target_staging, &paths)?;
-    if let Some(configure) = platform.build_file(&build, "configure") {
-        run_command(
-            Command::new("sh").arg(&configure).current_dir(&build).envs(
-                environment
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-            ),
-        )
-        .map_err(|error| {
-            Error::Package(format!(
-                "configuration failed for package '{name}'\n{error}"
-            ))
-        })?;
-    }
     let src = build.join("src");
     let mut shared_object = None;
     let mut install_libs = false;
-    if src.is_dir() {
-        let include_flags: Vec<String> = description
-            .packages("LinkingTo")
-            .iter()
-            .filter_map(|dependency| find_package(&paths, dependency))
-            .map(|directory| format!("-I\"{}\"", directory.join("include").display()))
-            .collect();
-        // GNU R links `<package><ext>` with the package name as it is: a package whose name has
-        // a dot renames the result in its Makevars (data.table's `mv $(SHLIB) data_table.dll`).
-        let library_name = format!("{name}{}", platform.shlib_ext());
-        if let Some(makefile) = platform.build_file(&src, "Makefile") {
-            run_command(
-                Command::new("make")
-                    .arg("-f")
-                    .arg(&makefile)
-                    .current_dir(&src)
-                    .envs(
-                        environment
-                            .iter()
-                            .map(|(key, value)| (key.as_str(), value.as_str())),
-                    ),
-            )
-            .map_err(|error| {
-                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
-            })?;
-        } else {
-            shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
-                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
-            })?;
+    if let Some(library_name) =
+        compile_in(home, &build, name, &description, &paths, &target_staging)?
+    {
+        // GNU R builds a source directory in place, so its shared objects stay in `src`, where
+        // `pkgbuild::compile_dll` and `pkgload::load_all` look for them after a libs-only
+        // install. The build here runs in a copy, so the objects go back to the source tree.
+        let source_src = source.join("src");
+        if !source.starts_with(staging) && source_src.is_dir() {
+            for entry in fs::read_dir(&src).map_err(io_error(&src))? {
+                let path = entry.map_err(io_error(&src))?.path();
+                let Some(file) = path.file_name().filter(|_| {
+                    path.extension()
+                        .is_some_and(|extension| Some(extension) == extension_of(platform))
+                }) else {
+                    continue;
+                };
+                let built = source_src.join(file);
+                fs::copy(&path, &built).map_err(io_error(&built))?;
+            }
         }
         // A package's `src/install.libs.R` installs its own libraries, and runs as R code in
         // the driver; otherwise every shared object `src` holds is installed, as GNU R does.
@@ -1695,6 +1712,97 @@ fn install_source(
         }),
         directory: target,
     })
+}
+
+/// Builds the compiled code of the package source tree at `package` in place, against ry's R
+/// home `home`, as `R CMD INSTALL --libs-only` builds it but without installing anything: its
+/// `configure` script runs, then `src/` is compiled into `src/<package><ext>`, which `ry load`
+/// then loads. The headers of the packages in `LinkingTo` are searched for in `libraries`, the
+/// session's library paths, and then in the home's own library.
+pub fn compile(home: &Path, package: &Path, libraries: &[PathBuf]) -> Result<()> {
+    let description_path = package.join("DESCRIPTION");
+    let description = Description::parse(
+        &fs::read_to_string(&description_path).map_err(io_error(&description_path))?,
+    );
+    let name = description
+        .get("Package")
+        .ok_or_else(|| {
+            Error::Package(format!(
+                "{} has no Package field",
+                description_path.display()
+            ))
+        })?
+        .to_owned();
+    // `configure` scripts may write into `R_PACKAGE_DIR`, which an installation keeps and a load
+    // has no use for.
+    let target = tempdir(&std::env::temp_dir())?;
+    let mut paths = libraries.to_vec();
+    paths.push(home.join("library"));
+    let built = compile_in(home, package, &name, &description, &paths, &target);
+    let removed = fs::remove_dir_all(&target).map_err(io_error(&target));
+    built.and(removed)
+}
+
+/// Runs the `configure` script of the source tree `build` and compiles its `src/`, returning the
+/// name of the shared object the package's name gives it, or `None` when it has no `src/`.
+fn compile_in(
+    home: &Path,
+    build: &Path,
+    name: &str,
+    description: &Description,
+    paths: &[PathBuf],
+    target: &Path,
+) -> Result<Option<String>> {
+    let platform = Platform::of_home(home)?;
+    let environment = build_environment(home, platform, name, target, paths)?;
+    if let Some(configure) = platform.build_file(build, "configure") {
+        run_command(
+            Command::new("sh").arg(&configure).current_dir(build).envs(
+                environment
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            ),
+        )
+        .map_err(|error| {
+            Error::Package(format!(
+                "configuration failed for package '{name}'\n{error}"
+            ))
+        })?;
+    }
+    let src = build.join("src");
+    if !src.is_dir() {
+        return Ok(None);
+    }
+    let include_flags: Vec<String> = description
+        .packages("LinkingTo")
+        .iter()
+        .filter_map(|dependency| find_package(paths, dependency))
+        .map(|directory| format!("-I\"{}\"", directory.join("include").display()))
+        .collect();
+    // GNU R links `<package><ext>` with the package name as it is: a package whose name has a
+    // dot renames the result in its Makevars (data.table's `mv $(SHLIB) data_table.dll`).
+    let library_name = format!("{name}{}", platform.shlib_ext());
+    if let Some(makefile) = platform.build_file(&src, "Makefile") {
+        run_command(
+            Command::new("make")
+                .arg("-f")
+                .arg(&makefile)
+                .current_dir(&src)
+                .envs(
+                    environment
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                ),
+        )
+        .map_err(|error| {
+            Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+        })?;
+    } else {
+        shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
+            Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+        })?;
+    }
+    Ok(Some(library_name))
 }
 
 /// Runs an R file on ry's interpreter through the home's `bin/R`, in `directory`, with
@@ -2003,6 +2111,30 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
         assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
         assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn a_linux_toolchain_links_the_blas_and_lapack_gnu_r_makeconf_names() {
+        let home = Path::new("/nix/store/abc-R-4.5.2/lib/R");
+        let nix = "BLAS_LIBS = -L/nix/store/def-blas-3/lib -lblas\n\
+                   LAPACK_LIBS = -L/nix/store/ghi-lapack-3/lib -llapack\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(nix, home);
+        assert_eq!(toolchain.blas_libs, "-L/nix/store/def-blas-3/lib -lblas");
+        assert_eq!(
+            toolchain.lapack_libs,
+            "-L/nix/store/ghi-lapack-3/lib -llapack"
+        );
+        assert_eq!(toolchain.cc, Toolchain::default().cc);
+        let internal = "BLAS_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRblas\nLAPACK_LIBS =\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(internal, home);
+        assert_eq!(
+            toolchain.blas_libs,
+            "-L\"/nix/store/abc-R-4.5.2/lib/R/lib\" -lRblas"
+        );
+        assert_eq!(toolchain.lapack_libs, "");
+        let toolchain = Toolchain::default().with_makeconf_libraries("CC = gcc\n", home);
+        assert_eq!(toolchain.blas_libs, "-lblas");
+        assert_eq!(toolchain.lapack_libs, "-llapack");
     }
 
     #[test]
