@@ -2114,13 +2114,14 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     if selector.kind() == SexpType::String {
         let text = values::string_at(selector, 0);
         let missing = missing_arg();
-        // GNU R rejects a second default before it looks for a match.
+        // GNU R rejects a second default before it looks for a match, naming the calling
+        // function rather than the `switch`.
         let defaults: Vec<&Arg> = alternatives
             .iter()
             .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
             .collect();
         if defaults.len() > 1 {
-            return Err(call.error(
+            return Err(error(
                 "duplicate 'switch' defaults: '".to_string()
                     + &deparse::deparse_one_line(defaults[0].value)
                     + "' and '"
