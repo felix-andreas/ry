@@ -1,0 +1,33 @@
+# A user builds a source tarball of their package with `ry build`, the way `devtools::build()`
+# does, and installs the tarball.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: greet
+| Version: 0.2.0
+| Title: Says hello
+| Description: A small package to build.
+| Authors@R: person("Ada", "Lovelace", email = "ada@example.org", role = c("aut", "cre"))
+| License: MIT
+file pkg/NAMESPACE
+| export(hello)
+file pkg/R/hello.R
+| hello <- function(name) paste0("Hello, ", name, "!")
+
+run ry build pkg -o dist
+expect exit 0
+expect stdout "dist/greet_0.2.0.tar.gz"
+
+install dist/greet_0.2.0.tar.gz
+expect exit 0
+expect file library/greet/DESCRIPTION "Packaged:"
+expect file library/greet/DESCRIPTION "Maintainer: Ada Lovelace <ada@example.org>"
+
+file use.R
+| library(greet, lib.loc = "library")
+| print(hello("ry"))
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "Hello, ry!"

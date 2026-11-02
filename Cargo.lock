@@ -2148,7 +2148,6 @@ dependencies = [
  "salsa",
  "semantics",
  "serde",
- "serde_json",
  "syntax",
  "tempfile",
  "xxhash-rust",
@@ -3621,8 +3620,10 @@ dependencies = [
  "libloading",
  "nu-ansi-term",
  "portable-pty",
+ "rcmd",
  "reedline",
  "syntax",
+ "zstd",
 ]
 
 [[package]]

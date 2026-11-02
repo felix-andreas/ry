@@ -29,6 +29,8 @@ The quality bar is four things.
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
+- **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
+
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
@@ -48,14 +50,12 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
-- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
-  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
-  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
-  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
-  with a block cache and linear topic ordering").
-- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
-  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
-  after `ry load`, `ry test` and `ry document`.
+- **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
+  on finbench is `readRDS` of the 29 MB compressed cache. Splitting it per file, or a faster
+  format, would cut it (`decisions.md`, "`ry document` is roxygen2 with block and topic caches").
+- **Tarballs built on ry's runtime record owner 0/0** where GNU R's record `root/root`: ry's
+  `file.info` has no `uname`/`grname` columns, so `utils::tar` falls back to ids. Harmless for
+  installing, but `ry build` output is not byte-identical to GNU R's.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
   3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for

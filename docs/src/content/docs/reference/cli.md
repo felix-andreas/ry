@@ -12,13 +12,15 @@ ry R [FILE]                    # the same on GNU R
 ry load [PATH]                 # load an R package from source, run code against it, and exit
 ry test [PATH]                 # run a package's testthat tests against the loaded package
 ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
+ry build [PATH]                # build a package's source tarball
+ry install [PATH]              # build and install a package
 ry debug-adapter               # a debugger for editors, over stdio
 ry server                      # the language server, over stdio; your editor starts it
 ry debug COMMAND               # developer aids for working on ry itself
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`
-and `debug-adapter` need R. They use
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`,
+`build`, `install` and `debug-adapter` need R. They use
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
 built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
 own runtime needs that installation too, because it still reads base R's R code and the default
@@ -212,13 +214,47 @@ byte for byte. roxygen2 must be installed. `--roclet NAME` (repeatable) runs onl
 roclets, such as `rd` or `namespace`. Without it, the package's own roxygen options decide, and a
 package that sets none gets `collate`, `namespace` and `rd`.
 
-Two things make it faster than roxygen2 alone, without changing what it writes. The parsed
-documentation blocks of each file are cached in ry's cache directory, so a run
-parses again only the files whose content changed, and the steps of roxygen2 that take time
-quadratic in the number of topics (collecting them, ordering them for `@inherit`, and finding
-them by name) run in linear time. A cached block keeps the markdown links it
-resolved when it was parsed, so after you install or remove a package a link points at, edit the
-file or delete the cache.
+Three things make it faster than roxygen2 alone, without changing what it writes. The parsed
+documentation blocks of each file are cached in ry's cache directory, so a run parses again only
+the files whose content changed. The finished Rd text of every topic is cached too, so after an
+edit only the topics that can have changed are rebuilt: those with a block in an edited file, those
+that inherit from them (`@inheritParams` and the other `@inherit` tags) or share a `@family` with
+them, and, every time, the package topic and any topic built from a block ry cannot track. A block
+is tracked only when it documents a function defined right below it under a name without a dot (a
+dotted name may become an S3 method when another file adds a generic) and uses none of the tags
+that read other files or the namespace: `@eval`, `@evalRd`, `@evalNamespace`, `@template`,
+`@templateVar`, `@example`, `@includeRmd`, `@describeIn`, `@method`, `@exportS3Method` and
+`@R6method`. Every other topic is written from the cache. Finally, the steps of roxygen2 that
+take time quadratic in the number of topics (collecting them, ordering them for `@inherit`, and
+finding them by name) run in linear time.
+
+The caches keep two things roxygen2 would recompute: the markdown links a block resolved against
+installed packages, and documentation inherited from another package. After you install or remove
+a package a link or an `@inherit` points at, edit the file or delete the cache, which lives in
+`~/.cache/ry/roxygen/` (or under `$XDG_CACHE_HOME`).
+
+## build and install
+
+```sh
+ry build                  # write ../<package>_<version>.tar.gz
+ry build -o dist          # write it into dist/ instead
+ry install                # install into the first library on .libPaths()
+ry install -l ~/rlib      # install into ~/rlib
+```
+
+`ry build` writes the source tarball of the package at `PATH` (default: the one containing the
+current directory), as `devtools::build()` does: it runs `R CMD build --no-resave-data
+--no-manual`, rebuilds the vignettes unless you pass `--no-vignettes`, and prints the tarball's path
+on stdout. The tarball goes beside the package directory unless `-o DIR` names another.
+
+`ry install` installs the package as `devtools::install()` does: it builds a tarball without
+rebuilding the vignettes in a temporary directory, installs it with `R CMD INSTALL`, and deletes the
+tarball. `-l DIR` names the library, which is created if it does not exist. The package's dependencies must
+already be installed.
+
+Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home, so compiled code is
+built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
+instead.
 
 ## debug-adapter
 

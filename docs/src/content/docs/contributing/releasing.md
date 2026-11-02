@@ -95,20 +95,27 @@ users install the `.vsix` files attached to the GitHub release.
 
 ## What a release ships
 
-Each archive holds `ry`, ry's runtime and `ry-rcmd` side by side, so `ry run` finds the runtime
-without configuration:
+Each archive holds `ry` alone, with ry's runtime built into it, so `ry run` needs no
+configuration:
 
 | Archive | Contents |
 | --- | --- |
-| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `ry-rcmd`, `LICENSE` |
-| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `ry-rcmd`, `LICENSE` |
-| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `R.dll`, `ry-rcmd.exe`, `LICENSE` |
+| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `LICENSE` |
+| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `LICENSE` |
+| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `LICENSE` |
+
+`just package` builds the runtime first and then `ry` with `RY_EMBED_RUNTIME` naming it, which
+embeds it zstd-compressed (`crates/repl/build.rs`), along with `libR.dll.a` on Windows. On first
+use `ry` extracts it into `ry/runtime/<hash>/` of the user's cache. `ry` is also the R front end
+that `ry-rcmd` is in a development build: ry's R home runs it through a link named `ry-rcmd`
+(on Windows, hard links named `R.exe`, `Rscript.exe` and so on), and `ry` acts as the front end
+when started under such a name.
 
 ry looks for its runtime in `RY_LIBR`, then beside the executable, then in `deps/` and
-`../lib/ry/` next to it, so an installer may place `ry` in `bin/` and the library in `lib/ry/`.
-`ry load` compiles a package's `src/` with the `ry-rcmd` it finds beside the runtime. At run time,
-`ry run`, `ry R` and `ry load` also need a GNU R installation built as a shared library, because
-ry's runtime reads base R from it. `ry check`, `ry fmt` and `ry server` need nothing else.
+`../lib/ry/` next to it, and only then falls back to the built-in one, so an installer may still
+place `ry` in `bin/` and the library in `lib/ry/`. At run time, `ry run`, `ry R` and `ry load` also
+need a GNU R installation built as a shared library, because ry's runtime reads base R from it.
+`ry check`, `ry fmt` and `ry server` need nothing else.
 
 The Linux archive is built on Ubuntu 22.04, so it needs glibc 2.35 or newer. On macOS, `libR.dylib`
 has the install name `@rpath/libR.dylib` and exports the same names as the Linux library, which is
@@ -152,4 +159,7 @@ version that differs from any of the three.
    with **publish** ticked.
 7. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
    hand and run `ry --version`, and check the extension's version on the Marketplace.
-8. Update [Installation](/installation) to name the new release and its archives.
+8. Update [Installation](/installation) to name the new release and its archives. For the first
+   release from the workflow that means: each archive holds `ry` alone, with the runtime built in,
+   and the Windows archive is `ry-x86_64-pc-windows-gnullvm.zip` (say that `ry run` and `ry load`
+   work on Windows only if the Windows smoke test passed).
