@@ -100,7 +100,15 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
   variable, argument name, `$` field, `pkg::name`), and how often signature help answers inside a
   call, with a few unanswered lines per role. A completion table then deletes the tail of sampled
   identifiers (half the name, then all but two characters) and counts how often the original name
-  is in the top five, with the latency percentiles of those requests. It forces `[check] typing` on. Build with
+  is in the top five, with the latency percentiles of those requests. A references table checks
+  find-references on sampled package bindings against an independent lexical resolver
+  (`crates/ry/src/scope_oracle.rs`), which knows only the syntax tree and R's scoping rules, and
+  counts a sample as found when the two sets of occurrences are equal. Every second sample also
+  renames the binding and renames it back, which must succeed and restore the text. Both are
+  grouped into function locals and package-level names. The resolver leaves out names whose binding
+  scoping does not decide: inside a formula or quoted code, a `:=` target, an argument of a call it
+  cannot see, and a `<<-` target that no enclosing function or file defines. It also follows ry in
+  giving each `for` loop's variable its own binding, which later assignments continue. It forces `[check] typing` on. Build with
   `--release` when absolute numbers matter; a debug build still gives honest ratios.
 
 ## The docs site

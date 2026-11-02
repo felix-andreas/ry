@@ -18,7 +18,7 @@ use {
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
         item_name_range, item_naming, item_node, item_tree,
         metadata::{PackageMetadata, is_own_package},
-        naming::{BindingId, BindingKind, ItemNaming, dot_dot_variable},
+        naming::{BindingId, BindingKind, CopySource, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{
             STANDARD_LIBRARY, StubSources, declaring_namespace, exporting_namespaces,
@@ -643,8 +643,15 @@ fn hover_definition<'db>(
         Some(CalleeTarget::Library) => return stub_hover_definition(db, name),
         None => naming.resolutions.get(&expression).copied(),
     };
-    if let Some(binding) = &binding {
-        let info = naming.bindings.get(binding)?;
+    if let Some(binding) = binding {
+        let binding = match copy_origin(naming, binding) {
+            CopySource::Slot(origin) => origin,
+            CopySource::NonLocal(source) => {
+                return global_hover_definition(db, files, &source, None)
+                    .or_else(|| stub_hover_definition(db, &source));
+            }
+        };
+        let info = naming.bindings.get(&binding)?;
         if info.kind == BindingKind::TopLevel {
             return global_hover_definition(db, files, &info.name, Some(item));
         }
@@ -6305,6 +6312,49 @@ fn target_at<'db>(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<Target<'db>> {
+    match written_target_at(db, files, file, offset)? {
+        Target::Slot { item, binding } => {
+            let naming = item_naming(db, item).as_ref()?;
+            Some(match copy_origin(naming, binding) {
+                CopySource::Slot(origin) => match naming.bindings.get(&origin) {
+                    Some(info) if info.kind == BindingKind::TopLevel => {
+                        Target::Global(info.name.to_string())
+                    }
+                    _ => Target::Slot {
+                        item,
+                        binding: origin,
+                    },
+                },
+                CopySource::NonLocal(name) => non_local_target(db, files, &name),
+            })
+        }
+        target => Some(target),
+    }
+}
+
+/// The variable a replacement assignment's local copy was copied from, through any chain of
+/// copies (`naming::ItemNaming::replacement_copies`), or the binding itself when it is no copy.
+fn copy_origin(naming: &ItemNaming, mut binding: BindingId) -> CopySource {
+    // Naming records a copy's source from a strictly enclosing scope, so a chain is no longer
+    // than the scope nesting; the bound only keeps a malformed map from hanging the editor.
+    for _ in 0..naming.replacement_copies.len() {
+        let Some(source) = naming.replacement_copies.get(&binding) else {
+            break;
+        };
+        match *source {
+            CopySource::Slot(outer) => binding = outer,
+            CopySource::NonLocal(name) => return CopySource::NonLocal(name),
+        }
+    }
+    CopySource::Slot(binding)
+}
+
+fn written_target_at<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<Target<'db>> {
     if let Some(cursor) = type_parameter_at(db, file, offset) {
         return Some(Target::TypeParameter(type_parameter_occurrences(
             file, &cursor,
@@ -6454,18 +6504,24 @@ fn expression_target<'db>(
         .get(&expression)
         .or_else(|| naming.quiet_reads.get(&expression))
     {
-        if global_declaration_exists(db, files, name) {
-            return Some(Target::Global(name.to_string()));
-        }
-        if stub_declaration(db, name).is_some() {
-            return Some(Target::StubGlobal(name.to_string()));
-        }
-        return Some(Target::Package(PackageTarget {
-            packages: candidate_packages(db, name),
-            name: name.to_string(),
-        }));
+        return Some(non_local_target(db, files, name));
     }
     None
+}
+
+/// Where a name the item does not bind navigates: the project's global, a stub's declaration,
+/// or the packages that may export it.
+fn non_local_target<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Target<'db> {
+    if global_declaration_exists(db, files, name) {
+        return Target::Global(name.to_string());
+    }
+    if stub_declaration(db, name).is_some() {
+        return Target::StubGlobal(name.to_string());
+    }
+    Target::Package(PackageTarget {
+        packages: candidate_packages(db, name),
+        name: name.to_string(),
+    })
 }
 
 /// A named argument in a call, `name` in `f(name = value)`.
@@ -6755,6 +6811,13 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         Target::Slot { item, binding } => {
             slot_occurrences(db, *item, *binding, &mut result);
             named_argument_occurrences(db, files, *item, *binding, &mut result);
+            if let Some(naming) = item_naming(db, *item) {
+                for &copy in naming.replacement_copies.keys() {
+                    if copy_origin(naming, copy) == CopySource::Slot(*binding) {
+                        slot_occurrences(db, *item, copy, &mut result);
+                    }
+                }
+            }
         }
         Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {
@@ -6807,6 +6870,19 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     for (binding, info) in &naming.bindings {
                         if info.kind == BindingKind::TopLevel && info.name == *name {
                             slot_occurrences(db, item, *binding, &mut result);
+                        }
+                    }
+                    for &copy in naming.replacement_copies.keys() {
+                        let copies_global = match copy_origin(naming, copy) {
+                            CopySource::NonLocal(source) => source == *name,
+                            CopySource::Slot(origin) => {
+                                naming.bindings.get(&origin).is_some_and(|info| {
+                                    info.kind == BindingKind::TopLevel && info.name == *name
+                                })
+                            }
+                        };
+                        if copies_global {
+                            slot_occurrences(db, item, copy, &mut result);
                         }
                     }
                     if let Some(hir) = item_hir(db, item) {
