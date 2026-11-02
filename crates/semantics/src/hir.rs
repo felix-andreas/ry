@@ -13,7 +13,7 @@ use {
         sync::{LazyLock, Mutex},
     },
     syntax::{
-        GreenElementAt, GreenNodeAt, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ElementRef, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{is_expression_kind, name_text},
     },
     thin_vec::ThinVec,
@@ -955,9 +955,8 @@ pub struct PatternField {
 }
 
 pub fn lower_item(root: &SyntaxNode) -> Module {
-    let green = root.green();
     let mut lowering = LOWERING.take();
-    let root_id = lowering.lower_expression(GreenNodeAt::new(&green, root.text_range().start()));
+    let root_id = lowering.lower_expression(root.node_ref());
     let scratch = &mut lowering.module;
     // The module lives as long as the project, so it gets exact-size copies; the scratch
     // arrays keep their capacity for the next item this thread lowers, which saves both the
@@ -986,7 +985,7 @@ thread_local! {
     static LOWERING: Cell<Lowering> = Cell::default();
 }
 
-/// Lowering reads the green tree, so it builds no red nodes. A list's elements are lowered
+/// Lowering reads borrowed nodes. A list's elements are lowered
 /// before the list is complete, and lowering them appends their own lists first, so each list
 /// gathers on a stack and moves into its side array once its last element is done. A nested
 /// list is always finished and popped before the enclosing one takes its next element, which
@@ -1032,15 +1031,15 @@ impl Lowering {
         self.allocate(ExpressionKind::Missing, range)
     }
 
-    fn lower_optional(&mut self, node: Option<GreenNodeAt<'_>>, fallback: TextRange) -> ExprId {
+    fn lower_optional(&mut self, node: Option<NodeRef<'_>>, fallback: TextRange) -> ExprId {
         match node {
             Some(node) => self.lower_expression(node),
             None => self.missing(fallback),
         }
     }
 
-    fn lower_expression(&mut self, node: GreenNodeAt<'_>) -> ExprId {
-        let range = significant_range_green(node);
+    fn lower_expression(&mut self, node: NodeRef<'_>) -> ExprId {
+        let range = significant_range_of(node);
         match node.kind() {
             SyntaxKind::NAME => {
                 let name = name_symbol(node).unwrap_or_default();
@@ -1284,7 +1283,7 @@ impl Lowering {
 
     /// The items of a native tuple or record literal. The parser already rejects a list that
     /// mixes named and unnamed items, so the first item decides which one this is.
-    fn lower_items(&mut self, list: GreenNodeAt<'_>, range: TextRange) -> ExprId {
+    fn lower_items(&mut self, list: NodeRef<'_>, range: TextRange) -> ExprId {
         let mark = self.argument_stack.len();
         self.lower_arguments_of(list, None);
         let is_record = self
@@ -1332,8 +1331,8 @@ impl Lowering {
         self.allocate(ExpressionKind::Tuple(items), range)
     }
 
-    fn lower_arm(&mut self, arm: GreenNodeAt<'_>) -> MatchArm {
-        let range = significant_range_green(arm);
+    fn lower_arm(&mut self, arm: NodeRef<'_>) -> MatchArm {
+        let range = significant_range_of(arm);
         let pattern = match arm
             .child_nodes()
             .find(|child| is_pattern_kind(child.kind()))
@@ -1351,7 +1350,7 @@ impl Lowering {
         };
         let guard = child_of_kind(arm, SyntaxKind::MATCH_GUARD).map(|guard| {
             let condition = expression_children(guard).next();
-            self.lower_optional(condition, significant_range_green(guard))
+            self.lower_optional(condition, significant_range_of(guard))
         });
         let body = expression_children(arm).next();
         let body = self.lower_optional(body, range);
@@ -1369,8 +1368,8 @@ impl Lowering {
         id
     }
 
-    fn lower_pattern(&mut self, node: GreenNodeAt<'_>) -> PatId {
-        let range = significant_range_green(node);
+    fn lower_pattern(&mut self, node: NodeRef<'_>) -> PatId {
+        let range = significant_range_of(node);
         let kind = match node.kind() {
             SyntaxKind::PATTERN_WILDCARD => PatternKind::Wildcard,
             SyntaxKind::PATTERN_BIND => {
@@ -1430,7 +1429,7 @@ impl Lowering {
                             Some(pattern) => self.lower_pattern(pattern),
                             None => self.allocate_pattern(
                                 PatternKind::Missing,
-                                significant_range_green(field),
+                                significant_range_of(field),
                             ),
                         };
                         self.pattern_field_stack.push(PatternField {
@@ -1464,7 +1463,7 @@ impl Lowering {
         self.allocate_pattern(kind, range)
     }
 
-    fn lower_pattern_list(&mut self, node: GreenNodeAt<'_>) -> Span<PatId> {
+    fn lower_pattern_list(&mut self, node: NodeRef<'_>) -> Span<PatId> {
         let mark = self.pattern_stack.len();
         for item in node
             .child_nodes()
@@ -1480,7 +1479,7 @@ impl Lowering {
         )
     }
 
-    fn lower_binary(&mut self, node: GreenNodeAt<'_>, range: TextRange) -> ExprId {
+    fn lower_binary(&mut self, node: NodeRef<'_>, range: TextRange) -> ExprId {
         let Some(operator_token) = node.child_tokens().find(|token| !token.kind.is_trivia()) else {
             return self.missing(range);
         };
@@ -1599,8 +1598,8 @@ impl Lowering {
     /// Shapes R rejects return `None` and keep the opaque-operator lowering.
     fn lower_pipe(
         &mut self,
-        lhs: Option<GreenNodeAt<'_>>,
-        rhs: Option<GreenNodeAt<'_>>,
+        lhs: Option<NodeRef<'_>>,
+        rhs: Option<NodeRef<'_>>,
         range: TextRange,
     ) -> Option<ExprId> {
         let call = rhs.filter(|node| node.kind() == SyntaxKind::CALL_EXPR)?;
@@ -1628,13 +1627,13 @@ impl Lowering {
 
     /// Pushes the arguments of `node`'s argument list onto the argument stack. The `_`
     /// placeholder never becomes an expression, so nothing dangles in the module.
-    fn lower_arguments(&mut self, node: GreenNodeAt<'_>, substitute: Option<(usize, ExprId)>) {
+    fn lower_arguments(&mut self, node: NodeRef<'_>, substitute: Option<(usize, ExprId)>) {
         if let Some(list) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
             self.lower_arguments_of(list, substitute);
         }
     }
 
-    fn lower_arguments_of(&mut self, list: GreenNodeAt<'_>, substitute: Option<(usize, ExprId)>) {
+    fn lower_arguments_of(&mut self, list: NodeRef<'_>, substitute: Option<(usize, ExprId)>) {
         for (index, argument) in list
             .child_nodes()
             .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
@@ -1679,7 +1678,7 @@ impl Lowering {
         }
     }
 
-    fn lower_parameters(&mut self, list: GreenNodeAt<'_>) {
+    fn lower_parameters(&mut self, list: NodeRef<'_>) {
         for parameter in list
             .child_nodes()
             .filter(|child| child.kind() == SyntaxKind::PARAMETER)
@@ -1721,42 +1720,41 @@ fn is_pattern_kind(kind: SyntaxKind) -> bool {
     )
 }
 
-fn expression_children<'a>(node: GreenNodeAt<'a>) -> impl Iterator<Item = GreenNodeAt<'a>> {
+fn expression_children<'a>(node: NodeRef<'a>) -> impl Iterator<Item = NodeRef<'a>> {
     node.child_nodes()
         .filter(|child| is_expression_kind(child.kind()))
 }
 
-fn child_of_kind(node: GreenNodeAt<'_>, kind: SyntaxKind) -> Option<GreenNodeAt<'_>> {
+fn child_of_kind(node: NodeRef<'_>, kind: SyntaxKind) -> Option<NodeRef<'_>> {
     node.child_nodes().find(|child| child.kind() == kind)
 }
 
 /// Excludes the trailing trivia (including `#:` annotations) rowan attaches
 /// inside expression nodes, so ranges cover code only.
 pub fn significant_range(node: &SyntaxNode) -> TextRange {
-    let green = node.green();
-    significant_range_green(GreenNodeAt::new(&green, node.text_range().start()))
+    significant_range_of(node.node_ref())
 }
 
-fn significant_range_green(node: GreenNodeAt<'_>) -> TextRange {
+fn significant_range_of(node: NodeRef<'_>) -> TextRange {
     let start = node.range().start();
     TextRange::new(start, significant_end(node).unwrap_or(start))
 }
 
 /// Where the last token that is neither trivia nor inside an `ANNOTATION` ends.
-fn significant_end(node: GreenNodeAt<'_>) -> Option<TextSize> {
+fn significant_end(node: NodeRef<'_>) -> Option<TextSize> {
     node.children().rev().find_map(|child| match child {
-        GreenElementAt::Token(token) => (!token.kind.is_trivia()).then_some(token.range.end()),
-        GreenElementAt::Node(child) if child.kind() == SyntaxKind::ANNOTATION => None,
-        GreenElementAt::Node(child) => significant_end(child),
+        ElementRef::Token(token) => (!token.kind.is_trivia()).then_some(token.range.end()),
+        ElementRef::Node(child) if child.kind() == SyntaxKind::ANNOTATION => None,
+        ElementRef::Node(child) => significant_end(child),
     })
 }
 
 /// The name a `NAME` node spells, read from its first token.
-fn name_symbol(node: GreenNodeAt<'_>) -> Option<Symbol> {
+fn name_symbol(node: NodeRef<'_>) -> Option<Symbol> {
     Some(Symbol::new(&name_text(node.first_token()?.text)))
 }
 
-fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
+fn literal_kind(node: NodeRef<'_>, buffer: &mut String) -> LiteralKind {
     let mut text = |value: &str| {
         let start = buffer.len() as u32;
         buffer.push_str(value);
@@ -1840,7 +1838,7 @@ fn string_value(text: &str) -> &str {
     text.trim_matches(['"', '\''])
 }
 
-fn field_name_text(node: GreenNodeAt<'_>) -> Option<Symbol> {
+fn field_name_text(node: NodeRef<'_>) -> Option<Symbol> {
     match node.kind() {
         SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
@@ -1858,7 +1856,7 @@ enum PipeShape {
 
 /// R's placeholder rules: `_` may appear exactly once, as the whole value of a
 /// named argument of this call. Any other use is an R error (`None`).
-fn pipe_shape(call: GreenNodeAt<'_>) -> Option<PipeShape> {
+fn pipe_shape(call: NodeRef<'_>) -> Option<PipeShape> {
     match count_placeholders(call) {
         0 => return Some(PipeShape::FirstArgument),
         1 => {}
@@ -1883,11 +1881,11 @@ fn pipe_shape(call: GreenNodeAt<'_>) -> Option<PipeShape> {
         .map(PipeShape::NamedPlaceholder)
 }
 
-fn count_placeholders(node: GreenNodeAt<'_>) -> usize {
+fn count_placeholders(node: NodeRef<'_>) -> usize {
     node.children()
         .map(|child| match child {
-            GreenElementAt::Token(token) => usize::from(token.kind == SyntaxKind::UNDERSCORE),
-            GreenElementAt::Node(child) => count_placeholders(child),
+            ElementRef::Token(token) => usize::from(token.kind == SyntaxKind::UNDERSCORE),
+            ElementRef::Node(child) => count_placeholders(child),
         })
         .sum()
 }

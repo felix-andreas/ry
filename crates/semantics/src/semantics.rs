@@ -16,7 +16,6 @@ pub mod types;
 
 use {
     crate::{hir::Symbol, sorted::SortedSet},
-    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -24,7 +23,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, GreenNodeAt, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree, TreeEvent,
         ast::{is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -278,7 +277,7 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// from it stay item-relative until the rendering edge.
 #[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    item_node(db, item).map(|node| ItemSyntax(node.green().into()))
+    item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
@@ -316,8 +315,8 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     spans
 }
 
-/// The sparse nodes the per-file passes look for, in preorder, from one walk of the green
-/// tree: each pass reading the tree itself would walk every node once per pass.
+/// The sparse nodes the per-file passes look for, in preorder, from one walk of the tree:
+/// each pass reading the tree itself would walk every node once per pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct SyntaxSites(Vec<SyntaxSite>);
 
@@ -338,13 +337,13 @@ pub enum SiteRole {
     Declaration,
     /// A record, tuple, tag or `match`, which R cannot run.
     RySyntax,
-    /// A node carrying an inline annotation, as [`annotations::is_green_inline_site`].
+    /// A node carrying an inline annotation, as [`annotations::is_inline_site_ref`].
     InlineSite,
-    /// An inline annotation itself, as [`syntax::is_green_inline_annotation`].
+    /// An inline annotation itself, as [`syntax::is_inline_annotation_kind`].
     InlineAnnotation,
     /// The file or a brace body with a `#:` block among its statements.
     AnnotatedSequence,
-    /// A call that attaches a namespace, as [`metadata::is_green_attach_call`].
+    /// A call that attaches a namespace, as [`metadata::is_attach_call_ref`].
     AttachCall,
 }
 
@@ -403,8 +402,8 @@ impl SyntaxSites {
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let mut sites = Vec::new();
-    syntax::walk_green(&parse(db, file).syntax_node(), |event| {
-        let GreenEvent::Enter {
+    syntax::walk_tree(parse(db, file).tree().root(), |event| {
+        let TreeEvent::Enter {
             node,
             parent,
             range,
@@ -414,10 +413,10 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         let kind = node.kind();
         let mut roles = 0;
-        if annotations::is_green_inline_site(node) {
+        if annotations::is_inline_site_ref(node) {
             roles |= SiteRole::InlineSite.bit();
         }
-        if syntax::is_green_inline_annotation(kind, parent.map(syntax::GreenRef::kind)) {
+        if syntax::is_inline_annotation_kind(kind, parent.map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
         }
         if (parent.is_none() || kind == SyntaxKind::BRACE_EXPR)
@@ -425,7 +424,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         {
             roles |= SiteRole::AnnotatedSequence.bit();
         }
-        if metadata::is_green_attach_call(node) {
+        if metadata::is_attach_call_ref(node) {
             roles |= SiteRole::AttachCall.bit();
         }
         if roles != 0
@@ -518,7 +517,7 @@ fn item_span_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
-pub struct ItemSyntax(pub rowan::GreenNode);
+pub struct ItemSyntax(pub Arc<Tree>);
 
 impl ItemSyntax {
     /// Offsets start at 0 (item-relative).
@@ -527,7 +526,7 @@ impl ItemSyntax {
     }
 }
 
-/// Derived from the item's green subtree only, so it cuts off across edits
+/// Derived from the item's subtree only, so it cuts off across edits
 /// elsewhere in the file.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
@@ -608,7 +607,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
             };
             associations.push((annotation, target));
         }
-        if let rowan::NodeOrToken::Node(node) = child
+        if let NodeOrToken::Node(node) = child
             && kind == SyntaxKind::ANNOTATION
         {
             pending = Some((node, 0));
@@ -646,7 +645,7 @@ fn file_item_annotations<'db>(
         .filter_map(|(annotation, target)| match target {
             AnnotationTarget::Attached(node) => item_by_range
                 .get(&node.text_range())
-                .map(|&item| (item, ItemSyntax(annotation.green().into()))),
+                .map(|&item| (item, ItemSyntax(Arc::new(annotation.subtree())))),
             _ => None,
         })
         .collect()
@@ -775,7 +774,7 @@ fn expression_annotations<'db>(
     // recorded sites cannot stand in for it.
     let (comments, inline_sites): (Vec<SyntaxNode>, Vec<SyntaxNode>) =
         matching_nodes(&root, |node, _| {
-            node.kind() == SyntaxKind::ANNOTATION || annotations::is_green_inline_site(node)
+            node.kind() == SyntaxKind::ANNOTATION || annotations::is_inline_site_ref(node)
         })
         .into_iter()
         .partition(|node| node.kind() == SyntaxKind::ANNOTATION);
@@ -920,7 +919,7 @@ pub fn file_typing_directives(
     let mut invalid = Vec::new();
     for element in root.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let Some(rest) = token
                     .text()
                     .trim_start_matches('#')
@@ -937,7 +936,7 @@ pub fn file_typing_directives(
                     other => invalid.push((token.text_range(), other.to_owned())),
                 }
             }
-            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
+            NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
                 if let Some(strict) =
                     comment_annotation(db, file, &node).and_then(|annotation| annotation.strict)
                 {
@@ -1657,13 +1656,11 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
-    // A green walk: the red preorder built a cursor node for every element of every item.
     if node.kind() == SyntaxKind::FUNCTION_DEF {
         return 0;
     }
     let mut count = 0;
-    let green = node.green();
-    let mut stack = vec![(node.kind(), green.children())];
+    let mut stack = vec![(node.kind(), node.node_ref().children())];
     while let Some((parent_kind, children)) = stack.last_mut() {
         let parent_kind = *parent_kind;
         let Some(element) = children.next() else {
@@ -1672,13 +1669,13 @@ fn write_tokens(node: &SyntaxNode) -> usize {
         };
         match element {
             NodeOrToken::Node(child) => {
-                let kind = RLanguage::kind_from_raw(child.kind());
+                let kind = child.kind();
                 if kind != SyntaxKind::FUNCTION_DEF {
                     stack.push((kind, child.children()));
                 }
             }
             NodeOrToken::Token(token) => {
-                let writes = match RLanguage::kind_from_raw(token.kind()) {
+                let writes = match token.kind {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
@@ -1686,9 +1683,9 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
                     SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
-                    SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
+                    SyntaxKind::SPECIAL => matches!(token.text, "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
-                        token.text().trim_matches('`'),
+                        token.text.trim_matches('`'),
                         ":=" | "setnames" | "setcolorder"
                     ),
                     _ => false,
@@ -2725,10 +2722,7 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    // Read off the green tree: this runs on every top-level statement of every file, and each
-    // red child is an allocation.
-    let green = node.green();
-    let binary = GreenNodeAt::new(&green, node.text_range().start());
+    let binary = node.node_ref();
     let mut operator = None;
     let mut operands = binary
         .child_nodes()

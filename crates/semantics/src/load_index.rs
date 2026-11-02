@@ -18,12 +18,11 @@ use {
         parse,
         top_level::{TopLevel, item_effect_free, item_super_assigned_names, item_top_level},
     },
-    rowan::{GreenNodeData, Language, NodeOrToken},
     rustc_hash::FxHashMap,
     serde::{Deserialize, Serialize},
     std::{collections::BTreeSet, sync::Arc},
     syntax::{
-        RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{self, BinaryExpr},
     },
 };
@@ -126,9 +125,8 @@ fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
     };
     let definition = binding_definition(node);
     let mentions = definition.as_ref().map_or_else(Vec::new, |(_, value)| {
-        let green = value.green();
         let mut names = Vec::new();
-        collect_identifiers(green.as_ref(), &mut names);
+        collect_identifiers(value.node_ref(), &mut names);
         names.sort_unstable();
         names.dedup();
         names.into_iter().map(str::to_owned).collect()
@@ -951,7 +949,7 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
 
 /// The text R evaluates for `node`: inline annotations erased, with their line breaks kept so
 /// line numbers survive. Also maps each offset in `marks` (token boundaries of `node`) to its
-/// offset in the erased text. Walks the green tree, which allocates nothing per node.
+/// offset in the erased text.
 fn erase_for_r(node: &SyntaxNode, mut marks: Vec<TextSize>) -> (String, Marks) {
     marks.sort_unstable();
     marks.dedup();
@@ -964,7 +962,7 @@ fn erase_for_r(node: &SyntaxNode, mut marks: Vec<TextSize>) -> (String, Marks) {
         next: 0,
         out: String::with_capacity(usize::from(node.text_range().len())),
     };
-    eraser.node(node.green().as_ref(), None, node.text_range().start());
+    eraser.node(node.node_ref(), None);
     eraser.marks.erased = eraser.erased;
     (eraser.out, eraser.marks)
 }
@@ -1009,62 +1007,41 @@ impl Eraser {
         }
     }
 
-    fn node(&mut self, green: &GreenNodeData, parent: Option<SyntaxKind>, start: TextSize) {
-        let kind = RLanguage::kind_from_raw(green.kind());
-        self.record(start);
-        let end = start + green.text_len();
-        if syntax::is_green_inline_annotation(kind, parent) {
-            let breaks = count_breaks(green);
+    fn node(&mut self, node: NodeRef<'_>, parent: Option<SyntaxKind>) {
+        let kind = node.kind();
+        let range = node.range();
+        self.record(range.start());
+        if syntax::is_inline_annotation_kind(kind, parent) {
+            let breaks = node.text().matches('\n').count();
             self.out.extend(std::iter::repeat_n('\n', breaks));
-            self.record(end);
+            self.record(range.end());
             return;
         }
-        let mut offset = start;
-        for child in green.children() {
+        for child in node.children() {
             match child {
-                NodeOrToken::Node(child) => {
-                    self.node(child, Some(kind), offset);
-                    offset += child.text_len();
-                }
+                NodeOrToken::Node(child) => self.node(child, Some(kind)),
                 NodeOrToken::Token(token) => {
-                    self.record(offset);
-                    self.out.push_str(token.text());
-                    offset += token.text_len();
-                    self.record(offset);
+                    self.record(token.range.start());
+                    self.out.push_str(token.text);
+                    self.record(token.range.end());
                 }
             }
         }
-        self.record(end);
+        self.record(range.end());
     }
 }
 
-fn collect_identifiers<'a>(green: &'a GreenNodeData, names: &mut Vec<&'a str>) {
-    for child in green.children() {
-        match child {
-            NodeOrToken::Node(child) => collect_identifiers(child, names),
-            NodeOrToken::Token(token)
-                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::IDENT =>
-            {
-                let text = token.text();
-                let name = text
-                    .strip_prefix('`')
-                    .and_then(|text| text.strip_suffix('`'))
-                    .unwrap_or(text);
-                names.push(name);
-            }
-            NodeOrToken::Token(_) => {}
+fn collect_identifiers<'a>(node: NodeRef<'a>, names: &mut Vec<&'a str>) {
+    for token in node.tokens() {
+        if token.kind == SyntaxKind::IDENT {
+            let text = token.text;
+            let name = text
+                .strip_prefix('`')
+                .and_then(|text| text.strip_suffix('`'))
+                .unwrap_or(text);
+            names.push(name);
         }
     }
-}
-
-fn count_breaks(green: &GreenNodeData) -> usize {
-    green
-        .children()
-        .map(|child| match child {
-            NodeOrToken::Node(child) => count_breaks(child),
-            NodeOrToken::Token(token) => token.text().matches('\n').count(),
-        })
-        .sum()
 }
 
 struct LineStarts(Vec<u32>);
