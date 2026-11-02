@@ -380,6 +380,13 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- **In flight: records as the fast choice.** The round's items, in order:
+  - speculate on plain-list element reads (below);
+  - make `Construct` a real JIT op (coordinate with the JIT session);
+  - compile a guarded `match` instead of running the special;
+  - bound `List.range` and `List.repeat` with a clear error past a size limit;
+  - have the typed finbench/dsbench conversion use records, tuples and tags, and measure them
+    against `list(kind=)` equivalents.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
