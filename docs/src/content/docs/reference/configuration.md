@@ -152,8 +152,7 @@ bundled binary, and `ry` on your `PATH`. A change takes effect after **ry: Resta
 ```jsonc
 {
   "ry.path": "/usr/local/bin/ry",
-  "ry.args": ["server"],
-  "ry.experimentalFeatures": ["range_formatting"]  // format a selection
+  "ry.args": ["server"]
 }
 ```
 

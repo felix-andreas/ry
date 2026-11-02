@@ -294,8 +294,8 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Comment { text, range } => {
-            if annotation_depth == 0 {
+        GreenEvent::Token { kind, text, range } => {
+            if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
                 commented_code_lint(text, range, config, diagnostics);
             }
             if kind == SyntaxKind::STRING && annotation_depth == 0 {

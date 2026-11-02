@@ -494,14 +494,18 @@ pub enum GreenEvent<'a> {
     },
     /// The end of a node, after its last child.
     Leave(GreenRef<'a>),
-    /// A comment token, the only token a whole-file pass reads.
-    Comment { text: &'a str, range: TextRange },
+    /// A comment, string or number token, the only tokens a whole-file pass reads.
+    Token {
+        kind: SyntaxKind,
+        text: &'a str,
+        range: TextRange,
+    },
 }
 
 /// The nodes under `root`, `root` included, in preorder, read from the green tree, so the
 /// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
-/// few sites a pass needs. Tokens other than comments only advance the offset: most
-/// elements of a tree are tokens, and the whole-file passes read only nodes and comments.
+/// few sites a pass needs. Tokens other than comments, strings and numbers only advance the
+/// offset: most elements of a tree are tokens, and the whole-file passes read only nodes and those.
 #[inline]
 pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
     let root_green = root.green();
@@ -532,15 +536,23 @@ pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
                 });
                 stack.push((green, green.children(), start));
             }
-            NodeOrToken::Token(token)
-                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::COMMENT =>
-            {
-                visit(GreenEvent::Comment {
-                    text: token.text(),
-                    range: TextRange::at(start, token.text_len()),
-                });
+            NodeOrToken::Token(token) => {
+                let kind = RLanguage::kind_from_raw(token.kind());
+                if matches!(
+                    kind,
+                    SyntaxKind::COMMENT
+                        | SyntaxKind::STRING
+                        | SyntaxKind::DOUBLE
+                        | SyntaxKind::INTEGER
+                        | SyntaxKind::COMPLEX
+                ) {
+                    visit(GreenEvent::Token {
+                        kind,
+                        text: token.text(),
+                        range: TextRange::at(start, token.text_len()),
+                    });
+                }
             }
-            NodeOrToken::Token(_) => {}
         }
     }
 }

@@ -655,7 +655,12 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
             visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
         }
         crate::GreenEvent::Leave(_) => open -= 1,
-        crate::GreenEvent::Comment { text, range } => comments.push((text.to_owned(), range)),
+        crate::GreenEvent::Token {
+            kind: crate::SyntaxKind::COMMENT,
+            text,
+            range,
+        } => comments.push((text.to_owned(), range)),
+        crate::GreenEvent::Token { .. } => {}
     });
     assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
     let expected_comments: Vec<_> = root

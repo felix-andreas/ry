@@ -1006,16 +1006,15 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 149 of the 150 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
-   (`oracle compare --engine ry`), and 148 of 150 under the JIT (`--engine ry-jit`, which also
-   differs on `environments__hidden_function_bindings`). The
+   The interpreter runs. 152 of the 153 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
+   (`oracle compare --engine ry`), and so do 152 of 153 under the JIT (`--engine ry-jit`). The
    remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
-   exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
+   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
+   exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
    `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
-   Parsed code keeps source references when `keep.source` asks for them. Connections are a single
+   Parsed code keeps source references when `keep.source` asks for them. Connections, sockets included (so `parallel`'s PSOCK clusters run), are a single
    implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime
    with the R_GE_version 17 device API, so base graphics, grid, lattice and device packages such as
    ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
@@ -1061,7 +1060,7 @@ Each step ends with something real running, and each one is a large, whole chang
    exists it applies the same plans.
 6. **Inline syntax, agreement warnings and strict mode (done),** in the parser, the checker and the
    runtime, with the runtime type summary and body facts.
-7. **The JIT (loops done, calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
+7. **The JIT (loops and scalar functions done, general calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
