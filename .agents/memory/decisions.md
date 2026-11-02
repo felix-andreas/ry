@@ -1802,6 +1802,18 @@ Measured with the JIT off: a loop passing `i * 2 + 1` and `sqrt(i) - i / 3` to a
 about 1.6x faster, and `sd(x)`, whose closure arguments are mostly bare symbols (a symbol stays
 an ordinary promise), went from about 115.4k to 114.8k instructions.
 
+**`switch` compiles to one table lookup and a chain of literal tests.** `SwitchArm dst src table`
+maps the selector to an arm number through a constant table built at compile time (the tag
+names, the first non-empty arm at or after each name, the arm per position, the default), and
+each arm then tests that number with the existing `MatchLiteral` and jumps past the others. One
+opcode with a jump table would be faster to dispatch, but every op in the JIT's control-flow
+graph has at most one jump target, and the arm chain keeps that invariant, so the JIT needed only
+a read and a liveness arm for the new op. A `switch` whose selector is tagged, dots or missing,
+whose alternatives contain `...`, or which has two defaults stays an AST call, which keeps those
+rare shapes on one implementation (`switch_compiles`). Errors match GNU R's AST `switch`, not
+its byte compiler, which reports two defaults as "numeric EXPR required". The ledger fold
+template's per-fill cost dropped from about 19.1k to 17.8k instructions.
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last

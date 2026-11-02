@@ -1,0 +1,50 @@
+[stdout]
+| "a" -> "A" TRUE 
+| "b" -> "BC" TRUE 
+| "c" -> "BC" TRUE 
+| "d" -> "default" TRUE 
+| "e" -> "default" TRUE 
+| NA_character_ -> "default" TRUE 
+| "" -> "default" TRUE 
+| 1 -> "A" TRUE 
+| 2 -> "empty alternative in numeric switch" TRUE 
+| 3 -> "BC" TRUE 
+| 4 -> "empty alternative in numeric switch" TRUE 
+| 5 -> "default" TRUE 
+| 6 -> NULL FALSE 
+| 0 -> NULL FALSE 
+| -1 -> NULL FALSE 
+| 2.7 -> "empty alternative in numeric switch" TRUE 
+| TRUE -> "A" TRUE 
+| NA -> NULL FALSE 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| NULL
+| [1] "one"
+| $value
+| [1] "one"
+| 
+| $visible
+| [1] TRUE
+| 
+| switch(x, a = 1)
+| switch(x, a = 1)
+| [1] 1
+| [1] 10
+| [1] 0
+| [1] "duplicate 'switch' defaults: '2' and '3'"
+[messages]
+[warnings]
+[errors]
+- duplicate 'switch' defaults: '2' and '3' (in dd("a"))
+[value]
