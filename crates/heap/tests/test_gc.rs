@@ -583,6 +583,34 @@ fn environments_bind_look_up_and_remove() {
         let v4 = heap.install(b"v4").expect("install");
         assert_eq!(heap.frame_cell(global, v4).expect("bound").cdr(), values[4]);
 
+        // Removing most bindings compacts the frame; the survivors keep their insertion order
+        // and stay reachable through a collection.
+        let symbol = |heap: &mut Heap, index: usize| {
+            heap.install(format!("v{index}").as_bytes())
+                .expect("install")
+        };
+        for index in (5..20).filter(|index| index % 4 != 0) {
+            let removed = symbol(&mut heap, index);
+            assert_eq!(heap.remove_binding(global, removed), Ok(true));
+            assert_eq!(heap.remove_binding(global, removed), Ok(false));
+        }
+        heap.collect(Collection::Major);
+        let survivors = [0, 1, 2, 4, 8, 12, 16];
+        let expected: Vec<Sexp> = survivors
+            .iter()
+            .map(|&index| symbol(&mut heap, index))
+            .collect();
+        assert_eq!(heap.bound_symbols(global), expected);
+        for &index in &survivors {
+            let bound = symbol(&mut heap, index);
+            assert_eq!(
+                heap.frame_cell(global, bound).expect("bound").cdr(),
+                values[index]
+            );
+        }
+        heap.define(global, v3, values[3]).expect("define");
+        assert_eq!(heap.bound_symbols(global).last(), Some(&v3));
+
         let base = heap.known().base_env;
         let pi = heap.install(b"pi").expect("install");
         heap.define(base, pi, values[0]).expect("define");

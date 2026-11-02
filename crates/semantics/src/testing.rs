@@ -33,7 +33,7 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
         let Some(check) = item_check(db, item) else {
             continue;
         };
-        let Some(scheme) = check.scheme else {
+        let Some(scheme) = &check.scheme else {
             continue;
         };
         let mut renderer = TypeRenderer::default();

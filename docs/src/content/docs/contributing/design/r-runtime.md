@@ -380,7 +380,9 @@ The GC is a **non-moving, generational mark-sweep collector with size-segregated
 the design GNU R uses, kept because native code holds raw pointers to object data. Reference counts
 drive copy-on-modify exactly as `MAYBE_SHARED` expects. The roots are the `PROTECT` stack, the
 precious list behind `R_PreserveObject`, global variables, the interpreter's frames, and JIT frames
-through Cranelift's stack maps.
+through Cranelift's stack maps. A minor collection marks only the root-stack entries pushed since
+the previous collection, because marks stay set until the next major one, so the cost of a minor
+collection does not grow with the roots that lazy-loading base leaves behind.
 
 The JIT recovers what a moving nursery would buy in other VMs by not allocating in the first place:
 unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (section 5). If
@@ -1006,9 +1008,8 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 152 of the 153 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
-   (`oracle compare --engine ry`), and so do 152 of 153 under the JIT (`--engine ry-jit`). The
-   remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   The interpreter runs. Every oracle case in `crates/oracle/cases` but one matches GNU R 4.3.3
+   (`oracle compare --engine ry`). The exception, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
    different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 64 of 66 end with GNU R's
    exit status and 26 print exactly GNU R's output. The others come from three known cases, two of them accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
@@ -1052,9 +1053,8 @@ Each step ends with something real running, and each one is a large, whole chang
    Magick++. Two package-test rates are tracked, both counting only the packages whose
    tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
    ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
-   (`.corpus/ry-library`, `oracle packages --installed`), the last measured rate was 90 of 165
-   (54.5%), from an older interpreter. The rest fail on interpreter gaps, and the classes are listed in
-   `.agents/memory/backlog.md`.
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 126 of 164 (76.8%). The rest
+   fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.

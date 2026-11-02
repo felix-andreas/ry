@@ -6,6 +6,7 @@
 
 .ry_commit <- function(root) invisible(.Internal(ryLoaderCommit(root)))
 
+.ry_await_verdict <- function() .Internal(ryLoaderAwaitVerdict())
 .ry_callers <- function(root, names) .Internal(ryLoaderCallers(root, names))
 
 .ry_sources <- function(state, plan) invisible()

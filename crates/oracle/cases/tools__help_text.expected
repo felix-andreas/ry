@@ -1,0 +1,180 @@
+[stdout]
+| Arithmetic Mean
+| 
+| Description:
+| 
+|      Generic function for the (trimmed) arithmetic mean.
+| 
+| Usage:
+| 
+|      mean(x, ...)
+|      
+|      ## Default S3 method:
+|      mean(x, trim = 0, na.rm = FALSE, ...)
+|      
+| Arguments:
+| 
+|        x: An R object.  Currently there are methods for numeric/logical
+|           vectors and date, date-time and time interval objects.
+|           Complex vectors are allowed for ‘trim = 0’, only.
+| 
+|     trim: the fraction (0 to 0.5) of observations to be trimmed from
+|           each end of ‘x’ before the mean is computed.  Values of trim
+|           outside that range are taken as the nearest endpoint.
+| 
+|    na.rm: a logical evaluating to ‘TRUE’ or ‘FALSE’ indicating whether
+|           ‘NA’ values should be stripped before the computation
+|           proceeds.
+| 
+|      ...: further arguments passed to or from other methods.
+| 
+| Value:
+| 
+|      If ‘trim’ is zero (the default), the arithmetic mean of the values
+|      in ‘x’ is computed, as a numeric or complex vector of length one.
+|      If ‘x’ is not logical (coerced to numeric), numeric (including
+|      integer) or complex, ‘NA_real_’ is returned, with a warning.
+| 
+|      If ‘trim’ is non-zero, a symmetrically trimmed mean is computed
+|      with a fraction of ‘trim’ observations deleted from each end
+|      before the mean is computed.
+| 
+| References:
+| 
+|      Becker, R. A., Chambers, J. M. and Wilks, A. R. (1988) _The New S
+|      Language_.  Wadsworth & Brooks/Cole.
+| 
+| See Also:
+| 
+|      ‘weighted.mean’, ‘mean.POSIXct’, ‘colMeans’ for row and column
+|      means.
+| 
+| Examples:
+| 
+|      x <- c(0:10, 50)
+|      xm <- mean(x)
+|      c(xm, mean(x, trim = 0.10))
+|      
+| [1] 103
+| [1] "<!DOCTYPE html><html><head><title>R: Arithmetic Mean</title>"                                   
+| [2] "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />"                      
+| [3] "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\" />"
+| [4] "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.15.3/dist/katex.min.css\">"
+| [1] "\\inputencoding{utf8}"                         
+| [2] "\\HeaderA{mean}{Arithmetic Mean}{mean}"        
+| [3] "\\methaliasA{mean.default}{mean}{mean.default}"
+| [4] "\\keyword{univar}{mean}"                       
+| [5] "%"                                             
+| [6] "\\begin{Description}"                          
+| ### Name: mean
+| ### Title: Arithmetic Mean
+| ### Aliases: mean mean.default
+| ### Keywords: univar
+| 
+| ### ** Examples
+| 
+| x <- c(0:10, 50)
+| xm <- mean(x)
+| c(xm, mean(x, trim = 0.10))
+| 
+| 
+| 
+| A header
+| 
+| first
+| second
+| 
+| [1] FALSE
+| Cannot open file '/nonexistent/help-page': No such file or directory
+| 
+| sum                    package:base                    R Documentation
+| 
+| _S_u_m _o_f _V_e_c_t_o_r _E_l_e_m_e_n_t_s
+| 
+| _D_e_s_c_r_i_p_t_i_o_n:
+| 
+|      ‘sum’ returns the sum of all the values present in its arguments.
+| 
+| _U_s_a_g_e:
+| 
+|      sum(..., na.rm = FALSE)
+|      
+| _A_r_g_u_m_e_n_t_s:
+| 
+|      ...: numeric or complex or logical vectors.
+| 
+|    na.rm: logical.  Should missing values (including ‘NaN’) be removed?
+| 
+| _D_e_t_a_i_l_s:
+| 
+|      This is a generic function: methods can be defined for it directly
+|      or via the ‘Summary’ group generic.  For this to work properly,
+|      the arguments ‘...’ should be unnamed, and dispatch is on the
+|      first argument.
+| 
+|      If ‘na.rm’ is ‘FALSE’ an ‘NA’ or ‘NaN’ value in any of the
+|      arguments will cause a value of ‘NA’ or ‘NaN’ to be returned,
+|      otherwise ‘NA’ and ‘NaN’ values are ignored.
+| 
+|      Logical true values are regarded as one, false values as zero.
+|      For historical reasons, ‘NULL’ is accepted and treated as if it
+|      were ‘integer(0)’.
+| 
+|      Loss of accuracy can occur when summing values of different signs:
+|      this can even occur for sufficiently long integer inputs if the
+|      partial sums would cause integer overflow.  Where possible
+|      extended-precision accumulators are used, typically well supported
+|      with C99 and newer, but possibly platform-dependent.
+| 
+| _V_a_l_u_e:
+| 
+|      The sum.  If all of the ‘...’ arguments are of type integer or
+|      logical, then the sum is ‘integer’ when possible and is ‘double’
+|      otherwise.  Integer overflow should no longer happen since R
+|      version 3.5.0.  For other argument types it is a length-one
+|      numeric (‘double’) or complex vector.
+| 
+|      *NB:* the sum of an empty set is zero, by definition.
+| 
+| _S_4 _m_e_t_h_o_d_s:
+| 
+|      This is part of the S4 ‘Summary’ group generic.  Methods for it
+|      must use the signature ‘x, ..., na.rm’.
+| 
+|      ‘plotmath’ for the use of ‘sum’ in plot annotation.
+| 
+| _R_e_f_e_r_e_n_c_e_s:
+| 
+|      Becker, R. A., Chambers, J. M. and Wilks, A. R. (1988) _The New S
+|      Language_.  Wadsworth & Brooks/Cole.
+| 
+| _S_e_e _A_l_s_o:
+| 
+|      ‘colSums’ for row and column sums.
+| 
+| _E_x_a_m_p_l_e_s:
+| 
+|      ## Pass a vector to sum, and it will add the elements together.
+|      sum(1:5)
+|      
+|      ## Pass several numbers to sum, and it also adds the elements.
+|      sum(1, 2, 3, 4, 5)
+|      
+|      ## In fact, you can pass vectors into several arguments, and everything gets added.
+|      sum(1:2, 3:5)
+|      
+|      ## If there are missing values, the sum is unknown, i.e., also missing, ....
+|      sum(1:5, NA)
+|      ## ... unless  we exclude missing values explicitly:
+|      sum(1:5, NA, na.rm = TRUE)
+|      
+| 
+| [1] "Package:            tools" "Version:            4.3.3"
+| [3] "Priority:           base" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("Package:            tools", "Version:            4.3.3", "Priority:           base"
+| )

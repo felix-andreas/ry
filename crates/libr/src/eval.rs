@@ -1526,48 +1526,44 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         interp::session::run_text(startup, "<startup>");
     }
     let mut buffer = vec![0u8; 64 * 1024];
+    // The reader runs on the console's input thread, so the interpreter's thread answers an
+    // editor's requests while the user types.
+    let reader = move |prompt: &str| {
+        use std::io::Write;
+        if let Err(error) = std::io::stdout().flush() {
+            crate::boundary::write_console(
+                format!("ry: cannot write output: {error}\n").as_bytes(),
+                true,
+            );
+        }
+        // A prompt never holds a NUL, so the empty fallback is unreachable.
+        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+        let mut input = Vec::new();
+        // A line longer than the buffer arrives in several chunks; only the last one ends the
+        // line, and the text is decoded once it is whole, so no character is split.
+        loop {
+            // SAFETY: `read` is the host's reader, which may run on any thread.
+            if unsafe { read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) } == 0 {
+                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+            }
+            let end = buffer
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(buffer.len());
+            input.extend_from_slice(&buffer[..end]);
+            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+            // cut off whenever it comes within two bytes of the buffer's end.
+            if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                return Some(String::from_utf8_lossy(&input).into_owned());
+            }
+            prompt = std::ffi::CString::default();
+        }
+    };
+    interp::console_server::install_reader(Box::new(reader));
     interp::console_server::start();
     interp::session::run_console(
-        |prompt| {
-            use std::io::Write;
-            if let Err(error) = std::io::stdout().flush() {
-                crate::boundary::write_console(
-                    format!("ry: cannot write output: {error}\n").as_bytes(),
-                    true,
-                );
-            }
-            // A prompt never holds a NUL, so the empty fallback is unreachable.
-            let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-            let buffer = &mut buffer;
-            // The input is read on a helper thread while the console answers an editor's
-            // requests, which need the interpreter's thread.
-            interp::console_server::read_while_serving(move || {
-                let mut input = Vec::new();
-                // A line longer than the buffer arrives in several chunks; only the last one
-                // ends the line, and the text is decoded once it is whole, so no character is
-                // split.
-                loop {
-                    // SAFETY: `read` is the host's reader, which may run on any thread.
-                    if unsafe { read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) }
-                        == 0
-                    {
-                        return (!input.is_empty())
-                            .then(|| String::from_utf8_lossy(&input).into_owned());
-                    }
-                    let end = buffer
-                        .iter()
-                        .position(|&byte| byte == 0)
-                        .unwrap_or(buffer.len());
-                    input.extend_from_slice(&buffer[..end]);
-                    // A reader may stop one byte short of the contract's limit, so a chunk is
-                    // taken as cut off whenever it comes within two bytes of the buffer's end.
-                    if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                        return Some(String::from_utf8_lossy(&input).into_owned());
-                    }
-                    prompt = std::ffi::CString::default();
-                }
-            })
-        },
+        // SAFETY: the console reads on the interpreter's thread, at its top level.
+        |prompt| unsafe { interp::console_server::read_line(prompt) },
         false,
     );
     interp::console_server::finish();
@@ -1587,6 +1583,14 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
     }
     let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
     loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
+}
+
+/// Makes the package loader wait for `verdict` before the parts of a load that may have
+/// effects, so the host can check the package while the definitions bind (see
+/// `loader::ry_runtime::set_verdict`). `ry load` calls it once, before [`ry_run`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
+    loader::ry_runtime::set_verdict(verdict);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

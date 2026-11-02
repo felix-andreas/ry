@@ -11,9 +11,13 @@ use {
         stats::analysis_stats,
     },
     std::{
-        env, fs,
+        env,
+        ffi::c_int,
+        fs,
         path::{Path, PathBuf},
         process::ExitCode,
+        sync::{Mutex, OnceLock, PoisonError},
+        thread::{self, JoinHandle},
     },
     tracing_subscriber::prelude::*,
 };
@@ -112,6 +116,7 @@ fn main() -> ExitCode {
             min_severity,
             fix,
             unsafe_fixes,
+            annotate,
             no_cache,
         } => {
             let fix = match (fix, unsafe_fixes) {
@@ -128,6 +133,7 @@ fn main() -> ExitCode {
                 output,
                 min_severity,
                 fix,
+                annotate,
                 cache,
             ))
         }
@@ -215,6 +221,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             None,
             &arguments,
             runtime_flags(preflight.config()),
+            None,
             None,
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
@@ -386,29 +393,101 @@ fn run_load(
     let Some(preflight) = Preflight::discover(&root, root.clone()) else {
         return ExitCode::from(2);
     };
-    match preflight::check_package(&root, preflight.config()) {
-        Ok(Verdict::Run) => {}
-        Ok(Verdict::Refuse) => return ExitCode::from(1),
-        Err(CommandError) => return ExitCode::from(2),
-    }
     let runtime_variable = env::var("RY_RUNTIME").ok();
     match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
-        Runtime::Ry => runtime_exit(repl::run_on_ry_runtime(
-            file,
-            Some(&input),
-            &[],
-            runtime_flags(preflight.config()),
-            Some(&root),
-        )),
-        Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
-            routines: load::call_routines(),
-            startup: vec![load::embedded_runtime()],
-            input,
-            file: file.map(Path::to_path_buf),
-            batch: true,
-            ..repl::RunOptions::default()
-        })),
+        Runtime::Ry => {
+            // The strict check runs while the runtime starts and the package's definitions
+            // bind; the loader waits for it before anything with an effect.
+            let config = preflight.config().clone();
+            let check_root = root.clone();
+            let check = thread::Builder::new()
+                .name("ry-strict-check".to_owned())
+                .spawn(move || {
+                    lower_priority();
+                    preflight::check_package(&check_root, &config)
+                });
+            match check {
+                Ok(check) => {
+                    *PACKAGE_CHECK.lock().unwrap_or_else(PoisonError::into_inner) = Some(check);
+                }
+                Err(error) => panic!("the strict check's thread should spawn: {error}"),
+            }
+            let status = repl::run_on_ry_runtime(
+                file,
+                Some(&input),
+                &[],
+                runtime_flags(preflight.config()),
+                Some(&root),
+                Some(package_verdict),
+            );
+            // A load that failed before it asked still reports the check, and a refusal
+            // decides the status.
+            match package_verdict() {
+                0 => runtime_exit(status),
+                refused => ExitCode::from(refused as u8),
+            }
+        }
+        Runtime::GnuR => {
+            match preflight::check_package(&root, preflight.config()) {
+                Ok(Verdict::Run) => {}
+                Ok(Verdict::Refuse) => return ExitCode::from(1),
+                Err(CommandError) => return ExitCode::from(2),
+            }
+            gnu_r_exit(repl::run(repl::RunOptions {
+                routines: load::call_routines(),
+                startup: vec![load::embedded_runtime()],
+                input,
+                file: file.map(Path::to_path_buf),
+                batch: true,
+                ..repl::RunOptions::default()
+            }))
+        }
     }
+}
+
+/// Lowers the calling thread's CPU priority, so the strict check yields to the runtime start it
+/// overlaps with. The analysis workers it spawns inherit the priority.
+#[cfg(target_os = "linux")]
+fn lower_priority() {
+    // SAFETY: gettid has no preconditions, and setpriority on the calling thread only changes
+    // its scheduling. A failure leaves the priority as it was, which is still correct.
+    unsafe {
+        let thread = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, thread, 10);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lower_priority() {}
+
+/// The strict check of the package `ry load` is loading, which [`package_verdict`] joins.
+static PACKAGE_CHECK: Mutex<Option<JoinHandle<Result<Verdict, CommandError>>>> = Mutex::new(None);
+
+/// [`repl::PackageVerdict`] for `ry load`: waits for the strict check, which has printed any
+/// errors by then, and answers 0 to run, 1 to refuse and 2 when the check could not run. A
+/// panic in the check ends the process with status 101. The answer is kept, so asking again
+/// returns at once.
+extern "C" fn package_verdict() -> c_int {
+    static STATUS: OnceLock<c_int> = OnceLock::new();
+    *STATUS.get_or_init(|| {
+        let check = PACKAGE_CHECK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(check) = check else {
+            return 0;
+        };
+        // Unwinding out of an `extern "C"` function aborts, so a panic in the check, whose
+        // message the panic hook has printed, ends the process with a panic's usual status.
+        let Ok(verdict) = check.join() else {
+            std::process::exit(101);
+        };
+        match verdict {
+            Ok(Verdict::Run) => 0,
+            Ok(Verdict::Refuse) => 1,
+            Err(CommandError) => 2,
+        }
+    })
 }
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time

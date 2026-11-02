@@ -11,9 +11,9 @@ rename: none
 signature: fn(count: integer, label: character) -> integer
 parameters: [count: integer] | label: character
 action: Add inferred type annotation for `result`
-  edit 92..92 -> "#: integer\n"
+  edit 98..98 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 92..92 -> "#: integer\n"
+  edit 98..98 -> ": integer"
 completion (128+): describe, result, break, else, FALSE, for, function, if
 hint @98: integer
 
@@ -29,9 +29,9 @@ rename: none
 signature: fn(quiet: logical = FALSE, ...: character) -> character
 parameters: [quiet: logical = FALSE] | ...: character
 action: Add inferred type annotation for `text`
-  edit 100..100 -> "#: character\n"
+  edit 104..104 -> ": character"
 action: Add inferred type annotations for the whole file
-  edit 100..100 -> "#: character\n"
+  edit 104..104 -> ": character"
 completion (1): TRUE
 hint @104: character
 hint @113quiet =
@@ -63,9 +63,9 @@ parameters: X: list[named: T] | [FUN: fn(T) -> U] | ...: Any
 signature: fn(X: list[integer] | integer[] | formula | NULL, FUN: fn(integer) -> integer, ...: Any) -> list[integer] (active)
 parameters: X: list[integer] | integer[] | formula | NULL | [FUN: fn(integer) -> integer] | ...: Any
 action: Add inferred type annotation for `result`
-  edit 83..83 -> "#: list[integer]\n"
+  edit 89..89 -> ": list[integer]"
 action: Add inferred type annotations for the whole file
-  edit 83..83 -> "#: list[integer]\n"
+  edit 89..89 -> ": list[integer]"
 completion (128+): result, break, else, FALSE, for, function, if, in
 hint @89: list[integer]
 hint @114FUN =

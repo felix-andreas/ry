@@ -83,6 +83,9 @@ pub(crate) struct Space {
     page_class: Vec<u8>,
     /// Marked slots per page, as of the last sweep or since.
     live_slots: Vec<u16>,
+    /// The sum of `live_slots`, kept beside it so the statistics after every collection do not
+    /// walk every page.
+    total_live_slots: usize,
     marks: Vec<Bitmap>,
     allocated: Vec<Bitmap>,
     /// Slots whose object owns memory outside the heap: environments, whose frames spill.
@@ -146,6 +149,7 @@ impl Space {
             page_count: 0,
             page_class: Vec::new(),
             live_slots: Vec::new(),
+            total_live_slots: 0,
             marks: Vec::new(),
             allocated: Vec::new(),
             finalizable: Vec::new(),
@@ -397,6 +401,7 @@ impl Space {
         }
         let before = self.live_slots[page] as isize;
         self.live_slots[page] = live as u16;
+        self.total_live_slots = (self.total_live_slots as isize + live as isize - before) as usize;
         (live as isize - before) * slot_size as isize
     }
 
@@ -450,7 +455,7 @@ impl Space {
     }
 
     pub fn live_slots(&self) -> usize {
-        self.live_slots.iter().map(|&live| live as usize).sum()
+        self.total_live_slots
     }
 
     pub fn page_count(&self) -> usize {

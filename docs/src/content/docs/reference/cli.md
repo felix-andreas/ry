@@ -28,6 +28,7 @@ ry check --output json         # one JSON object per finding, on stdout
 ry check --min-severity error  # ignore warnings, also for the exit code
 ry check --fix                 # apply the safe fixes, then report what remains
 ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling suggestion
+ry check --annotate            # write inferred types as annotations, then report what remains
 ```
 
 Naming a file limits what is reported, not what is analyzed: ry always reads the whole
@@ -55,6 +56,12 @@ guesses what you meant, such as changing a misspelled `totl` to `total`, is unsa
 `--unsafe-fixes` as well. One fix can expose another, so ry repeats the pass until nothing changes. A file with a syntax
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
 The editor offers the same fixes as quick fixes.
+
+`--annotate` writes the inferred type of each unannotated top-level function and binding in the
+named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
+says, prints how many it added, and then reports what is left.
+[Strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode) shows it at work. A binding
+whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
 
