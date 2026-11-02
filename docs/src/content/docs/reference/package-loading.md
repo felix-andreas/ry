@@ -63,9 +63,14 @@ A load holds them back only when all of these hold, and otherwise runs every one
   `setGeneric()` with a function literal as its definition, `setMethod()` or `setReplaceMethod()` with
   a literal signature, or `setValidity()`. Any other one, such as `setRefClass()` or
   `setClassUnion()`, keeps them all in place.
-- Every method is for a generic the package itself defines, and every validity method for one of its
-  own classes. A method on another package's generic, such as `show`, has to be registered before
-  that generic dispatches, and nothing marks the moment it does.
+- Every method is for a generic the package itself defines, or its signature names one of the
+  package's own classes, as `setMethod("show", "Quantity", ...)` does. A method of the second kind
+  must be for a standard generic that already exists, such as `show`, and the held-back definitions
+  then also run the first time that generic dispatches or is looked up. A method for a primitive
+  such as `length`, for a group generic such as `Arith`, or for a function that is not yet generic
+  keeps them in place, because those do not dispatch through `standardGeneric()`, where ry runs
+  held-back definitions. Every validity method
+  must be for one of the package's own classes.
 - Every name the definitions read is written once, by a statement placed before them, so running them
   later reads the same values.
 - Every name the definitions bind is written by them alone.
