@@ -17,7 +17,7 @@ use {
         },
         config::{
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
-            suggested_table,
+            LINTR_FILE_NAME, suggested_table,
         },
         console_link::{ConsoleLink, identifier_at},
         diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
@@ -1672,7 +1672,7 @@ impl Worker {
             }
             if path
                 .file_name()
-                .is_some_and(|name| name == CONFIG_FILE_NAME)
+                .is_some_and(|name| name == CONFIG_FILE_NAME || name == LINTR_FILE_NAME)
             {
                 // Re-discover: a deleted workspace config falls back to an ancestor or defaults.
                 match Config::discover(&self.workspace_root) {
@@ -1771,7 +1771,7 @@ impl Worker {
             lsp_types::FileSystemWatcher {
                 glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
                     base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
-                    pattern: CONFIG_FILE_NAME.to_owned(),
+                    pattern: format!("{{{CONFIG_FILE_NAME},{LINTR_FILE_NAME}}}"),
                 }),
                 kind: None,
             },
