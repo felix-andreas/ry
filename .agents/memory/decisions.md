@@ -6061,3 +6061,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Rejected:** redirecting the bound variable to the open argument. It dropped the literal's
   `double` (`outer(1L)` typed `integer`) and moved a variable between levels without adjusting
   them, so an outer function's variable was generalized by an inner one.
+
+## Alias cycles are reported at the declaration, and short names get narrow suggestions
+
+- **Previous shape.** An alias cycle was found only when an annotation used the alias, and reported on that use with a whole-statement range; an unused cyclic alias was never reported. `nearest_name` returned nothing for a name under four characters, so `person$nam` got no suggestion.
+- **Shape.** `alias_cycle_diagnostics` (`crates/semantics/src/diagnostics.rs`) walks each alias the file declares with `check::alias_cycle_walk`, seeded with the alias itself, and reports every alias on a cycle at its declaration. A use of a cyclic alias drops the annotation silently, so one mistake is reported once, where the fix goes. A name of two or three characters is suggested a candidate only when exactly one candidate is that name with one character inserted (`nam` and `nme` find `name`; `df` never finds `dt`), because a substitution budget on a short name matches unrelated names.
+- **Impact.** The fix site is the declaration, and the check runs per file over that file's declarations, so it adds no project-wide read.

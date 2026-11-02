@@ -94,6 +94,9 @@ pub enum TypeErrorKind<'db> {
     /// Named formals with no default that the call leaves out and the body forces.
     MissingArguments {
         names: Vec<String>,
+        /// A named argument that matched no formal and went to `...`, with the missing formal
+        /// it most likely misspells.
+        misspelled: Option<(String, String)>,
     },
     NamedArgumentMismatch {
         argument: String,
@@ -118,9 +121,6 @@ pub enum TypeErrorKind<'db> {
     NullDefaultNotAdmitted {
         name: String,
         declared: Ty<'db>,
-    },
-    AliasCycle {
-        name: String,
     },
     ConstraintViolation {
         constraint: Constraint,
@@ -730,9 +730,7 @@ fn check_item_in<'db>(
             .unwrap_or(0),
     };
     let mut annotation = annotation;
-    if let Some(root) = module.root
-        && let Some(present) = annotation
-    {
+    if let Some(present) = annotation {
         let mut mentioned = present.declared.iter().map(|declared| declared.body).chain(
             present
                 .new_nominal
@@ -743,11 +741,8 @@ fn check_item_in<'db>(
             mentioned
                 .find_map(|ty| alias_cycle_walk(db, definitions, ty, &mut FxHashSet::default()))
         });
-        if let Some(name) = cycle {
-            context.errors.push(TypeError {
-                range: module.range(root),
-                kind: TypeErrorKind::AliasCycle { name },
-            });
+        // The cycle is reported at the alias declarations, so a use only stops trusting it.
+        if cycle.is_some() {
             annotation = None;
         }
     }
@@ -11974,7 +11969,20 @@ impl<'db> Checker<'db, '_> {
         if !missing.is_empty() {
             return vec![TypeError {
                 range: callee_range,
-                kind: TypeErrorKind::MissingArguments { names: missing },
+                kind: TypeErrorKind::MissingArguments {
+                    misspelled: targets
+                        .iter()
+                        .zip(arguments)
+                        .find_map(|(target, argument)| {
+                            let name = argument.name.as_ref()?;
+                            if *target != Some(ArgumentTarget::Rest) {
+                                return None;
+                            }
+                            let nearest = nearest_name(name, missing.iter().map(String::as_str))?;
+                            Some((name.as_str().to_owned(), nearest))
+                        }),
+                    names: missing,
+                },
             }];
         }
         findings
@@ -15881,7 +15889,7 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 
 /// A DFS gray set: a name is expanding only while its own body is walked, so a
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
-fn alias_cycle_walk<'db>(
+pub(crate) fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,
     ty: Ty<'db>,

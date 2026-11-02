@@ -33,6 +33,10 @@ binding or expression it describes. Consecutive `#:` lines with no blank line be
 - `#: @if-unknown TYPE` is an [unknown-only coercion](#unknown-only-coercions).
 - `#: @new NOMINAL_TYPE` is a [nominal introduction](#nominal-introduction).
 
+After an annotation, a `#` starts a plain comment, so `#: double # amount in euros` is the type
+`double` with a note. A second `#:` on the same line is an error, because it would otherwise be
+read as that note and its type dropped: write each annotation on its own line.
+
 A block is one of three kinds, which cannot be mixed: a single line in one of those forms, an
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
 lines, or a definition block of `@type` and `@alias` lines.
@@ -616,9 +620,10 @@ the declaration's arity:
 #### Type aliases
 
 An alias is purely structural: writing its name is the same as writing the type it stands for. It
-creates no new identity, and may appear anywhere a type may, including inside a larger type. Using
-an alias that expands in a cycle is an error, reported where it is used; a cycle no annotation uses
-is not reported.
+creates no new identity, and may appear anywhere a type may, including inside a larger type. An
+alias whose expansion reaches itself, directly or through other aliases, is an error reported at
+each declaration on the cycle, whether or not an annotation uses it. An annotation that uses such an
+alias checks nothing.
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">

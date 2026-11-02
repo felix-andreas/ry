@@ -98,18 +98,13 @@ Smaller gaps:
   "did you mean".
 - After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
   finding.
-- An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
 - A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
   `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
   on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
   the generic argument check to carry which argument fixed the type variable.
-- `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
-  friendlier contract.
-- `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
-  function only takes 1". `greet(nam = "Ada")` gets the same message, although R partially matches
-  `nam` to `name`. After an invalid field write, a later field typo on the same record goes
+- After an invalid field write, a later field typo on the same record goes
   unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
 - From the final type-system review, each now documented as a known gap in the reference:
   - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
@@ -336,14 +331,6 @@ type-level function the annotation language does not have.
 - A nominal union is unchecked through `$` while a structural union is exact. There is also no
   discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
   be narrowed at all.
-- An alias cycle is reported on the use, with a whole-statement caret, and never at the declaration.
-  An unused cyclic alias is not reported at all, although the reference says a definition cycle is
-  an error.
-- A second `#:` annotation on one line is silently swallowed, because the first wins, while harmless
-  trailing prose errors. The ambiguous input is the quiet one.
-- A missing-argument error does not name the parameter, although the sibling wrong-name error lists
-  all of them.
-- A near-miss suggestion has a length floor that misses a short field name, such as `person$nam`.
 - A generic lambda passed as an argument keeps its binders rigid, so
   `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
   on a function that is not bound should instantiate its binders like a call does.

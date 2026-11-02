@@ -1248,8 +1248,10 @@ pub fn file_typing_directives(
                 else {
                     continue;
                 };
-                // The whole remainder is the value: `typing: on gely` is a typo, not `on`.
-                match rest.trim() {
+                // The whole remainder up to a trailing `# reason` comment is the value:
+                // `typing: on gely` is a typo, not `on`.
+                let value = rest.split_once('#').map_or(rest, |(value, _)| value);
+                match value.trim() {
                     "off" => mode = Some(TypingMode::Off),
                     "on" => mode = Some(TypingMode::On),
                     "strict" => mode = Some(TypingMode::Strict),
