@@ -333,6 +333,17 @@ walk (`item_interface_edges`) go through `package_name` too. A structural edit r
 that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
 items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
+`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
+cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
+`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
+instead of interning a name and going through `package_name` or `test_name`, and `item_group`
+finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
+`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+facts; only the granularity of the recorded dependencies changes. Under
+`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
+per-item answer. The language server and a cached `ry check` keep the firewalls.
+
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions
 into the winners and, in the same loop, the names defined more than once. The duplicate check reads

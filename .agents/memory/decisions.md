@@ -5189,10 +5189,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     caller holding a symbol never round-trips through a string. `hir::Symbol` orders by a cached
     8-byte big-endian prefix before comparing text, so sorted sets of symbols rarely touch memory.
   - `syntax::parser::TreeBuilder` builds green nodes directly from a child stack and shares only
-    tokens, through a per-thread hash table plus a per-kind "last token" slot. Nodes are not
-    deduplicated: on the finance bench that costs about 70 MB of peak memory (440 to 510 MB) and
-    saves the node cache's hashing, and value equality of green trees (the firewall mechanism, see
-    the rowan entry) does not depend on sharing.
+    tokens, through a per-thread hash table plus a per-kind "last token" slot. Small nodes are
+    shared again on a cheaper key (see "One-shot checks record coarse dependencies").
   - The lexer has ASCII fast paths for identifiers, numbers and comment bodies, and keyword
     lookup rejects by length and first byte.
   - `ry check` reads sources and renders findings in parallel and prints them in path order, and it

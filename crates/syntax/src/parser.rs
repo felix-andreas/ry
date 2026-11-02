@@ -178,9 +178,7 @@ impl TokenCache {
         self.last[slot] = Some(token.clone());
         token
     }
-}
 
-impl TokenCache {
     /// The node of `kind` over `children[first..]`, which it drains.
     fn node(
         &mut self,
