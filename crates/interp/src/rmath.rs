@@ -2737,6 +2737,24 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
             closest = neighbour_distance;
         }
     }
+    // Where the distribution function is flat to its last bit, a run of doubles share the
+    // closest probability and the root lies somewhere among them; the middle of the run is the
+    // best guess.
+    let mut run = [0usize; 2];
+    for (side, upward) in [true, false].into_iter().enumerate() {
+        let mut edge = x;
+        for _ in 0..MAXIMUM_POLISH {
+            edge = if upward { edge.next_up() } else { edge.next_down() };
+            if residual_at(edge).abs() != closest {
+                break;
+            }
+            run[side] += 1;
+        }
+    }
+    let (up, down) = (run[0], run[1]);
+    for _ in 0..up.abs_diff(down) / 2 {
+        x = if up > down { x.next_up() } else { x.next_down() };
+    }
     x
 }
 
