@@ -81,11 +81,12 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 
 /// How closely a case must agree with GNU R. Direct algorithms follow GNU R's operation order,
 /// so they agree to rounding; the iterative ones compound rounding differences over their
-/// iterations. GNU R's LINPACK routines also call the system BLAS for `dnrm2` and friends,
+/// iterations, except `lbfgsb`, which follows GNU R's floating-point path bit for bit. GNU R's LINPACK routines also call the system BLAS for `dnrm2` and friends,
 /// whose rounding depends on the BLAS build, so even the direct ones agree only to rounding.
 fn tolerance(case: &str) -> f64 {
     match case {
-        "lbfgsb" | "optif9" | "quadrature" => 1e-6,
+        "lbfgsb" => 0.0,
+        "optif9" | "quadrature" => 1e-6,
         _ => 1e-10,
     }
 }
@@ -269,7 +270,7 @@ fn r_pretty_agrees_with_gnu_r() {
 
 /// The recorded expectations are what GNU R answers today. GNU R's LINPACK routines call the
 /// system's level-1 BLAS, and BLAS builds sum in different orders (reference BLAS and OpenBLAS
-/// disagree in the last bits of `dqrdc2`, `svd` and `lbfgsb`), so values are compared with the
+/// disagree in the last bits of `dqrdc2` and `svd`), so values are compared with the
 /// same per-case tolerance as ry's answers; everything else must match exactly.
 #[test]
 fn expectations_match_a_fresh_gnu_r_run() {

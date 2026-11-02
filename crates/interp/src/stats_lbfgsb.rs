@@ -2,11 +2,16 @@
 //! `optim(method = "L-BFGS-B")` and the C API's `lbfgsb`.
 //!
 //! This follows the authors' BSD-licensed reference code, L-BFGS-B 3.0 by Zhu, Byrd, Lu and
-//! Nocedal (ACM TOMS Algorithm 778, with the Morales and Nocedal remark of 2011), routine by
-//! routine and in the same operation order, because `optim()` results are compared digit for
-//! digit against GNU R. Each routine keeps its reference name in its doc comment. The vector
-//! kernels are written as the reference BLAS and LINPACK loops they stand for, so every sum is
-//! accumulated in the same order.
+//! Nocedal (ACM TOMS Algorithm 778), routine by routine, because `optim()` results are
+//! compared digit for digit against GNU R. Each routine keeps its reference name in its doc
+//! comment. The vector kernels are written as the reference BLAS and LINPACK loops they stand
+//! for, so every sum is accumulated in the same order.
+//!
+//! GNU R's results match an older variant of the method, which comparison against it pins
+//! down: the subspace step backtracks into the box without first trying its projection (the
+//! Morales and Nocedal remark that version 3.0 added), and a few updates add their whole
+//! right-hand side as one term (`r += a + b` rather than `r = r + a + b`). Comments mark each
+//! of those places.
 //!
 //! The reference code keeps its whole state in work arrays that persist between iterations,
 //! and several paths read values a previous iteration left behind (the Cauchy coefficients
@@ -168,7 +173,6 @@ pub unsafe fn minimize(
     let mut r = vec![0.0; n];
     let mut d = vec![0.0; n];
     let mut t = vec![0.0; n];
-    let mut xp = vec![0.0; n];
     let mut p = vec![0.0; 2 * m];
     let mut c = vec![0.0; 2 * m];
     let mut wbp = vec![0.0; 2 * m];
@@ -190,7 +194,6 @@ pub unsafe fn minimize(
     let mut free = n;
     let mut active = 0usize;
     let mut segments = 0i32;
-    let mut word = -1i32;
 
     // prn1lb
     if detail >= 0 {
@@ -217,7 +220,6 @@ pub unsafe fn minimize(
         ));
     }
     let mut info = 0i32;
-    let mut backtracks = 0i32;
     let task: &'static str;
     'iterations: {
         if projected <= settings.pgtol {
@@ -228,7 +230,6 @@ pub unsafe fn minimize(
             if detail >= 99 {
                 print(&format!("Iteration {iteration:5}\n"));
             }
-            word = -1;
             let rebuild;
             if !shape.constrained && memory.col > 0 {
                 z.copy_from_slice(x);
@@ -304,8 +305,7 @@ pub unsafe fn minimize(
                 );
                 if info == 0 {
                     info = subspace_minimization(
-                        free, &index, lower, upper, bounds, &mut z, &mut r, &mut xp, &memory,
-                        x, &g, &mut word, &mut p, &wn,
+                        free, &index, lower, upper, bounds, &mut z, &mut r, &memory, &mut p, &wn,
                     );
                 }
                 if info != 0 {
@@ -361,7 +361,7 @@ pub unsafe fn minimize(
             r.copy_from_slice(&g);
             let f_old = f;
             let mut trials = 0i32;
-            backtracks = 0;
+            let mut backtracks = 0;
             let mut starting = true;
             let mut gd;
             let mut gd_old = 0.0;
@@ -371,12 +371,6 @@ pub unsafe fn minimize(
                 if trials == 0 {
                     gd_old = gd;
                     if gd >= 0.0 {
-                        if detail >= 0 {
-                            print(&format!(
-                                "ascent direction in projection gd = {}\n",
-                                number(c"%g", gd)
-                            ));
-                        }
                         info = -4;
                         break;
                     }
@@ -410,7 +404,6 @@ pub unsafe fn minimize(
                     if info == 0 {
                         info = -9;
                         evaluations -= 1;
-                        backtracks -= 1;
                     }
                     task = ABNORMAL;
                     iteration += 1;
@@ -487,7 +480,7 @@ pub unsafe fn minimize(
                 memory.updated = false;
                 if detail >= 1 {
                     print(&format!(
-                        "  ys={}  -gs={} BFGS update SKIPPED\n",
+                        "ys={}  -gs={}, BFGS update SKIPPED\n",
                         number(c"%10.3e", dr),
                         number(c"%10.3e", threshold)
                     ));
@@ -506,8 +499,14 @@ pub unsafe fn minimize(
         }
     }
 
-    // prn3lb
-    if detail >= 0 {
+    // prn3lb. GNU R replaces the summary of a failed line search with a one-line notice.
+    if detail >= 0 && task == ABNORMAL {
+        print(if info == -4 {
+            DERIVATIVE_NOT_NEGATIVE
+        } else {
+            LINE_SEARCH_FAILED
+        });
+    } else if detail >= 0 {
         print(&format!(
             "\niterations {iteration}\nfunction evaluations {evaluations}\nsegments explored during Cauchy searches {segments_total}\nBFGS updates skipped {skipped}\nactive bounds at final generalized Cauchy point {active}\nnorm of the final projected gradient {}\nfinal function value {}\n\n",
             number(c"%g", projected),
@@ -519,11 +518,8 @@ pub unsafe fn minimize(
         if detail >= 1 {
             print(&format!("F = {}\n", number(c"%g", f)));
         }
-        match info {
-            -4 => print(DERIVATIVE_NOT_NEGATIVE),
-            -5 => print(LONG_LINE_SEARCH),
-            -9 => print(LINE_SEARCH_FAILED),
-            _ => {}
+        if info == -5 {
+            print(LONG_LINE_SEARCH);
         }
     }
     let reported = if task == ABNORMAL {
@@ -544,7 +540,7 @@ pub unsafe fn minimize(
 
 const CONVERGED_GRADIENT: &str = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL";
 const CONVERGED_REDUCTION: &str = "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH";
-const ABNORMAL: &str = "ABNORMAL_TERMINATION_IN_LNSRCH";
+const ABNORMAL: &str = "ERROR: ABNORMAL_TERMINATION_IN_LNSRCH";
 
 const SINGULAR_RESTART: &str =
     "\n Singular triangular system detected;\n   refresh the lbfgs memory and restart the iteration.\n";
@@ -552,10 +548,11 @@ const INDEFINITE_K_RESTART: &str = "\n Nonpositive definiteness in Cholesky fact
 const INDEFINITE_T_RESTART: &str = "\n Nonpositive definiteness in Cholesky factorization in formt;\n   refresh the lbfgs memory and restart the iteration.\n";
 const BAD_DIRECTION_RESTART: &str =
     "\n Bad direction in the line search;\n   refresh the lbfgs memory and restart the iteration.\n";
-const DERIVATIVE_NOT_NEGATIVE: &str = "\n Derivative >= 0, backtracking line search impossible.\n   Previous x, f and g restored.\n Possible causes: 1 error in function or gradient evaluation;\n                  2 rounding errors dominate computation.\n";
+const DERIVATIVE_NOT_NEGATIVE: &str = "Derivative >= 0, backtracking line search impossible.";
 const LONG_LINE_SEARCH: &str =
     "Warning:  more than 10 function and gradient evaluations\n   in the last line search\n";
-const LINE_SEARCH_FAILED: &str = "\n Line search cannot locate an adequate point after 20 function\n  and gradient evaluations.\n  Previous x, f and g restored.\n Possible causes: 1 error in function or gradient evaluation;\n                  2 rounding error dominate computation.\n";
+const LINE_SEARCH_FAILED: &str =
+    "Line search cannot locate an adequate point after 20 function and gradient evaluations.";
 
 /// The longest a line search may backtrack before the iteration gives up on its direction.
 const MAX_BACKTRACKS: i32 = 20;
@@ -863,7 +860,7 @@ fn cauchy(
     }
     xcp.copy_from_slice(x);
     if breaks == 0 && free == n {
-        if detail >= 100 {
+        if detail > 100 {
             print_vector("Cauchy X =  ", xcp);
         }
         return 0;
@@ -943,7 +940,8 @@ fn cauchy(
             }
             *segments += 1;
             let dibp2 = dibp * dibp;
-            f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp;
+            // GNU R adds these updates to `f1` and `f2` as one term each.
+            f1 += dt * f2 + dibp2 - theta * dibp * zibp;
             f2 -= theta * dibp2;
             if col > 0 {
                 daxpy(dt, &p[..col2], &mut c[..col2]);
@@ -962,7 +960,7 @@ fn cauchy(
                 let wmw = ddot(&wbp[..col2], &v[..col2]);
                 daxpy(-dibp, &wbp[..col2], &mut p[..col2]);
                 f1 += dibp * wmc;
-                f2 = f2 + 2.0 * dibp * wmp - dibp2 * wmw;
+                f2 += 2.0 * dibp * wmp - dibp2 * wmw;
             }
             f2 = fmax(epsilon * f2_original, f2);
             if left > 0 {
@@ -1138,12 +1136,19 @@ fn free_variables(
                 changes.entering += 1;
                 if detail >= 100 {
                     print(&format!(
-                        "Variable {} enters the set of free variables\n{} variables leave; {} variables enter\n",
-                        k + 1,
-                        n - changes.leaving,
-                        changes.entering
+                        "Variable {} enters the set of free variables\n",
+                        k + 1
                     ));
                 }
+            }
+            // GNU R reports the running totals once per variable examined here, not once
+            // after the loop.
+            if detail >= 100 {
+                print(&format!(
+                    "{} variables leave; {} variables enter\n",
+                    n - changes.leaving,
+                    changes.entering
+                ));
             }
         }
     }
@@ -1285,10 +1290,11 @@ fn form_k(
             for &k1 in leaving {
                 temp3 += ws(k1, ipntr) * wy(k1, jpntr);
             }
+            // Unlike the blocks above, this update adds the difference as one term.
             if is <= jy + m {
-                wn1[at(is, jy)] = wn1[at(is, jy)] + temp1 - temp3;
+                wn1[at(is, jy)] += temp1 - temp3;
             } else {
-                wn1[at(is, jy)] = wn1[at(is, jy)] - temp1 + temp3;
+                wn1[at(is, jy)] -= temp1 - temp3;
             }
             jpntr = memory.next(jpntr);
         }
@@ -1397,7 +1403,8 @@ fn reduced_gradient(
         let a2 = theta * v[col + j];
         for i in 0..free {
             let k = index[i];
-            r[i] = r[i] + memory.wy(k, pointer) * a1 + memory.ws(k, pointer) * a2;
+            // Added as one term, as GNU R does.
+            r[i] += memory.wy(k, pointer) * a1 + memory.ws(k, pointer) * a2;
         }
         pointer = memory.next(pointer);
     }
@@ -1415,11 +1422,7 @@ fn subspace_minimization(
     bounds: &[Bound],
     x: &mut [f64],
     d: &mut [f64],
-    xp: &mut [f64],
     memory: &Memory,
-    xx: &[f64],
-    gg: &[f64],
-    word: &mut i32,
     wv: &mut [f64],
     wn: &[f64],
 ) -> i32 {
@@ -1428,7 +1431,6 @@ fn subspace_minimization(
     }
     let col = memory.col;
     let theta = memory.theta;
-    let variant = variant();
     let mut pointer = memory.head;
     for i in 0..col {
         let mut temp1 = 0.0;
@@ -1455,73 +1457,24 @@ fn subspace_minimization(
     if info != 0 {
         return info;
     }
+    // GNU R adds each correction's two terms together before adding them to `d`, and divides
+    // by θ rather than multiplying by its reciprocal; both choices show in the last digits.
     let mut pointer = memory.head;
     for jy in 0..col {
         let js = col + jy;
         for i in 0..free {
             let k = index[i];
-            d[i] = d[i] + memory.wy(k, pointer) * wv[jy] / theta + memory.ws(k, pointer) * wv[js];
+            d[i] += memory.wy(k, pointer) * wv[jy] / theta + memory.ws(k, pointer) * wv[js];
         }
         pointer = memory.next(pointer);
     }
-    if variant.divide {
-        for value in &mut d[..free] {
-            *value /= theta;
-        }
-    } else {
-        let scale = 1.0 / theta;
-        for value in &mut d[..free] {
-            *value *= scale;
-        }
+    for value in &mut d[..free] {
+        *value /= theta;
     }
 
-    if variant.project {
-        // Morales and Nocedal: try the projection of the subspace step first.
-        *word = 0;
-        xp.copy_from_slice(x);
-        for i in 0..free {
-            let k = index[i];
-            let dk = d[i];
-            let xk = x[k];
-            x[k] = match bounds[k] {
-                Bound::None => xk + dk,
-                Bound::Lower => {
-                    let value = fmax(lower[k], xk + dk);
-                    if value == lower[k] {
-                        *word = 1;
-                    }
-                    value
-                }
-                Bound::Both => {
-                    let value = fmin(upper[k], fmax(lower[k], xk + dk));
-                    if value == lower[k] || value == upper[k] {
-                        *word = 1;
-                    }
-                    value
-                }
-                Bound::Upper => {
-                    let value = fmin(upper[k], xk + dk);
-                    if value == upper[k] {
-                        *word = 1;
-                    }
-                    value
-                }
-            };
-        }
-        if *word == 0 {
-            return 0;
-        }
-        let mut slope = 0.0;
-        for i in 0..x.len() {
-            slope += (x[i] - xx[i]) * gg[i];
-        }
-        if slope <= 0.0 {
-            return 0;
-        }
-        x.copy_from_slice(xp);
-        print(" Positive dir derivative in projection \n Using the backtracking step \n");
-    }
-
+    // Backtrack from the subspace minimizer to the box along `d`. GNU R does not first try
+    // the projection of the minimizer onto the box, which the reference code's version 3.0
+    // added (Morales and Nocedal, 2011).
     let mut alpha = 1.0;
     let mut temp1 = alpha;
     let mut ibd = 0;
@@ -1565,23 +1518,7 @@ fn subspace_minimization(
         let k = index[i];
         x[k] += alpha * d[i];
     }
-    if !variant.project {
-        *word = if alpha < 1.0 { 1 } else { 0 };
-    }
     0
-}
-
-struct Variant {
-    project: bool,
-    divide: bool,
-}
-
-fn variant() -> Variant {
-    let text = std::env::var("RY_LBFGSB").unwrap_or_default();
-    Variant {
-        project: text.contains("project"),
-        divide: text.contains("divide"),
-    }
 }
 
 /// `matupd`: appends the newest correction pair to the ring and updates `S'Y` and `S'S`.

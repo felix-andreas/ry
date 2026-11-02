@@ -2096,6 +2096,21 @@ primitives, and nothing built or installed packages.
   function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
   Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
   custom candidate generator and always takes the Gaussian step.
+- **One L-BFGS-B, written from the BSD reference v3.0** (Zhu, Byrd, Lu and Nocedal's Fortran,
+  `lbfgsb.f`). `crates/interp/src/stats_lbfgsb.rs` is the only implementation: `optim` calls it
+  through `stats_optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
+  callbacks. GNU R behaves as a hybrid of the versions, found by comparing every iterate bitwise
+  (`%a`) against Rscript: the subspace step backtracks to the box without v3.0's Morales-Nocedal
+  projection, and the Cauchy search keeps the `f2` floor (`eps * f2_org`) and is skipped for an
+  unconstrained problem once memory exists. The order of additions matters to the last bit and
+  is pinned with comments where it is not the reference's (grouped terms in `cmprlb`, `cauchy`,
+  the subspace product and `formk`'s (2,1) block, ungrouped in its diagonal blocks). Traces,
+  messages and the abnormal line-search exit were matched the same way, and
+  `stats__lbfgsb_paths` and `test_numerics` hold the result exactly. The trace text for a line
+  search that exhausts 20 evaluations is unverified, since no case reached it in GNU R.
+- **KalmanLike and `prod` accumulate as GNU R observably does.** The Kalman filter subtracts and
+  adds term by term (`y -= z_i a_i`, `V[i,j] += m T`), and `prod` multiplies each argument in long
+  double, combines arguments in double, and lets the first NaN win, so `prod(NaN, NA)` is NaN.
 - **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
   scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options
   are ignored, as before.

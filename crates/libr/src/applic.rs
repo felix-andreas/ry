@@ -26,7 +26,7 @@ use {
         utils::format_real_vector,
     },
     heap::object::NA_INTEGER,
-    interp::stats_lbfgsb::{self as lbfgsb, Bound, Settings, minimize},
+    interp::stats_lbfgsb::{self as lbfgsb, Bound, minimize},
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -3810,7 +3810,7 @@ pub unsafe extern "C" fn lbfgsb(
                 }
             });
         }
-        let settings = Settings {
+        let settings = lbfgsb::Settings {
             memory: m,
             factr,
             pgtol,

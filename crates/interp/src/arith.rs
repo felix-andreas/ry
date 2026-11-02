@@ -2701,29 +2701,34 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             scalar_integer(total as i32)
         }
         Summary::Product => {
-            // The same NaN order as the sum: first wins within an argument, NA across them.
-            let mut total = 1.0;
-            let mut na = false;
+            // Each argument's product accumulates in x87 long double, as GNU R's does, and the
+            // arguments' products then multiply as doubles. The first NaN wins, within an
+            // argument and across them, so `prod(NaN, NA)` is NaN.
+            let mut total: f64 = 1.0;
             for &item in &items {
-                let mut item_product: f64 = 1.0;
+                let mut product = LongDouble::from(1.0);
+                let mut nan = None;
                 for index in 0..length(item) {
                     let value = real_at(item, index);
                     if na_rm && value.is_nan() {
                         continue;
                     }
-                    if item_product.is_nan() {
+                    if value.is_nan() {
+                        nan = Some(value);
                         break;
                     }
-                    item_product = if value.is_nan() {
-                        value
+                    product = product * LongDouble::from(value);
+                }
+                let item_product = nan.unwrap_or_else(|| product.to_f64());
+                if !total.is_nan() {
+                    total = if item_product.is_nan() {
+                        item_product
                     } else {
-                        item_product * value
+                        total * item_product
                     };
                 }
-                na |= is_na_real(item_product);
-                total *= item_product;
             }
-            scalar_real(if na { NA_REAL } else { total })
+            scalar_real(total)
         }
         Summary::Max | Summary::Min => {
             let is_max = function == Summary::Max;
