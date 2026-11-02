@@ -1643,9 +1643,14 @@ impl<'a> Builder<'a> {
                     },
                 }
             }
-            // It always signals an error, so nothing runs after it: treating it as opaque would
-            // only forget the frame's types at the join after the `match`.
-            Op::MatchFail => self.opaque_step(state, None, &[], Effect::PureUnlessObserved),
+            // It always signals an error, so nothing runs after it, and the state it leaves
+            // must not widen the join after the `match`: no register holds a value there, and
+            // the frame's types stand.
+            Op::MatchFail => {
+                let action = self.opaque_step(state, None, &[], Effect::PureUnlessObserved);
+                state.registers.fill(Ty::Bottom);
+                action
+            }
             Op::Construct => {
                 state.registers[operand(0)] = Ty::Boxed;
                 state.visible = Some(true);
