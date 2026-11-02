@@ -1353,6 +1353,22 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
+    // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads properties.
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+        ];
+        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env)? {
+            return Ok(value);
+        }
+    }
     get_slot(object, symbol, call.call)
 }
 
@@ -1514,6 +1530,26 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
     let value = eval::eval(call.arg(2), call.env)?;
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        let args = [
+            Arg {
+                tag: nil(),
+                value: object,
+            },
+            Arg {
+                tag: nil(),
+                value: values::scalar_string_charsxp(symbol.car())?,
+            },
+            Arg {
+                tag: symbols().value,
+                value,
+            },
+        ];
+        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env)?
+        {
+            return Ok(result);
+        }
+    }
 
     // The methods package checks the assignment against the class definition.
     if let Some(check) = interp_methods_function("checkAtAssignment")? {

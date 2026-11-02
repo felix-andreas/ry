@@ -1523,7 +1523,13 @@ unsafe fn value_is_missing(value: Sexp) -> R<bool> {
     {
         let code = value.cdr();
         let caller = value.tag();
-        if crate::heap().frame_cell(caller, code).is_some() {
+        // A promise for `..1` asks about the caller's `...`, the binding that holds it.
+        let bound = if dot_dot_index(code).is_some() {
+            symbols().dots
+        } else {
+            code
+        };
+        if crate::heap().frame_cell(caller, bound).is_some() {
             return symbol_is_missing(code, caller, false);
         }
     }

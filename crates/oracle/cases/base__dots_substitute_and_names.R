@@ -50,3 +50,10 @@ by_count <- function(x, i, drop = (nargs() >= 3L)) frame_data[, 1, drop = drop]
 print(by_count(1, 2))
 by_call <- function(x, i, drop = sys.call()) frame_data[, 1, drop = { print(drop); FALSE }]
 invisible(by_call(1, 2))
+
+# missing() of an argument passed as ..N asks about the caller's dots.
+is_missing_arg <- function(x) missing(x)
+print((function(...) is_missing_arg(..1))())
+print((function(...) is_missing_arg(..1))(1))
+print((function(...) is_missing_arg(..2))(1, ))
+print((function(...) is_missing_arg(..2))(1, 2))

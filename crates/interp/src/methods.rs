@@ -10,6 +10,7 @@ use {
     crate::{
         annotations::Entry,
         builtin_libraries::{NativeCall, NativeFn},
+        builtins::Arg,
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
         eval, interp,
@@ -189,6 +190,66 @@ pub unsafe fn quick_method_check(arguments: Sexp, methods: Sexp, generic: Sexp) 
         return Ok(nil());
     }
     eval::value_of(method)
+}
+
+/// The primitive's arguments `args` reordered into the signature of generic `generic`, as a
+/// pairlist holding one value per signature argument (the missing marker where none was
+/// supplied), for `quick_method_check`. GNU R reads the cache key straight off the supplied
+/// arguments in order, so `x[i, drop = FALSE]` takes the class of `drop` for `j` and reuses
+/// the method cached for `x[i, j]`; matching by name first keys it as `j` missing. `None`
+/// means the arguments need full matching (a partial or unknown name), which the generic does.
+pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>> {
+    if generic.kind() != SexpType::Closure {
+        return Ok(None);
+    }
+    let generic_env = generic.tag();
+    for name in [".SigArgs", ".SigLength"] {
+        if eval::find_var_in_frame(values::install(name)?, generic_env)? == unbound() {
+            return Ok(None);
+        }
+    }
+    let signature = signature_symbols(generic_env)?;
+    let mut formals = Vec::new();
+    let mut formal = generic.car();
+    while formal.kind() == SexpType::Pairlist {
+        formals.push(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut matched = vec![missing_arg(); formals.len()];
+    let mut taken = vec![false; formals.len()];
+    for arg in args.iter().filter(|arg| arg.tag != nil()) {
+        let Some(index) = formals.iter().position(|&formal| formal == arg.tag) else {
+            return Ok(None);
+        };
+        if formals[index] == symbols().dots || taken[index] {
+            return Ok(None);
+        }
+        matched[index] = arg.value;
+        taken[index] = true;
+    }
+    let mut next = 0;
+    for arg in args.iter().filter(|arg| arg.tag == nil()) {
+        while next < formals.len() && taken[next] && formals[next] != symbols().dots {
+            next += 1;
+        }
+        // Positional arguments past `...` belong to the dots, which no signature names.
+        if next >= formals.len() || formals[next] == symbols().dots {
+            break;
+        }
+        matched[next] = arg.value;
+        taken[next] = true;
+    }
+    let mut list = nil();
+    for symbol in signature.iter().rev() {
+        let value = formals
+            .iter()
+            .position(|formal| formal == symbol)
+            .and_then(|index| matched.get(index).copied())
+            .unwrap_or_else(missing_arg);
+        list = values::cons(value, list)?;
+        crate::heap().root(list);
+    }
+    Ok(Some(list))
 }
 
 /// `R_execMethod`: runs `method` in place of the generic whose frame is `generic_env`. The
