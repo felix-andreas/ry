@@ -2,7 +2,7 @@
 //! order, suffixes, group order) follow Polars, which the `DataFrame` API mirrors.
 
 use {
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
     table::{
         Table,
         convert::{RVector, is_na_real, to_r},
@@ -268,8 +268,8 @@ fn the_optimizer_pushes_filters_and_projections() {
 /// Random chains of verbs give the same table with and without the optimizer.
 #[test]
 fn optimizing_never_changes_the_result() {
-    let mut rng = SplitMix64(0x5eed_1a2f);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let height = rng.below(12);
         let groups = ["a", "b", "c"];
         let table = frame(vec![
@@ -348,7 +348,7 @@ fn optimizing_never_changes_the_result() {
                 plain.err()
             ),
         }
-    }
+    });
 }
 
 #[test]

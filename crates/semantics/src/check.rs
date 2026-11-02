@@ -1921,6 +1921,111 @@ pub fn argument_targets<'arena>(
     targets
 }
 
+/// The finding a call earns from where its arguments land alone, before any argument's type is
+/// read: an argument with no formal left, an unfilled positional slot, or a missing required
+/// formal. Forwarded `...` may fill anything, and an unknown name throws off positional
+/// accounting, so neither gets an arity verdict. An overload probe asks this before it
+/// instantiates a candidate, because the verdict is the same for every instantiation.
+fn shape_verdict<'db>(
+    db: &'db dyn Db,
+    callee_range: TextRange,
+    function: &FunctionType<'db>,
+    arguments: &[CallArgument<'db>],
+    targets: &[Option<ArgumentTarget>],
+) -> Option<TypeError<'db>> {
+    if arguments.iter().any(|argument| argument.forwards_dots) {
+        return None;
+    }
+    let named = |argument: &CallArgument<'db>| argument.name.is_some();
+    if let Some(index) = targets
+        .iter()
+        .position(|target| *target == Some(ArgumentTarget::Overflow))
+    {
+        let claimed_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                named(argument)
+                    && matches!(
+                        target,
+                        Some(ArgumentTarget::Named(_) | ArgumentTarget::UndeclaredName)
+                    )
+            })
+            .count();
+        return Some(TypeError {
+            // The first argument with no formal left is the one to remove.
+            range: arguments.get(index)?.range,
+            kind: TypeErrorKind::ArityMismatch {
+                expected: (function.positional.len() + function.named.len())
+                    .saturating_sub(claimed_by_name),
+                found: arguments.iter().filter(|argument| !named(argument)).count(),
+            },
+        });
+    }
+    if targets.contains(&Some(ArgumentTarget::UnmatchedName)) {
+        return None;
+    }
+    // Overflow is handled above, so a mismatch here leaves a positional slot empty. A named
+    // argument that went to `...` fills none, so only the filled slots count.
+    let positional_filled = targets
+        .iter()
+        .filter(|target| {
+            matches!(
+                target,
+                Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
+            )
+        })
+        .count();
+    if positional_filled != function.positional.len() {
+        let filled_by_name = targets
+            .iter()
+            .zip(arguments)
+            .filter(|(target, argument)| {
+                named(argument) && **target == Some(ArgumentTarget::UndeclaredName)
+            })
+            .count();
+        return Some(TypeError {
+            range: callee_range,
+            kind: TypeErrorKind::ArityMismatch {
+                expected: function.positional.len() - filled_by_name,
+                found: positional_filled - filled_by_name,
+            },
+        });
+    }
+    let filled = |formal: usize| {
+        targets
+            .iter()
+            .any(|target| *target == Some(ArgumentTarget::Named(formal)))
+    };
+    let mut missing: Vec<String> = function
+        .named
+        .iter()
+        .enumerate()
+        .filter(|&(formal, field)| !field.optional && !filled(formal))
+        .map(|(_, field)| field.name.text(db).to_owned())
+        .collect();
+    let supplied = |name: Name<'db>| {
+        function
+            .named
+            .iter()
+            .position(|field| field.name == name)
+            .is_some_and(filled)
+    };
+    for read in &function.default_reads {
+        let name = read.formal.text(db);
+        if !supplied(read.formal)
+            && !supplied(read.default_of)
+            && !missing.iter().any(|missing| missing == name)
+        {
+            missing.push(name.to_owned());
+        }
+    }
+    (!missing.is_empty()).then(|| TypeError {
+        range: callee_range,
+        kind: TypeErrorKind::MissingArguments { names: missing },
+    })
+}
+
 /// Where a value is read as a condition: `if` and `while` read a string through `as.logical`,
 /// while `&&`, `||` and a match guard reject one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10925,6 +11030,27 @@ impl<'db> Checker<'db, '_> {
         call_arguments: &[CallArgument<'db>],
         courtesy: bool,
     ) -> Result<(Ty<'db>, FunctionType<'db>), Vec<TypeError<'db>>> {
+        // Instantiation renames type variables and keeps the parameter list, so a candidate
+        // the arguments cannot land on fails the same way uninstantiated. A courtesy probe
+        // records expectations as it checks, so it always runs in full.
+        if !courtesy && let TyKind::Function(function) = scheme.body.kind(self.db) {
+            let arena = self.arena;
+            let targets = &*argument_targets(
+                self.db,
+                arena,
+                function,
+                argument_shapes(arena, call_arguments),
+            );
+            if let Some(error) = shape_verdict(
+                self.db,
+                self.blame_range(callee),
+                function,
+                call_arguments,
+                targets,
+            ) {
+                return Err(vec![error]);
+            }
+        }
         let instantiated = self.instantiate(scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
@@ -11842,7 +11968,6 @@ impl<'db> Checker<'db, '_> {
         function: &FunctionType<'db>,
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
-        let total = function.positional.len() + function.named.len();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let arena = self.arena;
         let targets =
@@ -11957,33 +12082,10 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
                 ArgumentTarget::Overflow => {
-                    if !forwards_dots {
-                        let positional_arguments = arguments
-                            .iter()
-                            .filter(|argument| argument.name.is_none())
-                            .count();
-                        let claimed_by_name = targets
-                            .iter()
-                            .zip(arguments)
-                            .filter(|(target, argument)| {
-                                argument.name.is_some()
-                                    && matches!(
-                                        target,
-                                        Some(
-                                            ArgumentTarget::Named(_)
-                                                | ArgumentTarget::UndeclaredName
-                                        )
-                                    )
-                            })
-                            .count();
-                        return vec![TypeError {
-                            // The first argument with no formal left is the one to remove.
-                            range: argument.range,
-                            kind: TypeErrorKind::ArityMismatch {
-                                expected: total.saturating_sub(claimed_by_name),
-                                found: positional_arguments,
-                            },
-                        }];
+                    if let Some(error) =
+                        shape_verdict(self.db, callee_range, function, arguments, targets)
+                    {
+                        return vec![error];
                     }
                 }
             }
@@ -12008,76 +12110,13 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        let positional_filled = targets
-            .iter()
-            .filter(|target| {
-                matches!(
-                    target,
-                    Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
-                )
-            })
-            .count();
-        let filled_by_name = targets
-            .iter()
-            .zip(arguments)
-            .filter(|(target, argument)| {
-                argument.name.is_some() && *target == &Some(ArgumentTarget::UndeclaredName)
-            })
-            .count();
-        if forwards_dots || unknown_name {
+        if unknown_name {
             return findings;
         }
-        // Overflow is reported above, so a mismatch here leaves a positional slot empty. A
-        // named argument that went to `...` fills none, so only the filled slots count.
-        if positional_filled != function.positional.len() {
-            return vec![TypeError {
-                range: callee_range,
-                kind: TypeErrorKind::ArityMismatch {
-                    expected: function.positional.len() - filled_by_name,
-                    found: positional_filled - filled_by_name,
-                },
-            }];
+        match shape_verdict(self.db, callee_range, function, arguments, targets) {
+            Some(error) => vec![error],
+            None => findings,
         }
-        let missing: Vec<String> = function
-            .named
-            .iter()
-            .enumerate()
-            .filter(|(formal, field)| {
-                !field.optional
-                    && !targets.iter().any(
-                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if filled == formal),
-                    )
-            })
-            .map(|(_, field)| field.name.text(self.db).to_owned())
-            .collect();
-        let supplied = |name: Name<'db>| {
-            function
-                .named
-                .iter()
-                .position(|field| field.name == name)
-                .is_some_and(|formal| {
-                    targets.iter().any(
-                        |target| matches!(target, Some(ArgumentTarget::Named(filled)) if *filled == formal),
-                    )
-                })
-        };
-        let mut missing = missing;
-        for read in &function.default_reads {
-            let name = read.formal.text(self.db);
-            if !supplied(read.formal)
-                && !supplied(read.default_of)
-                && !missing.iter().any(|missing| missing == name)
-            {
-                missing.push(name.to_owned());
-            }
-        }
-        if !missing.is_empty() {
-            return vec![TypeError {
-                range: callee_range,
-                kind: TypeErrorKind::MissingArguments { names: missing },
-            }];
-        }
-        findings
     }
 
     /// Binds a type variable that two or more parameters share (`<T> fn(first: T, second: T)`,

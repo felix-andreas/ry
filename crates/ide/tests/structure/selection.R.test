@@ -127,6 +127,7 @@ symbol x (Value) at "x"
 symbol T (Value) at "T"
 symbol y (Value) at "y"
 token "list" Function
+token "T" Property
 token "f" Function
 fix Change to `FALSE`: "F" -> "FALSE"
 lens run file at line 3

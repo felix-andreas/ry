@@ -58,6 +58,8 @@ pub enum Error {
     SchemaSyntax(String),
     #[error("invalid query: {0}")]
     Query(String),
+    #[error("the quoted field that opens at byte {0} is never closed")]
+    UnclosedQuote(usize),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

@@ -11,7 +11,6 @@ path = "src/semantics.rs"
 boxcar.workspace = true
 bumpalo = { version = "3.20", features = ["collections"] }
 hashbrown = { workspace = true, features = ["nightly"] }
-rowan.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }

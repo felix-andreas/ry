@@ -12,9 +12,10 @@ The crate root is `src/syntax.rs`.
 
 - **`lexer.rs`**: the hand-written lexer. A `#:` annotation region comes out as structured trivia,
   so the parser can give it a grammar of its own.
-- **`parser.rs`**: a recursive-descent parser with Pratt parsing for expressions, building rowan
-  green trees. It also parses the annotation type grammar, and it recovers from errors at statement
-  boundaries.
+- **`parser.rs`**: a recursive-descent parser with Pratt parsing for expressions. It also parses
+  the annotation type grammar, and it recovers from errors at statement boundaries.
+- **`tree.rs`**: the flat syntax tree the parser builds, its owned cursors (`SyntaxNode`,
+  `SyntaxToken`) and borrowed ones (`NodeRef`), and the splice that a reparse uses.
 - **`kind.rs`**: `SyntaxKind`, the enum naming every token and node kind, with a display name for
   each.
 - **`ast.rs`**: typed views over the raw tree. Every accessor returns an `Option`, because a broken

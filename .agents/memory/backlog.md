@@ -725,7 +725,7 @@ item's span in constant time, and `item_spans` itself is consumed per file. Incr
 holds:
 every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
 diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
-stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
+stated bar. Re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
 binary search.
 
 ### Two measurement lessons from this review
@@ -1091,6 +1091,11 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 - **Allocation failure is not injectable** in the heap or the analysis.
 - **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
   and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
+- **`ry test --watch` has no end-to-end scenario.** `check_reload` (`crates/loader/src/testing.rs`) checks that every name whose call graph reaches changed code is among `Loader::callers`, but its reachability follows identifier tokens only, so a caller that reaches an edited S3 method through dispatch is not checked. Add a scenario that edits a file under a running watcher, and model dispatch in `reachable`.
+- **The make differential strips `include` lines** (`gnu_make_info` in `crates/rcmd/src/rcmd.rs`), because GNU R's `Makeconf` includes `$(R_SHARE_DIR)/make/vars.mk` from a home the test does not build. Point the include at a real file, or generate includes, so `include` handling is compared too.
+- **`fuzz/fuzz_targets/csv.rs` is not compiled by the default suite**; build the `fuzz/` crate in `just gate` (it needs nightly) or keep the target a one-line call into `io::check_csv_input`.
+- **`test_console_server` waits on the wall clock** (its `initialize` helper polls `sleep(10ms)` up to 200 times for the console to notice a closed debugger), so a heavily loaded machine can fail it. Signal the console's notice through a condition instead.
+- **The REPL is not driven by a seed.** `crates/repl` has no seeded harness; the console protocol is covered from the server side (`interp` `test_console_server`), not the REPL's line editing and evaluation loop.
 - **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
   query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
   protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
@@ -3026,9 +3031,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- Completion misses on CRAN corpora (`ry debug analysis-stats`): names imported from packages with no stub and no export manifest (purrr's `vctrs` and `rlang` imports) are never offered, so completion should read an installed package's NAMESPACE exports; the two-character prefix ranks a local helper (`check_rate`) below library names that share it. The import quick fix reads only export manifests, not the installed library.
-- Signature help's active parameter miscounts after an argument with no value (`f(x = , a, |)`), in both the typed and the formals path (`cursor_index` in `ide.rs`).
-- Semantic tokens: coloring of `$` fields and frame columns.
+- Completion at two characters is weakest on call heads (httr2 68%, purrr 74%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them, and project-wide use counts favor testthat's `expect_*` over `exec`. A signal beyond use counts (the types the call site expects) would be needed.
+- An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
+- Semantic tokens: frame columns inside `[` queries and `col("name")` strings are not colored as properties.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
@@ -3099,12 +3104,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   with wall time unchanged within noise (median about 1.34 s). The
   1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
   self cost. What is left is structural:
-  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
-    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
-    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
-    node array per file, children as index ranges) would remove both.
-  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
-    queries remove.
-  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - Done: rowan is replaced by ry's own flat preorder tree with windowed item trees, one-shot name
+    lookups read the project maps once per query, unlisted frame binders are built once per item,
+    and overload probes reject by call shape before instantiating (`decisions.md`, "The syntax
+    tree is ry's own flat preorder arena" and "Overload probes reject by call shape first"). The
+    finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
+    callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
+    build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+  - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
+    and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
     times on the slice), which a small-buffer type would absorb.
