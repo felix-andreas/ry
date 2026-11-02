@@ -971,15 +971,19 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
     let name = call.arg(2);
-    let env = if what.kind() == SexpType::Environment {
-        what
-    } else {
-        let env = new_env(empty_env())?;
-        if what.kind() == SexpType::List {
-            fill_env(env, what)?;
+    // An attached environment is a copy of `what`'s bindings, as in GNU R, so attaching a
+    // namespace leaves its own parent, the imports, in place.
+    let env = new_env(empty_env())?;
+    if what.kind() == SexpType::List {
+        fill_env(env, what)?;
+    } else if what.kind() == SexpType::Environment {
+        let heap = crate::heap();
+        for symbol in env_symbols(what, true, false) {
+            if let Some(cell) = heap.frame_cell(what, symbol) {
+                heap.define(env, symbol, cell.cdr())?;
+            }
         }
-        env
-    };
+    }
     let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();

@@ -686,7 +686,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let device = Device::File(FileDevice {
         path,
         temporary,
-        encoding: None,
+        encoding: compression,
         text_encoding,
         invalid_input: false,
         raw: raw || description == "stdin",

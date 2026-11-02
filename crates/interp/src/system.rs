@@ -239,8 +239,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, character_unchanged),
-    builtin("enc2utf8", 1, character_unchanged),
+    builtin("enc2native", 1, do_enc2utf8),
+    builtin("enc2utf8", 1, do_enc2utf8),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -295,7 +295,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindtextdomain", 2, |_| Ok(nil())),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, character_unchanged),
+    internal("enc2native", 1, do_enc2utf8),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -3117,12 +3117,25 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
 
 /// `enc2utf8` and `enc2native`: every string ry holds is already UTF-8, so only the type check
 /// remains.
-unsafe fn character_unchanged(call: &Call<'_>) -> R<Sexp> {
+/// `enc2utf8` and `enc2native`: the session's native encoding is UTF-8, so both translate
+/// latin1 strings to UTF-8 and leave every other string, bytes included, as it is.
+unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if value.kind() != SexpType::String {
         return Err(call.error("argument is not a character vector"));
     }
-    Ok(value)
+    let count = length(value);
+    let latin1 = |index: usize| value.element(index).has_gp(heap::object::gp::LATIN1);
+    if !(0..count).any(latin1) {
+        return Ok(value);
+    }
+    let result = values::duplicate(value)?;
+    crate::heap().root(result);
+    for index in (0..count).filter(|&index| latin1(index)) {
+        let text = values::char_str(value.element(index));
+        values::set_elt(result, index, values::mkchar(&text)?);
+    }
+    Ok(result)
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
