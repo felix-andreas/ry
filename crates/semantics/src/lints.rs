@@ -233,7 +233,6 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { .. } => {}
     });
 }
 

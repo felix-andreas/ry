@@ -642,7 +642,6 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
     );
     let descendants: Vec<crate::SyntaxNode> = root.descendants().collect();
     let mut visited = Vec::new();
-    let mut green_text = String::new();
     let mut open = 0usize;
     crate::walk_green(root, |event| match event {
         crate::GreenEvent::Enter {
@@ -654,16 +653,8 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
             visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
         }
         crate::GreenEvent::Leave(_) => open -= 1,
-        crate::GreenEvent::Token { text, range, .. } => {
-            assert_eq!(usize::from(range.start()), green_text.len());
-            green_text.push_str(text);
-        }
     });
     assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
-    assert_eq!(
-        green_text, input,
-        "green walk lost text for input {input:?}"
-    );
     let expected: Vec<_> = descendants
         .iter()
         .map(|node| {
