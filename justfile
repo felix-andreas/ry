@@ -71,9 +71,11 @@ docs-test page="":
 docs-bless page="":
     RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
 
-# The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
-fuzz-deep:
-    cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
+# Every seeded harness at a deep budget for `minutes`, rotating seed windows from `base`, plus the
+# libr package suites under collection stress; failures are logged with their replay commands to
+# target/fuzz-deep.log. A scheduled run passes a fresh base, e.g. `just fuzz-deep 480 $(date +%s)`.
+fuzz-deep minutes="120" base="1000000" depth="10" *args:
+    python3 -I tools/fuzz-deep.py --minutes {{ minutes }} --base {{ base }} --depth {{ depth }} {{ args }}
 
 # One libFuzzer target (`cargo fuzz list` names them all); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
