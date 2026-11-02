@@ -2,18 +2,16 @@
 #@ param LIMIT int 5 90
 #@ param RETRIES int 1 6
 # Validated settings object for component @ID@.
-#: @alias SettingsObject@ID@ {list{values: list[named: Any], get: fn(name: character) -> Any, set: fn(name: character, value: Any) -> Any}}
+alias SettingsObject@ID@ = list{values: list[named: Any], get: fn(name: character) -> Any, set: fn(name: character, value: Any) -> Any}
 
-#: list{new: fn(...: Any) -> SettingsObject@ID@}
-Settings@ID@ <- R6::R6Class( # ry: allow(object-system)
+Settings@ID@: list{new: fn(...: Any) -> SettingsObject@ID@} <- R6::R6Class( # ry: allow(object-system)
   "Settings@ID@",
   public = list(
     values = NULL,
     initialize = function(...) {
       defaults <- list(limit = @LIMIT@L, retries = @RETRIES@L, label = "component-@ID@")
       supplied <- rlang::list2(...)
-      #: character[]
-      unknown <- setdiff(names(supplied), names(defaults))
+      unknown: character[] <- setdiff(names(supplied), names(defaults))
       if (length(unknown) > 0) {
         rlang::abort(
           paste0("Unknown setting: ", paste(unknown, collapse = ", ")),
@@ -48,8 +46,7 @@ Settings@ID@ <- R6::R6Class( # ry: allow(object-system)
   )
 )
 
-#: fn(settings: SettingsObject@ID@) -> character
-settings_summary_@ID@ <- function(settings) {
+settings_summary_@ID@ <- function(settings: SettingsObject@ID@) -> character {
   stopifnot(inherits(settings, "Settings@ID@"))
   paste0(
     snakecase::to_snake_case(settings$get("label")), ":",
@@ -58,8 +55,7 @@ settings_summary_@ID@ <- function(settings) {
 }
 #@ test
 test_that("settings @ID@ validate and summarise", {
-  #: SettingsObject@ID@
-  settings <- Settings@ID@$new(limit = 3L)
+  settings: SettingsObject@ID@ <- Settings@ID@$new(limit = 3L)
   expect_equal(settings$get("limit"), 3L)
   expect_equal(settings_summary_@ID@(settings), "component_@ID@:3/@RETRIES@")
   expect_error(Settings@ID@$new(bogus = 1), class = "settings_error")

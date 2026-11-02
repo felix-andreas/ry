@@ -2,8 +2,10 @@
 
 Each `.R` file here is one template. The generator instantiates a template many times with
 fresh parameters, appends the code part to a package file, and appends the test part to the
-matching test file. A template is ordinary R apart from the `#@` header lines and the
-`@NAME@` placeholders, so it reads and parses like any other R file.
+matching test file. A template is ry code with inline type annotations, apart from the `#@`
+header lines and the `@NAME@` placeholders. An untyped run erases the annotations, so a template
+must still mean plain R once they are gone: ry's records, tuples and tags have no erasure and stay
+out of the templates.
 
 - `shared/` holds infrastructure used by all three code bases (settings, caching, logging,
   serialization, files, strings, conditions, parallelism, HTTP, markup, calendars, S4,

@@ -3,27 +3,21 @@
 #@ param VOL float 0.005 0.03 4
 #@ param ASSETS int 2 6
 # Return series on xts objects and their performance statistics.
-#: fn([days]: integer, [assets]: integer, [vol]: double, [seed]: integer) -> xts
-simulate_prices_@ID@ <- function(days = @DAYS@L, assets = @ASSETS@L, vol = @VOL@, seed = 7L) {
+simulate_prices_@ID@ <- function(days: integer = @DAYS@L, assets: integer = @ASSETS@L, vol: double = @VOL@, seed: integer = 7L) -> xts {
   set.seed(seed)
-  #: Date
-  dates <- seq(as.Date("2023-01-02"), by = "day", length.out = days)
-  #: matrix
-  steps <- matrix(stats::rnorm(days * assets, mean = 0.0003, sd = vol), nrow = days)
-  #: matrix
-  prices <- 100 * apply(1 + steps, 2, cumprod)
+  dates: Date <- seq(as.Date("2023-01-02"), by = "day", length.out = days)
+  steps: matrix <- matrix(stats::rnorm(days * assets, mean = 0.0003, sd = vol), nrow = days)
+  prices: matrix <- 100 * apply(1 + steps, 2, cumprod)
   colnames(prices) <- paste0("A", seq_len(assets))
   xts::xts(prices, order.by = dates)
 }
 
-#: fn(prices: xts) -> xts
-compute_returns_@ID@ <- function(prices) {
+compute_returns_@ID@ <- function(prices: xts) -> xts {
   returns <- PerformanceAnalytics::Return.calculate(prices, method = "discrete")
   returns[-1, ]
 }
 
-#: fn(returns: xts) -> list{annualised: data.frame, drawdown: matrix | double, sharpe: matrix}
-performance_table_@ID@ <- function(returns) {
+performance_table_@ID@ <- function(returns: xts) -> list{annualised: data.frame, drawdown: matrix | double, sharpe: matrix} {
   list(
     annualised = PerformanceAnalytics::table.AnnualizedReturns(returns, scale = 252),
     drawdown = PerformanceAnalytics::maxDrawdown(returns),
@@ -31,8 +25,7 @@ performance_table_@ID@ <- function(returns) {
   )
 }
 
-#: fn(returns: xts, [window]: integer) -> xts
-rolling_volatility_@ID@ <- function(returns, window = 20L) {
+rolling_volatility_@ID@ <- function(returns: xts, window: integer = 20L) -> xts {
   zoo::rollapply(returns, width = window, FUN = stats::sd, by.column = TRUE, align = "right")
 }
 #@ test

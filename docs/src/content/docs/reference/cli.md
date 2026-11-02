@@ -172,8 +172,10 @@ script's status. [Editors](/guides/editors#running-and-debugging) lists the laun
 
 ## debug
 
-`ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
-a workspace and reports where time and memory go. Both are developer aids for working on ry itself.
+`ry debug ast FILE` prints the syntax tree of a file, `ry debug analysis-stats [PATH]` analyzes
+a workspace and reports where time and memory go, and `ry debug erase FILE...` rewrites files in
+place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
+aids for working on ry itself.
 
 ## Exit codes
 

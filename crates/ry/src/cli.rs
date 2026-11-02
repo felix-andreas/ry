@@ -2255,6 +2255,37 @@ fn format_file(
     }
 }
 
+/// Rewrites each file as its erasure, the same program `ry R` runs. A file with a syntax error is
+/// refused, because its erasure would be a guess at what the broken code means.
+pub fn erase(paths: &[PathBuf]) -> Result<(), CommandError> {
+    let mut failed = false;
+    for path in paths {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => {
+                error(&format!("{}: {err}", path.display()));
+                failed = true;
+                continue;
+            }
+        };
+        let parse = syntax::parse(&text);
+        if let Some(syntax_error) = parse.errors().first() {
+            error(&format!(
+                "{}: not erased, it has a syntax error: {}",
+                path.display(),
+                syntax_error.message
+            ));
+            failed = true;
+            continue;
+        }
+        if let Err(err) = fs::write(path, syntax::erase_inline_annotations(&parse)) {
+            error(&format!("{}: {err}", path.display()));
+            failed = true;
+        }
+    }
+    if failed { Err(CommandError) } else { Ok(()) }
+}
+
 pub fn ast(path: &Path) -> Result<(), CommandError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,

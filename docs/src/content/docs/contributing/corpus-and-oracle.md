@@ -180,10 +180,12 @@ just bench-test .bench/finbench
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
-count (by default one file per 600 lines). `--typed` keeps the templates' `#:` annotations and
-turns on strict mode in the generated `ry.toml`, so the package doubles as a strict-mode dogfood
-corpus; without it the annotations are stripped and the package is plain R. The line target counts
-code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
+count (by default one file per 600 lines). The templates are written with inline annotations.
+`--typed` keeps them and turns on strict mode in the generated `ry.toml`, so the package doubles as
+a strict-mode dogfood corpus and ry's runtime checks and compiles its typed functions. Without it,
+the generator erases the package with `ry debug erase` (so `target/release/ry` must exist, or pass
+`--ry`), which gives plain R. Both runs count the same text toward the line target, so a typed and
+an untyped run with the same seed generate the same program. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
