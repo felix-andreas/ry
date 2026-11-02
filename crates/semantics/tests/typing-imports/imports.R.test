@@ -515,3 +515,13 @@ long: Any
 wide: Any
 kept: data.frame
 t: data.frame
+
+#---- an_unknown_attached_package_tolerates_a_near_miss_of_a_project_name
+# stringi's `stri_dup` is one letter from the project's `str_dup`, so the typo
+# heuristic would call it a misspelling. An attached package ry has no export
+# list for may define any name, so the blanket tolerance wins.
+library(zzunknownpkg)
+str_dup <- function(s) stri_dup(s, 2)
+#++++
+Any
+str_dup: <T> fn(s: T) -> Unknown

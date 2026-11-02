@@ -18,7 +18,6 @@ f <- function() {
 #++++
 == R/main.R
 f: fn() -> fn() -> integer
-30..31 warning[unused] `g` is assigned but never used.
 
 #---- nested_function_closes_over_outer_parameter
 #~~~~ R/main.R
@@ -28,7 +27,6 @@ f <- function(x) {
 #++++
 == R/main.R
 f: <T> fn(x: T) -> fn() -> T
-21..22 warning[unused] `g` is assigned but never used.
 
 #---- nested_function_closes_over_top_level_global
 #~~~~ R/main.R
@@ -40,7 +38,6 @@ f <- function() {
 == R/main.R
 x: integer
 f: fn() -> fn() -> integer
-28..29 warning[unused] `g` is assigned but never used.
 
 #---- multi_hop_nested_function_closes_over_outer_local
 #~~~~ R/main.R
@@ -53,8 +50,6 @@ f <- function() {
 #++++
 == R/main.R
 f: fn() -> fn() -> fn() -> integer
-30..31 warning[unused] `g` is assigned but never used.
-52..53 warning[unused] `h` is assigned but never used.
 
 #---- closure_parameter_shadows_enclosing_binding
 #~~~~ R/main.R
@@ -66,7 +61,6 @@ f <- function() {
 == R/main.R
 f: <T> fn() -> fn(x: T) -> T
 20..21 warning[unused] `x` is assigned but never used.
-30..31 warning[unused] `g` is assigned but never used.
 
 #---- closure_local_shadows_enclosing_binding
 #~~~~ R/main.R
@@ -79,7 +73,6 @@ f <- function(x) {
 #++++
 == R/main.R
 f: <T> fn([x]: T) -> fn() -> character
-21..22 warning[unused] `g` is assigned but never used.
 
 #---- closure_uses_nearest_shadowing_binding_across_hops
 #~~~~ R/main.R
@@ -96,8 +89,6 @@ f <- function() {
 x: integer
 f: fn() -> fn() -> fn() -> logical
 28..29 warning[unused] `x` is assigned but never used.
-43..44 warning[unused] `g` is assigned but never used.
-79..80 warning[unused] `h` is assigned but never used.
 
 #==== cross_file_globals
 #---- nested_function_closes_over_global_from_other_file
@@ -112,7 +103,6 @@ f <- function() {
 x: integer
 == R/b.R
 f: fn() -> fn() -> integer
-20..21 warning[unused] `g` is assigned but never used.
 
 #---- nested_function_local_shadow_ignores_cross_file_final_winner
 #~~~~ R/a.R
@@ -135,4 +125,3 @@ x: integer
   = 0..1 the earlier binding is here.
 == R/c.R
 f: fn() -> fn() -> integer
-30..31 warning[unused] `g` is assigned but never used.
