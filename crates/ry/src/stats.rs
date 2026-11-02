@@ -7,8 +7,10 @@ use {
         config::Config,
         diagnostics::document_diagnostics,
         installed::InstalledPackages,
+        scope_oracle::{Binding, ScopeOracle, Site},
     },
     ide::{DefinitionTarget, HoverDefinition},
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -32,7 +34,7 @@ use {
     },
     syntax::{
         SyntaxKind::{BINARY_EXPR, FOR_EXPR, IDENT, PARAMETER},
-        SyntaxToken, TextSize,
+        SyntaxToken, TextRange, TextSize,
     },
 };
 
@@ -319,6 +321,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         editor_requests(&mut db, &records, median, &config);
         editor_coverage(&db, &records, &root);
         completion_coverage(&mut db, &records, &root);
+        reference_coverage(&mut db, &records);
     }
 
     Ok(())
@@ -662,6 +665,286 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Pat
             println!("      {miss}");
         }
     }
+}
+
+/// Find-references and rename at the package's own bindings, checked against
+/// [`ScopeOracle`], a resolver that reads only syntax and R's scoping rules. References count when
+/// the set they find is exactly the resolver's; rename counts when renaming the binding and then
+/// renaming it back restores every file.
+fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let package: Vec<&FileRecord> = records
+        .iter()
+        .filter(|record| record.file.kind(db) == &DocumentKind::Package)
+        .collect();
+    let index: FxHashMap<SourceFile, usize> = package
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.file, index))
+        .collect();
+    let roots: Vec<_> = package
+        .iter()
+        .map(|record| semantics::parse(db, record.file).syntax_node())
+        .collect();
+    let oracle = ScopeOracle::build(&roots);
+    let mut expected: BTreeMap<&Binding, BTreeSet<Span>> = BTreeMap::new();
+    let mut undecided: FxHashSet<Span> = FxHashSet::default();
+    for site in &oracle.sites {
+        match &site.binding {
+            Some(binding) => {
+                expected
+                    .entry(binding)
+                    .or_default()
+                    .insert(span(site.file, site.range));
+            }
+            None => {
+                undecided.insert(span(site.file, site.range));
+            }
+        }
+    }
+    let candidates: Vec<&Site> = oracle
+        .sites
+        .iter()
+        .filter(|site| {
+            site.binding
+                .as_ref()
+                .is_some_and(|binding| oracle.is_project(binding))
+        })
+        .collect();
+    let stride = candidates.len().div_ceil(REFERENCE_SAMPLES).max(1);
+    let mut tallies: BTreeMap<&str, ReferenceTally> = BTreeMap::new();
+    let mut latencies = Vec::new();
+    let location = |file: usize, start: TextSize| {
+        let record = package[file];
+        let line = record.source[..usize::from(start)].matches('\n').count() + 1;
+        let name = record
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        format!("{name}:{line}")
+    };
+    for (position, site) in candidates.iter().step_by(stride).enumerate() {
+        let Some(binding) = &site.binding else {
+            continue;
+        };
+        let kind = match binding {
+            Binding::Local { .. } => "local",
+            Binding::Global(_) => "package-level",
+        };
+        let tally = tallies.entry(kind).or_default();
+        let record = package[site.file];
+        let began = Instant::now();
+        let found: BTreeSet<Span> =
+            ide::references(db, files, record.file, site.range.start(), true)
+                .into_iter()
+                .filter_map(|occurrence| {
+                    Some(span(*index.get(&occurrence.file)?, occurrence.range))
+                })
+                .filter(|occurrence| !undecided.contains(occurrence))
+                .collect();
+        latencies.push(began.elapsed());
+        let wanted = expected.get(binding).cloned().unwrap_or_default();
+        tally.references_total += 1;
+        if found == wanted {
+            tally.references += 1;
+        } else if tally.reference_misses.len() < COVERAGE_EXAMPLES {
+            let missing: Vec<String> = wanted
+                .difference(&found)
+                .take(3)
+                .map(|&(file, start, _)| location(file, start))
+                .collect();
+            let extra: Vec<String> = found
+                .difference(&wanted)
+                .take(3)
+                .map(|&(file, start, _)| location(file, start))
+                .collect();
+            tally.reference_misses.push(format!(
+                "{}: {}   expected {}, found {}   missing [{}]   extra [{}]",
+                location(site.file, site.range.start()),
+                site.name,
+                wanted.len(),
+                found.len(),
+                missing.join(", "),
+                extra.join(", "),
+            ));
+        }
+        // Renaming edits every file it touches, so it runs on every other sample.
+        if position % RENAME_EVERY != 0 || site.name.contains('`') {
+            continue;
+        }
+        tally.rename_total += 1;
+        match rename_round_trip(db, files, records, &package, site) {
+            Ok(()) => tally.rename += 1,
+            Err(reason) => {
+                if tally.rename_misses.len() < COVERAGE_EXAMPLES {
+                    tally.rename_misses.push(format!(
+                        "{}: {}   {reason}",
+                        location(site.file, site.range.start()),
+                        site.name
+                    ));
+                }
+            }
+        }
+    }
+    latencies.sort();
+    let sampled: usize = tallies.values().map(|tally| tally.references_total).sum();
+    println!();
+    println!(
+        "references and rename ({sampled} bindings, checked against a lexical resolver; references {:.1} ms p50 {:.1} ms p99):",
+        percentile(&latencies, 50),
+        percentile(&latencies, 99),
+    );
+    for (kind, tally) in &tallies {
+        let share = |count: usize, total: usize| count as f64 * 100.0 / total.max(1) as f64;
+        println!(
+            "  {kind:<16} {:>6}   references {:>5.1}%   rename {:>5.1}% of {}",
+            tally.references_total,
+            share(tally.references, tally.references_total),
+            share(tally.rename, tally.rename_total),
+            tally.rename_total,
+        );
+        for miss in tally.reference_misses.iter().chain(&tally.rename_misses) {
+            println!("      {miss}");
+        }
+    }
+}
+
+/// Renames the binding at `site` to a fresh name and back, and restores the package's files
+/// whatever happens.
+fn rename_round_trip(
+    db: &mut RootDatabase,
+    files: ProjectFiles,
+    records: &[FileRecord],
+    package: &[&FileRecord],
+    site: &Site,
+) -> Result<(), String> {
+    let record = package[site.file];
+    let renamed = format!("ry_renamed_{}", site.name);
+    let first = ide::rename(db, files, record.file, site.range.start())
+        .ok_or_else(|| "refused".to_owned())?;
+    let edits = rename_edits(db, &first, &site.name, &renamed)?;
+    let touched: Vec<SourceFile> = edits.iter().map(|(file, _)| *file).collect();
+    set_texts(db, edits);
+    // Every occurrence before the site in its file grew by the same amount.
+    let shift = first
+        .iter()
+        .filter(|occurrence| {
+            occurrence.file == record.file && occurrence.range.end() <= site.range.start()
+        })
+        .count()
+        * (renamed.len() - site.name.len());
+    let moved = site.range.start() + TextSize::from(shift as u32);
+    let outcome = match ide::rename(db, files, record.file, moved) {
+        None => Err("refused after the first rename".to_owned()),
+        Some(back) if back.len() != first.len() => Err(format!(
+            "renamed {} occurrences, then {} back",
+            first.len(),
+            back.len()
+        )),
+        Some(back) => rename_edits(db, &back, &renamed, &site.name).map(|edits| {
+            set_texts(db, edits);
+        }),
+    };
+    let changed = touched.iter().find_map(|&file| {
+        let text: &str = file.text(db);
+        let original = original_text(records, file);
+        let differs_at = text
+            .bytes()
+            .zip(original.bytes())
+            .position(|(left, right)| left != right)
+            .or_else(|| (text.len() != original.len()).then(|| text.len().min(original.len())))?;
+        let line = original[..differs_at].matches('\n').count() + 1;
+        let path = records
+            .iter()
+            .find(|record| record.file == file)
+            .and_then(|record| record.path.file_name())
+            .map_or(std::borrow::Cow::Borrowed(""), |name| {
+                name.to_string_lossy()
+            });
+        Some(format!("renaming back changed {path}:{line}"))
+    });
+    restore(db, records, &touched);
+    outcome?;
+    changed.map_or(Ok(()), Err)
+}
+
+/// Each edited file's new text, provided every occurrence spells `from`.
+fn rename_edits(
+    db: &RootDatabase,
+    occurrences: &[ide::Occurrence],
+    from: &str,
+    to: &str,
+) -> Result<Vec<(SourceFile, String)>, String> {
+    let mut by_file: FxHashMap<SourceFile, Vec<TextRange>> = FxHashMap::default();
+    for occurrence in occurrences {
+        by_file
+            .entry(occurrence.file)
+            .or_default()
+            .push(occurrence.range);
+    }
+    let mut edits = Vec::new();
+    for (file, mut ranges) in by_file {
+        let mut text = file.text(db).to_string();
+        ranges.sort_by_key(|range| Reverse(range.start()));
+        for range in ranges {
+            let span = std::ops::Range::<usize>::from(range);
+            let spelled = text.get(span.clone()).unwrap_or_default();
+            if spelled.trim_matches('`') != from {
+                return Err(format!("an occurrence spells `{spelled}`"));
+            }
+            text.replace_range(span, to);
+        }
+        edits.push((file, text));
+    }
+    Ok(edits)
+}
+
+fn set_texts(db: &mut RootDatabase, edits: Vec<(SourceFile, String)>) {
+    for (file, text) in edits {
+        file.set_text(db).with_durability(Durability::LOW).to(text);
+    }
+}
+
+fn original_text(records: &[FileRecord], file: SourceFile) -> &str {
+    records
+        .iter()
+        .find(|record| record.file == file)
+        .map_or("", |record| record.source.as_str())
+}
+
+fn restore(db: &mut RootDatabase, records: &[FileRecord], touched: &[SourceFile]) {
+    for record in records
+        .iter()
+        .filter(|record| touched.contains(&record.file))
+    {
+        record
+            .file
+            .set_text(db)
+            .with_durability(Durability::LOW)
+            .to(record.source.clone());
+    }
+}
+
+/// A file index and a range: an occurrence in one of the package's files.
+type Span = (usize, TextSize, TextSize);
+
+fn span(file: usize, range: TextRange) -> Span {
+    (file, range.start(), range.end())
+}
+
+const REFERENCE_SAMPLES: usize = 400;
+const RENAME_EVERY: usize = 2;
+
+#[derive(Default)]
+struct ReferenceTally {
+    references_total: usize,
+    references: usize,
+    reference_misses: Vec<String>,
+    rename_total: usize,
+    rename: usize,
+    rename_misses: Vec<String>,
 }
 
 /// `list(total = 1)` or `tryCatch(warning = ...)`: an argument name the known signature does not
