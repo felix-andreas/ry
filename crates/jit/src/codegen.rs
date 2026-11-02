@@ -15,8 +15,8 @@
 use {
     crate::{
         analysis::{
-            Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef, Ty,
-            jump_target, status,
+            self, Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef,
+            Ty, jump_target, status,
         },
         native,
         runtime::{self, Activation, offset, outcome, reason, representation},
@@ -42,7 +42,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{Arith, Op},
+        bytecode::Arith,
         values,
     },
     rustc_hash::FxHashMap,
@@ -387,7 +387,11 @@ impl<'p, 'b> Translator<'p, 'b> {
             let next = self.builder.create_block();
             self.builder.ins().brif(fits, next, &[], declined, &[]);
             self.builder.switch_to_block(next);
-            if ty.is_unboxed() {
+            if ty == Ty::Num {
+                let (unboxed, flag) = self.unbox_num(value);
+                self.def_register(register, ty, unboxed);
+                self.builder.def_var(self.integers[register], flag);
+            } else if ty.is_unboxed() {
                 let unboxed = self.unbox(value, ty);
                 self.def_register(register, ty, unboxed);
             }
@@ -402,6 +406,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         let Some(before) = plan.before(position) else {
             return Ok(false);
         };
+        for &register in plan.boxings(position) {
+            let boxed = self.box_register(register, Ty::Num);
+            self.store_register(register, boxed);
+        }
         self.action(position, before, plan.actions[position])
     }
 
@@ -460,9 +468,13 @@ impl<'p, 'b> Translator<'p, 'b> {
                     self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
-                if ty.is_unboxed() {
+                if ty.in_variables() {
                     let value = self.use_slot(slot, ty);
                     self.def_register(dst, ty, value);
+                    if ty == Ty::Num {
+                        let flag = self.builder.use_var(self.slot_integers[slot]);
+                        self.builder.def_var(self.integers[dst], flag);
+                    }
                 } else {
                     let value = self.load_slot_cell(slot);
                     self.store_register(dst, value);
@@ -473,11 +485,15 @@ impl<'p, 'b> Translator<'p, 'b> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                let value = if ty.is_unboxed() {
+                let value = if ty.in_variables() {
                     self.use_register(src, ty)
                 } else {
                     self.load_register(src)
                 };
+                if ty == Ty::Num {
+                    let flag = self.builder.use_var(self.integers[src]);
+                    self.builder.def_var(self.slot_integers[slot], flag);
+                }
                 self.assign_slot(&before, slot, ty, value);
                 self.set_visible(&before, false);
             }
@@ -612,9 +628,13 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::Move { dst, src, ty } => {
                 // Only a scalar lives in a variable; any other value lives in the window.
-                if ty.is_unboxed() {
+                if ty.in_variables() {
                     let value = self.use_register(src, ty);
                     self.def_register(dst, ty, value);
+                    if ty == Ty::Num {
+                        let flag = self.builder.use_var(self.integers[src]);
+                        self.builder.def_var(self.integers[dst], flag);
+                    }
                 } else {
                     let value = self.load_register(src);
                     self.store_register(dst, value);
@@ -1187,7 +1207,7 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
     unsafe fn box_reads(&mut self, position: usize, before: &StateRef<'p>) {
-        for register in reads(&self.plan.insts[position]) {
+        for register in analysis::reads(&self.plan.insts[position]) {
             let ty = before
                 .registers
                 .get(register)
@@ -2160,6 +2180,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let unboxed = self.unbox(value, ty);
                 self.builder.def_var(self.slot_doubles[slot], unboxed);
             }
+            Ty::Num => {
+                let (unboxed, flag) = self.unbox_num(value);
+                self.builder.def_var(self.slot_doubles[slot], unboxed);
+                self.builder.def_var(self.slot_integers[slot], flag);
+            }
             _ => {}
         }
         self.builder.ins().jump(done, &[]);
@@ -2221,6 +2246,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let unboxed = self.unbox(value, ty);
                 self.builder.def_var(self.slot_doubles[slot], unboxed);
             }
+            Ty::Num => {
+                let (unboxed, flag) = self.unbox_num(value);
+                self.builder.def_var(self.slot_doubles[slot], unboxed);
+                self.builder.def_var(self.slot_integers[slot], flag);
+            }
             _ => {}
         }
         self.builder.ins().jump(done, &[]);
@@ -2233,7 +2263,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// was dirty and boxed, after counting the new one, since the two may be the same object.
     unsafe fn assign_slot(&mut self, before: &StateRef<'p>, slot: usize, ty: Ty, value: Value) {
         let old = before.slots[slot];
-        let release = (!old.ty.is_unboxed() && old.ty != Ty::Bottom && old.may_be(status::DIRTY))
+        let release = (!old.ty.in_variables() && old.ty != Ty::Bottom && old.may_be(status::DIRTY))
             .then(|| {
                 let status = self.builder.use_var(self.statuses[slot]);
                 let dirty =
@@ -2244,7 +2274,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             });
         match ty {
             Ty::Int | Ty::Lgl => self.builder.def_var(self.slot_integers[slot], value),
-            Ty::Dbl => self.builder.def_var(self.slot_doubles[slot], value),
+            Ty::Dbl | Ty::Num => self.builder.def_var(self.slot_doubles[slot], value),
             _ => {
                 self.store_slot_cell(slot, value);
                 self.increment(value);
@@ -2305,10 +2335,33 @@ impl<'p, 'b> Translator<'p, 'b> {
                     self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
                 )
             }
+            Ty::Num => {
+                let value = self.builder.use_var(self.slot_doubles[slot]);
+                let flag = self.builder.use_var(self.slot_integers[slot]);
+                let integer = self.builder.ins().icmp_imm_s(IntCC::NotEqual, flag, 0);
+                let narrowed = self.num_to_integer(value);
+                let narrowed = self.builder.ins().sextend(I64, narrowed);
+                let bits = self.builder.ins().bitcast(I64, MemFlagsData::new(), value);
+                let bits = self.builder.ins().select(integer, narrowed, bits);
+                let integer_kind = self
+                    .builder
+                    .ins()
+                    .iconst(I32, representation::INTEGER as i64);
+                let double_kind = self
+                    .builder
+                    .ins()
+                    .iconst(I32, representation::DOUBLE as i64);
+                let kind = self.builder.ins().select(integer, integer_kind, double_kind);
+                return self.flush_call(slot, kind, bits);
+            }
             _ => (representation::BOXED, self.builder.ins().iconst(I64, 0)),
         };
-        let slot_constant = iconst(&mut self.builder, slot);
         let kind = self.builder.ins().iconst(I32, kind as i64);
+        self.flush_call(slot, kind, bits)
+    }
+
+    fn flush_call(&mut self, slot: usize, kind: Value, bits: Value) -> Value {
+        let slot_constant = iconst(&mut self.builder, slot);
         self.call(
             runtime::jit_flush as *const () as usize,
             &[I64, I64, I32, I64],
@@ -2352,13 +2405,12 @@ impl<'p, 'b> Translator<'p, 'b> {
             .registers
             .iter()
             .zip(entry.registers)
-            .any(|(from, to)| from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed());
-        let slots = from.slots.iter().zip(entry.slots).any(|(from, to)| {
-            from.ty.is_unboxed()
-                && from.may_be(status::LOADED)
-                && to.ty != Ty::Bottom
-                && !to.ty.is_unboxed()
-        });
+            .any(|(from, to)| converts(*from, *to));
+        let slots = from
+            .slots
+            .iter()
+            .zip(entry.slots)
+            .any(|(from, to)| from.may_be(status::LOADED) && converts(from.ty, to.ty));
         if !registers && !slots {
             return Ok(label);
         }
@@ -2381,19 +2433,35 @@ impl<'p, 'b> Translator<'p, 'b> {
                     .ok_or(Refusal("a jump to unreachable code"))?,
             );
             let state = self.plan.state(edge.state);
-            for (register, (from, to)) in state.registers.iter().zip(entry.registers).enumerate() {
-                if from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed() {
-                    let value = self.use_register(register, *from);
-                    let boxed = self.box_value(*from, value);
+            for (register, (&from, &to)) in
+                state.registers.iter().zip(entry.registers).enumerate()
+            {
+                if !converts(from, to) {
+                    continue;
+                }
+                if to == Ty::Num {
+                    let value = self.as_double(register, from);
+                    let flag = self.builder.ins().iconst(I32, i64::from(from == Ty::Int));
+                    self.def_register(register, Ty::Num, value);
+                    self.builder.def_var(self.integers[register], flag);
+                } else {
+                    let boxed = self.box_register(register, from);
                     self.store_register(register, boxed);
                 }
             }
             for (slot, (from, to)) in state.slots.iter().zip(entry.slots).enumerate() {
-                if from.ty.is_unboxed()
-                    && from.may_be(status::LOADED)
-                    && to.ty != Ty::Bottom
-                    && !to.ty.is_unboxed()
-                {
+                if !from.may_be(status::LOADED) || !converts(from.ty, to.ty) {
+                    continue;
+                }
+                if to.ty == Ty::Num {
+                    let value = self.slot_as_double(slot, from.ty);
+                    let flag = self
+                        .builder
+                        .ins()
+                        .iconst(I32, i64::from(from.ty == Ty::Int));
+                    self.builder.def_var(self.slot_doubles[slot], value);
+                    self.builder.def_var(self.slot_integers[slot], flag);
+                } else {
                     self.box_slot(slot, from.ty);
                 }
             }
@@ -2415,8 +2483,14 @@ impl<'p, 'b> Translator<'p, 'b> {
         let done = self.builder.create_block();
         self.builder.ins().brif(loaded, boxing, &[], done, &[]);
         self.builder.switch_to_block(boxing);
-        let value = self.use_slot(slot, ty);
-        let boxed = self.box_value(ty, value);
+        let boxed = if ty == Ty::Num {
+            let value = self.builder.use_var(self.slot_doubles[slot]);
+            let flag = self.builder.use_var(self.slot_integers[slot]);
+            self.box_num(value, flag)
+        } else {
+            let value = self.use_slot(slot, ty);
+            self.box_value(ty, value)
+        };
         self.store_slot_cell(slot, boxed);
         let local = self
             .builder
@@ -2459,12 +2533,11 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.set_cold_block(deopt.label);
         let state = self.plan.state(deopt.state);
         for (register, &ty) in state.registers.iter().enumerate() {
-            if ty.is_unboxed()
+            if ty.in_variables()
                 && deopt.boxed != Some(register)
                 && self.plan.live.get(deopt.live, register)
             {
-                let value = self.use_register(register, ty);
-                let boxed = self.box_value(ty, value);
+                let boxed = self.box_register(register, ty);
                 self.store_register(register, boxed);
             }
         }
@@ -2598,21 +2671,21 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     fn use_register(&mut self, register: usize, ty: Ty) -> Value {
         match ty {
-            Ty::Dbl => self.builder.use_var(self.doubles[register]),
+            Ty::Dbl | Ty::Num => self.builder.use_var(self.doubles[register]),
             _ => self.builder.use_var(self.integers[register]),
         }
     }
 
     fn def_register(&mut self, register: usize, ty: Ty, value: Value) {
         match ty {
-            Ty::Dbl => self.builder.def_var(self.doubles[register], value),
+            Ty::Dbl | Ty::Num => self.builder.def_var(self.doubles[register], value),
             _ => self.builder.def_var(self.integers[register], value),
         }
     }
 
     fn use_slot(&mut self, slot: usize, ty: Ty) -> Value {
         match ty {
-            Ty::Dbl => self.builder.use_var(self.slot_doubles[slot]),
+            Ty::Dbl | Ty::Num => self.builder.use_var(self.slot_doubles[slot]),
             _ => self.builder.use_var(self.slot_integers[slot]),
         }
     }
@@ -2620,9 +2693,22 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// A register's value as a double, converting integers and logicals with `NA` kept.
     fn as_double(&mut self, register: usize, ty: Ty) -> Value {
         let value = self.use_register(register, ty);
-        if ty == Ty::Dbl {
+        if matches!(ty, Ty::Dbl | Ty::Num) {
             return value;
         }
+        self.integer_as_double(value)
+    }
+
+    /// A slot's value as a double, like [`Self::as_double`].
+    fn slot_as_double(&mut self, slot: usize, ty: Ty) -> Value {
+        let value = self.use_slot(slot, ty);
+        if matches!(ty, Ty::Dbl | Ty::Num) {
+            return value;
+        }
+        self.integer_as_double(value)
+    }
+
+    fn integer_as_double(&mut self, value: Value) -> Value {
         let missing = self
             .builder
             .ins()
@@ -2657,7 +2743,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     None => self.builder.ins().iconst(I8, 0),
                 };
             }
-            Ty::Int => (SexpType::Integer, true),
+            Ty::Int | Ty::Num => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
             Ty::Lgl => (SexpType::Logical, true),
             Ty::IntVec => (SexpType::Integer, false),
@@ -2694,6 +2780,13 @@ impl<'p, 'b> Translator<'p, 'b> {
             .builder
             .ins()
             .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+        if ty == Ty::Num {
+            let real = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, actual, SexpType::Real as i64);
+            fits = self.builder.ins().bor(fits, real);
+        }
         let attributes = self.builder.ins().load(I64, flags(), value, ATTRIB);
         let plain = self
             .builder
@@ -2734,6 +2827,61 @@ impl<'p, 'b> Translator<'p, 'b> {
     fn unbox(&mut self, value: Value, ty: Ty) -> Value {
         let load_ty = if ty == Ty::Dbl { F64 } else { I32 };
         self.builder.ins().load(load_ty, flags(), value, DATA)
+    }
+
+    /// An integer or double scalar's `(value, flag)` pair, as [`Ty::Num`] holds it.
+    fn unbox_num(&mut self, value: Value) -> (Value, Value) {
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+        let from_integer = self.builder.create_block();
+        let from_double = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, F64);
+        self.builder
+            .ins()
+            .brif(integer, from_integer, &[], from_double, &[]);
+        self.builder.switch_to_block(from_integer);
+        let unboxed = self.builder.ins().load(I32, flags(), value, DATA);
+        let widened = self.integer_as_double(unboxed);
+        self.builder.ins().jump(done, &[widened.into()]);
+        self.builder.switch_to_block(from_double);
+        let unboxed = self.builder.ins().load(F64, flags(), value, DATA);
+        self.builder.ins().jump(done, &[unboxed.into()]);
+        self.builder.switch_to_block(done);
+        let double = self.builder.block_params(done)[0];
+        (double, self.builder.ins().uextend(I32, integer))
+    }
+
+    /// The integer a [`Ty::Num`] whose flag says integer holds, `NA` included.
+    fn num_to_integer(&mut self, value: Value) -> Value {
+        let missing = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
+        let narrowed = self.builder.ins().fcvt_to_sint_sat(I32, value);
+        let na = self.builder.ins().iconst(I32, NA_INTEGER as i64);
+        self.builder.ins().select(missing, na, narrowed)
+    }
+
+    /// Boxes a register held in variables.
+    fn box_register(&mut self, register: usize, ty: Ty) -> Value {
+        if ty == Ty::Num {
+            let value = self.builder.use_var(self.doubles[register]);
+            let flag = self.builder.use_var(self.integers[register]);
+            return self.box_num(value, flag);
+        }
+        let value = self.use_register(register, ty);
+        self.box_value(ty, value)
+    }
+
+    fn box_num(&mut self, value: Value, flag: Value) -> Value {
+        self.call(
+            runtime::jit_box_num as *const () as usize,
+            &[I64, F64, I32],
+            Some(I64),
+            &[self.activation, value, flag],
+        )
+        .unwrap_or(value)
     }
 
     fn box_value(&mut self, ty: Ty, value: Value) -> Value {
@@ -2823,42 +2971,20 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 }
 
+/// Whether a value of type `from` changes representation on an edge into a block expecting
+/// `to`: an unboxed value boxed for a block that expects an object, or an integer or double
+/// widened for one that expects either.
+fn converts(from: Ty, to: Ty) -> bool {
+    if to == Ty::Num {
+        return matches!(from, Ty::Int | Ty::Dbl);
+    }
+    from.in_variables() && to != Ty::Bottom && !to.in_variables()
+}
+
 fn iconst(builder: &mut FunctionBuilder<'_>, value: usize) -> Value {
     builder.ins().iconst(I64, value as i64)
 }
 
 unsafe fn runtime_constant(code: Sexp, index: usize) -> Sexp {
     unsafe { code.cdr().element(index) }
-}
-
-/// The registers an instruction reads.
-fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
-    let operand = |index: usize| inst.operand(index);
-    match inst.op {
-        Op::CallBuiltin => std::iter::once(operand(1))
-            .chain(operand(3)..operand(3) + operand(4))
-            .collect(),
-        Op::CallGeneric
-        | Op::CallRebinding
-        | Op::CallTailUpdate
-        | Op::Field
-        | Op::Item
-        | Op::Slot => vec![operand(1)],
-        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
-        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
-        Op::Move => vec![operand(1)],
-        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
-        Op::MatchCondition => vec![operand(1)],
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
-            vec![operand(0)]
-        }
-        Op::DispatchSubject => vec![operand(1), operand(3)],
-        Op::Arithmetic => vec![operand(2), operand(3)],
-        Op::SubAssign => vec![operand(2), operand(3)],
-        Op::JumpUnless | Op::Return | Op::ForEnd => vec![operand(0)],
-        Op::ForInit | Op::ForStep | Op::LogicLeft => vec![operand(1)],
-        Op::LogicRight => vec![operand(1), operand(2)],
-        Op::SetVar => vec![operand(1)],
-        _ => Vec::new(),
-    }
 }

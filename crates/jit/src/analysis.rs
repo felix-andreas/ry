@@ -32,7 +32,7 @@ use {
         values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
-    smallvec::SmallVec,
+    smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
         ptr::NonNull,
@@ -69,6 +69,10 @@ pub enum Ty {
     Dbl,
     /// An attribute-free logical scalar, unboxed as an `i32`.
     Lgl,
+    /// An attribute-free integer or double scalar, as a join of the two produces: the value as
+    /// an `f64` (an integer `NA` as the double `NA`) and a flag that is nonzero for an integer,
+    /// so boxing it gives back exactly the R value it came from.
+    Num,
     /// A boxed, attribute-free, non-ALTREP integer vector of any length.
     IntVec,
     DblVec,
@@ -92,6 +96,11 @@ pub enum Ty {
 impl Ty {
     pub fn is_unboxed(self) -> bool {
         matches!(self, Ty::Int | Ty::Dbl | Ty::Lgl)
+    }
+
+    /// Whether compiled code holds a value of this type in variables rather than as an object.
+    pub fn in_variables(self) -> bool {
+        matches!(self, Ty::Int | Ty::Dbl | Ty::Lgl | Ty::Num)
     }
 
     /// Whether every value of this type is a plain object, which no builtin dispatches on.
@@ -146,6 +155,9 @@ impl Ty {
             (a, b) if a == b => a,
             (Ty::Bottom, b) => b,
             (a, Ty::Bottom) => a,
+            // Joined, an integer and a double stay unboxed: the value widens to a double and a
+            // flag remembers which it was, so a loop whose branches disagree stays compiled.
+            (Ty::Int | Ty::Dbl | Ty::Num, Ty::Int | Ty::Dbl | Ty::Num) => Ty::Num,
             (a, b) if a.vector() == b.vector() && a.vector().is_vector() => a.vector(),
             _ => Ty::Boxed,
         }
@@ -226,10 +238,10 @@ impl Slot {
         // hold, so from there on it is a value to write back, not the frame's own (see
         // `box_slot` in codegen).
         let boxed = |side: Slot| {
-            side.ty.is_unboxed()
+            side.ty.in_variables()
                 && side.may_be(status::LOCAL)
                 && ty != Ty::Bottom
-                && !ty.is_unboxed()
+                && !ty.in_variables()
         };
         let mut status = self.status | other.status;
         if boxed(self) || boxed(other) {
@@ -767,6 +779,10 @@ pub struct Plan<'a> {
     /// the state along each, by target pc, the fallthrough edge included.
     edge_ranges: List<'a, u32>,
     edges: List<'a, (usize, StateId)>,
+    /// The registers boxed before instruction `position` are
+    /// `boxings[boxing_ranges[position]..boxing_ranges[position + 1]]`.
+    boxing_ranges: List<'a, u32>,
+    boxings: List<'a, usize>,
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
@@ -783,6 +799,16 @@ impl Plan<'_> {
 
     pub fn before(&self, position: usize) -> Option<StateRef<'_>> {
         self.before[position].map(|id| self.states.get(id))
+    }
+
+    /// The registers holding a [`Ty::Num`] that the instruction at `position` reads as objects,
+    /// which code generation boxes before it.
+    pub fn boxings(&self, position: usize) -> &[usize] {
+        let (start, end) = (
+            self.boxing_ranges[position] as usize,
+            self.boxing_ranges[position + 1] as usize,
+        );
+        &self.boxings[start..end]
     }
 
     pub fn edges(&self, position: usize) -> &[(usize, StateId)] {
@@ -933,6 +959,8 @@ pub unsafe fn plan<'a>(
     before.resize(count, None);
     let mut edge_ranges = List::with_capacity_in(count + 1, arena);
     let mut edges = List::new_in(arena);
+    let mut boxing_ranges = List::with_capacity_in(count + 1, arena);
+    let mut boxings = List::new_in(arena);
     let mut state = State::bottom(arena, registers + TEMPORARIES, builder.slots.len());
     // Each instruction adds the row before it and usually a fallthrough edge.
     builder.states.reserve(2 * count + blocks.len());
@@ -941,11 +969,15 @@ pub unsafe fn plan<'a>(
             for _ in block.start..block.end {
                 actions.push(Action::Skip);
                 edge_ranges.push(edges.len() as u32);
+                boxing_ranges.push(boxings.len() as u32);
             }
             continue;
         };
         builder.states.load(entry, &mut state);
         for position in block.start..block.end {
+            let start = boxings.len() as u32;
+            boxings.extend(builder.box_operands(position, &mut state));
+            boxing_ranges.push(start);
             before[position] = Some(builder.states.push(&state));
             builder.edges.clear();
             actions.push(builder.transfer(position, &mut state)?);
@@ -954,7 +986,10 @@ pub unsafe fn plan<'a>(
         }
     }
     edge_ranges.push(edges.len() as u32);
+    boxing_ranges.push(boxings.len() as u32);
     Ok(Plan {
+        boxing_ranges,
+        boxings,
         temporaries: TEMPORARIES,
         insts: builder.insts,
         blocks,
@@ -1446,6 +1481,7 @@ impl<'a> Builder<'a> {
         position: usize,
         state: &mut State<'a>,
     ) -> Result<Action<'a>, Refusal> {
+        self.box_operands(position, state);
         let inst = self.insts[position];
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
@@ -2021,6 +2057,51 @@ impl<'a> Builder<'a> {
     }
 
     /// Adds a step to an inlined call, with the state before it.
+    /// Retypes as boxed every [`Ty::Num`] register the instruction at `position` cannot read
+    /// unboxed, returning them so code generation boxes them first. Only a copy, an assignment
+    /// and arithmetic whose result is a double whatever the flag says read one unboxed.
+    fn box_operands(&self, position: usize, state: &mut State<'a>) -> SmallVec<[usize; 2]> {
+        let inst = &self.insts[position];
+        let operands = reads(inst);
+        let mut boxed = SmallVec::new();
+        if operands
+            .iter()
+            .all(|&register| state.registers[register] != Ty::Num)
+        {
+            return boxed;
+        }
+        let keeps = match inst.op {
+            Op::Move | Op::SetVar => true,
+            Op::Arithmetic => {
+                let (a, b) = (
+                    state.registers[inst.operand(2)],
+                    state.registers[inst.operand(3)],
+                );
+                let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+                // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
+                // operand is a double; every other operator converts to double anyway.
+                scalar(a)
+                    && scalar(b)
+                    && (!matches!(
+                        ARITHS[inst.operand(0)].0,
+                        Arith::Add | Arith::Subtract | Arith::Multiply
+                    ) || a == Ty::Dbl
+                        || b == Ty::Dbl)
+            }
+            _ => false,
+        };
+        if keeps {
+            return boxed;
+        }
+        for register in operands {
+            if state.registers[register] == Ty::Num && !boxed.contains(&register) {
+                state.registers[register] = Ty::Boxed;
+                boxed.push(register);
+            }
+        }
+        boxed
+    }
+
     fn push_step(&mut self, lowering: &mut Lowering<'a>, action: Action<'a>) {
         let id = self.states.push(&lowering.state);
         lowering.steps.push((action, id));
@@ -2523,8 +2604,9 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
-        if a.is_numeric_scalar() && b.is_numeric_scalar() {
-            let integers = !matches!(a, Ty::Dbl) && !matches!(b, Ty::Dbl);
+        let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+        if scalar(a) && scalar(b) {
+            let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
                 Arith::Equal
@@ -2990,6 +3072,38 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         }
         _ => return None,
     })
+}
+
+/// The registers an instruction reads.
+pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
+    let operand = |index: usize| inst.operand(index);
+    match inst.op {
+        Op::CallBuiltin => std::iter::once(operand(1))
+            .chain(operand(3)..operand(3) + operand(4))
+            .collect(),
+        Op::CallGeneric
+        | Op::CallRebinding
+        | Op::CallTailUpdate
+        | Op::Field
+        | Op::Item
+        | Op::Slot => smallvec![operand(1)],
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => smallvec![operand(0)],
+        Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
+        Op::Move => smallvec![operand(1)],
+        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
+        Op::MatchCondition => smallvec![operand(1)],
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+            smallvec![operand(0)]
+        }
+        Op::DispatchSubject => smallvec![operand(1), operand(3)],
+        Op::Arithmetic => smallvec![operand(2), operand(3)],
+        Op::SubAssign => smallvec![operand(2), operand(3)],
+        Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
+        Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
+        Op::LogicRight => smallvec![operand(1), operand(2)],
+        Op::SetVar => smallvec![operand(1)],
+        _ => SmallVec::new(),
+    }
 }
 
 pub fn jump_target(inst: &Inst) -> Option<usize> {
