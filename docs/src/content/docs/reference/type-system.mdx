@@ -2263,6 +2263,14 @@ to such a name is resolved separately at each call site:
   is `integer[named]`. Each field of a record or frame is its own element type, and an element no
   candidate accepts is an error. A class whose first argument declares a `sum.<class>` or
   `Summary.<class>` method is dispatched to that method instead of the set, as R dispatches it.
+- `Reduce` with a function named directly, or chosen by an `if` between two names, folds that
+  function over the elements instead of matching it against `fn(U, T) -> U`. R hands each return
+  back as the next accumulator, so the accumulator's type is the join of the start (`init`, or the
+  element type) and every return. With `same <- function(x, y) if (identical(x, y)) x`,
+  `Reduce(same, list(1, 2))` is `double | NULL`. A step the function rejects is an error at that
+  argument, so `Reduce(add, list(1, 2), "start")` with a numeric `add` is reported at `"start"`. A
+  function that closes over the enclosing function's own type variables, `right =`, `accumulate =`
+  and `simplify =` keep the stub's signature.
 
 Only a declaration file can overload a name, because a name with several signatures has no single
 most general type and must be resolved by search rather than inferred. A `#:` annotation on your own

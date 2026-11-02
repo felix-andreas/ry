@@ -13337,7 +13337,11 @@ impl<'db> Checker<'db, '_> {
         } else {
             (bound.value(0)?, bound.value(1)?)
         };
-        let callback = self.callback(function)?;
+        let callback = match self.callback(function) {
+            Some(callback) => callback,
+            None if family == "Reduce" => return self.infer_reduce_fold(id, callee, &bound),
+            None => return None,
+        };
         self.infer(callee);
         let x_ty = self.infer(x);
         let x_ty = self.structural(x_ty);
@@ -13479,6 +13483,115 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// The overload set a callback passed by name stands for, unless a binding shadows it.
+    /// `Reduce(f, x)` with a function that is not overloaded, named directly or picked by an
+    /// `if`, such as `Reduce(if (reals) merge_reals else merge_sets, x)`. R hands `f` the
+    /// accumulator and each element in turn, and the accumulator takes whatever `f` returned, so
+    /// its type is the join of the start and every return: `function(x, y) if (identical(x, y))
+    /// x` folds to `T | NULL`. The stub's `fn(U, T) -> U` cannot widen, so the fold is iterated
+    /// here until the accumulator stops growing. A step that fails is reported as it is, and only
+    /// the last step's findings are kept otherwise.
+    /// A function that closes over the enclosing function's open variables keeps the stub's
+    /// typing, because calling it repeatedly would pin those variables to every step at once.
+    fn infer_reduce_fold(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        bound: &BoundFormals,
+    ) -> Option<Ty<'db>> {
+        let db = self.db;
+        let module = self.module;
+        let function = bound.value(0)?;
+        let x = bound.value(1)?;
+        let named_function = |name: ExprId| matches!(module.kind(name), ExpressionKind::NameRef(_));
+        let eligible = named_function(function)
+            || matches!(
+                module.kind(function),
+                ExpressionKind::If { then_branch, else_branch: Some(else_branch), .. }
+                    if named_function(*then_branch) && named_function(*else_branch)
+            );
+        if !eligible || bound.values[3..].iter().any(Option::is_some) {
+            return None;
+        }
+        let recorded_errors = self.errors.len();
+        let recorded_origins = self.strict_origins.len();
+        let first_var = self.table.next_var().0;
+        let callback_ty = self.infer(function);
+        let callback_ty = self.table.resolve(db, callback_ty);
+        if self.mentions_var_before(callback_ty, first_var) {
+            self.errors.truncate(recorded_errors);
+            self.strict_origins.truncate(recorded_origins);
+            return None;
+        }
+        self.infer(callee);
+        let x_ty = self.infer(x);
+        let x_ty = self.structural(x_ty);
+        let (elements, _) = element_types(db, x_ty);
+        let element = self.join_all(&elements);
+        let init = bound.value(2);
+        let mut accumulator = match init {
+            Some(init) => self.infer(init),
+            None => element,
+        };
+        let range = module.range(id);
+        let callee_range = self.blame_range(function);
+        let argument = |value: ExprId, ty: Ty<'db>| CallArgument {
+            name: None,
+            name_range: None,
+            ty: Some(ty),
+            range: module.range(value),
+            value: Some(value),
+            whole_double: false,
+            forwards_dots: false,
+            named_function: None,
+        };
+        let mut callback_ty = callback_ty;
+        // Each step can only add members to the accumulator, so a few rounds reach the
+        // fixpoint of any fold the checker can type; the bound guards a type that keeps growing.
+        for round in 0..4 {
+            let step_errors = self.errors.len();
+            let step_origins = self.strict_origins.len();
+            let arguments = [
+                argument(init.unwrap_or(x), accumulator),
+                argument(x, element),
+            ];
+            let returned = self.dispatch_call(
+                range,
+                callee_range,
+                callback_ty,
+                CalleeSource::Value,
+                &arguments,
+            );
+            let widened = self.join_types(accumulator, returned);
+            if widened == accumulator || round == 3 || self.errors.len() > step_errors {
+                return Some(widened);
+            }
+            accumulator = widened;
+            self.errors.truncate(step_errors);
+            self.strict_origins.truncate(step_origins);
+            let step_errors = self.errors.len();
+            callback_ty = self.infer(function);
+            self.errors.truncate(step_errors);
+        }
+        Some(accumulator)
+    }
+
+    /// Whether `ty` mentions an inference variable created before `first`, which is one the
+    /// enclosing code owns rather than one an instantiation just made.
+    fn mentions_var_before(&self, ty: Ty<'db>, first: u32) -> bool {
+        let db = self.db;
+        if !contains_inference_var(db, ty) {
+            return false;
+        }
+        if let TyKind::Var(var) = ty.kind(db) {
+            return var.0 < first;
+        }
+        let mut found = false;
+        for_each_child_type(db, ty, &mut |child| {
+            found = found || self.mentions_var_before(child, first);
+        });
+        found
+    }
+
     fn callback(&self, function: ExprId) -> Option<Callback<'db>> {
         let ExpressionKind::NameRef(name) = self.module.kind(function) else {
             return None;

@@ -5297,3 +5297,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
   `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
   as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.
+
+## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
+
+- Previous shape: `Reduce`'s stub `fn(f: fn(U, T) -> U, ...)` pinned the accumulator to the start type, so a function whose return is wider (`T | NULL`, a union of list shapes) was reported as "must return `T`", although R simply carries the wider value forward.
+- Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
+- A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.

@@ -2078,3 +2078,38 @@ outer <- function(y) {
 }
 #++++
 outer: <T> fn([y]: T) -> T | NULL
+
+#---- a_fold_accumulator_widens_to_what_the_function_returns
+same <- function(x, y) if (identical(x, y)) x
+allsame <- function(values) !is.null(Reduce(same, values))
+first_or_null <- function(values) Reduce(same, values)
+#++++
+same: <T, U> fn(x: T, y: U) -> T | NULL
+allsame: <T> fn(values: T) -> logical
+first_or_null: <T> fn(values: T) -> Unknown
+
+#---- a_fold_function_picked_by_an_if_folds_each_branch
+merge_a <- function(x, y) if (length(x) > 1) list(x, y) else c(x, y)
+merge_b <- function(x, y) c(x, y)
+simplify <- function(x, reals = TRUE) Reduce(if (reals) merge_a else merge_b, lapply(unclass(x), list))
+#++++
+merge_a: <T, U> fn(x: T, y: U) -> Unknown
+merge_b: <T, U> fn(x: T, y: U) -> Unknown
+simplify: <T, U> fn(x: T, [reals]: U) -> Unknown
+
+#---- a_fold_start_the_function_rejects_is_reported
+add <- function(count, value) count + 1L
+run <- function() Reduce(add, list(1, 2), "start")
+#++++
+add: <T: numeric, U> fn(count: T, [value]: U) -> T
+run: Unknown
+83..90 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_fold_over_known_elements_returns_the_widened_accumulator
+same <- function(x, y) if (identical(x, y)) x
+pick <- function() Reduce(same, list(1, 2))
+total <- function() Reduce(function(a, b) a + b, list(1, 2), 0L)
+#++++
+same: <T, U> fn(x: T, y: U) -> T | NULL
+pick: fn() -> double | NULL
+total: fn() -> double
