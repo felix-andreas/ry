@@ -701,6 +701,13 @@ impl Loader {
     /// `changed`, through the names the definitions mention, `changed` included. A test that
     /// mentions none of them runs exactly the code it ran before a reload that changed only
     /// `changed`, so `ry test` reruns the tests that mention one first.
+    ///
+    /// A call of a generic reaches its methods through S3 dispatch rather than by name, so a
+    /// reached method also reaches its generic: the generic a `NAMESPACE` registration names,
+    /// and each generic its name can be read as, `as` and `as.data` as well as `as.data.frame`
+    /// for `as.data.frame.ledger`. Reading too many names only reruns more tests. The generic
+    /// may be one the package does not define, such as `print`, and is listed all the same,
+    /// because a test that calls it dispatches to the method.
     pub fn callers(&self, root: &Path, changed: &[String]) -> Vec<String> {
         let Some(index) = self
             .packages
@@ -719,9 +726,23 @@ impl Loader {
                 }
             }
         }
+        let mut generics_of: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for method in &index.namespace.s3_methods {
+            generics_of
+                .entry(&method.function)
+                .or_default()
+                .push(&method.generic);
+        }
         let mut reached: FxHashSet<&str> = changed.iter().map(String::as_str).collect();
         let mut queue: Vec<&str> = reached.iter().copied().collect();
         while let Some(name) = queue.pop() {
+            let registered = generics_of.get(name).map_or(&[][..], Vec::as_slice);
+            let by_name = name.match_indices('.').map(|(at, _)| &name[..at]);
+            for generic in registered.iter().copied().chain(by_name) {
+                if !generic.is_empty() && reached.insert(generic) {
+                    queue.push(generic);
+                }
+            }
             for &caller in mentioned_by.get(name).map_or(&[][..], Vec::as_slice) {
                 if reached.insert(caller) {
                     queue.push(caller);
@@ -2014,6 +2035,21 @@ impl Plan {
             .filter_map(|code| code.name.clone())
             .chain(self.remove.iter().cloned())
             .collect();
+        names.sort();
+        names.dedup();
+        Some(names)
+    }
+
+    /// The names whose calls this plan may change, which [`Loader::callers`] starts from: the
+    /// touched names, and the method and generic of each S3 registration the plan adds or
+    /// drops, since a registration changes where a call of the generic dispatches without
+    /// rebinding anything. `None` when [`Plan::touched_names`] is.
+    pub fn changed_names(&self) -> Option<Vec<String>> {
+        let mut names = self.touched_names()?;
+        for method in self.s3_register.iter().chain(&self.s3_unregister) {
+            names.push(method.function.clone());
+            names.push(method.generic.clone());
+        }
         names.sort();
         names.dedup();
         Some(names)
