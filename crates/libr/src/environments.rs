@@ -199,13 +199,25 @@ pub unsafe extern "C" fn Rf_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| lookup_in_frame(env, symbol, "findVarInFrame"))
 }
 
 /// With `do_get` false GNU R only checks for existence; the value is cheap to return either way.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame3(env: Sexp, symbol: Sexp, _do_get: Rboolean) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame3")?, symbol))
+    enter(|| lookup_in_frame(env, symbol, "findVarInFrame3"))
+}
+
+/// GNU R reads `R_UnboundValue` as an environment with an empty frame, because the marker's
+/// fields line up with an empty frame and hash table. Packages rely on it: vctrs looks up a
+/// method's `.__S3MethodsTable__.` and searches whatever comes back, which is `R_UnboundValue`
+/// for a method defined in the global environment.
+unsafe fn lookup_in_frame(env: Sexp, symbol: Sexp, what: &str) -> ApiResult<Sexp> {
+    let unbound = runtime().heap.known().unbound;
+    if env == unbound {
+        return Ok(unbound);
+    }
+    frame_lookup(environment(env, what)?, symbol)
 }
 
 /// `R_findVar` and `R_findVarInFrame`: the names GNU R's own code uses for `Rf_findVar` and
@@ -217,7 +229,7 @@ pub unsafe extern "C" fn R_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| frame_lookup(environment(env, "findVarInFrame")?, symbol))
+    enter(|| lookup_in_frame(env, symbol, "findVarInFrame"))
 }
 
 /// `R_varloc_t`: a binding cell, or null when there is no binding. It is a one-pointer struct

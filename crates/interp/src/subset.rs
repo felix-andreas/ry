@@ -1631,19 +1631,31 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .into_iter()
         .filter(|&position| position != NA_POSITION)
         .collect();
-    if positions.is_empty() {
+    // A logical subscript longer than the vector extends it to the subscript's length, even
+    // past the last TRUE: `x <- NA; x[c(TRUE, FALSE)] <- 1` gives `c(1, NA)`.
+    let logical_extent = if index.kind() == SexpType::Logical {
+        length(index)
+    } else {
+        0
+    };
+    if positions.is_empty() && logical_extent <= count {
         return Ok(result);
     }
-    if value_count == 0 {
+    if !positions.is_empty() && value_count == 0 {
         return Err(crate::unwind::error_in(call, "replacement has length zero"));
     }
-    if !positions.len().is_multiple_of(value_count) {
+    if value_count > 0 && !positions.len().is_multiple_of(value_count) {
         conditions::warning_call(
             call,
             "number of items to replace is not a multiple of replacement length",
         )?;
     }
-    let needed = positions.iter().copied().max().map_or(0, |max| max + 1);
+    let needed = positions
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max| max + 1)
+        .max(logical_extent);
     if needed > count {
         result = grow(result, needed)?;
         if names != nil() || !new_names.is_empty() {
@@ -2778,6 +2790,17 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     if symbol == symbols.class {
         return crate::dispatch::set_class_attribute(object, value);
     }
+    // `dput()` of a data frame writes its compact row names as the double `c(NA, n)`; GNU R
+    // stores them back as integers so the frame keeps its compact form.
+    let value = if symbol == symbols.row_names
+        && value.kind() == SexpType::Real
+        && length(value) == 2
+        && values::reals(value)[0].is_nan()
+    {
+        coerce_vector(value, SexpType::Integer)?
+    } else {
+        value
+    };
     if symbol == symbols.row_names && value.kind() == SexpType::Integer {
         // Row names 1:n are stored compactly, as GNU R does.
         let data = values::ints(value);
@@ -2858,6 +2881,12 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     for pass in 0..2 {
         for index in 0..length(attributes) {
             let name = names.element(index);
+            if name == values::na_string() || name.bytes().is_empty() {
+                return Err(call.error(format!(
+                    "all attributes must have names [{} does not]",
+                    index + 1
+                )));
+            }
             let is_dim = name.bytes() == b"dim";
             if (pass == 0) != is_dim {
                 continue;
