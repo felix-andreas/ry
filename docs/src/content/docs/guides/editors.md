@@ -54,7 +54,10 @@ followed, so spell arguments out before you rename their parameter.
 
 A field ry cannot trace to the value it was read from, such as a field of a function parameter,
 goes to every place in the project that puts a field of that name into a value, and rename refuses
-it, because those places are a guess. A field of a value that a package function returns, such as
+it, because those places are a guess. For the same reason, renaming a field you can trace is
+refused while any other read of that name in the project cannot be traced, since that read might
+be the same field. A rename covers every `if` branch that builds the value, and it does not touch
+string indexing such as `cfg[["port"]]`. A field of a value that a package function returns, such as
 `optim(start, cost)$par`, goes to that function, whose help page describes what it returns. A
 named argument passed to a function that collects its `...` into a list, as in
 `new_rate <- function(...) list(...)` and then `new_rate(pause = 1)`, counts as a place that puts
@@ -62,10 +65,11 @@ named argument passed to a function that collects its `...` into a list, as in
 parameter of the function stored in `deposit`, and renaming that parameter renames the argument.
 
 The code of an installed package comes from its lazy-load database, so it is the code R runs. ry
-writes it to a read-only file under your cache directory (`~/.cache/ry/packages` on Linux), named
-by the package's version, and reads a package only when you first navigate into it. It finds
-packages where R does: the libraries in `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE`, your user
-library, the project's renv library, and R's own library. A package
+writes it to a file under your cache directory (`~/.cache/ry/packages` on Linux), named by the
+package's version, and reads a package only when you first navigate into it. Edits to that file
+change nothing, because ry regenerates it. Packages are looked up in this order: the project's
+renv library, the libraries in `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE`, your user library, and
+R's own library. A package
 installed with `options(keep.source.pkgs = TRUE)` shows its original source with comments,
 otherwise the code is deparsed. Base R's primitive functions, such as `sum` and `c`, have no R
 code, so they show only their arguments.

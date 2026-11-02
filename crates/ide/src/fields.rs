@@ -11,7 +11,7 @@ use {
     crate::{NavigationTarget, Occurrence, declaring_item, position_in_item},
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile,
-        hir::{AssignSpelling, ExprId, ExpressionKind, Module, Symbol},
+        hir::{Argument, AssignSpelling, ExprId, ExpressionKind, Module, Symbol},
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
     },
@@ -58,10 +58,7 @@ pub(crate) fn field_at(
             }
             ExpressionKind::Call { callee, arguments } if is_constructor(hir, *callee) => {
                 for argument in &hir[arguments] {
-                    let (Some(name), Some(range)) = (
-                        hir.argument_name(argument),
-                        hir.argument_name_range(argument),
-                    ) else {
+                    let Some((name, range)) = element(hir, *callee, argument) else {
                         continue;
                     };
                     if range.contains_inclusive(relative) {
@@ -191,6 +188,9 @@ fn resolve_with<'db>(
     let db = resolver.db;
     resolver.visited.clear();
     resolver.producers.clear();
+    // A cycle's placeholder leaves the expressions inside it with partial sources, which must
+    // not leak into the next access's resolution.
+    resolver.source_cache.clear();
     let hir = item_hir(db, item).as_ref()?;
     let ExpressionKind::Field {
         target,
@@ -236,80 +236,120 @@ fn resolve_with<'db>(
     })
 }
 
+/// The occurrences of a field, and whether a rename may edit them.
+pub(crate) struct FieldOccurrences {
+    pub occurrences: Vec<Occurrence>,
+    /// False when an edit could break code: the target is a guess, or some same-named read
+    /// cannot be traced and so might read this field.
+    pub renamable: bool,
+}
+
 /// Every read, write and declaration of the field `target` names. A guessed target is the
 /// by-name set of declarations, which every same-named access reaches, so all of them belong to
-/// it. A precise
-/// target takes the precise reads that reach one of its sites, so that a rename never edits a
-/// read it merely guessed at.
+/// it. A precise target grows to a closed set: a read that reaches one of its declarations
+/// belongs to it, and so does every other declaration that read reaches, because renaming one
+/// branch of `if (...) list(a = 1) else list(a = 2)` alone would leave `x$a` reading `NULL`.
 pub(crate) fn field_occurrences(
     db: &dyn Db,
     files: ProjectFiles,
     target: &FieldTarget,
-) -> Vec<Occurrence> {
+) -> FieldOccurrences {
     // A field nothing in the project declares (a column of a package's data frame, say) is no
     // symbol the project owns, so same-named reads are not known to be the same field.
     if target.sites.is_empty() {
-        return Vec::new();
+        return FieldOccurrences {
+            occurrences: Vec::new(),
+            renamable: false,
+        };
     }
-    let declaration = |file, range| Occurrence {
-        file,
-        range,
+    let declaration = |site: NavigationTarget| Occurrence {
+        file: site.file,
+        range: site.range,
         is_declaration: true,
     };
-    let mut result: Vec<Occurrence> = target
-        .sites
-        .iter()
-        .map(|site| declaration(site.file, site.range))
-        .collect();
-    let Some(spellings) = field_index(db, files).by_name.get(target.name.as_str()) else {
-        return result;
-    };
+    let spellings = field_index(db, files)
+        .by_name
+        .get(target.name.as_str())
+        .map_or(&[][..], Vec::as_slice);
     let accesses = spellings
         .iter()
         .filter(|spelled| spelled.kind == SpellingKind::Access);
     if !target.precise {
-        result.extend(accesses.map(|spelled| Occurrence {
+        let mut occurrences: Vec<Occurrence> =
+            target.sites.iter().copied().map(declaration).collect();
+        occurrences.extend(accesses.map(|spelled| Occurrence {
             file: spelled.file,
             range: spelled.range,
             is_declaration: false,
         }));
-        return result;
+        return FieldOccurrences {
+            occurrences,
+            renamable: false,
+        };
     }
-    let target_sites: HashSet<NavigationTarget> = target.sites.iter().copied().collect();
     let mut resolver = Resolver::new(db, files);
+    let mut renamable = true;
+    let mut reads: Vec<(NavigationTarget, Vec<NavigationTarget>)> = Vec::new();
     for spelled in accesses {
-        let file = spelled.file;
-        let Some(position) = position_in_item(db, file, spelled.range.start()) else {
-            continue;
+        let here = NavigationTarget {
+            file: spelled.file,
+            range: spelled.range,
         };
-        let Some(hir) = item_hir(db, position.item).as_ref() else {
-            continue;
-        };
-        let relative = spelled.range - position.item_offset;
-        let Some(index) = hir.expressions().position(|expression| {
-            matches!(expression.kind, ExpressionKind::Field { name: Some(name), .. }
-                if hir.name_range(*name) == relative)
-        }) else {
-            continue;
-        };
-        let Some(Resolved { sites, .. }) =
-            resolve_with(&mut resolver, position.item, ExprId::new(index))
-        else {
-            continue;
-        };
-        if sites.iter().any(|site| target_sites.contains(site)) {
-            let here = NavigationTarget {
-                file,
-                range: spelled.range,
-            };
-            result.push(Occurrence {
-                file,
-                range: spelled.range,
-                is_declaration: sites.contains(&here),
+        let sites =
+            position_in_item(db, spelled.file, spelled.range.start()).and_then(|position| {
+                let hir = item_hir(db, position.item).as_ref()?;
+                let relative = spelled.range - position.item_offset;
+                let index = hir.expressions().position(|expression| {
+                    matches!(expression.kind, ExpressionKind::Field { name: Some(name), .. }
+                    if hir.name_range(*name) == relative)
+                })?;
+                resolve_with(&mut resolver, position.item, ExprId::new(index))
+            });
+        match sites {
+            Some(Resolved { sites, .. }) if !sites.is_empty() => reads.push((here, sites)),
+            _ => renamable = false,
+        }
+    }
+    let mut closed: Vec<NavigationTarget> = target.sites.clone();
+    let mut included = vec![false; reads.len()];
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (index, (_, sites)) in reads.iter().enumerate() {
+            if included.get(index).copied().unwrap_or(true)
+                || !sites.iter().any(|site| closed.contains(site))
+            {
+                continue;
+            }
+            if let Some(flag) = included.get_mut(index) {
+                *flag = true;
+            }
+            grew = true;
+            for site in sites {
+                if !closed.contains(site) {
+                    closed.push(*site);
+                }
+            }
+        }
+    }
+    let mut occurrences: Vec<Occurrence> = closed.iter().copied().map(declaration).collect();
+    for ((here, _), _) in reads
+        .iter()
+        .zip(&included)
+        .filter(|(_, included)| **included)
+    {
+        if !closed.contains(here) {
+            occurrences.push(Occurrence {
+                file: here.file,
+                range: here.range,
+                is_declaration: false,
             });
         }
     }
-    result
+    FieldOccurrences {
+        occurrences,
+        renamable,
+    }
 }
 
 /// Every declaration of a field named `name` in the project, the fallback for a read whose
@@ -491,10 +531,7 @@ fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
                 }
                 ExpressionKind::Call { callee, arguments } if is_constructor(hir, *callee) => {
                     for argument in &hir[arguments] {
-                        if let (Some(name), Some(range)) = (
-                            hir.argument_name(argument),
-                            hir.argument_name_range(argument),
-                        ) {
+                        if let Some((name, range)) = element(hir, *callee, argument) {
                             push(name, SpellingKind::Element, range);
                         }
                     }
@@ -555,6 +592,40 @@ const R6_CLASS: &str = "R6Class";
 /// cost of a request on code that builds values through many helpers.
 const MAX_DEPTH: usize = 8;
 
+/// The field a constructor's named argument declares, unless the name is one of the
+/// constructor's own parameters, as `stringsAsFactors` is for `data.frame`.
+fn element(hir: &Module, callee: ExprId, argument: &Argument) -> Option<(Symbol, TextRange)> {
+    let name = hir.argument_name(argument)?;
+    let constructor = callee_name(hir, callee)?;
+    let parameters = CONSTRUCTOR_PARAMETERS
+        .iter()
+        .find(|(spelled, _)| *spelled == constructor.as_str())
+        .map_or(&[][..], |(_, parameters)| *parameters);
+    if parameters.contains(&name.as_str()) {
+        return None;
+    }
+    Some((name, hir.argument_name_range(argument)?))
+}
+
+/// The parameters of the constructors that take more than the fields they build.
+const CONSTRUCTOR_PARAMETERS: &[(&str, &[&str])] = &[
+    (
+        "data.frame",
+        &[
+            "row.names",
+            "check.rows",
+            "check.names",
+            "fix.empty.names",
+            "stringsAsFactors",
+        ],
+    ),
+    (
+        "data.table",
+        &["keep.rownames", "check.names", "key", "stringsAsFactors"],
+    ),
+    ("tibble", &[".rows", ".name_repair"]),
+];
+
 fn is_constructor(hir: &Module, callee: ExprId) -> bool {
     callee_name(hir, callee).is_some_and(|name| CONSTRUCTORS.contains(&name.as_str()))
 }
@@ -594,6 +665,10 @@ struct Resolver<'db> {
     visited: HashSet<(Item<'db>, ExprId, Symbol)>,
     /// The heads of library calls a followed value came from, as item and callee.
     producers: Vec<(Item<'db>, ExprId)>,
+    /// Each expression's sources and the producers found on the way, for one resolution. A
+    /// variable reassigned from itself (`s <- structure(s, ...)`) reaches every assignment from
+    /// every use, so without it the work grows as a power of the reassignments up to the depth.
+    source_cache: HashMap<(Item<'db>, ExprId), (Vec<Source<'db>>, Vec<(Item<'db>, ExprId)>)>,
     /// Per field name, the items that write it; per item and name, those writes. A global
     /// receiver's writes are searched across the project once, not once per access.
     written_items: HashMap<Symbol, Vec<Item<'db>>>,
@@ -607,6 +682,7 @@ impl<'db> Resolver<'db> {
             files,
             visited: HashSet::new(),
             producers: Vec::new(),
+            source_cache: HashMap::new(),
             written_items: HashMap::new(),
             field_writes: HashMap::new(),
         }
@@ -644,6 +720,33 @@ impl<'db> Resolver<'db> {
         if depth > MAX_DEPTH {
             return;
         }
+        let key = (item, expression);
+        if let Some((cached, producers)) = self.source_cache.get(&key) {
+            sources.extend(cached.iter().copied());
+            self.producers.extend(producers.iter().copied());
+            return;
+        }
+        // The empty placeholder ends a cycle back to this expression.
+        self.source_cache.insert(key, (Vec::new(), Vec::new()));
+        let producers_before = self.producers.len();
+        let mut found = Vec::new();
+        self.uncached_sources(item, expression, depth, &mut found);
+        let producers = self
+            .producers
+            .get(producers_before..)
+            .unwrap_or_default()
+            .to_vec();
+        sources.extend(found.iter().copied());
+        self.source_cache.insert(key, (found, producers));
+    }
+
+    fn uncached_sources(
+        &mut self,
+        item: Item<'db>,
+        expression: ExprId,
+        depth: usize,
+        sources: &mut Vec<Source<'db>>,
+    ) {
         let Some(hir) = item_hir(self.db, item).as_ref() else {
             return;
         };
@@ -870,14 +973,14 @@ impl<'db> Resolver<'db> {
                             },
                         ));
                     }
-                    ExpressionKind::Call { arguments, .. }
+                    ExpressionKind::Call { callee, arguments }
                         if !self.is_r6_class(item, expression) =>
                     {
                         sites.extend(hir[arguments].iter().filter_map(|argument| {
-                            (hir.argument_name(argument)? == name).then_some(())?;
-                            Some(Site {
+                            let (element_name, range) = element(hir, *callee, argument)?;
+                            (element_name == name).then_some(Site {
                                 item,
-                                range: hir.argument_name_range(argument)?,
+                                range,
                                 value: argument.value,
                             })
                         }));

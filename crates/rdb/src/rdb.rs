@@ -38,11 +38,20 @@ pub struct PackageSource {
 }
 
 /// The library directories to search for installed packages, in priority order and without
-/// duplicates: the `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE` variables, the default user
-/// library, a `.corpus/library` above `project_root`, the project's renv library, R's own
-/// library under `R_HOME`, and the usual install locations.
+/// duplicates: the project's renv library, the `R_LIBS`, `R_LIBS_USER` and `R_LIBS_SITE`
+/// variables, the default user library, a `.corpus/library` above `project_root` (the
+/// repository's own package corpus), R's own library under `R_HOME`, and the usual install
+/// locations.
 pub fn library_paths(project_root: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    // renv puts the project library first on `.libPaths()`, so it shadows every other one.
+    for outer in sorted_subdirectories(&project_root.join("renv/library")) {
+        for inner in sorted_subdirectories(&outer).into_iter().rev() {
+            if holds_packages(&inner) {
+                candidates.push(inner);
+            }
+        }
+    }
     let separator = if cfg!(windows) { ';' } else { ':' };
     for variable in ["R_LIBS", "R_LIBS_USER", "R_LIBS_SITE"] {
         let Some(value) = env::var_os(variable) else {
@@ -77,13 +86,6 @@ pub fn library_paths(project_root: &Path) -> Vec<PathBuf> {
         .find(|corpus| corpus.is_dir())
     {
         candidates.push(corpus);
-    }
-    for outer in sorted_subdirectories(&project_root.join("renv/library")) {
-        for inner in sorted_subdirectories(&outer).into_iter().rev() {
-            if holds_packages(&inner) {
-                candidates.push(inner);
-            }
-        }
     }
     if let Some(r_home) = env::var_os("R_HOME") {
         candidates.push(PathBuf::from(r_home).join("library"));

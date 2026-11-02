@@ -5238,6 +5238,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - A receiver that cannot be followed (a parameter) falls back to every same-named declaration in
   the project. That target is imprecise: references list every same-named access, and rename is
   refused, because a guess must never edit code.
+- A precise target's references are a closed set: a read that reaches one of its declarations
+  brings in every other declaration it reaches (both `if` branches). Rename is refused while any
+  same-named read in the project is untraced, because that read might be this field; the same
+  holds for a method parameter, whose calls are the field's reads.
+- Named arguments that are a constructor's own parameters (`stringsAsFactors`, `key`,
+  `.name_repair`) are no fields (`CONSTRUCTOR_PARAMETERS`).
+- `Resolver::sources` is memoized per resolution with a cycle placeholder, so a variable
+  reassigned from itself costs one pass per assignment, not a power of them.
 - A receiver a library function returns has its fields declared by that function, so goto goes
   to the function (stub or installed package) and the hover carries its help page.
 - A tag's payload record is not a field declaration, because patterns, not `$`, read it.

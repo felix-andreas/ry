@@ -720,3 +720,134 @@ references: 167..172*, 216..221
 rename: none
 signature: none
 completion (1): pause
+
+#---- field_rename_closes_over_branches
+x <- if (runif(1) > 0.5) list(a$0 = 1) else list(a = 2)
+x$a
+#++++
+hover 30..31: a: double
+definition 30..31
+references: 30..31*, 47..48*, 56..57
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `x`
+  edit 0..0 -> "#: list{a: double}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: list{a: double}\n"
+completion (128+): abbreviate, ability.cov, abline, abs, acf, acf2AR, acos, acosh
+hint @1: list{a: double}
+
+#---- field_rename_refuses_untraced_read
+cfg <- list(po$0rt = 1)
+f <- function(p) p$port
+f(cfg)
+cfg$port
+#++++
+hover 12..16: port: double
+definition 12..16
+references: 12..16*, 57..61
+rename: none
+signature: none
+action: Add inferred type annotation for `cfg`
+  edit 0..0 -> "#: list{port: double}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: list{port: double}\n"
+completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
+hint @3: list{port: double}
+
+#---- field_constructor_parameter
+df <- data.frame(x = 1, stringsAsFac$0tors = FALSE)
+#++++
+hover 24..40: [stringsAsFactors]: logical
+definition: stub source base at `data.frame`
+references: none
+rename: none
+type-definition: stub source base at `data.frame`
+signature: fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
+parameters: ...: Any | [row.names]: Any | [check.rows]: logical | [check.names]: logical | [fix.empty.names]: logical | [[stringsAsFactors]: logical]
+action: Add inferred type annotation for `df`
+  edit 0..0 -> "#: data.frame\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
+completion (1): default.stringsAsFactors
+hint @2: data.frame
+
+#---- field_self_reassigned
+f <- function() {
+  s <- list(k = 1)
+  s <- structure(s, class = "c1")
+  s <- structure(s, class = "c2")
+  s <- structure(s, class = "c3")
+  s <- structure(s, class = "c4")
+  s <- structure(s, class = "c5")
+  s <- structure(s, class = "c6")
+  s <- structure(s, class = "c7")
+  s <- structure(s, class = "c8")
+  s <- structure(s, class = "c9")
+  s <- structure(s, class = "c10")
+  s <- structure(s, class = "c11")
+  s <- structure(s, class = "c12")
+  s <- structure(s, class = "c13")
+  s <- structure(s, class = "c14")
+  s <- structure(s, class = "c15")
+  s <- structure(s, class = "c16")
+  s <- structure(s, class = "c17")
+  s <- structure(s, class = "c18")
+  s <- structure(s, class = "c19")
+  s <- structure(s, class = "c20")
+  s$$0k
+}
+#++++
+hover 732..733: k: double
+definition 30..31
+references: 30..31*, 732..733
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: fn() -> double\n"
+action: Add inferred type annotations for the whole file
+  edit 18..18 -> "  #: list{k: double}\n"
+  edit 37..37 -> "  #: list{k: double}\n"
+  edit 71..71 -> "  #: list{k: double}\n"
+  edit 105..105 -> "  #: list{k: double}\n"
+  edit 139..139 -> "  #: list{k: double}\n"
+  edit 173..173 -> "  #: list{k: double}\n"
+  edit 207..207 -> "  #: list{k: double}\n"
+  edit 241..241 -> "  #: list{k: double}\n"
+  edit 275..275 -> "  #: list{k: double}\n"
+  edit 309..309 -> "  #: list{k: double}\n"
+  edit 343..343 -> "  #: list{k: double}\n"
+  edit 378..378 -> "  #: list{k: double}\n"
+  edit 413..413 -> "  #: list{k: double}\n"
+  edit 448..448 -> "  #: list{k: double}\n"
+  edit 483..483 -> "  #: list{k: double}\n"
+  edit 518..518 -> "  #: list{k: double}\n"
+  edit 553..553 -> "  #: list{k: double}\n"
+  edit 588..588 -> "  #: list{k: double}\n"
+  edit 623..623 -> "  #: list{k: double}\n"
+  edit 658..658 -> "  #: list{k: double}\n"
+  edit 693..693 -> "  #: list{k: double}\n"
+  edit 0..0 -> "#: fn() -> double\n"
+completion (1): k
+hint @1: fn() -> double
+hint @21: list{k: double}
+hint @40: list{k: double}
+hint @74: list{k: double}
+hint @108: list{k: double}
+hint @142: list{k: double}
+hint @176: list{k: double}
+hint @210: list{k: double}
+hint @244: list{k: double}
+hint @278: list{k: double}
+hint @312: list{k: double}
+hint @346: list{k: double}
+hint @381: list{k: double}
+hint @416: list{k: double}
+hint @451: list{k: double}
+hint @486: list{k: double}
+hint @521: list{k: double}
+hint @556: list{k: double}
+hint @591: list{k: double}
+hint @626: list{k: double}
+hint @661: list{k: double}
+hint @696: list{k: double}

@@ -962,7 +962,14 @@ pub fn rename(
     // type would leave them pointing at nothing.
     match &target {
         Target::Tag(name) if stub_mentions_tag(db, name) => return None,
-        Target::Field(field) if !field.precise => return None,
+        Target::Field(field) if !fields::field_occurrences(db, files, field).renamable => {
+            return None;
+        }
+        Target::Slot { item, binding }
+            if !named_argument_occurrences(db, files, *item, *binding, &mut Vec::new()) =>
+        {
+            return None;
+        }
         _ => {}
     }
     let occurrences = occurrences(db, files, &target);
@@ -5770,15 +5777,15 @@ fn named_argument_occurrences(
     item: Item<'_>,
     binding: BindingId,
     result: &mut Vec<Occurrence>,
-) {
+) -> bool {
     let (Some(hir), Some(naming)) = (item_hir(db, item), item_naming(db, item)) else {
-        return;
+        return true;
     };
     let Some(info) = naming.bindings.get(&binding) else {
-        return;
+        return true;
     };
     if info.kind != BindingKind::Parameter {
-        return;
+        return true;
     }
     let Some(function) = hir
         .expressions()
@@ -5793,7 +5800,7 @@ fn named_argument_occurrences(
                 .then(|| ExprId::new(index))
         })
     else {
-        return;
+        return true;
     };
     let function_binding = hir
         .expressions()
@@ -5804,6 +5811,7 @@ fn named_argument_occurrences(
             _ => None,
         });
     let mut callers = Vec::new();
+    let mut renamable = true;
     match function_binding.and_then(|binding| Some((binding, naming.bindings.get(&binding)?))) {
         Some((_, function_info)) if function_info.kind == BindingKind::TopLevel => {
             callers = occurrences(db, files, &Target::Global(function_info.name.to_string()));
@@ -5811,14 +5819,19 @@ fn named_argument_occurrences(
         Some((function_binding, _)) => {
             slot_occurrences(db, item, function_binding, &mut callers);
         }
-        // A method, `list(copy = function(deep) ...)`: its calls are the reads of the field,
-        // when those are known precisely.
+        // A method, `list(copy = function(deep) ...)`: its calls are the reads of the field.
+        // A rename must reach every one of them, so a guessed field or an untraced
+        // same-named read refuses it.
         None => {
-            if let Some(declared) = field_holding(hir, function)
-                && let Some(field) = fields::field_at(db, files, item, declared.start())
-                && field.precise
-            {
-                callers = fields::field_occurrences(db, files, &field);
+            if let Some(declared) = field_holding(hir, function) {
+                match fields::field_at(db, files, item, declared.start()) {
+                    Some(field) if field.precise => {
+                        let found = fields::field_occurrences(db, files, &field);
+                        renamable = found.renamable;
+                        callers = found.occurrences;
+                    }
+                    _ => renamable = false,
+                }
             }
         }
     }
@@ -5848,6 +5861,7 @@ fn named_argument_occurrences(
             }));
         }
     }
+    renamable
 }
 
 /// The item-relative name range of the field that `value` is put into: a named argument of a
@@ -5887,7 +5901,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     let mut result = Vec::new();
     match target {
         Target::StubGlobal(_) | Target::Package(_) => {}
-        Target::Field(field) => result = fields::field_occurrences(db, files, field),
+        Target::Field(field) => result = fields::field_occurrences(db, files, field).occurrences,
         Target::TypeParameter(occurrences) => result = occurrences.clone(),
         Target::Tag(name) => result = tag_occurrences(db, files, name),
         Target::Slot { item, binding } => {
