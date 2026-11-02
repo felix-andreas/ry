@@ -372,18 +372,17 @@ fn native_functions_agree_across_tiers() {
 #[test]
 fn run_time_binding_shadows_cached_global_function() {
     // Once compiled code has cached the global `g`, a `g` bound in the activation's own frame at
-    // run time, in ways the compiler cannot see, must shadow it.
+    // run time, in ways the compiler cannot see, must shadow it. The oracle case
+    // `environments__hidden_function_bindings` covers `assign` into `parent.frame()`, which needs
+    // base R's closures.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::Force);
         run("g <- function() \"global\"");
-        run("setter <- function() assign(\"g\", function() \"local\", envir = parent.frame())");
         let definitions = [
-            "via_parent <- function(set) { if (set) setter(); g() }",
             "via_default <- function(set, x = if (set) (g <- function() \"local\")) { x; g() }",
-            "via_qualified <- function(set) { if (set) base::assign(\"g\", function() \"local\"); g() }",
             "gen <- function(x, set) { if (set) g <- function() \"local\"; UseMethod(\"gen\") }\ngen.default <- function(x, set) g()",
         ];
-        let calls = ["via_parent", "via_default", "via_qualified", "gen"];
+        let calls = ["via_default", "gen"];
         let mut outcomes = Vec::new();
         for (definition, name) in definitions.iter().zip(calls) {
             run(definition);
