@@ -1820,6 +1820,7 @@ mod tests {
                 flag_return: None,
                 quoted: Vec::new(),
                 default_reads: Vec::new(),
+                missing_tested: Vec::new(),
             }),
         );
         let positional_interface = Ty::new(
@@ -1833,6 +1834,7 @@ mod tests {
                 flag_return: None,
                 quoted: Vec::new(),
                 default_reads: Vec::new(),
+                missing_tested: Vec::new(),
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));

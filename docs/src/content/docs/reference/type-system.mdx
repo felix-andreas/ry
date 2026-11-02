@@ -2458,6 +2458,12 @@ exceptions and additions:
   still forces it, except for a base R parameter that has no default and that the function tests
   with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
   the formal unforced.
+- Passing the formal bare, under any name or position, to a project function's parameter that the
+  callee may leave unread does not force it either. Such a parameter is optional without a default,
+  or tested with `missing()` in the callee's body. A missing formal passed on does not take the
+  callee's default, so in `table_of <- function(x, format) pick_format(format)`, `format` is
+  optional when `pick_format <- function(format = NULL)` tests `missing(format)` before reading it,
+  and required when `pick_format` reads it untested.
 - Passing the formal positionally to a function that the enclosing body defines further down,
   as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
   "advice"` in the same `local()`, does not force it either. The sibling runs only after its

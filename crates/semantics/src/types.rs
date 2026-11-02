@@ -334,6 +334,9 @@ pub struct FunctionType<'db> {
     /// Optional formals that a forced formal's default reads: `function(x, y = x) y` may be
     /// called as `g(y = 1)` but not as `g()`. Inferred only.
     pub default_reads: Vec<DefaultRead<'db>>,
+    /// Formals the body tests with `missing()`, so a missing formal the caller forwards there
+    /// may stay unread even when the formal has a default. Inferred only.
+    pub missing_tested: Vec<Name<'db>>,
 }
 
 /// `formal` is required by a call that leaves out `default_of`, whose default reads it.
@@ -769,6 +772,7 @@ fn mapped_kind<'db>(
             }),
             quoted: function.quoted.clone(),
             default_reads: function.default_reads.clone(),
+            missing_tested: function.missing_tested.clone(),
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -995,6 +999,7 @@ mod tests {
                 flag_return: None,
                 quoted: Vec::new(),
                 default_reads: Vec::new(),
+                missing_tested: Vec::new(),
             }),
         );
 
@@ -1024,6 +1029,7 @@ mod tests {
                 flag_return: None,
                 quoted: Vec::new(),
                 default_reads: Vec::new(),
+                missing_tested: Vec::new(),
             }),
         );
         let f2 = Ty::new(
@@ -1037,6 +1043,7 @@ mod tests {
                 flag_return: None,
                 quoted: Vec::new(),
                 default_reads: Vec::new(),
+                missing_tested: Vec::new(),
             }),
         );
         assert_eq!(f1, f2);

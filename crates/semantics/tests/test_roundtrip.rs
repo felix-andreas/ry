@@ -24,8 +24,9 @@ use {
 /// syntax, so the declared form returns both branches. A formal that is read as a value and
 /// also handed to `match.fun` keeps an open type when inferred, while the declared form pins it
 /// to the function `match.fun` expects. An argument the callee only substitutes is unchecked at
-/// an inferred call, while the declared parameter type is checked.
-const KNOWN_UNWRITABLE: [&str; 17] = [
+/// an inferred call, while the declared parameter type is checked. A parameter the body tests with
+/// `missing()` lets a caller forward its own missing formal there, which a declared default does not.
+const KNOWN_UNWRITABLE: [&str; 18] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -43,6 +44,7 @@ const KNOWN_UNWRITABLE: [&str; 17] = [
     "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: spread",
     "semantics/tests/typing::correct_r__a_formal_read_as_a_value_may_name_the_function_it_passes :: trim",
     "semantics/tests/typing::correct_r__an_argument_the_callee_only_substitutes_is_not_checked_in_the_caller :: wrap",
+    "semantics/tests/typing::correct_r__a_formal_forwarded_to_a_missing_tested_defaulted_parameter_is_optional :: pick_format",
 ];
 
 #[test]

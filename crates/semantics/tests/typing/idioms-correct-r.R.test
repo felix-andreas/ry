@@ -2113,3 +2113,34 @@ total <- function() Reduce(function(a, b) a + b, list(1, 2), 0L)
 same: <T, U> fn(x: T, y: U) -> T | NULL
 pick: fn() -> double | NULL
 total: fn() -> double
+
+#---- a_formal_forwarded_to_a_missing_tested_defaulted_parameter_is_optional
+pick_format <- function(format = NULL) {
+  if (missing(format) || is.null(format)) format <- "pipe"
+  format
+}
+table_of <- function(x, format) {
+  format <- pick_format(format)
+  paste(x, format)
+}
+run <- function() table_of(1)
+#++++
+pick_format: <T> fn([format]: T | NULL) -> Unknown
+table_of: <T, U> fn(x: T, [format]: U) -> character
+run: fn() -> character
+
+#---- a_formal_forwarded_to_a_defaulted_parameter_the_callee_reads_is_required
+pick_format <- function(format = NULL) {
+  if (is.null(format)) format <- "pipe"
+  format
+}
+table_of <- function(x, format) {
+  format <- pick_format(format)
+  paste(x, format)
+}
+run <- function() table_of(1)
+#++++
+pick_format: <T> fn([format]: T | NULL) -> Unknown
+table_of: <T, U> fn(x: T, format: U) -> character
+run: Unknown
+197..205 error[type-mismatch] this call leaves out `format`, which the function requires

@@ -2572,6 +2572,11 @@ impl<'db> Checker<'db, '_> {
                             .map(|parameter| Name::new(self.db, &parameter.name))
                             .collect(),
                         default_reads,
+                        missing_tested: module[parameters]
+                            .iter()
+                            .filter(|parameter| uses.missing_tested.contains(&parameter.name))
+                            .map(|parameter| Name::new(self.db, &parameter.name))
+                            .collect(),
                     }),
                 )
             }
@@ -5038,9 +5043,10 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// For each argument of a call to the project function `name`, whether it binds a
-    /// parameter the callee may leave unread: optional without a default. A missing formal
-    /// passed on does not take the callee's default, so a defaulted parameter that the
-    /// callee reads still errors. Names match exactly, and the remaining
+    /// parameter the callee may leave unread: optional without a default, or one the callee
+    /// tests with `missing()`. A missing formal passed on does not take the callee's default,
+    /// so a defaulted parameter that the callee reads without testing it still errors, while
+    /// knitr's `kable_format(format = NULL)` tests `missing(format)` before any read. Names match exactly, and the remaining
     /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
     /// optional targets, so its arguments stay forced. A local function the enclosing body
     /// has already bound counts as well, as callr's `format_advice(x)` hands `x` to a local
@@ -5078,8 +5084,11 @@ impl<'db> Checker<'db, '_> {
         let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
             return Vec::new();
         };
-        let leaves_unread =
-            |parameter: &Parameter<'db>| parameter.optional && parameter.default.is_none();
+        let leaves_unread = |parameter: &Parameter<'db>| {
+            parameter.optional
+                && (parameter.default.is_none()
+                    || function.missing_tested.contains(&parameter.name))
+        };
         let mut claimed = vec![false; function.named.len()];
         let mut targets = vec![false; arguments.len()];
         for (index, argument) in arguments.iter().enumerate() {
@@ -7115,6 +7124,7 @@ impl<'db> Checker<'db, '_> {
             flag_return: None,
             quoted: Vec::new(),
             default_reads: Vec::new(),
+            missing_tested: Vec::new(),
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -10928,6 +10938,7 @@ impl<'db> Checker<'db, '_> {
                         flag_return: None,
                         quoted: Vec::new(),
                         default_reads: Vec::new(),
+                        missing_tested: Vec::new(),
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
