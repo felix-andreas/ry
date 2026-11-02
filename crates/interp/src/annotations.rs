@@ -96,6 +96,7 @@ const CHARACTER: Mask = bit(SexpType::String);
 const RAW: Mask = bit(SexpType::Raw);
 const NULL: Mask = bit(SexpType::Nil);
 const LIST: Mask = bit(SexpType::List);
+const NATIVE: Mask = bit(SexpType::Record);
 const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(SexpType::Special);
 /// `Array<T>`: the value must carry the Array bit, and its storage must be one the item type
 /// admits (any storage when the item type is not decidable from storage).
@@ -556,6 +557,14 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             }) =>
         {
             0
+        }
+        // A ry record or tuple is its own storage kind, not an R list.
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE
+            if node
+                .first_token()
+                .is_some_and(|token| matches!(token.text(), "Record" | "Tuple")) =>
+        {
+            NATIVE
         }
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_LIST => LIST,
         SyntaxKind::TYPE_FUNCTION => FUNCTION,
