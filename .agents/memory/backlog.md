@@ -65,7 +65,6 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **`R/unix/` and `R/windows/` subdirectories are not loaded**, nor are `data/` datasets (LazyData).
 - **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
   reload that re-registers it and never removed.
 - **A declared `S3method` whose function does not exist** registers a promise that fails at
@@ -697,17 +696,6 @@ The memory note of about 300 MiB at 302k lines holds for the script shape, at 34
 lines, and is sixteen times off for the package shape. Memory attribution in the healthy shape is
 parse at 82 MiB, lowering and naming at 158 MiB, typecheck at 47 MiB and diagnostics at 28 MiB. HIR
 and naming dominate resident memory at rest, not interned types.
-
-### Fan the formatter out
-
-On an identical file set of ggplot2's 339 files, 64,302 lines and 2.0 MiB, single-threaded on both
-sides, `fmt --check` takes 1.01 s and `check` takes 2.26 s. The formatter costs half what the type
-checker does.
-
-Format is 113 ms of parse plus about 890 ms of render, so the render is about eight times the parse,
-at 1.9 MiB/s against about 18 MiB/s for parsing. The actionable part is to fan `fmt` out the way
-`check` already does. The render's factor of eight was not localized and needs its own profile
-before anyone touches it.
 
 ### Open from a fixed entry: the `BTreeMap` choice in `ItemNaming`
 
@@ -2310,13 +2298,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the "deparse may be incomplete" warning.
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
-- **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
-  push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
-  `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
-- **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
-  package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
-- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
-  only loader, so macOS and Windows need their own paths.
 - **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
   packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
   oracle cases; what is left:
@@ -2345,8 +2326,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   with a release build.
 - **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
-- **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
-  context, so it prints `Calls: print -> .Call` where ry prints none.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
   length enough to allocate before the read fails. Bound the allocation by the bytes remaining
@@ -2804,8 +2783,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **The formatter is not slower than the type checker.** The original reading compared a parallel
   command against a sequential one, because `ry check .` fans out over `available_parallelism()`
   while `ry fmt` is a plain loop. On an identical file set with both single-threaded, the formatter
-  costs 1.01 s against the checker's 2.26 s. Fanning `fmt` out is still open, as is the unlocalized
-  fact that the render is about eight times the parse, at 1.9 MiB/s against about 18 MiB/s.
+  costs 1.01 s against the checker's 2.26 s. `ry fmt` has since been fanned out and sped up (see
+  `MEMORY.md`, "Formatter speed").
 
 - **The overload corpus is not inflated by a missing grammar feature.** The constrained binder works
   in a `#:` annotation and in a `.Rtypes` file alike, and shape-mirroring falls out of it: a project
@@ -3064,15 +3043,19 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
 - 5 matrix indexing, a documented limitation.
 
-## Server cold start from the check cache
+## Check cache follow-ups
 
-- The language server starts from nothing and does not read `.ry_cache/check.json`. It could publish
-  the recorded findings of unchanged files at once and check them in idle time, but its findings
-  come from the open buffers and its own scheduling waves, so it needs its own rule for when a
-  recorded finding is still valid. Measure first how long the server's first full wave takes on a
-  benchmark.
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check is about 1.45 s on 4 cores and already uses about 3.4 of them, so the 1 s cold target
-  needs about a third less CPU work. The levers are in "Benchmark code bases (measured)".
+- A cold check is about 1.45-1.6 s on 4 cores and already uses about 3.4 of them, so the 1 s cold
+  target needs about a third less CPU work. Under callgrind the finance bench went from 27.6 to
+  24.6 G instructions with: direct descent in `node_at`, green walks for `write_tokens`, a node-only
+  `walk_green` (syntax lints 2.1 to 1.06 G, syntax sites 0.82 to 0.66 G), a per-check memo of type
+  definitions, and a formal-use walk that tracks only the formals. Wall time did not move outside the
+  machine's noise. What is left is flat: item checking 11.05 G (45%, `infer_ordinary_call` 5.7 G,
+  argument matching 1.75 G, `InferenceTable::resolve` 1.8 G), parse inside `file_attached_namespaces`
+  4.2 G (rowan's node cache, `flush_deferred_trivia`, the lexer), HIR lowering 3.7 G, naming
+  `resolve` 0.88 G, mimalloc about 4.5 G spread over all of them, and salsa's dependency edges about
+  0.7 G. A real third needs the checker's per-call allocations gone (argument targets, scheme clones,
+  `match_arguments` vectors) and a cheaper tree build, not more local cuts.

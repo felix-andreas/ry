@@ -94,6 +94,18 @@ fn routines_return_correct_values() {
     );
 }
 
+/// `FRAME` builds a pairlist that GNU R would find in the environment itself, so it must outlive
+/// the handout window for as long as the native call runs.
+#[test]
+fn frame_snapshots_live_until_the_call_returns() {
+    let r = r();
+    rytest(&r);
+    let value = r
+        .call("rytest_frame_lifetime", &[r.integer(10_000)])
+        .expect("rytest_frame_lifetime");
+    assert_eq!(r.integers(value), vec![7]);
+}
+
 /// GNU R's number formatting API and the binding-cell and string-buffer entry points GNU R
 /// exports without declaring them, as packages call them.
 #[test]
@@ -204,6 +216,33 @@ fn errors_unwind_through_native_frames() {
     let inner = inner_call;
     let inner = r.quote(inner);
     assert_eq!(error, "Error: custom: inner\n");
+
+    // GNU R gives a foreign call a context of its own, which a traceback lists and
+    // `sys.calls()` does not.
+    let traceback = r.call_expression(
+        ".Internal",
+        &[(
+            None,
+            r.call_expression("traceback", &[(None, r.integer(0))]),
+        )],
+    );
+    let calls = r
+        .call("rytest_eval", &[r.quote(traceback), global])
+        .expect("the calls on the stack");
+    let calls = r.keep(unsafe { (r.api().Rf_coerceVector)(calls, VECSXP as u32) });
+    assert_eq!(r.length(calls), 1, "only the foreign call is on the stack");
+    let text = r.strings(r.element(calls, 0));
+    assert!(
+        text[0]
+            .as_deref()
+            .is_some_and(|line| line.starts_with(".Call(\"rytest_eval\"")),
+        "{text:?}"
+    );
+    let sys_calls = r.call_expression(".Internal", &[(None, r.call_expression("sys.calls", &[]))]);
+    let calls = r
+        .call("rytest_eval", &[r.quote(sys_calls), global])
+        .expect("sys.calls()");
+    assert_eq!(r.type_of(calls), NILSXP);
 
     // A nested R error (stop) inside native code, stopped by R_tryEvalSilent in native code.
     let stop = r.call_expression("stop", &[(None, r.string("from stop"))]);
@@ -419,6 +458,17 @@ fn objects_survive_collection_and_finalizers_run() {
         r.integers(r.call("rytest_finalized", &[]).expect("count"))[0],
         before + 5
     );
+
+    // A short loop keeps the dropped pointer among the call's recent handouts; a long one lets
+    // the collection inside the call reclaim it, and with it the first pointer.
+    let finalized = |r: &R| r.integers(r.call("rytest_finalized", &[]).expect("count"))[0];
+    let before = finalized(&r);
+    r.call("rytest_dropped_temporary", &[r.integer(100), r.integer(10)])
+        .expect("a short loop");
+    assert_eq!(finalized(&r), before, "a recent handout stays rooted");
+    r.call("rytest_dropped_temporary", &[r.integer(1), r.integer(5000)])
+        .expect("a long loop");
+    assert_eq!(finalized(&r), before + 101, "old handouts are released");
 }
 
 #[test]
