@@ -1385,6 +1385,52 @@ show: <T> fn([tab]: T, fade: logical) -> character[]
 render: Unknown
 99..103 error[type-mismatch] expected `fn(T) -> U`, found `fn([tab]: V, fade: logical) -> character[]`
 
+#---- an_inferred_logical_callback_parameter_takes_numbers
+# gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
+# passing the callback over integers is too.
+not <- function(value) {
+  if (value) FALSE else TRUE
+}
+flags <- function() lapply(0:3, not)
+#++++
+not: fn(value: logical) -> logical
+flags: fn() -> list[logical]
+
+#---- an_element_fills_an_inferred_logical_parameter_after_a_forwarded_name
+# gmp's `lapply(0:(n - 1L), Eulerian, n = n)`: `n = n` fills `n`, so each element fills `k`.
+eulerian <- function(n, k) {
+  if (n && k) 1 else 0
+}
+row <- function(n) lapply(0:(n - 1L), eulerian, n = n)
+#++++
+eulerian: fn(n: logical, [k]: logical) -> double
+row: fn(n: logical) -> list[double]
+
+#---- an_inferred_logical_callback_parameter_still_rejects_strings
+not <- function(value) {
+  if (value) FALSE else TRUE
+}
+flags <- function() lapply(c("a", "b"), not)
+#++++
+not: fn(value: logical) -> logical
+flags: Unknown
+96..99 error[type-mismatch] this function is passed `character`, but its parameter `value` accepts `logical`
+
+#---- a_logical_text_string_is_an_inferred_logical_argument
+# renv's `not(Sys.getenv("CHECK", unset = "TRUE"))`: `if ("TRUE")` runs in R.
+not <- function(value) {
+  if (value) FALSE else TRUE
+}
+from_env <- function() not(Sys.getenv("CHECK", unset = "TRUE"))
+from_text <- function() not("TRUE")
+from_word <- function() not("yes")
+#++++
+not: fn(value: logical) -> logical
+from_env: fn() -> logical
+from_text: fn() -> logical
+from_word: Unknown
+262..267 error[type-mismatch] expected `logical`, found `character`
+
 #---- a_root_finder_callback_may_return_a_vector
 # GeneralizedHyperbolic's `uniroot(zeroFnLess, param = param, p = p[i], interval = xRange)`.
 #: fn(x: double) -> double[]

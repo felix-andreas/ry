@@ -6431,18 +6431,7 @@ impl<'db> Checker<'db, '_> {
         if site == ConditionSite::IfOrWhile
             && matches!(resolved.kind(self.db), TyKind::Scalar(Atomic::Character))
         {
-            let mut operand = condition;
-            while let ExpressionKind::Paren(inner) = self.module.kind(operand) {
-                operand = *inner;
-            }
-            let reads_as_logical = match self.module.kind(operand) {
-                ExpressionKind::Literal(LiteralKind::String(text)) => matches!(
-                    &self.module[text],
-                    "TRUE" | "true" | "True" | "T" | "FALSE" | "false" | "False" | "F"
-                ),
-                _ => true,
-            };
-            if reads_as_logical {
+            if self.reads_as_logical_text(condition) {
                 return;
             }
         }
@@ -6482,6 +6471,22 @@ impl<'db> Checker<'db, '_> {
             }
         }
         self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), resolved);
+    }
+
+    /// Whether a string value may read as a logical through `as.logical`: only a literal shows
+    /// its text, and then only R's logical spellings do.
+    fn reads_as_logical_text(&self, value: ExprId) -> bool {
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+            value = *inner;
+        }
+        match self.module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => matches!(
+                &self.module[text],
+                "TRUE" | "true" | "True" | "T" | "FALSE" | "false" | "False" | "F"
+            ),
+            _ => true,
+        }
     }
 
     /// `c(a, b, ...)` with two or more elements is longer than one whatever its elements are,
@@ -11374,6 +11379,24 @@ impl<'db> Checker<'db, '_> {
         if inferred_signature && self.fits_inferred_scalar(expected, ty) {
             return Some(expected);
         }
+        // A body tests a flag with `if`, which reads a string through `as.logical`, so renv's
+        // `not(Sys.getenv("CHECK", unset = "TRUE"))` passes. A literal shows its text, and only
+        // R's logical spellings pass.
+        if inferred_signature
+            && matches!(
+                self.table.shallow_resolve(self.db, expected).kind(self.db),
+                TyKind::Scalar(Atomic::Logical)
+            )
+            && matches!(
+                self.table.resolve(self.db, ty).kind(self.db),
+                TyKind::Scalar(Atomic::Character)
+            )
+            && argument
+                .value
+                .is_none_or(|value| self.reads_as_logical_text(value))
+        {
+            return Some(expected);
+        }
         let ty = self.joined_list_union(expected, ty);
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
@@ -11720,6 +11743,14 @@ impl<'db> Checker<'db, '_> {
                 let argument_ty = match argument {
                     Some(argument) => {
                         self.argument_type_for(target, argument, actual_callback.inferred)
+                    }
+                    // An element takes the leniency a direct call gives an inferred scalar,
+                    // so gmp's `lapply(0:(n - 1L), Eulerian, n = n)` fills `k` as
+                    // `Eulerian(n = n, 0L)` would.
+                    None if actual_callback.inferred
+                        && argument_ty.is_some_and(|ty| self.fits_inferred_scalar(target, ty)) =>
+                    {
+                        continue;
                     }
                     None => argument_ty,
                 };

@@ -21,7 +21,7 @@ use {
 /// no names to match.
 /// A callback the body calls with two arities after testing `formals()` has no single declared
 /// shape that admits both calls.
-const KNOWN_UNWRITABLE: [&str; 11] = [
+const KNOWN_UNWRITABLE: [&str; 12] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -33,6 +33,7 @@ const KNOWN_UNWRITABLE: [&str; 11] = [
     "semantics/tests/typing::correct_r__a_vector_forwarded_to_a_callback_fits_its_inferred_scalar_parameter :: show",
     "semantics/tests/typing::correct_r__a_callback_called_with_the_arity_its_formals_report_is_not_an_arity_error :: new_source",
     "semantics/tests/typing::correct_r__a_callback_whose_first_call_passed_an_integer_takes_a_double_later :: palette",
+    "semantics/tests/typing::correct_r__an_inferred_logical_callback_parameter_takes_numbers :: not",
 ];
 
 #[test]
