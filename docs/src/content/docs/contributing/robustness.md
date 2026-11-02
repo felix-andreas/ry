@@ -189,6 +189,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |
 | Debugger | scripted sessions and a seeded client that sends random requests at every stop (`interp` `test_debugger`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean |
 | Interpreter | generated programs (`interp` `test_fuzz`); differential fuzzing; `cargo fuzz` `interp_lower`, `bytecode` | GNU R, tier 0 |
+| Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases | no panic, identical bytes on a second render, one file per page; GNU R's warnings and capabilities |
 | Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
 | C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |
 | JIT | `test_tiers`; differential fuzzing with `RY_JIT=force` | tier 0, GNU R |

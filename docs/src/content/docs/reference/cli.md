@@ -123,7 +123,9 @@ script with them erased. ry's runtime is under construction: a script that calls
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
 built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and `tiff` devices write their files when
-the device closes or the script ends. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+the device closes or the script ends. They draw gradients, patterns, clipping paths, masks, groups
+and even-odd fills except on `postscript`, which refuses them and drops semi-transparent colours
+with a warning, as GNU R's does. knitr and rmarkdown documents with plot chunks render. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
