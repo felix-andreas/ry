@@ -369,6 +369,54 @@ fn a_seed_replays_the_same_session() {
     assert_eq!(first, second, "seed {seed} played out differently");
 }
 
+/// The console's socket parses whatever a peer sends: well-framed messages come back in order,
+/// and broken framing (a bad length, a truncated body, a body that is not JSON) ends the stream
+/// without a panic or an unbounded allocation.
+#[cfg(unix)]
+#[test]
+fn the_console_framing_survives_arbitrary_bytes() {
+    for seed in seeds() {
+        let mut entropy = SplitMix64(seed);
+        let mut bytes = Vec::new();
+        let mut expected = Vec::new();
+        let mut broken = false;
+        for index in 0..entropy.below(6) {
+            let message = json!({ "type": "request", "seq": index, "command": "ryGlobals" });
+            let body = message.to_string();
+            match entropy.below(5) {
+                0 => {
+                    let cut = entropy.below(body.len());
+                    bytes.extend(format!("Content-Length: {}\r\n\r\n", body.len()).bytes());
+                    bytes.extend(&body.as_bytes()[..cut]);
+                    broken = true;
+                }
+                1 => {
+                    let length = entropy.next_u64();
+                    bytes.extend(format!("content-length: {length}\r\n\r\n").bytes());
+                    broken = true;
+                }
+                2 => {
+                    for _ in 0..entropy.below(40) {
+                        bytes.push(entropy.next_u64() as u8);
+                    }
+                    broken = true;
+                }
+                _ => {
+                    bytes.extend(format!("Content-Length: {}\r\n\r\n{body}", body.len()).bytes());
+                    if !broken {
+                        expected.push(message);
+                    }
+                }
+            }
+        }
+        let parsed = interp::console_server::parse_messages(&bytes);
+        assert!(
+            parsed.len() >= expected.len() && parsed[..expected.len()] == expected[..],
+            "framing seed {seed}: replay with DEBUGGER_SEED={seed}"
+        );
+    }
+}
+
 fn seeds() -> Vec<u64> {
     if let Some(seed) = std::env::var("DEBUGGER_SEED")
         .ok()
@@ -381,6 +429,111 @@ fn seeds() -> Vec<u64> {
 
 /// Programs that cover loops, recursion, closures, lists, environments, lazy arguments, a caught
 /// and an uncaught error, and `browser()`.
+#[test]
+fn debug_and_debugonce_stop_when_the_function_is_entered() {
+    let program = "\
+counted <- function(n) {
+  m <- n + 1
+  m
+}
+.Internal(debugonce(counted, \"\", NULL))
+once_first <- counted(1)
+once_second <- counted(2)
+.Internal(debug(counted, \"\", NULL))
+flagged <- if (.Internal(isdebugged(counted))) counted(3)
+.Internal(undebug(counted))
+unflagged <- counted(4)
+";
+    let transcript = scripted(
+        program,
+        &[],
+        vec![
+            request("stackTrace", json!({ "threadId": 1 })),
+            request("continue", json!({ "threadId": 1 })),
+            request("stackTrace", json!({ "threadId": 1 })),
+            request("evaluate", json!({ "expression": "n", "frameId": 1 })),
+            request("continue", json!({ "threadId": 1 })),
+        ],
+    );
+    assert_eq!(
+        transcript,
+        "\
+stopped function breakpoint
+stack counted@2 <top level>@6
+stopped function breakpoint
+stack counted@2 <top level>@9
+evaluate 3
+exited 0
+"
+    );
+}
+
+#[test]
+fn variables_carry_expressions_the_data_viewer_opens() {
+    let program = "\
+inspect <- function() {
+  flags <- c(TRUE, FALSE)
+  nested <- list(inner = list(values = 1:4), `odd name` = 2)
+  browser()
+}
+inspect()
+";
+    let transcript = scripted(
+        program,
+        &[],
+        vec![
+            request("ryView", json!({ "expression": "flags", "frameId": 1 })),
+            request(
+                "ryView",
+                json!({ "expression": "nested$inner$values", "frameId": 1 }),
+            ),
+            request("ryView", json!({ "expression": "sum", "frameId": 1 })),
+            request("continue", json!({ "threadId": 1 })),
+        ],
+    );
+    assert_eq!(
+        transcript,
+        "\
+stopped breakpoint
+view 2 rows value:logical
+view 4 rows value:integer
+ryView failed: a value of type builtin cannot be shown as a table
+exited 0
+"
+    );
+    let log = session(
+        program,
+        &[],
+        false,
+        vec![
+            request("scopes", json!({ "frameId": 1 })),
+            request("variables", json!({ "variablesReference": 1 })),
+            request("variables", json!({ "variablesReference": 3 })),
+            request("continue", json!({ "threadId": 1 })),
+        ],
+    );
+    let names: Vec<&str> = log
+        .iter()
+        .filter(|message| message["command"] == "variables")
+        .flat_map(|message| {
+            message["body"]["variables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|variable| variable["evaluateName"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "flags",
+            "nested",
+            "nested[[\"inner\"]]",
+            "nested[[\"odd name\"]]"
+        ]
+    );
+}
+
 const PROGRAMS: &[&str] = &[
     "\
 fib <- function(n) {
@@ -421,6 +574,15 @@ g <- function(v) {
 ok <- 1
 r <- g(3)
 never <- 2
+",
+    "\
+step <- function(v) {
+  doubled <- v * 2
+  doubled
+}
+.Internal(debugonce(step, \"\", NULL))
+s <- step(1)
+t <- step(2)
 ",
     "\
 total <- 0
@@ -677,7 +839,9 @@ fn check_protocol(log: &[Value]) -> Result<(), String> {
 
 fn check_stopped(message: &Value) -> Result<(), String> {
     match message.pointer("/body/reason").and_then(Value::as_str) {
-        Some("entry" | "step" | "breakpoint" | "pause" | "exception") => Ok(()),
+        Some("entry" | "step" | "breakpoint" | "function breakpoint" | "pause" | "exception") => {
+            Ok(())
+        }
         reason => Err(format!("an unexpected stop reason: {reason:?}")),
     }
 }
@@ -810,8 +974,8 @@ fn render(log: &[Value]) -> String {
             (Some("event"), Some("exited")) => format!("exited {}", body["exitCode"]),
             (Some("response"), _) if message["success"] == false => {
                 match message["command"].as_str() {
-                    Some("evaluate") => format!(
-                        "evaluate failed: {}",
+                    Some(command @ ("evaluate" | "ryView")) => format!(
+                        "{command} failed: {}",
                         message["message"].as_str().unwrap_or_default()
                     ),
                     _ => continue,
@@ -859,6 +1023,21 @@ fn render(log: &[Value]) -> String {
                 }
                 Some("evaluate") => {
                     format!("evaluate {}", body["result"].as_str().unwrap_or_default())
+                }
+                Some("ryView") => {
+                    let columns: Vec<String> = body["columns"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|column| {
+                            format!(
+                                "{}:{}",
+                                column["name"].as_str().unwrap_or_default(),
+                                column["type"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    format!("view {} rows {}", body["rows"], columns.join(" "))
                 }
                 _ => continue,
             },
