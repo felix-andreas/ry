@@ -1830,11 +1830,12 @@ an empty script took over 300 s in a debug build. It now takes about 7 s, with t
 is small, and past that one per sixteenth of the live objects, which keeps the total linear.
 
 **Peak memory comes from what the heap keeps alive, not from the allocator.** At 1e6 rows the base
-kernels' peak RSS was 1.1 to 1.6 times GNU R's, and three causes accounted for it:
+kernels' peak RSS was 1.1 to 1.6 times GNU R's (`format` was the 1.6), and three causes accounted for it:
 - **Leaves skip the mark stack.** `Heap::mark` sets a leaf's mark bit without pushing it, where a
-  leaf is a CHARSXP or atomic vector with no attributes that is not ALTREP. A million-element
-  character vector used to push every CHARSXP, which grew the mark stack to 8 MB, and the stack
-  keeps its capacity. Tier-0 relies on marking tracing every non-leaf object's attrib slot.
+  leaf is a CHARSXP or atomic vector with no attributes that is not ALTREP. Otherwise a
+  million-element character vector pushes every CHARSXP, which grows the mark stack to 8 MB, and
+  the stack keeps its capacity. Every non-leaf object's attrib slot is still traced, which the
+  interpreter's compiled promises depend on.
 - **The young budget for large vectors is 16 MB, not 64 MB.** It counts only large vectors
   allocated since the last collection, so 64 MB let dead temporaries pile up about 50 MB above
   GNU R's peak, whose 64 MB `R_VSIZE` also counts live data. The setup of
@@ -3612,10 +3613,10 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** All of it lives in `crates/heap/src/heap.rs`:
   - `Heap::young_parent` caches the last store target the barrier found unmarked. Marks change only inside a collection, which clears the cache, so a repeated store into the same young vector costs one compare.
   - `Heap::copy_elements` copies a range between vectors with one barrier decision for the whole range, and `Rf_duplicate` uses it.
-  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 64 MB, GNU R's initial `R_VSIZE`, or half the old generation if that is larger.
+  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 16 MB, or half the old generation if that is larger ("Peak memory comes from what the heap keeps alive" says why not GNU R's 64 MB).
   - The major-collection limit falls back towards twice the survivors by an eighth per collection instead of at once, as GNU R shrinks its trigger.
 - **Kernels.** `duplicated`/`unique` without incomparables hash a plain key per type, and for an all-ASCII character vector they hash the CHARSXP pointer, because interning makes equal ASCII text one object (`crates/interp/src/sort.rs`). `strsplit` with `fixed = TRUE` builds its `memchr::memmem` finder once per pattern and collects byte ranges instead of `String`s (`crates/interp/src/strings.rs`). `char_str` validates ASCII-flagged strings strictly, which runs a word at a time, but only as a hint: native code can set any gp bit through `SETLEVELS`, so the flag never licenses `from_utf8_unchecked`.
-- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. The cost is memory: up to 64 MB of dead large vectors, the same slack GNU R allows, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
+- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. These timings were taken with a 64 MB large-vector budget; at 16 MB `fread` at 1e6 rows measured the same, and 1e7 rows is not re-measured. The cost is memory: up to the budget in dead large vectors, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
 
 ## What keeps a dropped object alive: registers, handles, caches and dying finalizers
 

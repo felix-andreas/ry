@@ -2028,7 +2028,8 @@ impl WellKnown {
     }
 }
 
-/// Whether tracing `object` would mark nothing: a string or numeric vector without attributes.
+/// Whether tracing `object` would mark nothing: a CHARSXP or an atomic vector (logical, integer,
+/// double, complex or raw) that has no attributes and is not ALTREP.
 /// Such an object is marked without a trip through the mark stack, which a string vector with a
 /// million distinct elements would otherwise grow by a million entries, and the stack keeps its
 /// capacity for the rest of the session.
