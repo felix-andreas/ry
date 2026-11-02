@@ -20,7 +20,8 @@ const SEEDS: &[&str] = &[
 ];
 
 /// Inputs the coverage-guided `ide` target has broken; only the invariants must hold.
-const REGRESSIONS: &[&str] = &[];
+const REGRESSIONS: &[&str] =
+    &["make <- function() {\n  a\ntotal <- 0\n  add <- <unction(n) total <<- total + n\n  add\n}?"];
 
 #[test]
 fn seeds_never_panic() {
