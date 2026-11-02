@@ -7,13 +7,22 @@
 //! read, so a statement that should have rerun shows up as a stale value. A strict file binds its
 //! pure constants lazily, and the model forces every constant as soon as its binding lands, so a
 //! constant that should have been bound afresh keeps a stale forced value.
+//!
+//! The package's `NAMESPACE` is random too, and edits change it. The model then also tracks what
+//! a backend does with the namespace half of a plan: the imports it rebuilds, the exports it
+//! resyncs, and each `S3method()` registration together with the value of the method's binding
+//! when it was registered, so a method whose binding changed but was not registered again shows
+//! up as a stale value.
 
 use {
     crate::{Loader, PackageInputs, Plan},
     rustc_hash::{FxHashMap, FxHashSet},
-    semantics::load_index::{IndexedItem, PackageIndex, Registration},
+    semantics::{
+        load_index::{IndexedItem, PackageIndex, Registration},
+        metadata::S3MethodDirective,
+    },
     std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         path::{Path, PathBuf},
     },
     syntax::testing::Entropy,
@@ -70,14 +79,19 @@ pub fn check_random_reload(loaders: &mut ReloadLoaders, entropy: &mut impl Entro
     check_reload(loaders, &before, &after);
 }
 
-/// A package as statements per file, `FILES` files in collation order.
-pub type Package = Vec<Vec<String>>;
+/// A package as statements per file, `FILES` files in collation order, and its `NAMESPACE`
+/// as one directive per line.
+#[derive(Debug, Clone)]
+pub struct Package {
+    pub files: Vec<Vec<String>>,
+    pub namespace: Vec<String>,
+}
 
 const FILES: usize = 3;
 
 fn random_statement(entropy: &mut impl Entropy) -> String {
     let number = entropy.below(100);
-    match entropy.below(12) {
+    match entropy.below(13) {
         0..=2 => format!(
             "{} <- function(x) {}(x) + {number}",
             pick(entropy, "f", 5),
@@ -111,6 +125,11 @@ fn random_statement(entropy: &mut impl Entropy) -> String {
             pick(entropy, "f", 5)
         ),
         10 => "# typing: strict".to_owned(),
+        11 => format!(
+            "{} <- function(x, ...) {}(x) + {number}",
+            method_binding(entropy),
+            pick(entropy, "f", 5)
+        ),
         _ => format!(
             "setMethod(\"g{}\", \"C{}\", function(x) {number})",
             entropy.below(2),
@@ -123,8 +142,34 @@ fn pick(entropy: &mut impl Entropy, prefix: &str, count: usize) -> String {
     format!("{prefix}{}", entropy.below(count))
 }
 
+/// One of the bindings the generated `S3method()` directives name.
+fn method_binding(entropy: &mut impl Entropy) -> String {
+    match entropy.below(3) {
+        0 => "print.widget".to_owned(),
+        1 => "format.widget".to_owned(),
+        _ => pick(entropy, "f", 5),
+    }
+}
+
+fn random_directive(entropy: &mut impl Entropy) -> String {
+    match entropy.below(8) {
+        0 => "S3method(print, widget)".to_owned(),
+        1 => "S3method(format, widget)".to_owned(),
+        2 => format!("S3method(summary, widget, {})", pick(entropy, "f", 5)),
+        3 => format!("export({})", pick(entropy, "f", 5)),
+        4 => format!(
+            "export({}, {})",
+            pick(entropy, "v", 4),
+            pick(entropy, "c", 3)
+        ),
+        5 => "exportPattern(\"^c\")".to_owned(),
+        6 => "importFrom(stats, setNames)".to_owned(),
+        _ => "import(utils, except = c(\"head\"))".to_owned(),
+    }
+}
+
 pub fn random_package(entropy: &mut impl Entropy) -> Package {
-    (0..FILES)
+    let files = (0..FILES)
         .map(|_| {
             let header = (entropy.below(2) == 0).then(|| "# typing: strict".to_owned());
             header
@@ -132,11 +177,33 @@ pub fn random_package(entropy: &mut impl Entropy) -> Package {
                 .chain((0..entropy.below(6)).map(|_| random_statement(entropy)))
                 .collect()
         })
-        .collect()
+        .collect();
+    let namespace = (0..entropy.below(5))
+        .map(|_| random_directive(entropy))
+        .collect();
+    Package { files, namespace }
 }
 
 pub fn edit(entropy: &mut impl Entropy, package: &mut Package) {
-    let file = &mut package[entropy.below(FILES)];
+    if entropy.below(4) == 0 {
+        let namespace = &mut package.namespace;
+        match entropy.below(3) {
+            0 if !namespace.is_empty() => {
+                let at = entropy.below(namespace.len());
+                namespace.remove(at);
+            }
+            1 if !namespace.is_empty() => {
+                let at = entropy.below(namespace.len());
+                namespace[at] = random_directive(entropy);
+            }
+            _ => {
+                let at = entropy.below(namespace.len() + 1);
+                namespace.insert(at, random_directive(entropy));
+            }
+        }
+        return;
+    }
+    let file = &mut package.files[entropy.below(FILES)];
     match entropy.below(5) {
         0 => {
             let at = entropy.below(file.len() + 1);
@@ -166,7 +233,13 @@ pub fn edit(entropy: &mut impl Entropy, package: &mut Package) {
 fn inputs(package: &Package) -> PackageInputs {
     PackageInputs {
         description: "Package: demo\nVersion: 1.0\n".to_owned(),
+        namespace: package
+            .namespace
+            .iter()
+            .map(|directive| format!("{directive}\n"))
+            .collect(),
         files: package
+            .files
             .iter()
             .enumerate()
             .map(|(position, statements)| {
@@ -192,6 +265,13 @@ struct Model {
     registrations: BTreeSet<Registration>,
     /// Each lazy constant's value as it was forced right after its binding landed.
     forced: FxHashMap<String, String>,
+    /// Each registered S3 method by generic and class: the binding it names and that
+    /// binding's value when it was registered.
+    s3: BTreeMap<(String, String), (String, String)>,
+    /// What the backend last rebuilt the imports environment from.
+    imports: String,
+    /// What the backend last resynced the exports from.
+    exports: String,
 }
 
 /// Reloading `before` into `after` gives the same bindings and registrations as loading `after`
@@ -205,20 +285,21 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         scratch,
         ..
     } = loaders;
-    loader
+    let first = loader
         .plan_inputs(root, inputs(before), false)
         .expect("the package plans");
     let old_index = loader.pending(root).expect("pending").index.clone();
     loader.commit(root);
     let old_texts = texts(before);
     let mut reloaded = fresh_load(&old_index, &old_texts);
+    apply_namespace(&mut reloaded, &first);
 
     let plan = loader
         .plan_inputs(root, inputs(after), false)
         .expect("the edited package plans");
     let new_index = loader.pending(root).expect("pending").index.clone();
     let new_texts = texts(after);
-    scratch
+    let scratch_plan = scratch
         .plan_inputs(root, inputs(after), false)
         .expect("the edited package plans from scratch");
     assert_eq!(
@@ -226,8 +307,34 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         *scratch.pending(root).expect("pending").index,
         "the incrementally derived index differs from a fresh one"
     );
+    let names_before: BTreeSet<String> = reloaded.bindings.keys().cloned().collect();
     apply(&mut reloaded, &plan, &new_index, &new_texts);
-    let fresh = fresh_load(&new_index, &new_texts);
+    apply_namespace(&mut reloaded, &plan);
+    let mut fresh = fresh_load(&new_index, &new_texts);
+    apply_namespace(&mut fresh, &scratch_plan);
+
+    if plan.keeps_names {
+        let names_after: BTreeSet<String> = reloaded.bindings.keys().cloned().collect();
+        assert_eq!(
+            names_before, names_after,
+            "the plan claims to keep the namespace's names\n---- plan:\n{plan:#?}"
+        );
+    }
+    if let Some(writes) = &plan.run_writes {
+        for code in &plan.run {
+            let item = new_index
+                .items()
+                .find(|(path, item)| *path == code.path && item.span.char_start == code.start)
+                .map(|(_, item)| item)
+                .expect("a planned statement is in the index");
+            for name in &item.binds {
+                assert!(
+                    writes.contains(name),
+                    "`run_writes` leaves out `{name}`, which a planned statement writes\n---- plan:\n{plan:#?}"
+                );
+            }
+        }
+    }
 
     for name in &plan.remove {
         assert!(
@@ -239,6 +346,37 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         reloaded, fresh,
         "reloading differs from a fresh load\n---- before:\n{before:#?}\n---- after:\n{after:#?}\n---- plan:\n{plan:#?}"
     );
+}
+
+/// What a backend does with the namespace half of a plan, once its bindings are in place.
+fn apply_namespace(model: &mut Model, plan: &Plan) {
+    if let Some(imports) = &plan.imports {
+        model.imports = format!("{imports:?}");
+    }
+    if plan.exports_changed {
+        model.exports = format!(
+            "{:?} {:?}",
+            plan.namespace.exports, plan.namespace.export_patterns
+        );
+    }
+    for S3MethodDirective { generic, class, .. } in &plan.s3_unregister {
+        model.s3.remove(&(generic.clone(), class.clone()));
+    }
+    for S3MethodDirective {
+        generic,
+        class,
+        function,
+    } in &plan.s3_register
+    {
+        let value = model
+            .bindings
+            .get(function)
+            .cloned()
+            .unwrap_or_else(|| "missing".to_owned());
+        model
+            .s3
+            .insert((generic.clone(), class.clone()), (function.clone(), value));
+    }
 }
 
 fn texts(package: &Package) -> FxHashMap<String, String> {

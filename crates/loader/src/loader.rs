@@ -1598,24 +1598,45 @@ pub fn diff<'text>(
         .iter()
         .filter_map(|code| code.name.as_deref())
         .collect();
-    let (old_set, new_set): (FxHashSet<&S3MethodDirective>, FxHashSet<&S3MethodDirective>) =
-        if s3_changed {
-            (old_declared.iter().collect(), declared.iter().collect())
-        } else {
-            Default::default()
-        };
+    // R registers the directives in order into one table entry per generic and class, so a
+    // later directive for the same pair replaces an earlier one, and a reload must diff the
+    // entries, not the directives: dropping one of two directives for a pair keeps the entry.
+    fn entry(method: &S3MethodDirective) -> (&str, &str) {
+        (method.generic.as_str(), method.class.as_str())
+    }
+    fn entries(methods: &[S3MethodDirective]) -> FxHashMap<(&str, &str), &S3MethodDirective> {
+        methods
+            .iter()
+            .map(|method| (entry(method), method))
+            .collect()
+    }
+    let new_entries = entries(declared);
+    let old_entries = match s3_changed {
+        true => entries(old_declared),
+        false => FxHashMap::default(),
+    };
     let s3_register = declared
         .iter()
         .filter(|method| {
-            full || (s3_changed && !old_set.contains(method))
+            // Only the directive that wins its entry registers, even when NAMESPACE is
+            // unchanged: rebinding the function of a losing directive must not let it win.
+            let wins = new_entries
+                .get(&entry(method))
+                .is_some_and(|winner| std::ptr::eq(*winner, *method));
+            wins && (full
+                || (s3_changed && old_entries.get(&entry(method)) != Some(method))
                 || changed.contains(&method.function)
-                || rebound.contains(method.function.as_str())
+                || rebound.contains(method.function.as_str()))
         })
         .cloned()
         .collect();
     let s3_unregister = old_declared
         .iter()
-        .filter(|method| s3_changed && !new_set.contains(method))
+        .filter(|method| {
+            s3_changed
+                && old_entries.get(&entry(method)) == Some(method)
+                && !new_entries.contains_key(&entry(method))
+        })
         .cloned()
         .collect();
 
@@ -1650,13 +1671,18 @@ pub fn diff<'text>(
     let exports_changed = full
         || (!Arc::ptr_eq(&index.namespace, &old.namespace)
             && exports_differ(&index.namespace, &old.namespace));
+    // A rerun statement may write a name nothing bound before, so the statements count too,
+    // and one that may write a name it computes rules the claim out.
     let keeps_names = !full
         && !exports_changed
         && remove.is_empty()
         && unregister.is_empty()
         && bind
             .iter()
-            .all(|code| code.name.as_ref().is_some_and(|name| old.binds(name)));
+            .all(|code| code.name.as_ref().is_some_and(|name| old.binds(name)))
+        && run_writes
+            .as_ref()
+            .is_some_and(|names: &Vec<String>| names.iter().all(|name| old.binds(name)));
 
     Plan {
         package: index.package.clone(),
