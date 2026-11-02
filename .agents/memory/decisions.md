@@ -1817,12 +1817,41 @@ interned symbol, the weak-reference list, and any `RootSource` an interpreter or
 function that allocates while it holds a handle that nothing else roots must root it first, and collection stress is what
 exposes a miss.
 
-**The handle scope roots what the API hands out, not every allocation.** While a native call is on
-the stack, every handle an API function returns to native code is pushed to the handle stack, and
-the native call's return truncates it. Rooting results rather than allocations matters for
-`Rf_eval` called from native code: the evaluator's own temporaries stay collectable, and only the
-value native code receives is kept. The cost is that a native loop that allocates and drops many
-temporaries keeps them until it returns, which GNU R would have collected.
+**The handle scope roots what the API hands out, not every allocation, and only recently.** While a
+native call is on the stack, a handle an API function returns to native code goes to the heap's
+handouts stack (`Heap::hand_out`), which the native call truncates on return. Rooting results
+rather than allocations matters for `Rf_eval` called from native code: the evaluator's own
+temporaries stay collectable, and only the value native code receives is kept.
+- Previously every handout stayed rooted until the call returned, so a native loop that allocated
+  and dropped temporaries kept all of them, which GNU R would have collected. A call now keeps only
+  its most recent `HANDOUT_WINDOW` (1,024) to twice that; once it holds twice the window, the older
+  half is dropped in one `drain`, so the cost per handout stays constant and memory stays bounded.
+  The invariant this relies on: ry allocates on behalf of native code only where GNU R does, so
+  code correct under GNU R, which protects what it keeps across an allocation, never needs an
+  older handout. Two kinds of result break that and must not enter the window: a view ry builds
+  of something GNU R stores in the argument (`FRAME`'s pairlist) is `Pinned` to the call's handle
+  stack, and a field read is `Reachable` and takes no slot at all, which also keeps real
+  temporaries in the window longer.
+- Only the outermost API function hands out (`Runtime::api_depth`). A nested one returns to ry's own
+  code, which the outer function's handle scope covers, and pushing it to the window would let it
+  displace native code's recent handouts.
+- A result reachable through the argument it was read from (`CAR`, `CDR`, `TAG`, the `CADR` family,
+  `ENCLOS`, `R_ParentEnv`, the closure and promise fields, the external pointer and ALTREP fields,
+  `PRINTNAME`) is `Reachable` and takes no handle.
+- A C context saves and restores `api_depth` and the window's base with the `PROTECT` depth, so a
+  jump that leaves an API function without returning through it cannot leave later handouts on
+  the unbounded handle stack.
+- The previous design kept one handle stack for both the Rust side and native code. Handouts got
+  their own stack because the window drops entries from the middle of a call's region, which must
+  never touch handles ry's own code pushed.
+
+**Accessors are inline in `Rinternals.h` and mirrored in libR.** The header reads the kind byte
+(offset 0), the ALTREP flag (offset 2, bit 1), a vector's length (offset 16), its elements
+(offset 32) and a cell's three fields (offsets 16, 24, 32) directly, and calls the exported
+function for anything else. `heap/src/object.rs` pins those offsets with const assertions. The
+exported functions take identical fast paths before `enter`, so binaries built against GNU R's
+headers skip the boundary too. A writable `DATAPTR` into a list or character vector stays out of
+line, because it makes the vector escape.
 
 **Each native call owns a `PROTECT` region.** `UNPROTECT` below the region's base is an error, in GNU
 R's words, rather than silently unprotecting the caller's objects, which GNU R allows. An imbalance
@@ -4948,6 +4977,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## The language server reads the check record
+
+- **Previous shape.** The server started from nothing. Until the startup warm-up ended, opening a file
+  showed only its parse-stage findings, so a large project looked clean for seconds.
+- **Target shape.** At initialize the worker loads `.ry_cache/check.json` and keys it with
+  `check_cache::key`, the one function `ry check` uses too. The key canonicalizes the root and the
+  configuration's directory, because `ry check .` and the server spell them differently. The worker
+  then runs `check_cache::plan` over `collect_r_files`, hashing loaded files from the database and
+  reading the others from disk, and restores the findings of every loaded file the plan reuses
+  (`Worker::restore_recorded_diagnostics`). `fast_diagnostics` serves them until the settled wave
+  replaces them. Any input change clears them all, because one file's change can change another's
+  findings.
+- **Why not per-file invalidation.** Partial invalidation would need the dependency closure at every
+  edit. The record is only a cold-start aid: after the first edit the live analysis is warm anyway.
+- **Known difference.** The server analyses the package files and the open documents while `ry check`
+  analyses every file, so a finding that depends on a script can differ until the settled wave.
+- **Identity.** A record is keyed by the binary that wrote it. `WorkerSeed::executable` is
+  `current_exe` in production; `Simulation::start_as` passes the scenario's `ry` binary, since the
+  simulated server runs inside the test binary. `ClientOptions::cold` starts a simulated session
+  before the warm-up, and the seeded sessions draw it.
 
 ## Compiled function lookups also check the activation's own frame
 

@@ -16,6 +16,7 @@ pub mod types;
 
 use {
     crate::{hir::Symbol, sorted::SortedSet},
+    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -23,7 +24,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, Parse, SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
     },
@@ -1541,29 +1542,35 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
+    // A green walk: the red preorder built a cursor node for every element of every item.
+    if node.kind() == SyntaxKind::FUNCTION_DEF {
+        return 0;
+    }
     let mut count = 0;
-    let mut preorder = node.preorder_with_tokens();
-    while let Some(event) = preorder.next() {
-        let rowan::WalkEvent::Enter(element) = event else {
+    let green = node.green();
+    let mut stack = vec![(node.kind(), green.children())];
+    while let Some((parent_kind, children)) = stack.last_mut() {
+        let parent_kind = *parent_kind;
+        let Some(element) = children.next() else {
+            stack.pop();
             continue;
         };
         match element {
-            SyntaxElement::Node(child) => {
-                if child.kind() == SyntaxKind::FUNCTION_DEF {
-                    preorder.skip_subtree();
+            NodeOrToken::Node(child) => {
+                let kind = RLanguage::kind_from_raw(child.kind());
+                if kind != SyntaxKind::FUNCTION_DEF {
+                    stack.push((kind, child.children()));
                 }
             }
-            SyntaxElement::Token(token) => {
-                let writes = match token.kind() {
+            NodeOrToken::Token(token) => {
+                let writes = match RLanguage::kind_from_raw(token.kind()) {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
                     | SyntaxKind::MINUS_GREATER2
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
-                    SyntaxKind::EQ => token
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR),
+                    SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
                     SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
                         token.text().trim_matches('`'),

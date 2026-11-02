@@ -1102,6 +1102,29 @@ fn a_top_level_error_halts_the_script_with_status_one_on_both_runtimes() {
 }
 
 #[test]
+fn an_error_in_native_code_lists_the_foreign_call_in_the_traceback_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("native.R"),
+        "f <- function() .Call(utils:::C_crc64, 1)\nf()\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "native.R"],
+            &[],
+            "",
+        );
+        assert_eq!(status, Some(1), "{runtime}: {stdout}{stderr}");
+        assert!(
+            stderr.contains("Calls: f -> .Call\n"),
+            "{runtime}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn run_defaults_to_ry_s_runtime_and_r_runs_gnu_r() {
     if !r_available() || !ry_runtime_available() {
         return;

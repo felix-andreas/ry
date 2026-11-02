@@ -66,6 +66,9 @@ pub struct InferenceTable<'db> {
     /// cut are stored.
     resolve_cache: RefCell<(u64, FxHashMap<Ty<'db>, Ty<'db>>)>,
     epoch: Cell<u64>,
+    /// `definitions` answers through two salsa fetches and a scan of the file's
+    /// definitions, and relations ask about the same few names hundreds of times per item.
+    definition_cache: RefCell<FxHashMap<Name<'db>, Option<&'db NamedDefinition<'db>>>>,
 }
 
 thread_local! {
@@ -146,6 +149,20 @@ impl<'db> InferenceTable<'db> {
         &self.entries[self.find(var).0 as usize]
     }
 
+    pub fn definition(
+        &self,
+        db: &'db dyn Db,
+        name: Name<'db>,
+    ) -> Option<&'db NamedDefinition<'db>> {
+        let table = self.definitions?;
+        if let Some(cached) = self.definition_cache.borrow().get(&name) {
+            return *cached;
+        }
+        let definition = table.get(db, name);
+        self.definition_cache.borrow_mut().insert(name, definition);
+        definition
+    }
+
     /// An undeclared name or a wrong type-argument count. Both already carry an
     /// annotation diagnostic, so relations treat the type like `Unknown`. The overload
     /// witness is undeclared on purpose and must stay incompatible with every concrete type.
@@ -156,7 +173,7 @@ impl<'db> InferenceTable<'db> {
         if name.text(db) == UNCHECKED_WITNESS {
             return false;
         }
-        match self.definitions.and_then(|table| table.get(db, *name)) {
+        match self.definition(db, *name) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),
             None => !stubs(db).is_some_and(|library| library.nominals.contains(name.text(db))),
@@ -270,7 +287,7 @@ impl<'db> InferenceTable<'db> {
         name: Name<'db>,
         arguments: &[Ty<'db>],
     ) -> Option<Ty<'db>> {
-        let definition = self.definitions.and_then(|table| table.get(db, name))?;
+        let definition = self.definition(db, name)?;
         if definition.alias || matches!(definition.body.kind(db), TyKind::Unknown) {
             return None;
         }
