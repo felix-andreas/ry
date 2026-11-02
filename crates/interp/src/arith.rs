@@ -2556,7 +2556,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             result
         }
-        (SexpType::String, _) => {
+        // GNU R coerces anything but integers and complexes to double first, so a list of
+        // numbers (`cumprod(lapply(x, length))`) works.
+        (SexpType::String | SexpType::List, _) => {
             let converted = coerce_vector(operand, SexpType::Real)?;
             let args = [Arg {
                 tag: nil(),

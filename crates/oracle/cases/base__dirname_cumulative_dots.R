@@ -1,0 +1,11 @@
+# dirname edge cases, cumulative functions over lists, and substitute(...()) capturing the dots as a pairlist.
+print(dirname(c("", "a", "/a", "a//b", "//a", "/", "a/b/", "//")))
+print(cumprod(list(3L, 2L)))
+print(cumsum(list(1, 2.5)))
+f <- function(...) substitute(...())
+x <- f(a, b + 1, c = d)
+print(typeof(x)); print(x)
+g <- function(...) substitute(list(...))
+print(typeof(g(a, b)))
+h <- function(...) substitute(...())
+print(h())
