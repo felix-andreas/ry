@@ -1151,7 +1151,10 @@ mod tests {
         let stray = text(true);
         assert!(stray.matches("\" pipe").count() > 0);
         for size in [1, 7, 64, 1000] {
-            assert_eq!(slices(stray.as_bytes(), size, b','), [0..stray.len()]);
+            // One range spanning the file is the expected value, not a mistyped `(0..n).collect()`.
+            #[allow(clippy::single_range_in_vec_init)]
+            let whole = [0..stray.len()];
+            assert_eq!(slices(stray.as_bytes(), size, b','), whole);
         }
         let text = text(false);
         let bytes = text.as_bytes();

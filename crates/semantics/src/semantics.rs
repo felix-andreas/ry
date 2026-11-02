@@ -18,9 +18,8 @@ use {
     crate::{
         hir::{ExpressionKind, Symbol},
         naming::RefClassKey,
-        sorted::SortedSet,
+        sorted::{SortedMap, SortedSet},
     },
-    rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -28,7 +27,7 @@ use {
         sync::{Arc, Mutex},
     },
     syntax::{
-        GreenEvent, GreenNodeAt, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree, TreeEvent,
         ast::{is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -51,6 +50,14 @@ pub trait Db: salsa::Database {
     fn one_shot(&self) -> bool {
         false
     }
+
+    /// Whether an item's check keeps the per-expression facts that only editor features and
+    /// rewrites read (expression and pattern types, chosen overloads, callee targets). A host
+    /// that only reports diagnostics leaves them out, because resolving every recorded type is a
+    /// large share of a check's cost.
+    fn editor_facts(&self) -> bool {
+        !self.one_shot()
+    }
 }
 
 #[salsa::db]
@@ -60,50 +67,31 @@ pub struct RootDatabase {
     /// Shared across storage-handle clones so fresh handles keep the warm entries.
     splice_cache: Arc<SpliceCache>,
     one_shot: bool,
+    editor_facts: bool,
 }
 
 impl RootDatabase {
     /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
     /// splice caching would only hold a second copy of every text and of recent trees, and no
     /// query needs a firewall ([`Db::one_shot`]).
+    /// It reports diagnostics only, so it leaves out the editor facts ([`Db::editor_facts`]).
     pub fn one_shot() -> RootDatabase {
         RootDatabase {
             storage: salsa::Storage::default(),
             splice_cache: Arc::new(SpliceCache::disabled()),
             one_shot: true,
+            editor_facts: false,
         }
     }
-}
 
-/// Releases every memoized tree of `files` and keeps everything derived from them. A one-shot
-/// check calls it once its syntax pass has derived what later passes read, because the trees
-/// are its largest memos. A later tree read still works, by reparsing that file.
-///
-/// The queries record reads only while their capacity is nonzero, so the capacity is raised for
-/// one single-threaded touch of every tree, which fills the eviction lists, and lowered again
-/// after: recording on every read of a parallel pass queues the threads on one mutex per query.
-/// The file trees come back to the caller, which owns the last reference to every node and can
-/// free them off the critical path.
-pub fn release_trees(db: &mut RootDatabase, files: &[SourceFile]) -> Vec<Parse> {
-    parse::set_lru_capacity(db, 1);
-    item_syntax::set_lru_capacity(db, 1);
-    item_annotation_syntax::set_lru_capacity(db, 1);
-    file_item_annotations::set_lru_capacity(db, 1);
-    let mut trees = Vec::with_capacity(files.len());
-    for &file in files {
-        trees.push(parse(db, file));
-        file_item_annotations(db, file);
-        for &item in item_tree(db, file) {
-            item_syntax(db, item);
-            item_annotation_syntax(db, item);
+    /// A one-shot database for a command that reads editor facts, such as `ry migrate`, whose
+    /// rewrites read expression types.
+    pub fn one_shot_with_editor_facts() -> RootDatabase {
+        RootDatabase {
+            editor_facts: true,
+            ..RootDatabase::one_shot()
         }
     }
-    salsa::Database::trigger_lru_eviction(db);
-    parse::set_lru_capacity(db, 0);
-    item_syntax::set_lru_capacity(db, 0);
-    item_annotation_syntax::set_lru_capacity(db, 0);
-    file_item_annotations::set_lru_capacity(db, 0);
-    trees
 }
 
 #[salsa::db]
@@ -117,6 +105,10 @@ impl Db for RootDatabase {
 
     fn one_shot(&self) -> bool {
         self.one_shot
+    }
+
+    fn editor_facts(&self) -> bool {
+        self.editor_facts || !self.one_shot
     }
 }
 
@@ -151,10 +143,47 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-// Every tree-holding query takes an LRU capacity of 0, which records nothing on a read, so a
-// one-shot host can still release the trees once ([`release_trees`]).
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
+    if db.one_shot()
+        && let Some(parse) = HELD_TREE.with_borrow(|held| {
+            held.as_ref()
+                .filter(|(held, _)| *held == file)
+                .map(|(_, parse)| parse.clone())
+        })
+    {
+        // The read the memo would have recorded.
+        file.text(db);
+        return parse;
+    }
+    parse_memo(db, file)
+}
+
+/// Runs `work` with `file`'s tree held by this thread, so on the one-shot path every read of it
+/// inside `work` shares one tree that no memo keeps: the tree is freed when `work` returns,
+/// unless something derived from it holds a window onto it. A one-shot host derives everything
+/// its later passes read from a file's tree inside one call, which bounds the live trees by the
+/// number of threads rather than the number of files. A one-shot read outside any held tree
+/// falls back to the memo, which then keeps that tree for the rest of the run.
+///
+/// The slot is keyed by file only, so code inside `work` must not parse through a second
+/// one-shot database, whose file ids could coincide with this one's.
+pub fn with_held_tree<T>(db: &dyn Db, file: SourceFile, work: impl FnOnce() -> T) -> T {
+    if !db.one_shot() {
+        return work();
+    }
+    let tree = db.splice_cache().parse(file, file.text(db));
+    let previous = HELD_TREE.replace(Some((file, tree)));
+    let result = work();
+    HELD_TREE.set(previous);
+    result
+}
+
+thread_local! {
+    static HELD_TREE: RefCell<Option<(SourceFile, Parse)>> = const { RefCell::new(None) };
+}
+
+#[salsa::tracked(returns(clone))]
+fn parse_memo(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
 
@@ -280,9 +309,18 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
 /// from it stay item-relative until the rendering edge.
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    item_node(db, item).map(|node| ItemSyntax(node.green().into()))
+    // A one-shot run never edits, so the firewall buys nothing there, and a memo per item would
+    // keep its file's tree alive after the file's syntax pass ([`with_held_tree`]).
+    if db.one_shot() {
+        return item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())));
+    }
+    item_syntax_memo(db, item)
+}
+
+#[salsa::tracked(returns(clone))]
+fn item_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
+    item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
@@ -320,8 +358,8 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     spans
 }
 
-/// The sparse nodes the per-file passes look for, in preorder, from one walk of the green
-/// tree: each pass reading the tree itself would walk every node once per pass.
+/// The sparse nodes the per-file passes look for, in preorder, from one walk of the tree:
+/// each pass reading the tree itself would walk every node once per pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct SyntaxSites(Vec<SyntaxSite>);
 
@@ -342,13 +380,13 @@ pub enum SiteRole {
     Declaration,
     /// A record, tuple, tag or `match`, which R cannot run.
     RySyntax,
-    /// A node carrying an inline annotation, as [`annotations::is_green_inline_site`].
+    /// A node carrying an inline annotation, as [`annotations::is_inline_site_ref`].
     InlineSite,
-    /// An inline annotation itself, as [`syntax::is_green_inline_annotation`].
+    /// An inline annotation itself, as [`syntax::is_inline_annotation_kind`].
     InlineAnnotation,
     /// The file or a brace body with a `#:` block among its statements.
     AnnotatedSequence,
-    /// A call that attaches a namespace, as [`metadata::is_green_attach_call`].
+    /// A call that attaches a namespace, as [`metadata::is_attach_call_ref`].
     AttachCall,
 }
 
@@ -407,8 +445,8 @@ impl SyntaxSites {
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let mut sites = Vec::new();
-    syntax::walk_green(&parse(db, file).syntax_node(), |event| {
-        let GreenEvent::Enter {
+    syntax::walk_tree(parse(db, file).tree().root(), |event| {
+        let TreeEvent::Enter {
             node,
             parent,
             range,
@@ -418,10 +456,10 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         let kind = node.kind();
         let mut roles = 0;
-        if annotations::is_green_inline_site(node) {
+        if annotations::is_inline_site_ref(node) {
             roles |= SiteRole::InlineSite.bit();
         }
-        if syntax::is_green_inline_annotation(kind, parent.map(syntax::GreenRef::kind)) {
+        if syntax::is_inline_annotation_kind(kind, parent.map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
         }
         if (parent.is_none() || kind == SyntaxKind::BRACE_EXPR)
@@ -429,7 +467,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         {
             roles |= SiteRole::AnnotatedSequence.bit();
         }
-        if metadata::is_green_attach_call(node) {
+        if metadata::is_attach_call_ref(node) {
             roles |= SiteRole::AttachCall.bit();
         }
         if roles != 0
@@ -522,7 +560,7 @@ fn item_span_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
-pub struct ItemSyntax(pub rowan::GreenNode);
+pub struct ItemSyntax(pub Arc<Tree>);
 
 impl ItemSyntax {
     /// Offsets start at 0 (item-relative).
@@ -531,7 +569,7 @@ impl ItemSyntax {
     }
 }
 
-/// Derived from the item's green subtree only, so it cuts off across edits
+/// Derived from the item's subtree only, so it cuts off across edits
 /// elsewhere in the file.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
@@ -790,7 +828,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
             };
             associations.push((annotation, target));
         }
-        if let rowan::NodeOrToken::Node(node) = child
+        if let NodeOrToken::Node(node) = child
             && kind == SyntaxKind::ANNOTATION
         {
             pending = Some((node, 0));
@@ -805,15 +843,24 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
+    if db.one_shot() {
+        return file_item_annotations(db, *item.file(db))
+            .get(&item)
+            .cloned();
+    }
+    item_annotation_syntax_memo(db, item)
+}
+
+#[salsa::tracked(returns(clone))]
+fn item_annotation_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
         .cloned()
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref), lru = 0)]
+#[salsa::tracked(returns(ref))]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -828,7 +875,7 @@ fn file_item_annotations<'db>(
         .filter_map(|(annotation, target)| match target {
             AnnotationTarget::Attached(node) => item_by_range
                 .get(&node.text_range())
-                .map(|&item| (item, ItemSyntax(annotation.green().into()))),
+                .map(|&item| (item, ItemSyntax(Arc::new(annotation.detached_subtree())))),
             _ => None,
         })
         .collect()
@@ -926,8 +973,12 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         if !plain {
             return None;
         }
-        parameters.push(if position < passed {
+        // `if (!missing(pkgname))` lets a developer call the hook by hand without arguments.
+        let optional = formal.has_default || tests_missing(&function, &formal.name);
+        parameters.push(if position < passed && !optional {
             format!("{}: character", formal.name)
+        } else if position < passed {
+            format!("[{}]: character", formal.name)
         } else {
             format!("[{}]: Any", formal.name)
         });
@@ -937,6 +988,24 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         return None;
     }
     stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
+}
+
+/// Whether the function's text contains `missing(name)`.
+fn tests_missing(function: &SyntaxNode, name: &str) -> bool {
+    let tokens: Vec<_> = function
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !token.kind().is_trivia())
+        .collect();
+    tokens.windows(4).any(|window| {
+        let [missing, open, argument, close] = window else {
+            return false;
+        };
+        missing.text() == "missing"
+            && open.text() == "("
+            && argument.text().trim_matches('`') == name
+            && close.text() == ")"
+    })
 }
 
 fn expression_annotations<'db>(
@@ -957,7 +1026,7 @@ fn expression_annotations<'db>(
     // recorded sites cannot stand in for it.
     let (comments, inline_sites): (Vec<SyntaxNode>, Vec<SyntaxNode>) =
         matching_nodes(&root, |node, _| {
-            node.kind() == SyntaxKind::ANNOTATION || annotations::is_green_inline_site(node)
+            node.kind() == SyntaxKind::ANNOTATION || annotations::is_inline_site_ref(node)
         })
         .into_iter()
         .partition(|node| node.kind() == SyntaxKind::ANNOTATION);
@@ -1187,10 +1256,24 @@ fn normalize_relative_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// The item a sourced file binds `name` with. Per name, so a sourced file's edit re-checks only
-/// the reads whose definition changes; the last sourced file to bind it wins, as at run time.
-#[salsa::tracked]
+/// The item a sourced file binds `name` with; the last sourced file to bind it wins, as at run
+/// time.
 pub fn sourced_definition<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    name: Symbol,
+) -> Option<Item<'db>> {
+    // Most files source nothing, and interning a per-name query for every name such a file
+    // reads costs a check more time and memory than the answer is worth.
+    if sourced_files(db, file).is_empty() {
+        return None;
+    }
+    *sourced_name_definition(db, file, name)
+}
+
+/// Per name, so a sourced file's edit re-checks only the reads whose definition changes.
+#[salsa::tracked]
+fn sourced_name_definition<'db>(
     db: &'db dyn Db,
     file: SourceFile,
     name: Symbol,
@@ -1239,7 +1322,7 @@ pub fn file_typing_directives(
     let mut invalid = Vec::new();
     for element in root.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let Some(rest) = token
                     .text()
                     .trim_start_matches('#')
@@ -1248,15 +1331,17 @@ pub fn file_typing_directives(
                 else {
                     continue;
                 };
-                // The whole remainder is the value: `typing: on gely` is a typo, not `on`.
-                match rest.trim() {
+                // The whole remainder up to a trailing `# reason` comment is the value:
+                // `typing: on gely` is a typo, not `on`.
+                let value = rest.split_once('#').map_or(rest, |(value, _)| value);
+                match value.trim() {
                     "off" => mode = Some(TypingMode::Off),
                     "on" => mode = Some(TypingMode::On),
                     "strict" => mode = Some(TypingMode::Strict),
                     other => invalid.push((token.text_range(), other.to_owned())),
                 }
             }
-            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
+            NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
                 if let Some(strict) =
                     comment_annotation(db, file, &node).and_then(|annotation| annotation.strict)
                 {
@@ -1471,28 +1556,78 @@ impl<'db> NameLayer<'db> {
     }
 }
 
-/// The package namespace's binding of `name`, or with `test` set, the helper files'. An
-/// incremental host reads it through the per-name projection, so a check depends only on the
-/// names it reads. A one-shot host never edits, so it reads the project-wide maps: one
-/// dependency per map instead of an interned key and a memo per name read.
+/// The package namespace's binding of `name`, or with `test` set, the helper files'. A caller
+/// that looks up many names builds one [`NameLookup`] instead.
 pub fn name_layer<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     name: Symbol,
     test: bool,
 ) -> NameLayer<'db> {
-    if db.one_shot() {
-        let layer = project_name_layer(db, files, name, test);
-        if syntax::testing::invariants_enabled() {
-            assert_eq!(
-                layer,
-                projected_name_layer(db, name, test),
-                "the one-shot lookup of `{name}` disagrees with its projection"
-            );
+    NameLookup::new(db, files, test).layer(db, name)
+}
+
+/// How one namespace layer's bindings are looked up. An incremental host reads them through
+/// the per-name projection, so a check depends only on the names it reads. A one-shot host
+/// never edits, so it reads the project-wide maps, once per lookup rather than once per name:
+/// every salsa read records a dependency edge, and an item looks up dozens of names.
+#[derive(Clone, Copy)]
+pub enum NameLookup<'db> {
+    Project {
+        winners: &'db FxHashMap<Symbol, Item<'db>>,
+        writers: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
+        test: bool,
+    },
+    Projected {
+        test: bool,
+    },
+}
+
+impl<'db> NameLookup<'db> {
+    pub fn new(db: &'db dyn Db, files: ProjectFiles, test: bool) -> NameLookup<'db> {
+        if !db.one_shot() {
+            return NameLookup::Projected { test };
         }
-        return layer;
+        let (winners, writers) = match test {
+            true => (
+                test_definitions(db, files),
+                test_conditional_slot_items(db, files),
+            ),
+            false => (
+                package_definitions(db, files),
+                conditional_slot_items(db, files),
+            ),
+        };
+        NameLookup::Project {
+            winners,
+            writers,
+            test,
+        }
     }
-    projected_name_layer(db, name, test)
+
+    pub fn layer(self, db: &'db dyn Db, name: Symbol) -> NameLayer<'db> {
+        match self {
+            NameLookup::Project {
+                winners,
+                writers,
+                test,
+            } => {
+                let layer = NameLayer {
+                    winner: winners.get(&name).copied(),
+                    conditional_writers: writers.get(&name).map_or(&[], Vec::as_slice),
+                };
+                if syntax::testing::invariants_enabled() {
+                    assert_eq!(
+                        layer,
+                        projected_name_layer(db, name, test),
+                        "the one-shot lookup of `{name}` disagrees with its projection"
+                    );
+                }
+                layer
+            }
+            NameLookup::Projected { test } => projected_name_layer(db, name, test),
+        }
+    }
 }
 
 /// [`name_layer`] for a caller that may run without a project, where nothing binds the name.
@@ -1500,28 +1635,6 @@ pub fn package_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLaye
     ProjectFiles::try_get(db).map_or_else(NameLayer::default, |files| {
         name_layer(db, files, name, test)
     })
-}
-
-fn project_name_layer<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: Symbol,
-    test: bool,
-) -> NameLayer<'db> {
-    let (winners, writers) = match test {
-        true => (
-            test_definitions(db, files),
-            test_conditional_slot_items(db, files),
-        ),
-        false => (
-            package_definitions(db, files),
-            conditional_slot_items(db, files),
-        ),
-    };
-    NameLayer {
-        winner: winners.get(&name).copied(),
-        conditional_writers: writers.get(&name).map_or(&[], Vec::as_slice),
-    }
 }
 
 fn projected_name_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'db> {
@@ -1794,6 +1907,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
     // would intern a query name per read only to turn it back into a symbol.
     let frame_binders = item_frame_binders(db, item);
+    let frame = OnceCell::new();
     let frame_definition = |name: Symbol, deferred: bool| {
         if deferred && package {
             return None;
@@ -1803,7 +1917,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, name), deferred),
+            None => unlisted_frame_binder(db, item, &frame, name, deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -1906,9 +2020,11 @@ pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'
     let Some(files) = ProjectFiles::try_get(db) else {
         return targets;
     };
+    let test_lookup = test.then(|| NameLookup::new(db, files, true));
+    let package_lookup = NameLookup::new(db, files, false);
     let layers = |name: Symbol| {
-        let test_layer = test.then(|| name_layer(db, files, name, true));
-        (test_layer, name_layer(db, files, name, false))
+        let test_layer = test_lookup.map(|lookup| lookup.layer(db, name));
+        (test_layer, package_lookup.layer(db, name))
     };
     for &name in &reads.layered {
         let (test_layer, package_layer) = layers(name);
@@ -1976,13 +2092,11 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
-    // A green walk: the red preorder built a cursor node for every element of every item.
     if node.kind() == SyntaxKind::FUNCTION_DEF {
         return 0;
     }
     let mut count = 0;
-    let green = node.green();
-    let mut stack = vec![(node.kind(), green.children())];
+    let mut stack = vec![(node.kind(), node.node_ref().children())];
     while let Some((parent_kind, children)) = stack.last_mut() {
         let parent_kind = *parent_kind;
         let Some(element) = children.next() else {
@@ -1991,13 +2105,13 @@ fn write_tokens(node: &SyntaxNode) -> usize {
         };
         match element {
             NodeOrToken::Node(child) => {
-                let kind = RLanguage::kind_from_raw(child.kind());
+                let kind = child.kind();
                 if kind != SyntaxKind::FUNCTION_DEF {
                     stack.push((kind, child.children()));
                 }
             }
             NodeOrToken::Token(token) => {
-                let writes = match RLanguage::kind_from_raw(token.kind()) {
+                let writes = match token.kind {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
@@ -2005,9 +2119,9 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
                     SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
-                    SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
+                    SyntaxKind::SPECIAL => matches!(token.text, "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
-                        token.text().trim_matches('`'),
+                        token.text.trim_matches('`'),
                         ":=" | "setnames" | "setcolorder"
                     ),
                     _ => false,
@@ -2501,8 +2615,11 @@ struct SalsaGlobals<'db, 'a> {
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
     item_frame_binders: OnceCell<&'db ItemFrameBinders<'db>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
+    frame: OnceCell<FrameBinders<'db>>,
     package_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
     test_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
+    package_lookup: OnceCell<NameLookup<'db>>,
+    test_lookup: OnceCell<NameLookup<'db>>,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -2645,31 +2762,52 @@ fn frame_binder<'db>(
     FrameBinders::of(db, item).binder(Symbol::new(name.text(db)), deferred)
 }
 
+/// [`frame_binder`] for a name [`item_frame_binders`] does not list. An incremental host goes
+/// through the per-name query, so the reader depends only on that name's binder; a one-shot
+/// host never edits, so it reads the file's binders once per reader instead of keeping a memo
+/// per item and name.
+fn unlisted_frame_binder<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    frame: &OnceCell<FrameBinders<'db>>,
+    name: Symbol,
+    deferred: bool,
+) -> Option<Item<'db>> {
+    if db.one_shot() {
+        return frame
+            .get_or_init(|| FrameBinders::of(db, item))
+            .binder(name, deferred);
+    }
+    frame_binder(db, item, types::Name::new(db, &name), deferred)
+}
+
+/// Each symbol an item reads from its frame, with its immediate and deferred binders.
+type ItemFrameBinders<'db> = SortedMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
+
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
 /// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
 /// which interned a key and kept a memo, and its value still changes only when a binder of
-/// one of the item's own names does.
-/// Each symbol bound in an item's frame, with its immediate and deferred binders.
-type ItemFrameBinders<'db> = FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
-
+/// one of the item's own names does. The value is an exactly sized sorted array rather than a
+/// hash table, because every item keeps one for the whole run.
 #[salsa::tracked(returns(ref))]
 fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders<'db> {
-    let mut binders = FxHashMap::default();
     let Some(naming) = item_naming(db, item) else {
-        return binders;
+        return SortedMap::default();
     };
     let frame = FrameBinders::of(db, item);
-    let names = naming
+    let mut names: Vec<Symbol> = naming
         .non_locals
         .values()
         .chain(naming.quiet_reads.values())
-        .chain(naming.quiet_operator_reads.iter());
-    for &name in names {
-        binders
-            .entry(name)
-            .or_insert_with(|| (frame.binder(name, false), frame.binder(name, true)));
-    }
-    binders
+        .chain(naming.quiet_operator_reads.iter())
+        .copied()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| (name, (frame.binder(name, false), frame.binder(name, true))))
+        .collect()
 }
 
 /// What every binder lookup of one item reads, fetched once: each salsa read records a
@@ -2729,8 +2867,11 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             schemes: RefCell::default(),
             item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
+            frame: OnceCell::new(),
             package_layers: RefCell::default(),
             test_layers: RefCell::default(),
+            package_lookup: OnceCell::new(),
+            test_lookup: OnceCell::new(),
         }
     }
 
@@ -2812,7 +2953,9 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             .frame_binders
             .borrow_mut()
             .entry((name, deferred))
-            .or_insert_with(|| frame_binder(self.db, self.item, name, deferred))
+            .or_insert_with(|| {
+                unlisted_frame_binder(self.db, self.item, &self.frame, Symbol::new(text), deferred)
+            })
     }
 
     /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
@@ -2826,7 +2969,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                     DocumentKind::Test | DocumentKind::TestHelper
                 )
             })
-            .map(|files| self.layer(&self.test_layers, files, name, true));
+            .map(|files| self.layer(&self.test_layers, &self.test_lookup, files, name, true));
         let sourced =
             sourced_definition(self.db, self.file, name.symbol()).map(|winner| NameLayer {
                 winner: Some(winner),
@@ -2840,20 +2983,28 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 
     fn package_layer(&self, name: types::Name<'db>) -> Option<NameLayer<'db>> {
         let files = self.files?;
-        Some(self.layer(&self.package_layers, files, name, false))
+        Some(self.layer(
+            &self.package_layers,
+            &self.package_lookup,
+            files,
+            name,
+            false,
+        ))
     }
 
     fn layer(
         &self,
         layers: &RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
+        lookup: &OnceCell<NameLookup<'db>>,
         files: ProjectFiles,
         name: types::Name<'db>,
         test: bool,
     ) -> NameLayer<'db> {
-        *layers
-            .borrow_mut()
-            .entry(name)
-            .or_insert_with(|| name_layer(self.db, files, Symbol::new(name.text(self.db)), test))
+        *layers.borrow_mut().entry(name).or_insert_with(|| {
+            lookup
+                .get_or_init(|| NameLookup::new(self.db, files, test))
+                .layer(self.db, Symbol::new(name.text(self.db)))
+        })
     }
 
     fn binder_scheme(
@@ -3052,10 +3203,7 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    // Read off the green tree: this runs on every top-level statement of every file, and each
-    // red child is an allocation.
-    let green = node.green();
-    let binary = GreenNodeAt::new(&green, node.text_range().start());
+    let binary = node.node_ref();
     let mut operator = None;
     let mut operands = binary
         .child_nodes()

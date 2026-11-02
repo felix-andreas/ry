@@ -7,40 +7,13 @@ use {
         Parse, SyntaxError,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
+        tree::{Checkpoint, TreeBuilder},
     },
-    hashbrown::HashTable,
-    rowan::{
-        GreenNode, GreenNodeData, GreenToken, GreenTokenData, NodeOrToken, TextRange, TextSize,
-    },
-    rustc_hash::FxHasher,
-    std::{
-        cell::RefCell,
-        hash::{Hash, Hasher},
-    },
+    std::sync::Arc,
+    text_size::{TextRange, TextSize},
 };
 
-/// Parses that share one cache of green elements before it is dropped. Sharing makes identical
-/// tokens (whitespace, punctuation, common names) and small nodes one allocation across files;
-/// the cache keeps its entries alive, so the bound stops a long-running server from pinning the
-/// small subtrees of trees it has already replaced.
-const GREEN_CACHE_PARSES: u32 = 256;
-
-thread_local! {
-    static GREEN_CACHE: RefCell<(GreenCache, u32)> = RefCell::new((GreenCache::default(), 0));
-}
-
 pub fn parse(text: &str) -> Parse {
-    GREEN_CACHE.with_borrow_mut(|(cache, parses)| {
-        if *parses >= GREEN_CACHE_PARSES {
-            *cache = GreenCache::default();
-            *parses = 0;
-        }
-        *parses += 1;
-        parse_with_cache(text, cache)
-    })
-}
-
-fn parse_with_cache(text: &str, cache: &mut GreenCache) -> Parse {
     let (tokens, lexer_errors) = lex(text);
     let mut offsets = Vec::with_capacity(tokens.len() + 1);
     let mut offset = 0usize;
@@ -55,11 +28,7 @@ fn parse_with_cache(text: &str, cache: &mut GreenCache) -> Parse {
         tokens,
         offsets,
         pos: 0,
-        builder: TreeBuilder {
-            cache,
-            children: Vec::new(),
-            parents: Vec::new(),
-        },
+        builder: TreeBuilder::default(),
         errors: lexer_errors,
         groups: vec![0],
         depth: 0,
@@ -74,208 +43,20 @@ fn parse_with_cache(text: &str, cache: &mut GreenCache) -> Parse {
         statement_left_group_open: false,
     };
     parser.source_file();
-    let green = parser.builder.finish();
-    Parse::new(green, parser.errors)
-}
-
-/// Builds the green tree bottom-up, sharing identical tokens and small nodes.
-struct TreeBuilder<'cache> {
-    cache: &'cache mut GreenCache,
-    children: Vec<NodeOrToken<GreenNode, GreenToken>>,
-    /// Each open node's kind and where its first child sits in `children`.
-    parents: Vec<(SyntaxKind, usize)>,
-}
-
-/// A position in the child list where a node can later be opened around what follows.
-#[derive(Clone, Copy)]
-struct Checkpoint(usize);
-
-impl TreeBuilder<'_> {
-    fn token(&mut self, kind: SyntaxKind, text: &str) {
-        let token = self.cache.token(kind, text);
-        self.children.push(NodeOrToken::Token(token));
-    }
-
-    fn start_node(&mut self, kind: SyntaxKind) {
-        self.parents.push((kind, self.children.len()));
-    }
-
-    fn start_node_at(&mut self, Checkpoint(first): Checkpoint, kind: SyntaxKind) {
-        assert!(
-            first <= self.children.len(),
-            "checkpoint is past the current child"
-        );
-        if let Some(&(_, parent_first)) = self.parents.last() {
-            assert!(
-                first >= parent_first,
-                "checkpoint is outside the current node"
-            );
-        }
-        self.parents.push((kind, first));
-    }
-
-    fn finish_node(&mut self) {
-        let (kind, first) = self
-            .parents
-            .pop()
-            .expect("finish_node without an open node");
-        let node = self.cache.node(kind, &mut self.children, first);
-        self.children.push(NodeOrToken::Node(node));
-    }
-
-    fn checkpoint(&self) -> Checkpoint {
-        Checkpoint(self.children.len())
-    }
-
-    fn finish(mut self) -> GreenNode {
-        assert!(self.parents.is_empty(), "every node is finished");
-        match (self.children.pop(), self.children.is_empty()) {
-            (Some(NodeOrToken::Node(root)), true) => root,
-            _ => panic!("a parse builds exactly one root node"),
-        }
-    }
-}
-
-/// Interned tokens, keyed by kind and text, and interned small nodes.
-#[derive(Default)]
-struct GreenCache {
-    /// The last token of each kind. Most tokens repeat the previous one of their kind (an
-    /// operator, a space, a newline), and comparing one slot is far cheaper than hashing.
-    last: Vec<Option<GreenToken>>,
-    tokens: HashTable<GreenToken>,
-    /// Nodes of at most [`SHARED_NODE_CHILDREN`] children and [`SHARED_NODE_TEXT`] bytes, keyed
-    /// by kind and the addresses of their children. An entry keeps its children alive, so no
-    /// address in a stored key is reused while the key exists, and equal addresses mean equal
-    /// subtrees without reading text. Wrappers such as a name expression around one identifier
-    /// repeat throughout a project, and sharing them is most of what a tree's memory saves; the
-    /// text bound keeps a short root or block over one large statement from pinning its tree.
-    ///
-    /// rowan compares red nodes by green address and offset only, so two files' nodes at the
-    /// same offset over a shared green node compare equal: never key a cross-file map by them.
-    nodes: HashTable<GreenNode>,
-}
-
-const SHARED_NODE_CHILDREN: usize = 3;
-const SHARED_NODE_TEXT: TextSize = TextSize::new(64);
-
-impl GreenCache {
-    fn token(&mut self, kind: SyntaxKind, text: &str) -> GreenToken {
-        let raw = rowan::SyntaxKind::from(kind);
-        let slot = usize::from(raw.0);
-        if let Some(Some(last)) = self.last.get(slot)
-            && last.text() == text
-        {
-            return last.clone();
-        }
-        let hash = token_hash(raw, text);
-        let token = self
-            .tokens
-            .entry(
-                hash,
-                |token| token.kind() == raw && token.text() == text,
-                |token| token_hash(token.kind(), token.text()),
-            )
-            .or_insert_with(|| GreenToken::new(raw, text))
-            .get()
-            .clone();
-        if self.last.len() <= slot {
-            self.last.resize(slot + 1, None);
-        }
-        self.last[slot] = Some(token.clone());
-        token
-    }
-
-    /// The node of `kind` over `children[first..]`, which it drains.
-    fn node(
-        &mut self,
-        kind: SyntaxKind,
-        children: &mut Vec<NodeOrToken<GreenNode, GreenToken>>,
-        first: usize,
-    ) -> GreenNode {
-        let raw = rowan::SyntaxKind::from(kind);
-        let Some(own) = children
-            .get(first..)
-            .filter(|own| own.len() <= SHARED_NODE_CHILDREN)
-            .filter(|own| {
-                let text: TextSize = own
-                    .iter()
-                    .map(|child| match child {
-                        NodeOrToken::Node(node) => node.text_len(),
-                        NodeOrToken::Token(token) => token.text_len(),
-                    })
-                    .sum();
-                text <= SHARED_NODE_TEXT
-            })
-        else {
-            return GreenNode::new(raw, children.drain(first..));
-        };
-        let hash = node_hash(
-            raw,
-            own.iter().map(|child| element_address(borrowed(child))),
-        );
-        let same = |node: &GreenNode| {
-            node.kind() == raw
-                && node.children().len() == own.len()
-                && node.children().zip(own).all(|(stored, child)| {
-                    element_address(stored) == element_address(borrowed(child))
-                })
-        };
-        if let Some(node) = self.nodes.find(hash, same) {
-            let node = node.clone();
-            children.truncate(first);
-            return node;
-        }
-        let node = GreenNode::new(raw, children.drain(first..));
-        self.nodes.insert_unique(hash, node.clone(), |node| {
-            node_hash(node.kind(), node.children().map(element_address))
-        });
-        node
-    }
-}
-
-fn borrowed(
-    element: &NodeOrToken<GreenNode, GreenToken>,
-) -> NodeOrToken<&GreenNodeData, &GreenTokenData> {
-    match element {
-        NodeOrToken::Node(node) => NodeOrToken::Node(node),
-        NodeOrToken::Token(token) => NodeOrToken::Token(token),
-    }
-}
-
-/// Where a shared element lives, tagged so a node and a token never collide.
-fn element_address(element: NodeOrToken<&GreenNodeData, &GreenTokenData>) -> usize {
-    match element {
-        NodeOrToken::Node(node) => node as *const GreenNodeData as usize,
-        NodeOrToken::Token(token) => token as *const GreenTokenData as usize | 1,
-    }
-}
-
-fn node_hash(kind: rowan::SyntaxKind, children: impl Iterator<Item = usize>) -> u64 {
-    let mut hasher = FxHasher::default();
-    kind.0.hash(&mut hasher);
-    for address in children {
-        address.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn token_hash(kind: rowan::SyntaxKind, text: &str) -> u64 {
-    let mut hasher = FxHasher::default();
-    kind.0.hash(&mut hasher);
-    text.hash(&mut hasher);
-    hasher.finish()
+    let tree = parser.builder.finish(text);
+    Parse::new(Arc::new(tree), parser.errors)
 }
 
 /// Deeper nesting reports an error instead of overflowing the stack.
 const MAX_DEPTH: u32 = 500;
 
-struct Parser<'a, 'cache> {
+struct Parser<'a> {
     text: &'a str,
     tokens: Vec<Token>,
     /// One extra trailing entry: the total length.
     offsets: Vec<usize>,
     pos: usize,
-    builder: TreeBuilder<'cache>,
+    builder: TreeBuilder,
     errors: Vec<SyntaxError>,
     /// `{` pushes 0, `(`/`[`/`[[` increment the top, closers undo; newlines are
     /// significant iff the top is 0.
@@ -307,7 +88,7 @@ struct Parser<'a, 'cache> {
     statement_left_group_open: bool,
 }
 
-impl Parser<'_, '_> {
+impl Parser<'_> {
     fn current(&self) -> Option<SyntaxKind> {
         self.tokens.get(self.pos).map(|token| token.kind)
     }
@@ -385,8 +166,7 @@ impl Parser<'_, '_> {
                 _ => {}
             }
         }
-        let text = &self.text[self.offsets[self.pos]..self.offsets[self.pos + 1]];
-        self.builder.token(kind, text);
+        self.builder.token(kind, self.tokens[self.pos].len);
         self.pos += 1;
     }
 
@@ -398,9 +178,8 @@ impl Parser<'_, '_> {
     fn flush_deferred_trivia(&mut self) {
         if let Some(start) = self.deferred_trivia.take() {
             for pos in start..self.pos {
-                let kind = self.tokens[pos].kind;
-                let text = &self.text[self.offsets[pos]..self.offsets[pos + 1]];
-                self.builder.token(kind, text);
+                let token = self.tokens[pos];
+                self.builder.token(token.kind, token.len);
             }
         }
     }
@@ -467,7 +246,9 @@ impl Parser<'_, '_> {
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
-        error.incomplete = self.peek_significant(self.pos, true).is_none();
+        let found = self.peek_significant(self.pos, true);
+        error.incomplete = found.is_none();
+        error.found = found.map(|(_, pos)| self.token_range(pos));
         self.errors.push(error);
     }
 
@@ -593,6 +374,13 @@ impl Parser<'_, '_> {
                 Some(WHITESPACE | NEWLINE | ANNOTATION_MARKER | COMMENT)
             )
         {
+            // `#` after an annotation starts a plain comment, so a second `#:` on the line would
+            // be read as prose and its type silently dropped.
+            if self.at(COMMENT) && self.token_str(self.pos).starts_with("#:") {
+                self.error_here(
+                    "a second `#:` annotation on this line is read as a comment. Put each annotation on its own `#:` line",
+                );
+            }
             self.bump();
         }
     }

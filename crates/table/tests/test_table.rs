@@ -3804,6 +3804,24 @@ fn dcast_names_columns_as_r_spells_the_values() {
 }
 
 #[test]
+fn dcast_orders_dates_and_puts_an_na_label_first() {
+    let d = frame(vec![
+        ("day", RVector::Date(vec![19725.0, 19724.0, 19725.0])),
+        ("c", ints(&[2, NA_INTEGER, 1])),
+        ("v", doubles(&[1.5, 2.5, 3.5])),
+    ]);
+    let cast = ops::dcast(&d, &["day"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
+    let mut wide = output_table(cast);
+    assert_eq!(
+        wide.schema().to_string(),
+        "DataFrame{day: Date, NA: double[], 1: double[], 2: double[]}"
+    );
+    assert_eq!(get(&mut wide, "day"), RVector::Date(vec![19724.0, 19725.0]));
+    assert_eq!(Read(get(&mut wide, "NA")), doubles(&[2.5, NA_REAL]));
+    assert_eq!(Read(get(&mut wide, "2")), doubles(&[NA_REAL, 1.5]));
+}
+
+#[test]
 fn nafill_fills_nan_like_na() {
     let gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
     let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
@@ -3987,9 +4005,9 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
                 2 * u8::from(values[row] != NA_INTEGER)
             }
             RVector::Factor { codes, .. } => 2 * u8::from(codes[row] != NA_INTEGER),
-            RVector::Double(values) if is_na_real(values[row]) => 0,
-            RVector::Double(values) if values[row].is_nan() => 1,
-            RVector::Double(_) => 2,
+            RVector::Double(values) | RVector::Date(values) if is_na_real(values[row]) => 0,
+            RVector::Double(values) | RVector::Date(values) if values[row].is_nan() => 1,
+            RVector::Double(_) | RVector::Date(_) => 2,
             RVector::Character(values) => 2 * u8::from(values[row].is_some()),
         }
     };
@@ -4000,7 +4018,7 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
     let ordering = match vector {
         RVector::Logical(values) | RVector::Integer(values) => values[left].cmp(&values[right]),
         RVector::Factor { codes, .. } => codes[left].cmp(&codes[right]),
-        RVector::Double(values) => values[left]
+        RVector::Double(values) | RVector::Date(values) => values[left]
             .partial_cmp(&values[right])
             .unwrap_or(Ordering::Equal),
         RVector::Character(values) => values[left]
@@ -4082,6 +4100,7 @@ fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
         RVector::Logical(values) => RVector::Logical(rows.iter().map(|row| values[*row]).collect()),
         RVector::Integer(values) => RVector::Integer(rows.iter().map(|row| values[*row]).collect()),
         RVector::Double(values) => RVector::Double(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Date(values) => RVector::Date(rows.iter().map(|row| values[*row]).collect()),
         RVector::Character(values) => {
             RVector::Character(rows.iter().map(|row| values[*row].clone()).collect())
         }
@@ -4221,4 +4240,68 @@ fn fuzz_sort_unique_and_runs_against_a_reference() {
             );
         }
     });
+}
+
+#[test]
+fn a_minimum_over_a_group_with_no_values_left_warns() {
+    let minimum = Expr::Aggregate {
+        function: Aggregate::Min,
+        arg: Box::new(column("y")),
+        na_rm: true,
+    };
+    for (kernels, bare) in [(true, false), (false, false), (true, true), (false, true)] {
+        let mut table = frame(vec![
+            ("k", ints(&[1, 1, 2, 2])),
+            ("y", ints(&[3, NA_INTEGER, NA_INTEGER, NA_INTEGER])),
+        ]);
+        let query = Query {
+            select: if bare {
+                Select::Value(minimum.clone())
+            } else {
+                Select::Columns(vec![named("V1", minimum.clone())])
+            },
+            by: vec![named("k", column("k"))],
+            ..Query::default()
+        };
+        let Executed { output, warnings } = if kernels {
+            execute(&mut table, query)
+        } else {
+            execute_with_plans_only(&mut table, query)
+        }
+        .unwrap_or_else(|error| panic!("query failed: {error}"));
+        let Output::Table(mut result) = output else {
+            panic!("expected a table")
+        };
+        assert_eq!(read(&mut result, "V1"), ints(&[3, NA_INTEGER]));
+        assert_eq!(warnings.len(), 1, "kernels: {kernels}, bare: {bare}");
+    }
+}
+
+#[test]
+fn a_rolling_join_keeps_every_exact_match() {
+    let cases = [
+        (Roll::Backward(None), vec![1, 2, 2, 4]),
+        (Roll::Forward(None), vec![1, 2, 3, NA_INTEGER]),
+    ];
+    for (roll, expected) in cases {
+        let mut x = frame(vec![
+            ("k", doubles(&[1.0, 1.0, 3.0, 3.0])),
+            ("v", ints(&[1, 2, 3, 4])),
+        ]);
+        let mut i = frame(vec![("k", doubles(&[1.0, 2.0, 4.0]))]);
+        let rows = join(&mut i, &[("k", "k")], false, roll);
+        let mut result = run_table(
+            &mut x,
+            Query {
+                rows,
+                ..Query::default()
+            },
+        );
+        assert_eq!(read(&mut result, "v"), ints(&expected), "{roll:?}");
+        assert_eq!(
+            read(&mut result, "k"),
+            doubles(&[1.0, 1.0, 2.0, 4.0]),
+            "{roll:?}"
+        );
+    }
 }

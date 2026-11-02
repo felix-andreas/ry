@@ -19,7 +19,7 @@ folds_@ID@ <- function(n: integer, k: integer = @FOLDS@L) -> integer[] sample(re
 
 cross_validate_@ID@ <- function(data: data.frame, k: integer = @FOLDS@L) -> double[named] {
   assignment <- folds_@ID@(nrow(data), k)
-  errors <- vapply(seq_len(k), function(fold) {
+  errors <- vapply(seq_len(k), function(fold: integer) -> double {
     fit <- fit_model_@ID@(data[assignment != fold, ])
     held_out <- data[assignment == fold, ]
     sqrt(mean((stats::predict(fit, held_out) - held_out$y)^2))

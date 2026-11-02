@@ -5,15 +5,17 @@
 //! generator and one set of mutation operators.
 
 use {
-    crate::SyntaxNode,
-    rowan::NodeOrToken,
+    crate::{NodeOrToken, SyntaxNode},
     std::{
         collections::HashSet,
         env, fs,
         ops::Range,
         panic::{self, AssertUnwindSafe},
         path::{Path, PathBuf},
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     },
 };
 
@@ -219,7 +221,24 @@ pub fn check_parse_invariants(input: &str) {
     }
 
     check_geometry(&parse.syntax_node(), input);
-    check_green_search(&parse.syntax_node(), input);
+    check_navigation(&parse.syntax_node(), input);
+    // Item trees are windows with a nonzero first index and base offset, which the root never
+    // exercises; a window of a window covers nested rebasing.
+    let tree = parse.tree();
+    for node in tree.root().descendants().skip(1).step_by(7).take(4) {
+        let window = Arc::new(tree.subtree(node));
+        let window_root = SyntaxNode::new_root(window.clone());
+        check_navigation(&window_root, window.text());
+        if let Some(inner) = window.root().descendants().nth(1) {
+            let nested = Arc::new(window.subtree(inner));
+            check_navigation(&SyntaxNode::new_root(nested.clone()), nested.text());
+            let detached = nested.detach();
+            assert!(
+                detached == *nested && detached.same_parents(&nested),
+                "a detached window differs from its source for input {input:?}"
+            );
+        }
+    }
 
     // One mistake must not fan out into a storm of errors.
     assert!(
@@ -266,8 +285,8 @@ pub fn check_parse_invariants(input: &str) {
 
     let again = crate::parse(input);
     assert_eq!(
-        parse.green(),
-        again.green(),
+        parse.tree(),
+        again.tree(),
         "non-deterministic parse for input {input:?}"
     );
     assert_eq!(
@@ -706,34 +725,31 @@ fn check_geometry(node: &SyntaxNode, input: &str) {
     }
 }
 
-/// The green-tree searches agree with the red-tree walks they replace, for the whole tree
-/// and for a subtree, and whatever subset of kinds is wanted.
-fn check_green_search(root: &crate::SyntaxNode, input: &str) {
+/// The flat tree's shortcuts (binary searches over starts, climbing parents, borrowed walks)
+/// agree with the plain child-by-child definitions a nested tree would use.
+fn check_navigation(root: &SyntaxNode, input: &str) {
     let mut text = String::new();
     crate::for_each_token(root, |_, token| text.push_str(token));
-    assert_eq!(
-        text, input,
-        "green token walk lost text for input {input:?}"
-    );
-    let descendants: Vec<crate::SyntaxNode> = root.descendants().collect();
+    assert_eq!(text, input, "token walk lost text for input {input:?}");
+    let descendants: Vec<SyntaxNode> = root.descendants().collect();
     let mut visited = Vec::new();
     let mut tokens = Vec::new();
     let mut open = 0usize;
-    crate::walk_green(root, |event| match event {
-        crate::GreenEvent::Enter {
+    crate::walk_tree(root.node_ref(), |event| match event {
+        crate::TreeEvent::Enter {
             node,
             parent,
             range,
         } => {
             open += 1;
-            visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
+            visited.push((node.kind(), parent.map(crate::NodeRef::kind), range));
         }
-        crate::GreenEvent::Leave(_) => open -= 1,
-        crate::GreenEvent::Token { kind, text, range } => {
+        crate::TreeEvent::Leave(_) => open -= 1,
+        crate::TreeEvent::Token { kind, text, range } => {
             tokens.push((kind, text.to_owned(), range));
         }
     });
-    assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
+    assert_eq!(open, 0, "tree walk left nodes open for input {input:?}");
     let expected_tokens: Vec<_> = root
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
@@ -742,7 +758,7 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
         .collect();
     assert_eq!(
         tokens, expected_tokens,
-        "green walk tokens diverged for input {input:?}"
+        "tree walk tokens diverged for input {input:?}"
     );
     let expected: Vec<_> = descendants
         .iter()
@@ -753,10 +769,7 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
             (node.kind(), parent, node.text_range())
         })
         .collect();
-    assert_eq!(
-        visited, expected,
-        "green node walk diverged for input {input:?}"
-    );
+    assert_eq!(visited, expected, "tree walk diverged for input {input:?}");
     for node in &descendants {
         let first = descendants
             .iter()
@@ -766,20 +779,21 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
             first,
             "node_at missed a node for input {input:?}"
         );
+        check_siblings(node, input);
     }
     let subtrees = root.children().take(3);
     for node in std::iter::once(root.clone()).chain(subtrees) {
         for modulus in [1, 3, 7] {
             let wanted = |kind: crate::SyntaxKind| (kind as u16).is_multiple_of(modulus);
-            let expected: Vec<crate::SyntaxNode> = node
+            let expected: Vec<SyntaxNode> = node
                 .descendants()
                 .filter(|node| wanted(node.kind()))
                 .collect();
             let mut parents = Vec::new();
-            let found = crate::matching_nodes(&node, |green, parent| {
-                let accepted = wanted(green.kind());
+            let found = crate::matching_nodes(&node, |candidate, parent| {
+                let accepted = wanted(candidate.kind());
                 if accepted {
-                    parents.push(parent.map(crate::GreenRef::kind));
+                    parents.push(parent.map(crate::NodeRef::kind));
                 }
                 accepted
             });
@@ -793,9 +807,123 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
                 .collect();
             assert_eq!(
                 parents, expected_parents,
-                "green search parents diverged for input {input:?}"
+                "node search parents diverged for input {input:?}"
             );
-            assert_eq!(found, expected, "green search diverged for input {input:?}");
+            assert_eq!(found, expected, "node search diverged for input {input:?}");
         }
     }
+    let end = u32::from(root.text_range().end());
+    for offset in 0..=end {
+        let offset = crate::TextSize::from(offset);
+        let fast: Vec<_> = root.token_at_offset(offset).collect();
+        assert_eq!(
+            fast,
+            nested_token_at_offset(&NodeOrToken::Node(root.clone()), offset),
+            "token_at_offset at {offset:?} diverged for input {input:?}"
+        );
+    }
+}
+
+/// Sibling, last-child, token and range lookups against the children list read front to back.
+fn check_siblings(node: &SyntaxNode, input: &str) {
+    let children: Vec<crate::SyntaxElement> = node.children_with_tokens().collect();
+    assert_eq!(
+        node.last_child_or_token(),
+        children.last().cloned(),
+        "last_child_or_token diverged for input {input:?}"
+    );
+    assert_eq!(
+        node.children_with_tokens().count(),
+        node.node_ref().children().rev().count(),
+        "reverse children diverged for input {input:?}"
+    );
+    for (position, child) in children.iter().enumerate() {
+        assert_eq!(
+            child.prev_sibling_or_token(),
+            position
+                .checked_sub(1)
+                .map(|previous| children[previous].clone()),
+            "prev_sibling_or_token diverged for input {input:?}"
+        );
+        assert_eq!(
+            child.index(),
+            position,
+            "index diverged for input {input:?}"
+        );
+        if let NodeOrToken::Token(token) = child {
+            assert_eq!(
+                token.next_token(),
+                nested_next_token(token),
+                "next_token diverged for input {input:?}"
+            );
+        }
+    }
+    let mut ranges: Vec<crate::TextRange> =
+        children.iter().map(|child| child.text_range()).collect();
+    ranges.extend(
+        children
+            .iter()
+            .map(|child| crate::TextRange::empty(child.text_range().start())),
+    );
+    ranges.push(crate::TextRange::empty(node.text_range().end()));
+    for range in ranges {
+        let ordering = |child: &crate::SyntaxElement| {
+            let child = child.text_range();
+            if child.end() <= range.start() {
+                std::cmp::Ordering::Less
+            } else if range.end() <= child.start() {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        };
+        let position = children
+            .binary_search_by(ordering)
+            .unwrap_or_else(|position| position.saturating_sub(1));
+        let expected = children
+            .get(position)
+            .filter(|child| child.text_range().contains_range(range))
+            .cloned();
+        assert_eq!(
+            node.child_or_token_at_range(range),
+            expected,
+            "child_or_token_at_range({range:?}) diverged under {node:?} for input {input:?}"
+        );
+    }
+}
+
+/// The next token the way a nested tree finds it: the first token of the next sibling, or of
+/// the next sibling of the nearest ancestor that has one.
+fn nested_next_token(token: &crate::SyntaxToken) -> Option<crate::SyntaxToken> {
+    let first_token = |element: crate::SyntaxElement| match element {
+        NodeOrToken::Node(node) => node.first_token(),
+        NodeOrToken::Token(token) => Some(token),
+    };
+    match token.next_sibling_or_token() {
+        Some(element) => first_token(element),
+        None => token
+            .parent_ancestors()
+            .find_map(|ancestor| ancestor.next_sibling_or_token())
+            .and_then(first_token),
+    }
+}
+
+fn nested_token_at_offset(
+    element: &crate::SyntaxElement,
+    offset: crate::TextSize,
+) -> Vec<crate::SyntaxToken> {
+    let node = match element {
+        NodeOrToken::Token(token) => return vec![token.clone()],
+        NodeOrToken::Node(node) => node,
+    };
+    if node.text_range().is_empty() {
+        return Vec::new();
+    }
+    node.children_with_tokens()
+        .filter(|child| {
+            let range = child.text_range();
+            !range.is_empty() && range.start() <= offset && offset <= range.end()
+        })
+        .flat_map(|child| nested_token_at_offset(&child, offset))
+        .collect()
 }

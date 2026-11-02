@@ -3,7 +3,7 @@
 # Bag-of-words text features.
 corpus_@ID@ <- function(docs: integer = @DOCS@L) -> character[] {
   vocabulary <- c("data", "model", "table", "query", "cache", "index", "frame", "vector")
-  vapply(seq_len(docs), function(i) {
+  vapply(seq_len(docs), function(i: integer) -> character {
     paste(vocabulary[((i + 0:4) %% length(vocabulary)) + 1L], collapse = " ")
   }, character(1))
 }
@@ -11,7 +11,7 @@ corpus_@ID@ <- function(docs: integer = @DOCS@L) -> character[] {
 term_matrix_@ID@ <- function(docs: character[]) -> matrix {
   tokens <- stringr::str_split(docs, "\\s+")
   vocabulary <- sort(unique(unlist(tokens)))
-  counts: matrix <- t(vapply(tokens, function(words) table(factor(words, levels = vocabulary)), numeric(length(vocabulary))))
+  counts: matrix <- t(vapply(tokens, function(words: character[]) -> integer[] table(factor(words, levels = vocabulary)), numeric(length(vocabulary))))
   colnames(counts) <- vocabulary
   counts
 }

@@ -7,9 +7,16 @@
 !LICENSE
 !language-configuration.json
 !r-annotation.tmLanguage.json
+!ry-type.tmLanguage.json
 !out/*.js
+# ry looks for its runtime and ry-rcmd beside itself
 !bin/ry
 !bin/ry.exe
+!bin/libR.so
+!bin/libR.dylib
+!bin/R.dll
+!bin/ry-rcmd
+!bin/ry-rcmd.exe
 !images/icon.png
 # allow js
 node_modules/**

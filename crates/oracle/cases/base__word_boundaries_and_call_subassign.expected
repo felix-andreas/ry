@@ -1,0 +1,29 @@
+[stdout]
+| [1] 1
+| attr(,"match.length")
+| [1] 0
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] 1 2 3 4 5
+| attr(,"match.length")
+| [1] 0 0 0 0 0
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "|a|b| |c|d|"
+| [1] "a|bc d|e"
+| [1] "<o<n<e <t<w<o"
+| [1] "one> two>"
+| y ~ w
+| [1] "formula"
+| [1] TRUE
+| g(a, h(c))
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| g(a, h(c))

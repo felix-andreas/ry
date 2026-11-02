@@ -4,12 +4,14 @@
 
 use {
     crate::{
-        Parse, SyntaxElement,
+        NodeOrToken, Parse, SyntaxElement,
         kind::SyntaxKind::{self, *},
         lexer::lex,
         parse,
+        tree::{element_index, splice},
     },
-    rowan::{GreenNode, NodeOrToken, TextRange, TextSize},
+    std::sync::Arc,
+    text_size::{TextRange, TextSize},
 };
 
 pub fn try_splice(
@@ -120,42 +122,54 @@ pub fn try_splice(
     {
         return None;
     }
-    let new_children: Vec<_> = children[..prefix_end]
-        .iter()
-        .cloned()
-        .chain(middle.syntax_node().children_with_tokens())
-        .chain(children[suffix_start..].iter().cloned())
-        .map(|element| match element {
-            NodeOrToken::Node(node) => NodeOrToken::Node(node.green().into_owned()),
-            NodeOrToken::Token(token) => NodeOrToken::Token(token.green().to_owned()),
-        })
-        .collect();
-    let green = GreenNode::new(SOURCE_FILE.into(), new_children);
+    let old_tree = old.tree();
+    let prefix = 1..element_index(&children[prefix_end]);
+    let suffix = match children.get(suffix_start) {
+        Some(first) => element_index(first)..old_tree.len() as u32,
+        None => 0..0,
+    };
+    let tree = splice(
+        SOURCE_FILE,
+        new_text,
+        &[
+            (old_tree, prefix),
+            (middle.tree(), 1..middle.tree().len() as u32),
+            (old_tree, suffix),
+        ],
+    );
 
+    let shift = |range: TextRange, by: i64| {
+        let start = (i64::from(u32::from(range.start())) + by) as u32;
+        let end = (i64::from(u32::from(range.end())) + by) as u32;
+        TextRange::new(TextSize::from(start), TextSize::from(end))
+    };
     let mut errors = Vec::new();
     for error in old.errors() {
         if error.range.end() <= prefix_len {
+            // The token the parser stood on can lie past the error, in the replaced region,
+            // where a reparse might stand on a different one.
+            if error.found.is_some_and(|found| found.end() > prefix_len) {
+                return None;
+            }
             errors.push(error.clone());
         } else if suffix_start < children.len() && error.range.start() >= old_suffix_start {
             // The non-empty-suffix guard drops a zero-width end-of-file error:
             // it belongs to the replaced region, whose parse re-derives it.
-            let start = (i64::from(u32::from(error.range.start())) + delta) as u32;
-            let end = (i64::from(u32::from(error.range.end())) + delta) as u32;
             let mut rebased = error.clone();
-            rebased.range = TextRange::new(TextSize::from(start), TextSize::from(end));
+            rebased.range = shift(error.range, delta);
+            rebased.found = error.found.map(|found| shift(found, delta));
             errors.push(rebased);
         }
     }
+    let prefix = i64::from(u32::from(prefix_len));
     for error in middle.errors() {
         let mut rebased = error.clone();
-        rebased.range = TextRange::new(
-            error.range.start() + prefix_len,
-            error.range.end() + prefix_len,
-        );
+        rebased.range = shift(error.range, prefix);
+        rebased.found = error.found.map(|found| shift(found, prefix));
         errors.push(rebased);
     }
 
-    Some(Parse::new(green, errors))
+    Some(Parse::new(Arc::new(tree), errors))
 }
 
 /// A NEWLINE next to an annotation is not a statement boundary: consecutive

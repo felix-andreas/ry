@@ -19,7 +19,7 @@ use {
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
-        SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
+        SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
     },
     std::{collections::HashSet, fmt},
 };
@@ -189,6 +189,8 @@ pub enum Expr {
     Double(f64),
     Logical(bool),
     Character(String),
+    /// A date literal, whole days since 1970-01-01.
+    Date(i32),
     /// A typed `NA`.
     Na(ColumnType),
     Unary(UnaryOp, Box<Expr>),
@@ -206,6 +208,15 @@ pub enum Expr {
     Correlation(Box<Expr>, Box<Expr>),
     /// `fifelse(test, yes, no)` and `ifelse`.
     IfElse(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `Expr.over(x, keys)`: `x` computed within each group of rows sharing the keys' values, one
+    /// value per row, so an aggregation gives every row its group's result.
+    Window(Box<Expr>, Vec<PlSmallStr>),
+    /// `Expr.rank(x)`: each value's position in the sorted values, from 1, with ties in row order,
+    /// as `frank(ties.method = "first")` ranks. `NA` ranks last.
+    Rank {
+        arg: Box<Expr>,
+        descending: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,6 +322,9 @@ pub enum Warning {
     MeltCoerced { to: ColumnType },
     /// `dcast` had no aggregate, but some cell got several values, so it counts them instead.
     CastCounted,
+    /// `min` or `max` with `na.rm = TRUE`, written as a column of `j`, found a group with no
+    /// values left, which gets `NA`. Base R and data.table warn there too.
+    NoValues { column: PlSmallStr },
 }
 
 impl fmt::Display for Warning {
@@ -340,6 +354,11 @@ impl fmt::Display for Warning {
                 "the measure columns have different types, so the value column holds {}",
                 holds(*to)
             ),
+            Warning::NoValues { column } => write!(
+                formatter,
+                "a group of `{column}` has no values left after removing `NA`s, so its minimum or \
+                 maximum is `NA`"
+            ),
             Warning::CastCounted => formatter.write_str(
                 "some cells get several values and no aggregate was given, so each cell counts \
                  its values; pass `fun.aggregate` to choose another",
@@ -355,6 +374,7 @@ fn holds(kind: ColumnType) -> &'static str {
         ColumnType::Double => "doubles",
         ColumnType::Character => "strings",
         ColumnType::Factor => "factor levels",
+        ColumnType::Date => "dates",
     }
 }
 
@@ -379,23 +399,23 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
     let mut columns = HashSet::new();
     match &query.rows {
         Rows::All | Rows::Positions(_) => {}
-        Rows::Filter(condition) => expression_columns(condition, &mut columns),
+        Rows::Filter(condition) => column_references(condition, &mut columns),
         Rows::Order(keys) => keys
             .iter()
-            .for_each(|key| expression_columns(&key.expr, &mut columns)),
+            .for_each(|key| column_references(&key.expr, &mut columns)),
         Rows::Join(_) => return None,
     }
     match &query.select {
         Select::All => return None,
         Select::Columns(items) => items
             .iter()
-            .for_each(|(_, expr)| expression_columns(expr, &mut columns)),
-        Select::Value(expr) => expression_columns(expr, &mut columns),
+            .for_each(|(_, expr)| column_references(expr, &mut columns)),
+        Select::Value(expr) => column_references(expr, &mut columns),
         Select::Assign(items) => {
             for (name, expr) in items {
                 columns.insert(name.clone());
                 if let Some(expr) = expr {
-                    expression_columns(expr, &mut columns);
+                    column_references(expr, &mut columns);
                 }
             }
         }
@@ -403,42 +423,31 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
     query
         .by
         .iter()
-        .for_each(|(_, expr)| expression_columns(expr, &mut columns));
+        .for_each(|(_, expr)| column_references(expr, &mut columns));
     Some(columns)
 }
 
-fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
-    match expr {
-        Expr::Column(name) => {
-            columns.insert(name.clone());
-        }
-        Expr::Integer(_)
-        | Expr::Double(_)
-        | Expr::Logical(_)
-        | Expr::Character(_)
-        | Expr::Na(_)
-        | Expr::Count => {}
-        Expr::Unary(_, inner) | Expr::Head(inner, _) | Expr::Aggregate { arg: inner, .. } => {
-            expression_columns(inner, columns)
-        }
-        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
-            expression_columns(left, columns);
-            expression_columns(right, columns);
-        }
-        Expr::IfElse(test, yes, no) => {
-            expression_columns(test, columns);
-            expression_columns(yes, columns);
-            expression_columns(no, columns);
-        }
-    }
-}
-
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
+    let query = bind_group_columns(query);
     let sums = grouped_integer_sums(&table.schema(), table.key(), &query)?;
+    let extremes = dropped_extremes(&query);
     let mut warnings = Vec::new();
     let output = run(table, query, kernels, &mut warnings)?;
     let schema = match &output {
-        Output::Table(result) => result.schema(),
+        Output::Table(result) => {
+            warnings.extend(
+                extremes
+                    .into_iter()
+                    .filter(|column| {
+                        result
+                            .frame()
+                            .column(column)
+                            .is_ok_and(|values| values.null_count() > 0)
+                    })
+                    .map(|column| Warning::NoValues { column }),
+            );
+            result.schema()
+        }
         Output::Updated => table.schema(),
         Output::Vector(_) => return Ok(Executed { output, warnings }),
     };
@@ -509,6 +518,100 @@ fn grouped_integer_sums(
         }
     }
     Ok(sums)
+}
+
+/// The columns of `j` that are a `min` or `max` with `na.rm = TRUE`, whose `NA` result means a
+/// group had no values left.
+fn dropped_extremes(query: &Query) -> Vec<PlSmallStr> {
+    let value;
+    let columns = match &query.select {
+        Select::Columns(columns) => columns.as_slice(),
+        // A grouped bare `j` is the column `V1`.
+        Select::Value(expr) if !query.by.is_empty() => {
+            value = [(PlSmallStr::from_static("V1"), expr.clone())];
+            value.as_slice()
+        }
+        _ => return Vec::new(),
+    };
+    columns
+        .iter()
+        .filter(|(_, expr)| {
+            matches!(
+                expr,
+                Expr::Aggregate {
+                    function: Aggregate::Min | Aggregate::Max,
+                    na_rm: true,
+                    ..
+                }
+            )
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// data.table evaluates `j` once per group with each grouping column bound to the group's single
+/// value, so by `b`, `sum(a) * b` is one value per group and `sum(b)` and `length(b)` read that
+/// one value. A reference in `j` to a column grouped under its own name therefore reads the
+/// group's first value, which every row of the group shares.
+fn bind_group_columns(mut query: Query) -> Query {
+    let keys: Vec<PlSmallStr> = query
+        .by
+        .iter()
+        .filter(|(name, expr)| matches!(expr, Expr::Column(source) if source == name))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if keys.is_empty() {
+        return query;
+    }
+    fn bind(expr: &mut Expr, keys: &[PlSmallStr]) {
+        match expr {
+            Expr::Column(name) if keys.contains(name) => {
+                let column = std::mem::replace(expr, Expr::Count);
+                *expr = Expr::Aggregate {
+                    function: Aggregate::First,
+                    arg: Box::new(column),
+                    na_rm: false,
+                };
+            }
+            Expr::Column(_)
+            | Expr::Integer(_)
+            | Expr::Double(_)
+            | Expr::Logical(_)
+            | Expr::Character(_)
+            | Expr::Na(_)
+            | Expr::Date(_)
+            | Expr::Count => {}
+            Expr::Unary(_, arg)
+            | Expr::Head(arg, _)
+            | Expr::Rank { arg, .. }
+            | Expr::Window(arg, _) => bind(arg, keys),
+            Expr::Aggregate { arg, .. } => bind(arg, keys),
+            Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+                bind(left, keys);
+                bind(right, keys);
+            }
+            Expr::IfElse(test, yes, no) => {
+                bind(test, keys);
+                bind(yes, keys);
+                bind(no, keys);
+            }
+        }
+    }
+    match &mut query.select {
+        Select::All => {}
+        Select::Value(expr) => bind(expr, &keys),
+        Select::Columns(columns) => {
+            for (_, expr) in columns {
+                bind(expr, &keys);
+            }
+        }
+        Select::Assign(assignments) => {
+            for expr in assignments.iter_mut().filter_map(|(_, expr)| expr.as_mut()) {
+                bind(expr, &keys);
+            }
+        }
+    }
+    query
 }
 
 fn run(
@@ -679,15 +782,14 @@ fn prefixed_copies(
     )))
 }
 
-/// Every column name `expr` reads.
-fn column_references(expr: &Expr, names: &mut HashSet<PlSmallStr>) {
+/// Every column name `expr` reads, window keys included.
+pub(crate) fn column_references(expr: &Expr, names: &mut impl Extend<PlSmallStr>) {
     match expr {
-        Expr::Column(name) => {
-            names.insert(name.clone());
-        }
-        Expr::Unary(_, arg) | Expr::Head(arg, _) | Expr::Aggregate { arg, .. } => {
-            column_references(arg, names);
-        }
+        Expr::Column(name) => names.extend([name.clone()]),
+        Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Aggregate { arg, .. }
+        | Expr::Rank { arg, .. } => column_references(arg, names),
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             column_references(left, names);
             column_references(right, names);
@@ -697,10 +799,15 @@ fn column_references(expr: &Expr, names: &mut HashSet<PlSmallStr>) {
             column_references(yes, names);
             column_references(no, names);
         }
+        Expr::Window(arg, keys) => {
+            column_references(arg, names);
+            names.extend(keys.iter().cloned());
+        }
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Count => {}
     }
@@ -898,10 +1005,16 @@ fn per_row_of_i(
         Expr::Head(arg, rows) => Expr::Head(rewrite(arg), *rows),
         Expr::Binary(op, left, right) => Expr::Binary(*op, rewrite(left), rewrite(right)),
         Expr::IfElse(test, yes, no) => Expr::IfElse(rewrite(test), rewrite(yes), rewrite(no)),
+        Expr::Rank { arg, descending } => Expr::Rank {
+            arg: rewrite(arg),
+            descending: *descending,
+        },
+        Expr::Window(arg, keys) => Expr::Window(rewrite(arg), keys.clone()),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_) => expr.clone(),
     }
@@ -916,10 +1029,12 @@ fn reads_count(expr: &Expr) -> bool {
             reads_count(left) || reads_count(right)
         }
         Expr::IfElse(test, yes, no) => reads_count(test) || reads_count(yes) || reads_count(no),
+        Expr::Rank { arg, .. } | Expr::Window(arg, _) => reads_count(arg),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_) => false,
     }
@@ -1089,9 +1204,11 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
             arg,
             ..
         } => typer.expr(arg)? != ColumnType::Double,
-        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
-            has_integer_sum(typer, arg)?
-        }
+        Expr::Aggregate { arg, .. }
+        | Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Rank { arg, .. }
+        | Expr::Window(arg, _) => has_integer_sum(typer, arg)?,
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             has_integer_sum(typer, left)? || has_integer_sum(typer, right)?
         }
@@ -1104,6 +1221,7 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => false,
@@ -1118,7 +1236,11 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
             arg,
             ..
         } if typer.expr(arg)? != ColumnType::Double => sums.push(expr.clone()),
-        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
+        Expr::Aggregate { arg, .. }
+        | Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Rank { arg, .. }
+        | Expr::Window(arg, _) => {
             integer_sums(typer, arg, sums)?;
         }
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
@@ -1134,6 +1256,7 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => {}
@@ -1173,10 +1296,16 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
         Expr::Binary(op, left, right) => Expr::Binary(*op, double(left)?, double(right)?),
         Expr::Correlation(left, right) => Expr::Correlation(double(left)?, double(right)?),
         Expr::IfElse(test, yes, no) => Expr::IfElse(double(test)?, double(yes)?, double(no)?),
+        Expr::Rank { arg, descending } => Expr::Rank {
+            arg: double(arg)?,
+            descending: *descending,
+        },
+        Expr::Window(arg, keys) => Expr::Window(double(arg)?, keys.clone()),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => expr.clone(),
@@ -1186,6 +1315,7 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
 /// The lazy plan for a query that does not assign, so tests and `explain` can inspect what the
 /// planner receives.
 pub fn plan(table: &Table, query: Query) -> Result<LazyFrame> {
+    let query = bind_group_columns(query);
     if let Rows::Join(join) = &query.rows
         && join.each_i
     {
@@ -1628,27 +1758,35 @@ fn join_plan(
     };
     // `mult = "first"` or `"last"` keeps one match per row of `i`, and the matches of a row are
     // adjacent in the join's output, so a numbered `i` tells where each row's matches start and end.
-    let i = if join.mult == Mult::All || rolling.is_some() {
+    let i = if join.mult == Mult::All && rolling.is_none() {
         i
     } else {
         i.with_row_index(I_ROW, None)
     };
-    let joined = match rolling {
-        // data.table matches an `NA` key to an `NA` key, which Polars does only when asked.
-        None => i
-            .join_builder()
-            .with(x)
-            .left_on(left_on)
-            .right_on(right_on)
-            .how(if join.drop_unmatched {
-                JoinType::Inner
-            } else {
-                JoinType::Left
-            })
+    // data.table matches an `NA` key to an `NA` key, which Polars does only when asked.
+    let exact = |i: LazyFrame, how: JoinType| {
+        i.join_builder()
+            .with(x.clone())
+            .left_on(left_on.clone())
+            .right_on(right_on.clone())
+            .how(how)
             .join_nulls(true)
             .maintain_order(MaintainOrderJoin::LeftRight)
             .suffix(CLASH_SUFFIX)
-            .finish(),
+            .finish()
+    };
+    let joined = match rolling {
+        None => keep_mult(
+            exact(
+                i,
+                if join.drop_unmatched {
+                    JoinType::Inner
+                } else {
+                    JoinType::Left
+                },
+            ),
+            join.mult,
+        ),
         Some((strategy, tolerance)) => {
             let rolled = on
                 .last()
@@ -1666,10 +1804,22 @@ fn join_plan(
                 allow_eq: true,
                 check_sortedness: false,
             };
+            // A row of `i` with an exact match gets every match, as an equi-join does, and only
+            // the others roll, each to a single row: the last of the rolled-to value's rows when
+            // rolling forward and the first when rolling backward, which is the row an as-of join
+            // picks.
+            let matched = keep_mult(exact(i.clone(), JoinType::Inner), join.mult);
+            let unmatched = i
+                .join_builder()
+                .with(x.clone().select(right_on.clone()))
+                .left_on(left_on.clone())
+                .right_on(right_on.clone())
+                .how(JoinType::Anti)
+                .join_nulls(true)
+                .finish();
             // An as-of join walks both sides in order of the rolling column within each group, so
             // `i` is sorted first and restored to its own order afterwards. `x` is sorted the same
             // way, which is free when it is keyed on these columns.
-            const ROW: &str = "\u{1}row";
             let mut sort_i: Vec<PolarsExpr> = groups
                 .iter()
                 .map(|condition| col(condition.i.clone()))
@@ -1686,31 +1836,34 @@ fn join_plan(
             // Marks the rows of `x` so that an unmatched row of `i` is told apart from a match
             // whose values are `NA`.
             const MATCHED: &str = "\u{1}matched";
-            let i = i
-                .with_row_index(ROW, None)
-                .sort_by_exprs(sort_i, options_sort.clone());
             let x = x
+                .clone()
                 .with_column(lit(true).alias(MATCHED))
-                .sort_by_exprs(sort_x, options_sort);
-            let mut matched = i
+                .sort_by_exprs(sort_x, options_sort.clone());
+            let mut rolled = unmatched
+                .sort_by_exprs(sort_i, options_sort)
                 .join_builder()
                 .with(x)
                 .left_on([col(i_roll.clone())])
                 .right_on([col(x_roll.clone())])
                 .how(JoinType::AsOf(Box::new(options)))
                 .suffix(CLASH_SUFFIX)
-                .finish()
-                .sort([ROW], Default::default())
-                .drop(by_name([ROW], true, false));
+                .finish();
             if join.drop_unmatched {
-                matched = matched.filter(col(MATCHED).is_not_null());
+                rolled = rolled.filter(col(MATCHED).is_not_null());
             }
-            matched
+            concat(
+                [matched, rolled.drop(by_name([MATCHED], true, false))],
+                UnionArgs {
+                    diagonal: true,
+                    ..Default::default()
+                },
+            )?
+            .sort(
+                [I_ROW],
+                SortMultipleOptions::default().with_maintain_order(true),
+            )
         }
-    };
-    let joined = match rolling {
-        Some(_) => joined,
-        None => keep_mult(joined, join.mult),
     };
     Ok(joined.select(layout_exprs(x_schema, i_schema, on, &restore)))
 }
@@ -1959,8 +2112,9 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_) => true,
-        Expr::Column(_) | Expr::Head(..) => false,
+        Expr::Column(_) | Expr::Head(..) | Expr::Rank { .. } | Expr::Window(..) => false,
         Expr::Unary(_, arg) => collapses(arg),
         Expr::Binary(_, left, right) => collapses(left) && collapses(right),
         Expr::IfElse(test, yes, no) => collapses(test) && collapses(yes) && collapses(no),
@@ -2582,12 +2736,18 @@ fn relevel(column: Column, levels: &[String]) -> Result<Column> {
 /// whole frame and keeping the selected rows gives the same values as evaluating it on them.
 fn row_wise(expr: &Expr) -> bool {
     match expr {
-        Expr::Aggregate { .. } | Expr::Count | Expr::Head(..) | Expr::Correlation(..) => false,
+        Expr::Aggregate { .. }
+        | Expr::Count
+        | Expr::Head(..)
+        | Expr::Correlation(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => false,
         Expr::Column(_)
         | Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
+        | Expr::Date(_)
         | Expr::Na(_) => true,
         Expr::Unary(_, arg) => row_wise(arg),
         Expr::Binary(_, left, right) => row_wise(left) && row_wise(right),
@@ -2680,14 +2840,17 @@ impl NullCounts {
             | Expr::Double(_)
             | Expr::Logical(_)
             | Expr::Character(_)
-            | Expr::Count => false,
+            | Expr::Date(_)
+            | Expr::Count
+            | Expr::Rank { .. } => false,
             Expr::Unary(UnaryOp::IsNa, _) => false,
             Expr::Unary(_, arg) | Expr::Head(arg, _) => self.may_be_null(arg),
             // Integer arithmetic overflows to NA, so it may always produce one.
             Expr::Binary(..)
             | Expr::Aggregate { .. }
             | Expr::Correlation(..)
-            | Expr::IfElse(..) => true,
+            | Expr::IfElse(..)
+            | Expr::Window(..) => true,
         }
     }
 }
@@ -2708,6 +2871,7 @@ impl Typer<'_> {
             Expr::Double(_) => ColumnType::Double,
             Expr::Logical(_) => ColumnType::Logical,
             Expr::Character(_) => ColumnType::Character,
+            Expr::Date(_) => ColumnType::Date,
             Expr::Na(kind) => *kind,
             Expr::Unary(UnaryOp::Not, arg) => {
                 expect_truthy(self.expr(arg)?, "`!`")?;
@@ -2720,6 +2884,10 @@ impl Typer<'_> {
             Expr::Unary(UnaryOp::Negate, arg) => arithmetic(self.expr(arg)?, ColumnType::Integer)?,
             Expr::Binary(op, left, right) => {
                 let (left, right) = (self.expr(left)?, self.expr(right)?);
+                let arithmetic = |left, right| match op {
+                    BinaryOp::Add | BinaryOp::Subtract => date_arithmetic(*op, left, right),
+                    _ => arithmetic(left, right),
+                };
                 match op {
                     BinaryOp::Add
                     | BinaryOp::Subtract
@@ -2771,20 +2939,53 @@ impl Typer<'_> {
                 expect_logical(self.expr(test)?, "an `ifelse` test")?;
                 supertype(self.expr(yes)?, self.expr(no)?)
             }
+            Expr::Rank { arg, .. } => {
+                self.expr(arg)?;
+                ColumnType::Integer
+            }
+            Expr::Window(arg, keys) => {
+                for key in keys {
+                    self.expr(&Expr::Column(key.clone()))?;
+                }
+                self.expr(arg)?
+            }
         })
     }
 }
 
 /// The result type of R arithmetic: logical promotes to integer, and anything with a double is
-/// double. Characters and factors are refused, as R refuses them.
+/// double. Characters and factors are refused, as R refuses them, and so are dates, which only
+/// take the `+` and `-` of [`date_arithmetic`].
 fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     match (left, right) {
+        (ColumnType::Date, _) | (_, ColumnType::Date) => Err(Error::Query(
+            "a date only takes `+` and `-` with a number of days, or `-` with another date"
+                .to_string(),
+        )),
         (ColumnType::Character | ColumnType::Factor, _)
         | (_, ColumnType::Character | ColumnType::Factor) => Err(Error::Query(
             "arithmetic needs numeric or logical columns".to_string(),
         )),
         (ColumnType::Double, _) | (_, ColumnType::Double) => Ok(ColumnType::Double),
         _ => Ok(ColumnType::Integer),
+    }
+}
+
+/// The result type of `+` or `-`, which also take dates: a date plus or minus a number of days is
+/// a date, and the difference of two dates is their distance in whole days, an integer, where R
+/// would give a `difftime`.
+fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    let days = |kind| {
+        matches!(
+            kind,
+            ColumnType::Logical | ColumnType::Integer | ColumnType::Double
+        )
+    };
+    match (op, left, right) {
+        (BinaryOp::Subtract, ColumnType::Date, ColumnType::Date) => Ok(ColumnType::Integer),
+        (_, ColumnType::Date, other) if days(other) => Ok(ColumnType::Date),
+        (BinaryOp::Add, other, ColumnType::Date) if days(other) => Ok(ColumnType::Date),
+        _ => arithmetic(left, right),
     }
 }
 
@@ -2796,7 +2997,7 @@ fn supertype(left: ColumnType, right: ColumnType) -> ColumnType {
             ColumnType::Logical => 0,
             ColumnType::Integer => 1,
             ColumnType::Double => 2,
-            ColumnType::Character | ColumnType::Factor => 3,
+            ColumnType::Character | ColumnType::Factor | ColumnType::Date => 3,
         }
     }
     if left == right {
@@ -2825,6 +3026,18 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// formatting (`1e+06`, fifteen significant digits) has no Polars equivalent, so that mix is
 /// refused rather than compared wrongly.
 pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    // Without this, a date against anything else would meet at character and compare as text.
+    if (left == ColumnType::Date) != (right == ColumnType::Date) {
+        let other = if left == ColumnType::Date {
+            right
+        } else {
+            left
+        };
+        return Err(Error::Query(format!(
+            "a Date compares only with a Date, not with {}",
+            other.name()
+        )));
+    }
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
     if (textual(left) && right == ColumnType::Double)
         || (left == ColumnType::Double && textual(right))
@@ -2854,6 +3067,7 @@ fn dtype(kind: ColumnType) -> DataType {
         // A factor result of `ifelse` and friends is character, as `supertype` decides, so this
         // arm only casts a factor column onto itself.
         ColumnType::Character | ColumnType::Factor => DataType::String,
+        ColumnType::Date => DataType::Date,
     }
 }
 
@@ -2880,6 +3094,7 @@ impl Lowering<'_> {
             Expr::Double(value) => lit(*value),
             Expr::Logical(value) => lit(*value),
             Expr::Character(value) => lit(value.clone()),
+            Expr::Date(days) => lit(*days).cast(DataType::Date),
             Expr::Na(kind) => lit(polars::prelude::Null {}).cast(dtype(*kind)),
             Expr::Count => len().cast(DataType::Int32),
             Expr::Unary(UnaryOp::Not, arg) => self.logical(arg)?.not(),
@@ -2911,7 +3126,7 @@ impl Lowering<'_> {
                 }
                 // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars' reductions skip nulls on
                 // their own, but `first` and `last` do not.
-                if *na_rm && kind == ColumnType::Double {
+                if *na_rm && kind == ColumnType::Double && *function != Aggregate::Length {
                     value = value.clone().filter(value.is_not_nan());
                 } else if *na_rm && matches!(function, Aggregate::First | Aggregate::Last) {
                     value = value.drop_nulls();
@@ -2935,7 +3150,7 @@ impl Lowering<'_> {
                     }
                     Aggregate::Mean => {
                         let value = value.cast(DataType::Float64);
-                        value.clone().cum_sum(false).last() / len().cast(DataType::Float64)
+                        value.clone().cum_sum(false).last() / value.len().cast(DataType::Float64)
                     }
                     // R's `min` and `max` are `NaN` when an input is, where Polars skips it.
                     Aggregate::Min if kind == ColumnType::Double => value.nan_min(),
@@ -2947,7 +3162,9 @@ impl Lowering<'_> {
                     Aggregate::Median => value.cast(DataType::Float64).median(),
                     Aggregate::Sd => value.cast(DataType::Float64).std(1),
                     Aggregate::Var => value.cast(DataType::Float64).var(1),
-                    Aggregate::Length => len().cast(DataType::Int32),
+                    // The length of the argument, not of the group: a grouping column bound to
+                    // its group's value has length one.
+                    Aggregate::Length => value.len().cast(DataType::Int32),
                 };
                 let propagates = !na_rm
                     && !matches!(
@@ -2997,6 +3214,23 @@ impl Lowering<'_> {
                     .then(yes)
                     .otherwise(no)
             }
+            // The row numbers sorted by the values, stably, list the rows in rank order, and
+            // sorting those positions back gives each row its rank. The second sort has no ties.
+            Expr::Rank { arg, descending } => {
+                let value = self.expr(arg)?;
+                // `is_null` is never null, so its running count is the row number.
+                let rows = value.clone().is_null().cum_count(false);
+                let options = SortMultipleOptions::default()
+                    .with_order_descending(*descending)
+                    .with_nulls_last(true)
+                    .with_maintain_order(true);
+                (rows.sort_by([value], options).arg_sort(false, false) + lit(1))
+                    .cast(DataType::Int32)
+            }
+            Expr::Window(arg, keys) => {
+                let keys: Vec<PolarsExpr> = keys.iter().map(|key| col(key.clone())).collect();
+                self.expr(arg)?.over(keys)?
+            }
         })
     }
 
@@ -3043,6 +3277,20 @@ impl Lowering<'_> {
         let typer = self.typer();
         let (left_kind, right_kind) = (typer.expr(left)?, typer.expr(right)?);
         Ok(match op {
+            BinaryOp::Add | BinaryOp::Subtract if kind == ColumnType::Date => {
+                // Days are whole in a Polars date, so a fractional number of days is floored, as
+                // R's `format` of a fractional date shows the day it falls in.
+                let days = |expr: &Expr, kind: ColumnType| -> Result<PolarsExpr> {
+                    let value = self.expr(expr)?;
+                    Ok(match kind {
+                        ColumnType::Double => value.floor().cast(DataType::Int64),
+                        _ => value.cast(DataType::Int32).cast(DataType::Int64),
+                    })
+                };
+                let (l, r) = (days(left, left_kind)?, days(right, right_kind)?);
+                let sum = if op == BinaryOp::Add { l + r } else { l - r };
+                checked_int32(sum).cast(DataType::Date)
+            }
             BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply
                 if kind == ColumnType::Integer =>
             {

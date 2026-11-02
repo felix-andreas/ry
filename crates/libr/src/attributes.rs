@@ -41,6 +41,17 @@ pub unsafe fn get_attrib(object: Sexp, name: Sexp) -> ApiResult<Sexp> {
     {
         return pairlist_names(object);
     }
+    // A one-dimensional array keeps its names as its only dimnames, as GNU R's
+    // `getAttrib` reports them; `tapply` results are such arrays.
+    if name == R_NamesSymbol.get() {
+        let dim = raw_attribute(object, R_DimSymbol.get());
+        if dim.kind() == SexpType::Integer && dim.length() == 1 {
+            let dimnames = raw_attribute(object, R_DimNamesSymbol.get());
+            if dimnames.kind() == SexpType::List && dimnames.length() >= 1 {
+                return crate::vectors::sexp_elt(dimnames, 0);
+            }
+        }
+    }
     let value = raw_attribute(object, name);
     if name == R_RowNamesSymbol.get()
         && value.kind() == SexpType::Integer
@@ -103,6 +114,10 @@ unsafe fn pairlist_names(list: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
     let nil = runtime.nil();
+    // R lets callers remove an attribute from `NULL`; data.table's unlock relies on it.
+    if object == nil && value == nil {
+        return Ok(nil);
+    }
     if object == nil {
         return Err(error("attempt to set an attribute on NULL"));
     }
@@ -327,6 +342,11 @@ pub unsafe fn dimnames_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
         if names == runtime.nil() {
             continue;
         }
+        // An empty component means no names along that extent, as in GNU R.
+        if xlength(names)? == 0 {
+            set_sexp_elt(list, index, runtime.nil())?;
+            continue;
+        }
         let names = if names.kind() == SexpType::String {
             names
         } else {
@@ -369,6 +389,25 @@ pub unsafe fn class_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
 /// `row.names` that are `1:n` are stored in GNU R's compact form, `c(NA, -n)`.
 unsafe fn row_names_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
+    // The compact form written as doubles, `c(NA, -n)`, is stored as integers, as GNU R does:
+    // readers such as cpp11's `data_frame::nrow` look only for the integer form.
+    if value.kind() == SexpType::Real
+        && let [first, count] = value.slice::<f64>()
+        && first.is_nan()
+    {
+        let compact = runtime.heap.alloc_vector(SexpType::Integer, 2)?;
+        runtime.heap.root(compact);
+        let count = if count.is_nan() {
+            NA_INTEGER
+        } else {
+            *count as i32
+        };
+        compact
+            .slice_mut::<i32>()
+            .copy_from_slice(&[NA_INTEGER, count]);
+        install_attribute(object, R_RowNamesSymbol.get(), compact)?;
+        return Ok(compact);
+    }
     if value.kind() == SexpType::Integer {
         let values = integers(value)?;
         let sequential = values

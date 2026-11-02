@@ -33,8 +33,12 @@ use {
         time::{Duration, Instant},
     },
     syntax::{
-        SyntaxKind::{BINARY_EXPR, FOR_EXPR, IDENT, PARAMETER},
-        SyntaxToken, TextRange, TextSize,
+        SyntaxElement,
+        SyntaxKind::{
+            BINARY_EXPR, CALL_EXPR, EQ, FOR_EXPR, FUNCTION_DEF, IDENT, LESS_MINUS, NAME, PARAMETER,
+        },
+        SyntaxNode, SyntaxToken, TextRange, TextSize,
+        ast::BinaryExpr,
     },
 };
 
@@ -322,6 +326,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         editor_coverage(&db, &records, &root);
         completion_coverage(&mut db, &records, &root);
         reference_coverage(&mut db, &records);
+        hierarchy_coverage(&db, &records);
     }
 
     Ok(())
@@ -458,10 +463,8 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
             let mut signature = true;
             if let Some(signature_offset) = signature_offset {
                 signature =
-                    ide::signature_help_with(db, record.file, signature_offset, &mut |target| {
-                        installed.formals(target)
-                    })
-                    .is_some();
+                    ide::signature_help_with(db, record.file, signature_offset, &mut installed)
+                        .is_some();
                 tally.signature_total += 1;
                 tally.signature += usize::from(signature);
             }
@@ -584,9 +587,7 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Pat
                     .to(text);
                 let cursor = TextSize::from(prefix_end as u32);
                 let began = Instant::now();
-                let result = ide::completion_with(db, files, record.file, cursor, &mut |target| {
-                    installed.formals(target)
-                });
+                let result = ide::completion_with(db, files, record.file, cursor, &mut installed);
                 latencies.push(began.elapsed());
                 let labels: Vec<String> = result
                     .map(|result| {
@@ -627,11 +628,9 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Pat
                     match role {
                         IdentifierRole::ArgumentName => format!(
                             "   signature: {}",
-                            ide::signature_help_with(db, record.file, cursor, &mut |target| {
-                                installed.formals(target)
-                            })
-                            .and_then(|help| help.signatures.into_iter().next())
-                            .map_or_else(|| "none".to_owned(), |signature| signature.label)
+                            ide::signature_help_with(db, record.file, cursor, &mut installed)
+                                .and_then(|help| help.signatures.into_iter().next())
+                                .map_or_else(|| "none".to_owned(), |signature| signature.label)
                         ),
                         _ => String::new(),
                     },
@@ -675,20 +674,12 @@ fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
     let Some(files) = ProjectFiles::try_get(db) else {
         return;
     };
-    let package: Vec<&FileRecord> = records
-        .iter()
-        .filter(|record| record.file.kind(db) == &DocumentKind::Package)
-        .collect();
-    let index: FxHashMap<SourceFile, usize> = package
-        .iter()
-        .enumerate()
-        .map(|(index, record)| (record.file, index))
-        .collect();
-    let roots: Vec<_> = package
-        .iter()
-        .map(|record| semantics::parse(db, record.file).syntax_node())
-        .collect();
-    let oracle = ScopeOracle::build(&roots);
+    let PackageSites {
+        package,
+        index,
+        oracle,
+        ..
+    } = package_sites(db, records);
     let mut expected: BTreeMap<&Binding, BTreeSet<Span>> = BTreeMap::new();
     let mut undecided: FxHashSet<Span> = FxHashSet::default();
     for site in &oracle.sites {
@@ -717,8 +708,14 @@ fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
     let mut tallies: BTreeMap<&str, ReferenceTally> = BTreeMap::new();
     let mut latencies = Vec::new();
     let location = |file: usize, start: TextSize| {
-        let record = package[file];
-        let line = record.source[..usize::from(start)].matches('\n').count() + 1;
+        let Some(record) = package.get(file) else {
+            return String::new();
+        };
+        let line = record
+            .source
+            .get(..usize::from(start))
+            .map_or(0, |before| before.matches('\n').count())
+            + 1;
         let name = record
             .path
             .file_name()
@@ -814,6 +811,326 @@ fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
             println!("      {miss}");
         }
     }
+}
+
+/// The package files with their syntax trees and the lexical resolver's answer for every name,
+/// which the reference and call hierarchy roles check the editor against.
+struct PackageSites<'a> {
+    package: Vec<&'a FileRecord>,
+    index: FxHashMap<SourceFile, usize>,
+    roots: Vec<SyntaxNode>,
+    oracle: ScopeOracle,
+}
+
+fn package_sites<'a>(db: &RootDatabase, records: &'a [FileRecord]) -> PackageSites<'a> {
+    let package: Vec<&FileRecord> = records
+        .iter()
+        .filter(|record| record.file.kind(db) == &DocumentKind::Package)
+        .collect();
+    let index = package
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.file, index))
+        .collect();
+    let roots: Vec<SyntaxNode> = package
+        .iter()
+        .map(|record| semantics::parse(db, record.file).syntax_node())
+        .collect();
+    let oracle = ScopeOracle::build(&roots);
+    PackageSites {
+        package,
+        index,
+        roots,
+        oracle,
+    }
+}
+
+/// Call hierarchy and workspace symbols for the package's top-level definitions, checked
+/// against the lexical resolver: the incoming calls of a function must be exactly the call
+/// sites that resolve to it, each under the top-level item that contains it, its outgoing calls
+/// exactly the calls in its body that resolve to another project function, and searching a
+/// definition's name, or the first half of it, must list the definition.
+fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let PackageSites {
+        package,
+        index,
+        roots,
+        oracle,
+    } = package_sites(db, records);
+    let mut definitions: Vec<Definition> = Vec::new();
+    for (file, root) in roots.iter().enumerate() {
+        for statement in root.children() {
+            let Some(binary) = BinaryExpr::cast(statement.clone()) else {
+                continue;
+            };
+            let (Some(target), Some(operator)) = (binary.lhs(), binary.operator()) else {
+                continue;
+            };
+            if target.kind() != NAME || !matches!(operator.kind(), LESS_MINUS | EQ) {
+                continue;
+            }
+            definitions.push(Definition {
+                file,
+                name: target.text().to_string().trim_matches('`').to_owned(),
+                name_range: target.text_range(),
+                range: statement.text_range(),
+                is_function: binary
+                    .rhs()
+                    .is_some_and(|value| value.kind() == FUNCTION_DEF),
+            });
+        }
+    }
+    let mut definition_count: FxHashMap<&str, usize> = FxHashMap::default();
+    for definition in &definitions {
+        *definition_count.entry(&definition.name).or_default() += 1;
+    }
+    // A name defined twice has no single function for the hierarchy to show.
+    let functions: FxHashMap<&str, &Definition> = definitions
+        .iter()
+        .filter(|definition| {
+            definition.is_function && definition_count.get(definition.name.as_str()) == Some(&1)
+        })
+        .map(|definition| (definition.name.as_str(), definition))
+        .collect();
+    let caller_name = |file: usize, offset: TextSize| {
+        definitions
+            .iter()
+            .find(|definition| definition.file == file && definition.range.contains(offset))
+            .map_or_else(
+                || "(top level)".to_owned(),
+                |definition| definition.name.clone(),
+            )
+    };
+    let mut incoming_expected: FxHashMap<&str, BTreeSet<(usize, TextSize, String)>> =
+        FxHashMap::default();
+    let mut outgoing_expected: FxHashMap<&str, BTreeSet<(usize, TextSize, String)>> =
+        FxHashMap::default();
+    let mut undecided: FxHashSet<(usize, TextSize)> = FxHashSet::default();
+    for site in &oracle.sites {
+        let Some(Binding::Global(callee)) = &site.binding else {
+            if site.binding.is_none() {
+                undecided.insert((site.file, site.range.start()));
+            }
+            continue;
+        };
+        let Some(root) = roots.get(site.file) else {
+            continue;
+        };
+        if !functions.contains_key(callee.as_str()) || !is_call_head(root, site.range) {
+            continue;
+        }
+        let caller = caller_name(site.file, site.range.start());
+        incoming_expected
+            .entry(callee.as_str())
+            .or_default()
+            .insert((site.file, site.range.start(), caller.clone()));
+        if let Some(&definition) = functions.get(caller.as_str())
+            && definition.file == site.file
+        {
+            outgoing_expected
+                .entry(definition.name.as_str())
+                .or_default()
+                .insert((site.file, site.range.start(), callee.clone()));
+        }
+    }
+    let location = |file: usize, start: TextSize| {
+        let Some(record) = package.get(file) else {
+            return String::new();
+        };
+        let line = record
+            .source
+            .get(..usize::from(start))
+            .map_or(0, |before| before.matches('\n').count())
+            + 1;
+        let name = record
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        format!("{name}:{line}")
+    };
+    let mut sampled: Vec<&Definition> = functions.values().copied().collect();
+    sampled.sort_by_key(|definition| (definition.file, definition.range.start()));
+    let stride = sampled.len().div_ceil(HIERARCHY_SAMPLES).max(1);
+    let mut incoming = HierarchyTally::default();
+    let mut outgoing = HierarchyTally::default();
+    let mut latencies = Vec::new();
+    for definition in sampled.iter().step_by(stride) {
+        let Some(record) = package.get(definition.file) else {
+            continue;
+        };
+        let began = Instant::now();
+        let item = ide::call_hierarchy_item(db, files, record.file, definition.name_range.start());
+        let (found_incoming, found_outgoing) = match &item {
+            Some(item) => (
+                ide::incoming_calls(db, files, item),
+                ide::outgoing_calls(db, files, item),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        latencies.push(began.elapsed());
+        // Incoming ranges sit in each caller's file, outgoing ones in the definition's.
+        let flatten = |calls: Vec<ide::CallHierarchyCall>,
+                       in_file: Option<usize>|
+         -> BTreeSet<(usize, TextSize, String)> {
+            let mut flat = BTreeSet::new();
+            for call in calls {
+                let Some(file) = in_file.or_else(|| index.get(&call.item.file).copied()) else {
+                    continue;
+                };
+                for range in call.ranges {
+                    if !undecided.contains(&(file, range.start())) {
+                        flat.insert((file, range.start(), call.item.name.clone()));
+                    }
+                }
+            }
+            flat
+        };
+        let found_incoming = flatten(found_incoming, None);
+        let found_outgoing = flatten(found_outgoing, Some(definition.file));
+        let empty = BTreeSet::new();
+        let wanted_incoming = incoming_expected
+            .get(definition.name.as_str())
+            .unwrap_or(&empty);
+        let wanted_outgoing = outgoing_expected
+            .get(definition.name.as_str())
+            .unwrap_or(&empty);
+        for (tally, wanted, found) in [
+            (&mut incoming, wanted_incoming, &found_incoming),
+            (&mut outgoing, wanted_outgoing, &found_outgoing),
+        ] {
+            tally.total += 1;
+            if wanted == found {
+                tally.matched += 1;
+            } else if tally.misses.len() < COVERAGE_EXAMPLES {
+                let describe = |set: &BTreeSet<(usize, TextSize, String)>| {
+                    set.iter()
+                        .take(3)
+                        .map(|(file, start, name)| format!("{} {name}", location(*file, *start)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                tally.misses.push(format!(
+                    "{}: {}   expected {}, found {}   missing [{}]   extra [{}]",
+                    location(definition.file, definition.name_range.start()),
+                    definition.name,
+                    wanted.len(),
+                    found.len(),
+                    describe(&wanted.difference(found).cloned().collect()),
+                    describe(&found.difference(wanted).cloned().collect()),
+                ));
+            }
+        }
+    }
+    let mut symbols = HierarchyTally::default();
+    let mut prefixes = HierarchyTally::default();
+    let mut symbol_latencies = Vec::new();
+    let stride = definitions.len().div_ceil(HIERARCHY_SAMPLES).max(1);
+    for definition in definitions.iter().step_by(stride) {
+        let Some(record) = package.get(definition.file) else {
+            continue;
+        };
+        let half = definition.name.chars().count().div_ceil(2).max(3);
+        let prefix: String = definition.name.chars().take(half).collect();
+        for (tally, query) in [
+            (&mut symbols, definition.name.as_str()),
+            (&mut prefixes, prefix.as_str()),
+        ] {
+            let began = Instant::now();
+            let results = ide::workspace_symbols(db, files, query);
+            symbol_latencies.push(began.elapsed());
+            tally.total += 1;
+            let listed = results.iter().any(|symbol| {
+                symbol.target.file == record.file && symbol.target.range == definition.name_range
+            });
+            if listed {
+                tally.matched += 1;
+            } else if results.len() == ide::COMPLETION_LIMIT {
+                // More names share the prefix than a search lists, so a user types on; the
+                // search is not wrong to leave this one out.
+                tally.total -= 1;
+                tally.crowded += 1;
+            } else if tally.misses.len() < COVERAGE_EXAMPLES {
+                tally.misses.push(format!(
+                    "{}: {}   query {query:?} lists {} symbols, not this definition",
+                    location(definition.file, definition.name_range.start()),
+                    definition.name,
+                    results.len(),
+                ));
+            }
+        }
+    }
+    latencies.sort();
+    symbol_latencies.sort();
+    let share = |tally: &HierarchyTally| tally.matched as f64 * 100.0 / tally.total.max(1) as f64;
+    println!();
+    println!(
+        "call hierarchy ({} functions, checked against a lexical resolver; {:.1} ms p50 {:.1} ms p99):",
+        incoming.total,
+        percentile(&latencies, 50),
+        percentile(&latencies, 99),
+    );
+    println!("  incoming calls   {:>5.1}%", share(&incoming));
+    for miss in &incoming.misses {
+        println!("      {miss}");
+    }
+    println!("  outgoing calls   {:>5.1}%", share(&outgoing));
+    for miss in &outgoing.misses {
+        println!("      {miss}");
+    }
+    println!(
+        "workspace symbols ({} definitions; {:.1} ms p50 {:.1} ms p99):",
+        symbols.total,
+        percentile(&symbol_latencies, 50),
+        percentile(&symbol_latencies, 99),
+    );
+    println!("  exact name       {:>5.1}%", share(&symbols));
+    for miss in &symbols.misses {
+        println!("      {miss}");
+    }
+    println!(
+        "  name prefix      {:>5.1}%   ({} prefixes match more than {} names, left out)",
+        share(&prefixes),
+        prefixes.crowded,
+        ide::COMPLETION_LIMIT,
+    );
+    for miss in &prefixes.misses {
+        println!("      {miss}");
+    }
+}
+
+const HIERARCHY_SAMPLES: usize = 300;
+
+/// A top-level `name <- value` statement of a package file.
+struct Definition {
+    file: usize,
+    name: String,
+    name_range: TextRange,
+    range: TextRange,
+    is_function: bool,
+}
+
+#[derive(Default)]
+struct HierarchyTally {
+    total: usize,
+    matched: usize,
+    crowded: usize,
+    misses: Vec<String>,
+}
+
+/// Whether the name at `range` is the head of a call, `f` in `f(x)`.
+fn is_call_head(root: &SyntaxNode, range: TextRange) -> bool {
+    let SyntaxElement::Token(token) = root.covering_element(range) else {
+        return false;
+    };
+    token.parent().is_some_and(|name| {
+        name.kind() == NAME
+            && name.parent().is_some_and(|call| {
+                call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&name)
+            })
+    })
 }
 
 /// Renames the binding at `site` to a fresh name and back, and restores the package's files
@@ -967,9 +1284,8 @@ fn names_a_dots_element(
     word: &str,
     installed: &mut InstalledPackages,
 ) -> bool {
-    let Some(signature) =
-        ide::signature_help_with(db, file, offset, &mut |target| installed.formals(target))
-            .and_then(|help| help.signatures.into_iter().next())
+    let Some(signature) = ide::signature_help_with(db, file, offset, installed)
+        .and_then(|help| help.signatures.into_iter().next())
     else {
         return false;
     };

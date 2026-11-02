@@ -323,8 +323,8 @@ pub mod gp {
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
-    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
-    /// compiled code revalidates its lookups only when the epoch moved.
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
+    /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
@@ -557,10 +557,13 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 length
             };
             let data = elements.checked_mul(element)?;
+            // A string's bytes need no alignment, so a string of up to seven bytes fits the
+            // 40-byte slot class, a sixth smaller than the 48 bytes 16-byte rounding gives it.
+            let align = if kind == SexpType::Char { 7 } else { 15 };
             VECTOR_DATA_OFFSET
                 .checked_add(data)?
-                .checked_add(15)
-                .map(|size| size & !15)
+                .checked_add(align)
+                .map(|size| size & !align)
         }
         Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),

@@ -13,14 +13,14 @@ Layering is enforced by the crate graph. A crate boundary is the compiler-checke
 illegal dependency unrepresentable.
 
 - **`syntax`** is a hand-written lexer and a recursive-descent parser with Pratt parsing for
-  expressions, emitting [rowan](https://github.com/rust-analyzer/rowan) green and red trees. Three
+  expressions, emitting a flat syntax tree (see [The syntax tree](#the-syntax-tree)). Three
   properties matter downstream:
   - The trees are *lossless*: every byte, trivia included, reprints exactly.
   - Parsing is *error-resilient*: every parse yields a tree, and an error stays local to the place
     where the code broke.
-  - Parsing is *position-independent*: a green node stores its width but no absolute offset, so an
-    untouched statement's subtree stays structurally equal when something elsewhere in the file
-    changes.
+  - Items are *position-independent*: an item's syntax is a window onto the file tree with offsets
+    counted from the item's start, so an untouched statement's tree stays equal when something
+    elsewhere in the file changes.
 
   A `#:` annotation is lexed as structured trivia and parsed into first-class nodes with real spans,
   so type syntax is grammar rather than comment text scraped after the fact. Inline annotations run
@@ -113,12 +113,43 @@ The analysis of a project has five inputs:
 
 The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
+### The syntax tree
+
+A file's tree is one `syntax::Tree`: its text and four parallel arrays over its elements (nodes and
+tokens alike) in preorder, holding each element's kind, start offset, the index one past its
+subtree, and its parent's index. Kinds are numbered tokens first, so a comparison tells a node from
+a token, and an element's end is where the next element after its subtree starts. A subtree is
+therefore a contiguous index range and a node's text a contiguous slice of the file text, so a
+whole-tree walk is a linear scan and reading a node's text never allocates.
+
+An item's tree is a window onto its file's tree, not a copy. A `Tree` holds the file's arrays
+behind an `Arc` plus the window's first index, length and base offset, and every accessor
+subtracts those, so an item tree reports indices from zero and offsets relative to the item.
+Equality compares kinds, subtree ends and those relative offsets, which is why moving an item
+within its file does not invalidate what was computed from it. Copying item ranges instead would
+duplicate every file's arrays, about 114 MiB on the finance bench.
+
+Cursors are indices. An owned `SyntaxNode` or `SyntaxToken` is the tree's `Arc` plus a `u32`, so
+moving one is arithmetic and a clone is one reference-count increment. A borrowed `NodeRef` is the
+tree reference plus the index and costs nothing to copy, which is what the whole-file passes and
+HIR lowering use. Lookups that a nested tree answers child by child use the layout instead: starts
+never decrease in preorder, so `node_at`, `token_at_offset` and `child_or_token_at_range` binary
+search the starts, and a previous sibling is found by climbing parents from the element before.
+
+The parser emits elements in postorder, because it only knows that a node wraps the elements after
+a checkpoint when it opens the node there. `TreeBuilder::finish` lays them out in preorder in one
+backward pass: an element's preorder index is its parent's plus one plus the size of its earlier
+siblings' subtrees, which postorder gives as a difference of first-element indices. The parse
+invariants (`syntax::testing::check_parse_invariants`) check every shortcut against the
+child-by-child definition on every parsed program, and with `enable_invariants()` every splice
+reparse is compared with a parse from scratch.
+
 ### Parsing, and why it is not where incrementality happens
 
 `parse(file)` is a per-file query with a splice cache beside it. The cache remembers the file's
 previous text and tree (shared across clones of the storage handle), works out the current edit as
 the longest common prefix and suffix, and lets `syntax::reparse` reparse only the statements the
-edit touched, sharing every untouched green subtree by pointer.
+edit touched and copying the untouched top-level runs of the old tree around them.
 
 The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
 fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
@@ -130,18 +161,20 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident in the server, and `ry check` releases them once
+### Syntax trees stay resident in the server, and `ry check` holds one at a time
 
-The server keeps every rowan tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
-has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
-off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
-zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
-to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
-never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
-check's wall time when the capacities stayed set). The released file trees come back to the
-caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
-all cores. A tree read after the release still works, by reparsing that file.
+The server keeps every syntax tree, because an edit reparses one file and every other tree stays
+valid. `ry check` reads each tree in its first pass only, so it does not memoize them. Each worker of
+the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
+parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
+tree is freed when the worker moves on. In a one-shot database `item_syntax` and
+`item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
+tree alive past the syntax pass and buys nothing in a run that never edits. A tree read outside a held
+tree still works: it goes through the `parse_memo` query, which then keeps that file's tree for the
+rest of the run. A full cold check never does this, but a partial cached run, the cache planner's
+surface comparison and `--annotate` read some trees that way. Annotation memos (`file_item_annotations`) store
+detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
+annotation never keeps the whole file's tree alive.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -159,17 +192,14 @@ file's share of the project-wide maps (`warm_project_folds`), so that no later c
 another file's facts on its own thread. The second names every item, so that two threads
 checking files that reach the same item do not block on one claim, and the third assembles the
 diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
-previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
-once.
+previous tree of every file. `test_incremental.rs` pins that a cold check parses each file once
+and that a one-shot cold check memoizes no tree.
 
-Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
-red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
-takes a predicate over a green node and its parent, and builds red nodes only for the matches and
-their ancestors, while `syntax::for_each_token` visits token texts with no red nodes at all. The
-per-file site collectors share one walk, `file_syntax_sites`, and the syntax lints walk the green
-tree with `syntax::walk_green`, building a red node (`syntax::node_at`) only where a cheap green
-test says a lint may fire. The parse invariants check these against the red walks on every parsed
-program.
+Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
+(`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
+over a node and its parent and makes owned nodes only for the matches. The per-file site collectors
+share one walk, `file_syntax_sites`, and the syntax lints walk the tree with `syntax::walk_tree`,
+making an owned node (`syntax::node_at`) only where a cheap test says a lint may fire.
 
 The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
 wall time. Several of them are worth knowing:
@@ -188,10 +218,7 @@ wall time. Several of them are worth knowing:
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
 - The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
-  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
-  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
-  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
-  memory on the finance benchmark.
+  borrows the item's checks and the stub schemes instead of cloning them.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.
@@ -212,7 +239,7 @@ persistence feature would need every memo to serialize, including the process-wi
 
 The record has a key fingerprint and, for each file, four facts:
 
-- **Key**: the ry version and binary, the configuration, the project root, the data files,
+- **Key**: the ry version and build, the configuration, the project root, the data files,
   `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
 - **Content fingerprint**: the file's text.
 - **Surface fingerprint**: two parts. The first is the text with the body of each top-level
@@ -230,9 +257,19 @@ The record has a key fingerprint and, for each file, four facts:
 
 A run with no changed file replays every finding without building a tree. A run whose changed
 files all keep their surface checks the changed files and the files whose dependencies include
-one of them. Every surface then matches the record, so the attached set and, when the imports used
-are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
-file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+one of them. Every surface then matches the record, so the attached set comes from the record as
+well, and the `NAMESPACE` findings are recomputed from the imports used, which costs a few
+milliseconds. Any other change checks every file.
+
+A package-only run, such as `ry check R` or the strict check of `ry load`, analyses only the
+package files. Tests and scripts read the package namespace but add nothing to it, so leaving
+them unparsed changes no package finding. They stay in the record: a file the run left unanalysed
+keeps its recorded content, surface, findings and imports used while its text is unchanged. When
+its text did change, the record keeps no surface for it and marks every unanalysed file
+unchecked, so the next run that analyses them checks them all. The `NAMESPACE` findings read only
+the imports the analysed files use, so a package-only run and a full run can disagree on them
+(an import only the tests use is unused to the first and used to the second). A replay therefore
+recomputes them when the package files' imports differ from all files' imports. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
 an edit inside a body rechecks one or two files.
 
 A partial run still parses every file, because the project-wide maps fold every file's items. So
@@ -244,7 +281,7 @@ run and panics on any difference. The seeded edit simulation in `cli.rs`
 
 ### From item to scheme
 
-An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower
+An item's subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
@@ -258,8 +295,7 @@ element type that the expression addresses with a `Span`, so every HIR kind is `
 over kinds never touches ranges. A name written at a site with its own range (an argument name, a
 field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
 holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
-no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the green tree through `syntax::GreenNodeAt` and
-builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the tree through borrowed `syntax::NodeRef` cursors. It writes into a per-thread scratch module that keeps its capacity across
 items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
 capacity and lowering allocates a handful of arrays per item. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
@@ -344,14 +380,16 @@ items that read its name. `crates/semantics/tests/test_incremental.rs` pins thes
 
 `ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
 cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches two lookups to a coarser shape.
-`name_layer` reads a name's winner and conditional writers straight from the project-wide maps
-instead of interning a name and going through `package_name` or `test_name`, and `item_group`
-finds every cyclic group in one walk over the project (`project_interface_groups`) instead of one
-`interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
+A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
+answers each name with a hash probe, instead of interning a name and going through `package_name`
+or `test_name`. A frame binder that `item_frame_binders` does not list comes from the file's
+binders, read once per reader, instead of a `frame_binder` memo per item and name. And
+`item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
+instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. The language server and a cached `ry check` keep the firewalls.
+per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

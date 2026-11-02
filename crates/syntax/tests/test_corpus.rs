@@ -224,7 +224,7 @@ fn corpus_parse_speed() {
     }
     let ours_start = Instant::now();
     for source in &sources {
-        black_box(parse(source).green());
+        black_box(parse(source).tree());
     }
     let ours = ours_start.elapsed();
 
@@ -298,7 +298,7 @@ fn corpus_incremental_speed() {
         let ours_start = Instant::now();
         for step in 0..EDITS {
             text.insert(middle + step, 'x');
-            black_box(parse(&text).green());
+            black_box(parse(&text).tree());
         }
         let ours = ours_start.elapsed() / EDITS as u32;
 
@@ -309,7 +309,7 @@ fn corpus_incremental_speed() {
             let at = TextSize::from((middle + step) as u32);
             text.insert(middle + step, 'x');
             previous = reparse(&previous, &text, TextRange::empty(at), TextSize::from(1));
-            black_box(previous.green());
+            black_box(previous.tree());
         }
         let splice = splice_start.elapsed() / EDITS as u32;
 

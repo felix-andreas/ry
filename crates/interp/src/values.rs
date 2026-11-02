@@ -420,7 +420,7 @@ pub unsafe fn set_mkchar_bytes(
 
 /// Interns the native strings one vectorized call produces, through a table of the call's own
 /// results in front of the heap's string table. The heap's table holds every string of the
-/// session, so at millions of strings each probe misses cache, while a call that extracts
+/// session, so at millions of strings even one probe into it misses cache, while a call that extracts
 /// repeating pieces (a code inside ids, a year inside dates) has few distinct results whose table
 /// stays in cache. A call whose results rarely repeat would only pay for the inserts, so the memo
 /// switches itself off after a window with few hits.
@@ -881,6 +881,15 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     if [gp::LATIN1, gp::UTF8]
         .iter()
         .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
+    {
+        return false;
+    }
+    // Outside a UTF-8 locale, GNU R reads a non-ASCII string of unknown encoding as native bytes
+    // that do not translate to the text of a marked string.
+    let native_non_ascii =
+        |text: Sexp| !text.has_gp(gp::LATIN1) && !text.has_gp(gp::UTF8) && !text.bytes().is_ascii();
+    if (native_non_ascii(left) || native_non_ascii(right))
+        && !crate::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
     {
         return false;
     }

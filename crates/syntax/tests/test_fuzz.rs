@@ -464,8 +464,8 @@ fn run_edit_stream(steps: usize) {
         );
         let scratch = parse(&buffer);
         assert_eq!(
-            spliced.green(),
-            scratch.green(),
+            spliced.tree(),
+            scratch.tree(),
             "splice != from-scratch tree: previous {:?}, deleted {deleted:?}, inserted {inserted}, now {buffer:?}",
             previous.text(),
         );

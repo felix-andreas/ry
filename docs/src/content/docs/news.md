@@ -5,7 +5,7 @@ description: Release announcements and project news
 
 ## ry 0.4.0-beta, the first release that runs R
 
-*Not released yet: this entry is prepared for the beta.*
+*Released in November 2026 as a pre-release.*
 
 Version 0.4.0-beta adds ry's own R runtime beside the checker, plus the language features that only
 that runtime runs.
@@ -64,7 +64,9 @@ that runtime runs.
   helpers are sourced, lazily defined functions keep their source references, a package that
   imports a reloaded one sees its new bindings, `Encoding: latin1` is honored, and a declared
   `S3method()` with no function refuses the load with R's message. Every load of a strict package
-  is checked, including a reload in the console ([package loading](/reference/package-loading)).
+  is checked, including a reload in the console, which re-checks only what the edit changed. On
+  ry's runtime, `src/` compiles with ry's own toolchain, and `if` blocks in `NAMESPACE` are
+  evaluated as GNU R evaluates them ([package loading](/reference/package-loading)).
 - **Help works on ry's runtime.** `?mean`, `help("mean")`, `help(package = "stats")` and
   `help.start()` print or serve R's help pages, HTML help included, as GNU R does
   ([Console](/guides/console#help)).
@@ -72,14 +74,25 @@ that runtime runs.
   rename resolve `x$name` through the values that built `x`: lists, data frames, records and R6
   classes, including `self$` and `private$`. Rename refuses a field it cannot trace completely.
   For a package without a ry stub, definition and hover read the installed package's code and help
-  without running R ([Editors](/guides/editors)).
+  without running R ([Editors](/guides/editors)). Renaming a package-level `the` also renames its
+  uses after `the$x <- v` inside a function, where R works on a local copy.
+- **Completion and signature help work on untyped code.** Completion ranks names by how often the
+  project uses them, with locals first, and a package without a ry stub completes the exports in its
+  installed `NAMESPACE`. Signature help covers untyped functions, installed packages and R6 methods
+  called through `self$`, and an unresolved name that a package exports gets the quick fixes
+  "Qualify as `pkg::name`" and, in a script, "Add `library(pkg)`". A function literal shows its
+  inferred signature as an inlay hint, member names such as `x$field`, `x@slot` and R6 members are
+  highlighted, and the outline lists S4 slots and a type's tags.
 - **Fewer false reports on real packages.** Inferred signatures now carry facts about the callee's
   body, such as a return chosen by a flag default or a parameter read only through `substitute()`.
-  With typing on, the corpus packages' `R/` sources report 63 errors, down from 98, and about 22 of
-  those are real package bugs. The generated benchmark packages report nothing.
+  Names injected into R6 and Reference Class methods (`self`, `private`, `.self`) resolve, a
+  literal `source("file.R")` is followed, and `with`, `subset` and `transform` mask their column
+  arguments. With typing on, the corpus packages' `R/` sources report 61 errors, down from 98, and
+  about 22 of those are real package bugs. The generated benchmark packages report nothing.
 - **Graphics gain patterns and masks.** On `pdf()`, `svg()` and the bitmap devices, gradients, tiling
   patterns, clipping paths, masks, compositing groups and even-odd fills work, and `postscript()`
-  refuses them as GNU R's device does. knitr and rmarkdown documents with plot chunks render on ry.
+  refuses them as GNU R's device does. knitr and rmarkdown documents with plot chunks render on ry,
+  and raster interpolation, `saturate` and the padding of SVG tiling patterns match GNU R.
 - **`DataFrame` checks column types and handles bigger data.** Arithmetic or comparison on a text
   column is a type error on the column reference. Reading a CSV no longer holds the parsed file
   next to its columns, so a 1e8-row group-by run fits in 15 GB. data.table's `dt[i]` runs on
@@ -90,23 +103,39 @@ that runtime runs.
   compiles from its signature instead of after warm-up. Records, tuples, tags and guarded `match`
   compile natively too, and a variable that is an integer on one path and a double on another stays
   unboxed. A fold over 200 tag-union records five times takes 0.05 to 0.1 s, against 0.4 to 0.7 s on GNU R for
-  the same program written with `list(kind = )`.
+  the same program written with `list(kind = )`. In compiled code, `List.walk`, `List.map`,
+  `List.keep_if`, `List.drop_if`, `List.any`, `List.all` and `List.count_if` run as native loops
+  with the callback inlined: walking a 100-element list 10,000 times takes 0.009 s, against 0.36 s
+  with the JIT off and 0.94 s for `Reduce` on GNU R.
+- **Faster everyday R on ry's runtime.** `switch` compiles to bytecode, a closure call makes one
+  collection check for its whole frame, small objects are allocated by bumping a pointer, and
+  `x[[i]] <- v` on a plain local vector inside a function writes in place. `match`, `order`,
+  `sort`, `formatC`, `substr`, `split`, `cut` and two-way `table` run at or below GNU R's time at
+  1e7 rows.
 - **The standard library is complete against Roc's builtins.** `Dict.with_capacity` and
   `Set.with_capacity` are new, and `reserve` now works on an empty `Dict` or `Set`
   ([standard library](/reference/standard-library)). `List.range` and `List.repeat` stop with an
   error past 2,147,483,647 elements.
 - **Lower memory, faster cold checks.** Large vectors are collected sooner, so peak memory at 1e6
-  rows is closer to GNU R's. `ry check --no-cache` uses a cheaper one-shot path, which takes the
-  finance benchmark from 1.60 s to 1.48 s on 4 cores.
-- **More packages pass their own tests.** ry's runtime passes the tests of 135 of the 164 packages
-  that GNU R passes (82.3%). The optimizers and integrators behind `optim` and `integrate` (L-BFGS-B,
-  UNCMIN, QUADPACK and the interval search) are now written from scratch and match GNU R's results.
+  rows is closer to GNU R's. The parser now builds ry's own flat syntax tree instead of rowan's, and
+  `ry check --no-cache` uses a cheaper one-shot path, so a cold check of the 300,000-line finance
+  benchmark takes about 1.1 s on 4 cores and peaks at about 370 MiB.
+- **More packages pass their own tests.** ry's runtime passes the tests of 140 of the 164 packages
+  that GNU R passes (85.4%), among them rlang, purrr, R6, Matrix, S7 and pkgload. The optimizers
+  and integrators behind `optim` and `integrate` (L-BFGS-B, UNCMIN, QUADPACK and the interval
+  search) are now written from scratch and match GNU R's results.
   A session uses one temporary directory, removed when it exits.
+- **Linear algebra works on NixOS.** BLAS and LAPACK are also looked up in the directories GNU R's
+  `etc/Makeconf` records, and packages that ry installs link the same libraries
+  ([Installation](/installation)).
+- **Seeded harnesses cover more of ry**: the help server, makefile expansion in `R CMD`, the JIT,
+  reloads, the debugger's message framing, CSV reading and rendered graphics files. The bugs they
+  found are fixed, and an unclosed quote in a CSV file is now an error.
 
-Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
-aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have
-not been run on a real Mac or Windows machine yet (Windows only under Wine), so treat them as
-experimental.
+Each release archive now holds `ry`, ry's runtime library and `ry-rcmd` side by side, for Linux
+(x86_64), macOS (Apple silicon) and Windows (x86_64), and so does each platform's VS Code extension.
+The macOS and Windows runtimes have not been run on a real Mac or Windows machine before this
+release's smoke test (Windows only under Wine), so treat them as experimental.
 
 ## ry 0.3.0, a complete rewrite
 

@@ -23,8 +23,8 @@ first: fn(p: Pair<integer>) -> integer
 #: A
 value <- 1L
 #++++
-value: Unknown
-22..33 error[type-mismatch] Type alias `A` expands in a cycle.
+value: integer
+3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
 
 #---- alias_mutual_cycle_used
 #: @alias A {B}
@@ -33,10 +33,21 @@ value: Unknown
 #: A
 value <- 1L
 #++++
-value: Unknown
-38..49 error[type-mismatch] Type alias `A` expands in a cycle.
+value: integer
+3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+19..31 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
 
 #==== nominals
+#---- alias_cycle_is_reported_at_its_declarations_when_unused
+#: @alias A {list{rest: B}}
+#: @alias B {A}
+
+f <- function() 1L
+#++++
+f: fn() -> integer
+3..27 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+31..43 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+
 #---- new_introduces_and_projects
 #: @type Person {list{name: character, age: integer}}
 

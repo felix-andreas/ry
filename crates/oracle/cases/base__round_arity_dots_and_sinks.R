@@ -1,0 +1,21 @@
+f <- function() round(banana = 2)
+tryCatch(f(), error = function(e) conditionMessage(e))
+g <- function() signif(1, 2, 3)
+tryCatch(g(), error = function(e) conditionMessage(e))
+tryCatch(round(x = 1, banana = 2), error = function(e) conditionMessage(e))
+round(digits = 2, 1.123)
+sub1 <- function(...) substitute(...)
+sub2 <- function(...) sub1(...)
+sub2(a + b, 2)
+is.null(sub1())
+dots <- (function(...) environment())(1, 2)[["..."]]
+tryCatch(dots[1], error = function(e) conditionMessage(e))
+tryCatch(dots$a, error = function(e) conditionMessage(e))
+print(c(3e20 - 1i, 1 + 1i))
+print(c(123456789 - 0.0001i, 1 + 0.5i))
+options(nwarnings = 3)
+w <- function() for (i in 1:5) warning(paste("w", i))
+w()
+options(nwarnings = 50)
+matrix(1:4, 2, dimnames = list(c("a", "b"), NULL))[0, , drop = FALSE]
+tc <- textConnection("abc"); rm(tc); invisible(gc()); NULL

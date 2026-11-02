@@ -33,6 +33,7 @@ just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
 just release-dry-run                # package and smoke-test this machine's release archive
+just docs-deploy <branch>           # build the docs site and deploy it (main is production)
 ```
 
 The simulators, fuzzers and long oracle runs have their own recipes, which
@@ -135,7 +136,8 @@ has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three
 quoted, because YAML reads the rest of the line as a comment.
 
 Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
-Node 22.23.4 or newer.
+Node 22.23.4 or newer. The live site changes only when someone deploys it with `just docs-deploy` or
+the Docs workflow ([Releasing](/contributing/releasing#deploying-the-docs-site)).
 
 [Formatting rules](/reference/formatting-rules) is generated, so do not edit it by hand. Edit
 `crates/format/tests/formatter.template.md` and regenerate the page with `just format-docs`.
@@ -152,7 +154,7 @@ Node 22.23.4 or newer.
 A comment in R can sit between any two tokens: inside an `if` header, between a call and its
 argument list, after an operator. A declarative "format each field" style silently drops such a
 comment, so the formatter walks the concrete children token by token and decides placement at the
-token level. Rowan attaches a trailing comment *inside* an expression node, so a decision about
+token level. The parser attaches a trailing comment *inside* an expression node, so a decision about
 where a closing token goes has to look at tokens, never at whole elements. See
 `crates/format/src/format.rs` and the fixtures under `crates/format/tests/format/`.
 

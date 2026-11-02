@@ -2,8 +2,10 @@
 //! (BLAS), the `La_*` internals (LAPACK), `backsolve`, and the LINPACK routines base registers
 //! for `.Fortran`, `dqrdc2` among them. The expected values are GNU R's on the reference BLAS
 //! and LAPACK 3.12, the libraries both run on.
-//! A machine whose default BLAS or LAPACK is OpenBLAS differs in the last bit, so run the test with
-//! `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack` there.
+//! OpenBLAS differs from them in the last bit, and installing it on Debian or Ubuntu makes it the
+//! `libblas.so.3` and `liblapack.so.3` alternative, which GNU R and ry then both load. So where
+//! Debian's reference libraries are installed, the test reruns itself with their directories on
+//! `LD_LIBRARY_PATH` (`run_on_reference_libraries`), which the loader reads only at startup.
 //!
 //! The interpreter runs here without base R and without libR, so the cases build their inputs
 //! from primitives and call `.Internal` and `.Fortran` directly. That also checks that base's
@@ -15,6 +17,7 @@ use {
         object::{Sexp, SexpType},
     },
     interp::{eval, lower, unwind::Unwind, values},
+    std::{env, path::PathBuf, process::Command},
 };
 
 /// The inputs: a 9 x 3 matrix `x`, a 9 x 5 matrix `n` whose second column nearly repeats its
@@ -585,6 +588,9 @@ const ERRORS: &[(&str, &str)] = &[
 
 #[test]
 fn linear_algebra_matches_gnu_r() {
+    if run_on_reference_libraries() {
+        return;
+    }
     if !system_lapack_present() {
         eprintln!(
             "skipping: the system BLAS and LAPACK (libblas.so.3, liblapack.so.3) are not installed"
@@ -651,4 +657,37 @@ fn system_lapack_present() -> bool {
         // SAFETY: probing for a library has no preconditions; the handle stays open for the test.
         unsafe { !libc::dlopen(name.as_ptr(), libc::RTLD_NOW).is_null() }
     })
+}
+
+/// Reruns this test in a child process whose loader finds Debian's reference BLAS and LAPACK
+/// before the system's alternative, and returns whether it did. It does nothing in that child,
+/// or where those libraries are not installed.
+fn run_on_reference_libraries() -> bool {
+    const CHILD: &str = "RY_TEST_REFERENCE_LIBRARIES";
+    let directories = ["blas", "lapack"]
+        .map(|name| PathBuf::from(format!("/usr/lib/{}-linux-gnu/{name}", env::consts::ARCH)));
+    if env::var_os(CHILD).is_some() || !directories.iter().all(|directory| directory.is_dir()) {
+        return false;
+    }
+    let search_path = env::join_paths(
+        directories.into_iter().chain(
+            env::var_os("LD_LIBRARY_PATH")
+                .iter()
+                .flat_map(env::split_paths),
+        ),
+    )
+    .unwrap_or_else(|failure| panic!("cannot build LD_LIBRARY_PATH: {failure}"));
+    let executable = env::current_exe()
+        .unwrap_or_else(|failure| panic!("cannot find the test binary: {failure}"));
+    let status = Command::new(executable)
+        .args(["linear_algebra_matches_gnu_r", "--exact", "--nocapture"])
+        .env(CHILD, "1")
+        .env("LD_LIBRARY_PATH", search_path)
+        .status()
+        .unwrap_or_else(|failure| panic!("cannot rerun the test: {failure}"));
+    assert!(
+        status.success(),
+        "the test failed on the reference BLAS and LAPACK; see the output above"
+    );
+    true
 }

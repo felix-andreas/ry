@@ -855,7 +855,7 @@ impl Worker {
         let namespace = fs::read_to_string(root.join("NAMESPACE")).ok();
         let description = fs::read_to_string(root.join("DESCRIPTION")).ok();
         let key = check_cache::key(
-            executable,
+            &check_cache::build_identity(executable),
             &self.config,
             &root,
             &scan_data_files(&root),
@@ -895,7 +895,7 @@ impl Worker {
             None => check_cache::Fingerprint::default(),
         };
         let (record, stale) =
-            match check_cache::plan(Some(record), key, &paths, &contents, surface_of) {
+            match check_cache::plan(Some(record), key, &paths, &contents, |_| true, surface_of) {
                 check_cache::Plan::Fresh => return HashMap::new(),
                 check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
                 check_cache::Plan::Partial { previous, stale } => (previous, stale),
@@ -2319,6 +2319,9 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                 lsp_types::CodeActionOptions {
                     code_action_kinds: Some(vec![
                         lsp_types::CodeActionKind::QUICKFIX,
+                        lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                        lsp_types::CodeActionKind::REFACTOR_INLINE,
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE,
                         lsp_types::CodeActionKind::SOURCE_FIX_ALL,
                     ]),
                     ..Default::default()
@@ -2383,6 +2386,8 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                                 lsp_types::SemanticTokenType::ENUM_MEMBER,
                                 lsp_types::SemanticTokenType::FUNCTION,
                                 lsp_types::SemanticTokenType::NAMESPACE,
+                                lsp_types::SemanticTokenType::PROPERTY,
+                                lsp_types::SemanticTokenType::METHOD,
                             ],
                             token_modifiers: vec![
                                 lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
@@ -2818,10 +2823,7 @@ impl LanguageServer for ServerState {
             let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::completion_with(&worker.db, files, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::completion_with(&worker.db, files, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             let (mut items, is_incomplete) = match result {
@@ -2897,10 +2899,7 @@ impl LanguageServer for ServerState {
             };
             let help = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::signature_help_with(&worker.db, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::signature_help_with(&worker.db, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             Ok(help.map(|help| {
@@ -2947,14 +2946,36 @@ impl LanguageServer for ServerState {
             };
             let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
             let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
+            let wants_refactors = [
+                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                lsp_types::CodeActionKind::REFACTOR_INLINE,
+                lsp_types::CodeActionKind::REFACTOR_REWRITE,
+            ]
+            .iter()
+            .any(|kind| wants(kind));
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);
                     let mut actions = Vec::new();
                     if wants_quick_fixes {
                         actions.extend(ide::diagnostic_fixes(&fixable, range));
-                        actions.extend(ide::import_fixes(&worker.db, file, &fixable, range));
+                        actions.extend(ide::import_fixes(
+                            &worker.db,
+                            file,
+                            &fixable,
+                            range,
+                            &mut worker.installed,
+                        ));
                         actions.extend(ide::code_actions(&worker.db, file, range));
+                    }
+                    if wants_refactors {
+                        // `only: ["refactor.extract"]` (an extract keybinding) asks for one
+                        // kind, so each refactoring is filtered by its own.
+                        actions.extend(
+                            ide::refactors(&worker.db, file, range)
+                                .into_iter()
+                                .filter(|action| wants(&lsp_action_kind(action.kind))),
+                        );
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
                     let worth_listing =
@@ -2989,15 +3010,9 @@ impl LanguageServer for ServerState {
                         let is_preferred = (action.kind
                             == ide::CodeActionKind::DiagnosticFix(Applicability::Safe))
                         .then_some(true);
-                        let kind = match action.kind {
-                            ide::CodeActionKind::FixAll => {
-                                lsp_types::CodeActionKind::SOURCE_FIX_ALL
-                            }
-                            _ => lsp_types::CodeActionKind::QUICKFIX,
-                        };
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+                            kind: Some(lsp_action_kind(action.kind)),
                             title: action.title,
-                            kind: Some(kind),
                             is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
@@ -3541,7 +3556,8 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
         DocumentSymbolKind::S4Method | DocumentSymbolKind::R6Method => {
             lsp_types::SymbolKind::METHOD
         }
-        DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::R6Field | DocumentSymbolKind::S4Slot => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::Tag => lsp_types::SymbolKind::ENUM_MEMBER,
         // The kind RStudio's outline and the R language server use for sections.
         DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
     }
@@ -3833,6 +3849,8 @@ fn semantic_class_index(class: SemanticClass) -> (u32, u32) {
         SemanticClass::Tag => 6,
         SemanticClass::Function | SemanticClass::LibraryFunction => 7,
         SemanticClass::Namespace => 8,
+        SemanticClass::Property => 9,
+        SemanticClass::Method => 10,
     };
     // Bit 0 is `defaultLibrary`, the only advertised modifier.
     let modifiers = match class {
@@ -4032,4 +4050,16 @@ fn stub_type_definition(text: &str, offset: TextSize) -> Option<TextRange> {
         }
     }
     None
+}
+
+fn lsp_action_kind(kind: ide::CodeActionKind) -> lsp_types::CodeActionKind {
+    match kind {
+        ide::CodeActionKind::FixAll => lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+        ide::CodeActionKind::ExtractVariable | ide::CodeActionKind::ExtractFunction => {
+            lsp_types::CodeActionKind::REFACTOR_EXTRACT
+        }
+        ide::CodeActionKind::InlineVariable => lsp_types::CodeActionKind::REFACTOR_INLINE,
+        ide::CodeActionKind::ConvertAnnotation => lsp_types::CodeActionKind::REFACTOR_REWRITE,
+        _ => lsp_types::CodeActionKind::QUICKFIX,
+    }
 }

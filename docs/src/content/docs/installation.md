@@ -31,7 +31,7 @@ instead.
 
 **Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has one archive
 per platform: `ry-x86_64-unknown-linux-gnu.tar.gz`,
-`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-msvc.zip`. Name the tag in the URL,
+`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL,
 because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
 points at 0.1.1. On a Mac:
 
@@ -94,8 +94,8 @@ the system's library path first, then in the directories GNU R's `etc/Makeconf` 
 `BLAS_LIBS` and `LAPACK_LIBS` (which is how it finds them on NixOS), then for GNU R's own
 `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every place it searched;
 start ry with `LD_LIBRARY_PATH` set to a directory that holds `liblapack.so.3` and
-`libblas.so.3`. On macOS the fallback is Accelerate, and on Windows the libraries are R's own
-`bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
+`libblas.so.3`. On macOS, Accelerate is tried right after the system's library path, and on
+Windows the libraries are R's own `bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
 installs links the same libraries, because ry's R home takes `BLAS_LIBS` and `LAPACK_LIBS` from
 GNU R's `Makeconf`.
 
@@ -103,7 +103,7 @@ From 0.4.0-beta on, the release archives hold `ry`, ry's runtime (`libR.so`, `li
 `R.dll`), and `ry-rcmd`, which `ry load` uses to compile a package's `src/`. Keep them in the same
 directory, or put the runtime and `ry-rcmd` together in `../lib/ry/` relative to `ry`. The
 Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
-`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
+`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `x86_64-pc-windows-gnu` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
 it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 

@@ -1,3 +1,4 @@
+# oracle: requires data.table
 # fread runs on data.table's own C code through ry's C API and reads every file as it does under GNU R.
 library(data.table)
 path <- tempfile(fileext = ".csv")

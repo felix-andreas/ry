@@ -1,3 +1,4 @@
+# oracle: requires data.table
 # Queries outside ry's engine still run on data.table itself, with its own errors and warnings.
 library(data.table)
 dt <- data.table(g = c("a", "b", "a"), x = 1:3, y = c(0.5, 1.5, 2.5))
