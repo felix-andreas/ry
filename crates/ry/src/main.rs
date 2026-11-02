@@ -518,7 +518,8 @@ fn run_build(
         .and_then(|root| {
             let home = r_home(runtime)?;
             let output = match output {
-                Some(output) => output.to_path_buf(),
+                Some(output) => std::path::absolute(output)
+                    .map_err(|error| format!("cannot resolve {}: {error}", output.display()))?,
                 None => root
                     .parent()
                     .ok_or_else(|| format!("{} has no parent directory", root.display()))?

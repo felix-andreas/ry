@@ -53,9 +53,9 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   cache keyed by the block, its object and the topics it inherits from would cut it to the edited
   topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
   with a block cache and linear topic ordering").
-- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
-  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
-  after `ry load`, `ry test` and `ry document`.
+- **Tarballs built on ry's runtime record owner 0/0** where GNU R's record `root/root`: ry's
+  `file.info` has no `uname`/`grname` columns, so `utils::tar` falls back to ids. Harmless for
+  installing, but `ry build` output is not byte-identical to GNU R's.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
   3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for

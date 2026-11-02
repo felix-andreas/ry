@@ -776,6 +776,11 @@ impl Journey {
                 }
             }
             ["run", "ry", arguments @ ..] => {
+                // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test only
+                // builds it for the scenario's R home.
+                if matches!(arguments.first(), Some(&("build" | "install"))) {
+                    r_home()?;
+                }
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
                 let output = Command::new(env!("CARGO_BIN_EXE_ry"))
                     .args(arguments)

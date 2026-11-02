@@ -11,10 +11,12 @@ ry R [FILE]        # the same on GNU R
 ry load [PATH]     # load an R package from source, run code against it, and exit
 ry test [PATH]     # run a package's testthat tests against the loaded package
 ry document [PATH] # write a package's Rd files and NAMESPACE with roxygen2
+ry build [PATH]    # build a package's source tarball
+ry install [PATH]  # build and install a package
 ry server          # the language server, over stdio; your editor starts it
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, and `document` need R. They use
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`, `build`, and `install` need R. They use
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
 built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
 own runtime needs that installation too, because it still reads base R's R code and the default
@@ -211,6 +213,29 @@ quadratic in the number of topics (collecting them, ordering them for `@inherit`
 them by name) run in linear time. A cached block keeps the markdown links it
 resolved when it was parsed, so after you install or remove a package a link points at, edit the
 file or delete the cache.
+
+## build and install
+
+```sh
+ry build                  # write ../<package>_<version>.tar.gz
+ry build -o dist          # write it into dist/ instead
+ry install                # install into the first library on .libPaths()
+ry install -l ~/rlib      # install into ~/rlib
+```
+
+`ry build` writes the source tarball of the package at `PATH` (default: the one containing the
+current directory), as `devtools::build()` does: it runs `R CMD build --no-resave-data
+--no-manual`, rebuilds the vignettes unless you pass `--no-vignettes`, and prints the tarball's path
+on stdout. The tarball goes beside the package directory unless `-o DIR` names another.
+
+`ry install` installs the package as `devtools::install()` does: it builds a tarball without
+rebuilding the vignettes in a temporary directory, installs it with `R CMD INSTALL`, and deletes the
+tarball. `-l DIR` names the library, which is created if it does not exist. The package's dependencies must
+already be installed.
+
+Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home, so compiled code is
+built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
+instead.
 
 ## debug-adapter
 
