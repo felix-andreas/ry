@@ -681,7 +681,7 @@ impl KdTree {
             // The median, moved outward to the nearest gap between distinct values so that
             // tied points never straddle the split.
             let count = members.len();
-            let middle = (count + 1) / 2 - 1;
+            let middle = count.div_ceil(2) - 1;
             let mut offset: isize = 0;
             let mut chosen = middle;
             loop {
