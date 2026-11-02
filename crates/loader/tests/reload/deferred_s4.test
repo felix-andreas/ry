@@ -117,3 +117,11 @@ run .onLoad
 ZERO <- 0
 setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
 #++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 ZERO <- 0
+hold back R/a.R:2 setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
+placeholders .__C__Sq
+metadata not cached: a definition reads other code
+sync exports
+run .onLoad
