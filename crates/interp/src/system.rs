@@ -3110,13 +3110,15 @@ unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn set_gc_stress(on: bool) -> bool {
-    let policy = crate::heap().policy_mut();
-    let previous = matches!(policy.stress, GcStress::EveryAllocation);
-    policy.stress = if on {
-        GcStress::EveryAllocation
-    } else {
-        GcStress::Off
-    };
+    let heap = crate::heap();
+    let previous = matches!(heap.policy().stress, GcStress::EveryAllocation);
+    heap.update_policy(|policy| {
+        policy.stress = if on {
+            GcStress::EveryAllocation
+        } else {
+            GcStress::Off
+        }
+    });
     previous
 }
 

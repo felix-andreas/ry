@@ -520,19 +520,86 @@ pub fn build_package(name: &str, headers: Headers) -> PathBuf {
     library
 }
 
+/// Whether GNU R is installed. Tests that compare against it, or build against its headers,
+/// skip with a message when it is not, and when `RY_SKIP_GNU_R` is set.
 pub fn gnu_r_available() -> bool {
-    if std::env::var_os("RY_SKIP_GNU_R").is_some() {
-        return false;
-    }
-    let found = Command::new("R")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    assert!(
-        found,
-        "GNU R is needed to build against its headers; install it or set RY_SKIP_GNU_R=1"
-    );
-    true
+    gnu_r().is_some()
+}
+
+/// A GNU R installation, located through the `R` on `PATH` rather than by assuming one layout:
+/// Debian keeps `Rscript` in `/usr/bin` and the headers in `/usr/share/R/include`, outside
+/// `R RHOME`, while a source build keeps both inside it.
+pub struct GnuR {
+    pub home: PathBuf,
+    pub rscript: PathBuf,
+    pub include: PathBuf,
+}
+
+pub fn gnu_r() -> Option<&'static GnuR> {
+    static FOUND: OnceLock<Option<GnuR>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            if std::env::var_os("RY_SKIP_GNU_R").is_some() {
+                eprintln!("skipping the comparison with GNU R: RY_SKIP_GNU_R is set");
+                return None;
+            }
+            let Some(home) = r_output(&["RHOME"]) else {
+                eprintln!("skipping the comparison with GNU R: no `R` on PATH");
+                return None;
+            };
+            let home = PathBuf::from(home);
+            // The `Rscript` beside the `R` on PATH comes first: the one in `R RHOME` is a binary
+            // that hardcodes where R was installed, so it fails in a relocated installation.
+            let rscript = path_entries()
+                .map(|directory| directory.join("Rscript"))
+                .chain([home.join("bin/Rscript")])
+                .find(|candidate| candidate.is_file())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "GNU R is installed at {} but has no Rscript",
+                        home.display()
+                    )
+                });
+            let flags = r_output(&["CMD", "config", "--cppflags"]).unwrap_or_default();
+            let include = flags
+                .split_whitespace()
+                .filter_map(|flag| flag.strip_prefix("-I"))
+                .map(PathBuf::from)
+                .chain([
+                    home.join("include"),
+                    home.join("../../share/R/include"),
+                    PathBuf::from("/usr/share/R/include"),
+                ])
+                .find(|candidate| candidate.join("Rinternals.h").is_file())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "GNU R is installed at {} but its headers were not found",
+                        home.display()
+                    )
+                });
+            Some(GnuR {
+                home,
+                rscript,
+                include,
+            })
+        })
+        .as_ref()
+}
+
+/// The trimmed standard output of `R <arguments>`, or `None` when `R` does not run or fails.
+fn r_output(arguments: &[&str]) -> Option<String> {
+    let output = Command::new("R").args(arguments).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn path_entries() -> impl Iterator<Item = PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
 }
 
 pub fn rytest(r: &R) {
