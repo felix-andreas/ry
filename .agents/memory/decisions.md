@@ -4622,3 +4622,36 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   data.table enters the code without flagging each query.
 - **Why off.** S4/R6 warn by default by user mandate; data.table has no such mandate, the
   benchmark code bases import it everywhere, and the guide says migrating is optional.
+
+## CSV files are read in released slices straight into the final column buffers
+
+- **Previous shape.** `read_csv_with` handed the whole mmapped file to one Polars parse, then
+  converted each column to its R type as a second copy.
+  At 1e8 group-by rows the file (5.2 GB), the parsed frame and the converted columns were all
+  resident together: the load peaked at 9.9 GB and the run did not fit in 15 GB.
+- **Target shape.** `read_bytes` (`crates/table/src/io.rs`) parses the file in about 256 MB slices
+  that end on a line break outside quotes (`slices`, which runs the quote state machine
+  `Quoting` over each stretch in parallel from all three start states and chains them), appends
+  each slice's columns into one `Builder` per column (a `Vec<i32>`, `Vec<f64>` or `Vec<u32>` of
+  factor codes plus a validity bitmap, reserved from the first slice's bytes per row), and
+  `madvise(DONTNEED)`s the parsed slice. A factor column parses as Polars `Categorical` with one
+  mapping per column shared through the schema, so codes stay valid across slices, and its codes
+  are remapped in place into R's sorted levels at the end.
+- **Fallbacks.** A factor column that holds a missing value is re-read whole as text, because R
+  keeps `NA` out of the levels and the categorical cannot say where it was. A Polars parse error on
+  a slice retries the whole file as text, so a row a slice boundary breaks never changes the
+  answer. `check_csv_input` (the fuzz target) compares a 16-byte sliced read with a whole read.
+- **Impact.** 1e8 load peak 5.6 GB (was 9.9 GB). No duplicated state: the builders are the final
+  buffers. The rest of the 1e8 peak is q10, which has nearly one group per row, so `aggregate` and
+  `hashed` in `group.rs` drop each per-row and per-group buffer as soon as the next step no longer
+  needs it; the whole group-by run then peaks at 13.4 GB from R and 12.6 GB from Rust, against
+  data.table's 13.7 GB.
+
+## The Rust table benchmark runs on libR's allocator and the same lazy plans as the R path
+
+- **Previous shape.** `db_benchmark` used glibc malloc and answered joins through the data.table
+  `x[i]` IR, while `ry run` used libR's mimalloc and lazy `Plan`s, so "ry from Rust" (9.2 s at
+  1e7) lost to "ry from R" (6.3 s) for reasons that had nothing to do with the API.
+- **Target shape.** `benches/allocator.rs` installs mimalloc with libR's settings (eager commit
+  off, purge delay -1) as the global allocator, and the joins run the same `Plan`s as `ry.R`. The
+  driver now measures the engine with no R in the way: 4.9 s against 5.5 s from R at 1e7.

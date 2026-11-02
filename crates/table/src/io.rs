@@ -782,8 +782,9 @@ mod tests {
         crate::Result,
     };
 
-    /// Quoted fields with line breaks and doubled quotes straddle many slice boundaries.
-    fn text() -> String {
+    /// Quoted fields with line breaks and doubled quotes straddle many slice boundaries. With
+    /// `stray`, some unquoted values also hold a quote, which only the slicer handles.
+    fn text(stray: bool) -> String {
         let mut text = String::from("id,name,note,x\n");
         for row in 0..400 {
             let note = match row % 4 {
@@ -791,7 +792,7 @@ mod tests {
                 1 => "\"say \"\"hi\"\", ok\"".to_string(),
                 2 => String::new(),
                 // A quote inside an unquoted value is text, not the start of a quoted field.
-                _ if row % 8 == 3 => format!("{row}\" pipe"),
+                _ if stray && row % 8 == 3 => format!("{row}\" pipe"),
                 _ => format!("n{row}"),
             };
             text.push_str(&format!("{row},k{},{note},{}.5\n", row % 7, row));
@@ -801,7 +802,7 @@ mod tests {
 
     #[test]
     fn slices_end_at_line_breaks_outside_quotes() {
-        let text = text();
+        let text = text(true);
         let bytes = text.as_bytes();
         assert!(text.matches("\" pipe").count() > 0);
         for size in [1, 7, 64, 1000] {
@@ -823,7 +824,8 @@ mod tests {
 
     #[test]
     fn a_sliced_read_matches_a_whole_read() -> Result<()> {
-        let text = text();
+        // Polars cannot read a stray quote at all, sliced or whole, so it is left out here.
+        let text = text(false);
         let bytes = text.as_bytes();
         for factors in [false, true] {
             let options = ReadOptions {

@@ -126,22 +126,29 @@ pub(crate) fn aggregate(
         return Ok(None);
     };
     let grouping = group(&codes, radix, &aggregations, None);
+    // With nearly one group per row, every per-row and per-group buffer is as large as a column
+    // of the input, so each is released as soon as the next step no longer needs it.
+    drop(codes);
     let order = output_order(&grouping, query.keyed, height);
     let first_rows: Vec<u32> = order
         .iter()
         .map(|slot| grouping.first_rows[*slot as usize])
         .collect();
+    let Grouping { states, .. } = grouping;
 
     let groups = order.len();
-    let mut result = key_columns(frame, &query.by, &first_rows)?;
     let mut temporaries = Vec::with_capacity(aggregations.len());
     let mut temporary_schema = Vec::with_capacity(aggregations.len());
-    for (index, (aggregation, state)) in aggregations.iter().zip(&grouping.states).enumerate() {
+    for (index, (aggregation, state)) in aggregations.iter().zip(states).enumerate() {
         let name = temporary(index);
-        let vector = finish(aggregation, state, &order);
+        let vector = finish(aggregation, &state, &order);
+        drop(state);
         temporary_schema.push((name.clone(), vector.kind()));
         temporaries.push(vector.into_column(name));
     }
+    drop(order);
+    let mut result = key_columns(frame, &query.by, &first_rows)?;
+    drop(first_rows);
     let temporaries = DataFrame::new(groups, temporaries)?;
     let temporary_schema = Schema {
         columns: temporary_schema,
@@ -743,6 +750,8 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
             })
             .collect()
     });
+    drop(rows);
+    drop(row_codes);
     let groups: usize = parts
         .iter()
         .map(|(first_rows, _, _)| first_rows.len())

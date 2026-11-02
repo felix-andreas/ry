@@ -809,30 +809,46 @@ without R.
 | join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
 | keyed rolling join | 0.137 | 0.100 | 0.109 |
 | total | 27.01 | 5.54 | 4.86 |
-| peak memory (GB) | 6.7 | 7.8 | 7.4 |
+| peak memory (GB) | 6.9 | 8.0 | 7.6 |
 <!-- /bench-table:1e7 -->
 
 At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
 group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
-machine's 15 GB. The last row is each engine's peak resident memory over the whole run.
+machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At 1e8
+rows the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
 
 <!-- bench-table:5e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
-| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
-| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
-| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
-| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
-| total | 29.84 | 11.83 | 15.97 |
+| groupby q1: `sum(v1)` by `id1` | 0.790 | 0.183 | 0.177 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.031 | 0.166 | 0.149 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.389 | 0.600 | 0.730 |
+| groupby q4: three means by `id4` | 1.746 | 0.681 | 0.661 |
+| groupby q5: three sums by `id6` | 1.502 | 0.809 | 0.665 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.072 | 0.891 | 0.812 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 4.898 | 0.556 | 0.410 |
+| groupby q8: the two largest `v3` by `id6` | 3.757 | 1.768 | 1.538 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.298 | 0.324 | 0.316 |
+| groupby q10: `sum(v3)`, count by all six ids | 12.993 | 4.396 | 4.288 |
+| total | 34.48 | 10.37 | 9.75 |
+| peak memory (GB) | 6.6 | 7.3 | 7.4 |
 <!-- /bench-table:5e7 -->
 
 <!-- bench-table:1e8 -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.990 | 0.293 | 0.301 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.906 | 2.519 | 1.573 |
+| groupby q4: three means by `id4` | 3.602 | 1.214 | 1.168 |
+| groupby q5: three sums by `id6` | 2.741 | 1.836 | 1.539 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.343 | 1.533 | 1.617 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 11.334 | 1.188 | 1.163 |
+| groupby q8: the two largest `v3` by `id6` | 7.691 | 4.108 | 3.491 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 4.513 | 0.708 | 0.536 |
+| groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
+| total | 69.22 | 22.42 | 20.81 |
+| peak memory (GB) | 13.7 | 13.4 | 12.6 |
 <!-- /bench-table:1e8 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
