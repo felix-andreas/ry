@@ -122,11 +122,25 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     if let Some(dll) = runtime.dlls.iter_mut().find(|dll| dll.path == canonical) {
         return Ok(&mut **dll);
     }
+    // The dynamic linker hands back the image it already mapped for a path, so a library
+    // loaded again after `dyn.unload`, typically because it was rebuilt, opens from a copy.
+    let reloaded = runtime
+        .unloaded_dlls
+        .iter()
+        .any(|dll| dll.path == canonical);
+    let fresh = if reloaded {
+        Some(fresh_copy(&canonical, runtime.unloaded_dlls.len())?)
+    } else {
+        None
+    };
+    let source = fresh
+        .as_ref()
+        .map_or(canonical.as_str(), |(_, path)| path.as_str());
     // On macOS a binary GNU R linked names GNU R's libR; ry loads a copy rebound to its own.
     #[cfg(target_os = "macos")]
-    let opened = rebound_copy(&canonical)?.unwrap_or_else(|| canonical.clone());
+    let opened = rebound_copy(source)?.unwrap_or_else(|| source.to_owned());
     #[cfg(not(target_os = "macos"))]
-    let opened = canonical.clone();
+    let opened = source.to_owned();
     let c_path = CString::new(opened.as_str()).map_err(|_| error("invalid library path"))?;
     let mut handle = std::ptr::null_mut();
     let mut load_error = 0;
@@ -140,6 +154,13 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         );
         status
     })?;
+    // A mapped library no longer needs its file, except on Windows, which keeps it locked.
+    #[cfg(not(windows))]
+    if let Some((directory, _)) = &fresh
+        && std::fs::remove_dir_all(directory).is_err()
+    {
+        // A leftover copy in the temporary directory is harmless.
+    }
     if handle.is_null() {
         #[cfg(windows)]
         let reason = platform::library_error_message(load_error);
@@ -182,6 +203,56 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         with_native_scope(|| ry_call_init(init, dll.cast()))?;
     }
     Ok(dll)
+}
+
+/// `dyn.unload(path)`: runs the library's `R_unload_<name>` and drops it from the loaded
+/// libraries, so `getLoadedDLLs()` and `PACKAGE =` no longer find it, and the next `dyn.load`
+/// of the path, such as of a rebuilt library, opens the file afresh.
+pub unsafe fn unload_library(path: &str) -> ApiResult<()> {
+    let runtime = runtime();
+    let canonical = std::fs::canonicalize(path)
+        .map(|path| platform::path_text(&path))
+        .unwrap_or_else(|_| path.to_owned());
+    let Some(index) = runtime.dlls.iter().position(|dll| dll.path == canonical) else {
+        return Err(error(format!("shared object '{canonical}' was not loaded")));
+    };
+    let dll = runtime.dlls.remove(index);
+    let unload_name = CString::new(format!("R_unload_{}", dll.name.replace('.', "_")))
+        .map_err(|_| error("invalid library name"))?;
+    let unload = platform::library_symbol(dll.handle, &unload_name);
+    runtime.unloaded_dlls.push(dll);
+    if !unload.is_null() {
+        let unload: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(unload);
+        let record: *mut Dll = &mut **runtime
+            .unloaded_dlls
+            .last_mut()
+            .ok_or_else(|| error("the unloaded library list is empty"))?;
+        with_native_scope(|| ry_call_init(unload, record.cast()))?;
+    }
+    Ok(())
+}
+
+/// A copy of the library at `path` in a directory of its own, under the same file name so
+/// `R_init_<name>` and the messages still match it. Returns the directory and the copy.
+fn fresh_copy(path: &str, generation: usize) -> ApiResult<(std::path::PathBuf, String)> {
+    let source = std::path::Path::new(path);
+    let file_name = source.file_name().ok_or_else(|| {
+        error(format!(
+            "unable to load shared object '{path}': no file name"
+        ))
+    })?;
+    let directory =
+        std::env::temp_dir().join(format!("ry-dll-{}-{generation}", std::process::id()));
+    let copy = directory.join(file_name);
+    std::fs::create_dir_all(&directory)
+        .and_then(|()| std::fs::copy(source, &copy))
+        .map_err(|failure| {
+            error(format!(
+                "unable to load shared object '{path}':\n  cannot copy it to {}: {failure}",
+                copy.display()
+            ))
+        })?;
+    Ok((directory, platform::path_text(&copy)))
 }
 
 /// A copy of the library at `path` whose libR reference names ry's runtime, or `None` when

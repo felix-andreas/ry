@@ -37,10 +37,7 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
             continue;
         };
         let mut renderer = TypeRenderer::default();
-        output.push_str(&format!(
-            "{name}: {}\n",
-            renderer.render_scheme(db, &scheme)
-        ));
+        output.push_str(&format!("{name}: {}\n", renderer.render_scheme(db, scheme)));
     }
     let lint_config = LintConfig {
         naming_style: Some(NameStyle::Snake),

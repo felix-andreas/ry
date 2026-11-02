@@ -38,7 +38,10 @@ reaches the output.
 `syntax::testing::SplitMix64` (or `ByteStream`, which reads a fuzzer's bytes through the same
 `Entropy` trait), print the seed and a replay command when they fail, and never consult the
 wall clock or the OS's randomness. Running the same seed twice must produce the same transcript, and
-the simulator pins that property with a test.
+the simulator pins that property with a test. A seeded battery loops through
+`syntax::testing::for_each_seed`, which runs seeds `0..N` (`N` scaled by `FUZZ_ITERS`), replays only
+the seed in `FUZZ_SEED` when it is set, and on a failure prints the exact command, such as
+`FUZZ_SEED=14 cargo test -p loader --test test_reload_fuzz a_reload_matches_a_fresh_load -- --exact`.
 
 **Invariants are always on in simulation.** Cross-checks that are too expensive for production run
 whenever a harness asks for them, and panic at the step that broke them with the inputs that
@@ -186,14 +189,17 @@ harness of that kind yet; the gap is filed in the backlog.
 | Formatter | seeds, mutations, fixture sources (`format` `test_fuzz`, `test_format_range`); `cargo fuzz` `format` | preservation, idempotence, determinism; for range formatting also convergence, restriction to the whole-file edits, additivity and composition |
 | IDE features | generated documents and positions (`ide` `test_fuzz`); `cargo fuzz` `ide` | no panic, ranges inside the document |
 | Language server | the simulator; scenarios; `cargo fuzz` `lsp` | a fresh server, the push contract, range geometry |
-| Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |
-| Debugger | scripted sessions and a seeded client that sends random requests at every stop (`interp` `test_debugger`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean |
+| NAMESPACE conditionals | generated `if`/`else` directive trees over R version and platform tests (`semantics` `test_fuzz` `namespace_conditionals_resolve_to_the_taken_branches`) | the directives of the taken branches, evaluated by a model |
+| Loader | random reload sequences that edit R files, `NAMESPACE` (with `if` blocks and S3 registrations), `DESCRIPTION` and data (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load; a model of the namespace's bindings and S3 table; every name whose call graph reaches changed code is among the callers `ry test` selects |
+| Package builds (`R CMD` under `ry load`) | generated makefiles with recursive, simple, appended, conditional and self-referencing variables, continuations and escapes (`rcmd` `make_expansion_agrees_with_gnu_make`); GNU R's own `Makeconf` | GNU make's expansion of the same variables |
+| Help server | generated requests written back to back on one connection, and their byte mutations (`interp` `help_server` tests) | the parsed request round trips; percent-decoding and query splitting match tables recorded from GNU R |
+| Debugger | scripted sessions and a seeded client that sends random requests, including ry's own `ry*` requests, at every stop (`interp` `test_debugger`); valid and mutated message framing (`ry` `test_debug_framing`); simulated editors attaching to the console, reinitializing and racing each other (`interp` `test_console_server`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean; frames read back exactly, a malformed or oversized frame is refused without a panic or an unbounded allocation |
 | Interpreter | generated programs (`interp` `test_fuzz`); differential fuzzing; `cargo fuzz` `interp_lower`, `bytecode` | GNU R, tier 0 |
-| Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases | no panic, identical bytes on a second render, one file per page; GNU R's warnings and capabilities |
-| Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
-| C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |
-| JIT | `test_tiers`; differential fuzzing with `RY_JIT=force` | tier 0, GNU R |
-| Table engine | `table` property tests; `cargo fuzz` `csv` | the eager implementation; the sniffer's promised columns |
+| Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases; the plot gallery against GNU R (`oracle` `test_gallery`) | no panic, identical bytes on a second render, one file per page, and files a reader parses (PDF cross-reference offsets and page count, balanced SVG markup, a decodable PNG, BMP, TIFF, JPEG and PostScript headers); GNU R's warnings and capabilities |
+| Garbage collector | seeded allocation and mutation sequences (`heap` `test_gc`); `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | a model of the live graph; the unstressed run, the write-barrier invariant |
+| C API | native fuzzing (`libr` `test_fuzz_native`); mutated serialized streams (`rdb` `mutated_streams_never_panic`); `cargo fuzz` `unserialize` | GNU R's behavior; an R error, never a panic; the PROTECT balance check on every `.Call` |
+| JIT | `test_tiers`, including generated typed closures over vectors, records, tuples, tags and `match` that the first call compiles (`fuzz_typed_closures_agree_with_tier_zero`); differential fuzzing with `RY_JIT=force` | tier 0's value, output and error message; GNU R |
+| Table engine | `table` property tests: random and mutated delimited text with quotes, embedded line breaks and random read options, read whole, through the slicer and through a memory-mapped file; grouped aggregates; sorting (`fuzz_csv_reading`, `fuzz_grouped_aggregates_against_a_reference`, `fuzz_sort_unique_and_runs_against_a_reference`); `cargo fuzz` `csv` | a whole read of the same text; a reference implementation; the eager implementation; the sniffer's promised columns |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
 | Check cache | seeded edits to a generated package (`ry` `cli::tests::cached_checks_match_fresh_checks_across_seeded_edits`, `CACHE_SEED`, `FUZZ_ITERS`) | a fresh check of the same files |
@@ -226,3 +232,9 @@ does. A stricter checker that catches an unprotected object at the moment it is 
   (GNU R's own, threads in packages) is controlled only by running them single-threaded.
 - The simulator interrupts a step only with a notification, so a request preempting idle work is not
   simulated.
+- `ry test --watch` has no end-to-end scenario. The caller selection it uses to order files is checked
+  against the reload model, but that check follows only direct name references, not S3 dispatch.
+- The make differential does not follow `include` lines, so a variable a package's `Makevars` takes
+  from an included file is checked only through ry's own expansion.
+- The `cargo fuzz` `csv` target is not built in the default test suite, so it is only checked when
+  `just fuzz-run csv` runs.

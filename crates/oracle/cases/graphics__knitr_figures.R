@@ -1,3 +1,4 @@
+# oracle: requires knitr, rmarkdown
 # A vignette with base and grid plots, knitted to Markdown and rendered to HTML. The figures
 # are compared by name and pixel size, since GNU R's PNG device draws through cairo.
 directory <- tempfile()

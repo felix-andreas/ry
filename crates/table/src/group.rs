@@ -126,22 +126,29 @@ pub(crate) fn aggregate(
         return Ok(None);
     };
     let grouping = group(&codes, radix, &aggregations, None);
+    // With nearly one group per row, every per-row and per-group buffer is as large as a column
+    // of the input, so each is released as soon as the next step no longer needs it.
+    drop(codes);
     let order = output_order(&grouping, query.keyed, height);
     let first_rows: Vec<u32> = order
         .iter()
         .map(|slot| grouping.first_rows[*slot as usize])
         .collect();
+    let Grouping { states, .. } = grouping;
 
     let groups = order.len();
-    let mut result = key_columns(frame, &query.by, &first_rows)?;
     let mut temporaries = Vec::with_capacity(aggregations.len());
     let mut temporary_schema = Vec::with_capacity(aggregations.len());
-    for (index, (aggregation, state)) in aggregations.iter().zip(&grouping.states).enumerate() {
+    for (index, (aggregation, state)) in aggregations.iter().zip(states).enumerate() {
         let name = temporary(index);
-        let vector = finish(aggregation, state, &order);
+        let vector = finish(aggregation, &state, &order);
+        drop(state);
         temporary_schema.push((name.clone(), vector.kind()));
         temporaries.push(vector.into_column(name));
     }
+    drop(order);
+    let mut result = key_columns(frame, &query.by, &first_rows)?;
+    drop(first_rows);
     let temporaries = DataFrame::new(groups, temporaries)?;
     let temporary_schema = Schema {
         columns: temporary_schema,
@@ -360,6 +367,7 @@ fn rank(codes: &mut [u64]) -> u64 {
     THREAD_POOL.install(|| {
         (0..chunks).into_par_iter().for_each(|index| {
             let mut rank = firsts[index];
+            #[allow(clippy::needless_range_loop)]
             for position in index * chunk..((index + 1) * chunk).min(height) {
                 if position > 0 && code_at(position) != code_at(position - 1) {
                     rank += 1;
@@ -743,6 +751,8 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
             })
             .collect()
     });
+    drop(rows);
+    drop(row_codes);
     let groups: usize = parts
         .iter()
         .map(|(first_rows, _, _)| first_rows.len())
@@ -905,7 +915,12 @@ pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
             Expr::Column(temporary(index))
         }
         Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Na(_) => expr.clone(),
-        Expr::Character(_) | Expr::Column(_) | Expr::Head(..) => return None,
+        Expr::Character(_)
+        | Expr::Date(_)
+        | Expr::Column(_)
+        | Expr::Head(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => return None,
         Expr::Unary(op, arg) => Expr::Unary(*op, Box::new(rewrite(arg, aggregates)?)),
         Expr::Binary(op, left, right) => Expr::Binary(
             *op,

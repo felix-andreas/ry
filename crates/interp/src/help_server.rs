@@ -312,8 +312,8 @@ fn converse(stream: TcpStream, generation: u64) {
 /// is a clean close (or an idle timeout) before a request began; `Err` a request GNU R's server
 /// would refuse.
 fn read_request(
-    reader: &mut BufReader<TcpStream>,
-    writer: &mut TcpStream,
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
 ) -> Result<Option<(String, bool, Request)>, ()> {
     let mut budget = MAX_HEAD;
     // Blank lines before a request line are skipped, as HTTP allows.
@@ -403,14 +403,15 @@ fn read_request(
         Some("keep-alive") => true,
         _ => version == "HTTP/1.1",
     };
-    let target = target.split_once('#').map_or(target, |(before, _)| before);
+    // GNU R keeps a `#` and what follows it: browsers never send a fragment, and the server
+    // does not strip one.
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path, Some(parse_query(query))),
         None => (target, None),
     };
     let request = Request {
         method: method.to_owned(),
-        path: percent_decode(path, false),
+        path: percent_decode(path),
         query,
         headers,
         body,
@@ -418,45 +419,84 @@ fn read_request(
     Ok(Some((version.to_owned(), keep_alive, request)))
 }
 
-/// `a=1&b&&c=x=y` gives `a = "1"`, `"" = "b"`, `"" = ""` and `c = "x=y"`, as in GNU R.
+/// `a=1&b&&c=x=y` gives `a = "1"`, `"" = "b"`, `"" = ""` and `c = "x=y"`, as in GNU R. The
+/// field count comes from the raw `&`s, but an escape takes its two digits whatever they are, so
+/// `k=%2&j` is the one field `k = " j"` followed by an empty one, exactly as GNU R's server reads
+/// it.
 fn parse_query(query: &str) -> Vec<(String, String)> {
-    query
-        .split('&')
-        .map(|field| match field.split_once('=') {
-            Some((name, value)) => (percent_decode(name, true), percent_decode(value, true)),
-            None => (String::new(), percent_decode(field, true)),
-        })
-        .collect()
+    let bytes = query.as_bytes();
+    let count = bytes.iter().filter(|byte| **byte == b'&').count() + 1;
+    let mut fields = Vec::with_capacity(count);
+    let mut name = None;
+    let mut value = Vec::new();
+    let mut index = 0;
+    loop {
+        match bytes.get(index) {
+            Some(b'=') if name.is_none() => {
+                name = Some(std::mem::take(&mut value));
+                index += 1;
+            }
+            Some(b'&') | None => {
+                fields.push((
+                    decoded_text(name.take().unwrap_or_default()),
+                    decoded_text(std::mem::take(&mut value)),
+                ));
+                if index >= bytes.len() {
+                    break;
+                }
+                index += 1;
+            }
+            Some(_) => index = decode_one(bytes, index, &mut value),
+        }
+    }
+    fields.resize(count, (String::new(), String::new()));
+    fields
 }
 
-/// Decodes `%XX` escapes, and `+` as a space in a query. Like GNU R's server, the text ends at
-/// the first malformed escape.
-fn percent_decode(text: &str, plus_is_space: bool) -> String {
+/// A path decoded the way GNU R's server decodes it, `+` becoming a space there too.
+fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
-    while let Some(&byte) = bytes.get(index) {
-        match byte {
-            b'%' => {
-                let hex = bytes
-                    .get(index + 1..index + 3)
-                    .and_then(|hex| std::str::from_utf8(hex).ok())
-                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-                let Some(value) = hex else { break };
-                decoded.push(value);
-                index += 3;
-            }
-            b'+' if plus_is_space => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            _ => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
+    while index < bytes.len() {
+        index = decode_one(bytes, index, &mut decoded);
     }
-    String::from_utf8_lossy(&decoded).into_owned()
+    decoded_text(decoded)
+}
+
+/// Decodes the character at `index` onto `out` and returns where the next one starts. `+` is a
+/// space and `%XX` the byte `0xXX`. GNU R's server checks nothing: a digit that is not hex counts
+/// as 0, and a missing one (at the end of the text) also counts as 0 without being consumed.
+fn decode_one(bytes: &[u8], index: usize, out: &mut Vec<u8>) -> usize {
+    let digit = |at: usize| match bytes.get(at) {
+        Some(byte @ b'0'..=b'9') => byte - b'0',
+        Some(byte @ b'a'..=b'f') => byte - b'a' + 10,
+        Some(byte @ b'A'..=b'F') => byte - b'A' + 10,
+        _ => 0,
+    };
+    match bytes.get(index) {
+        Some(b'%') => {
+            out.push(digit(index + 1) << 4 | digit(index + 2));
+            (index + 3).min(bytes.len())
+        }
+        Some(b'+') => {
+            out.push(b' ');
+            index + 1
+        }
+        Some(byte) => {
+            out.push(*byte);
+            index + 1
+        }
+        None => index,
+    }
+}
+
+/// GNU R makes each decoded field a C string, so it ends at the first NUL an escape produced.
+fn decoded_text(mut bytes: Vec<u8>) -> String {
+    if let Some(end) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(end);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn encode(response: &Response, version: &str, head_only: bool) -> Vec<u8> {
@@ -665,32 +705,265 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        std::io::Cursor,
+        syntax::testing::{SplitMix64, for_each_seed, mutate_bytes},
+    };
 
+    fn pairs(fields: &[(&str, &str)]) -> Vec<(String, String)> {
+        fields
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    /// Each pair was read off GNU R's own server by a handler that deparses its `path` and
+    /// `query`.
     #[test]
-    fn queries_split_like_gnu_r() {
-        assert_eq!(
-            parse_query("a=%3D&b=c=d&&e="),
-            vec![
-                ("a".to_owned(), "=".to_owned()),
-                ("b".to_owned(), "c=d".to_owned()),
-                (String::new(), String::new()),
-                ("e".to_owned(), String::new()),
-            ]
-        );
-        assert_eq!(
-            parse_query("=v&k&y=a+b%26c"),
-            vec![
-                (String::new(), "v".to_owned()),
-                (String::new(), "k".to_owned()),
-                ("y".to_owned(), "a b&c".to_owned()),
-            ]
-        );
+    fn paths_decode_like_gnu_r() {
+        for (raw, decoded) in [
+            ("/a%20b+c", "/a b c"),
+            ("/q/%2Fx%zz%4", "/q//x"),
+            ("/a%+1b", "/a\u{1}b"),
+            ("/a%G1b", "/a\u{1}b"),
+            ("/a%1+b", "/a\u{10}b"),
+            ("/a%2", "/a "),
+            ("/a%1", "/a\u{10}"),
+            ("/a%4", "/a@"),
+            ("/a%", "/a"),
+            ("/a%%41", "/a\u{4}1"),
+            ("/a%2&b", "/a b"),
+            ("/a%Gzb", "/a"),
+            ("/a%41%42", "/aAB"),
+            ("/a+%2B#x", "/a +#x"),
+        ] {
+            assert_eq!(percent_decode(raw), decoded, "{raw}");
+        }
     }
 
     #[test]
-    fn a_path_decodes_until_a_malformed_escape() {
-        assert_eq!(percent_decode("/a%20b+c", false), "/a b+c");
-        assert_eq!(percent_decode("/q/%2Fx%zz%4", false), "/q//x");
+    fn queries_split_like_gnu_r() {
+        for (raw, fields) in [
+            (
+                "a=%3D&b=c=d&&e=",
+                &[("a", "="), ("b", "c=d"), ("", ""), ("e", "")][..],
+            ),
+            ("=v&k&y=a+b%26c", &[("", "v"), ("", "k"), ("y", "a b&c")]),
+            ("k=%2&j=3", &[("k", " j=3"), ("", "")]),
+            ("k=%&j=3&z", &[("k", ""), ("", "z"), ("", "")]),
+            ("k=a%00b&j=2", &[("k", "a"), ("j", "2")]),
+            ("k=%00%2&j=3", &[("k", ""), ("", "")]),
+            ("k%3D=1", &[("k=", "1")]),
+            ("%41=%", &[("A", "")]),
+            ("k=1#frag&j", &[("k", "1#frag"), ("", "j")]),
+            ("", &[("", "")]),
+            ("&", &[("", ""), ("", "")]),
+        ] {
+            assert_eq!(parse_query(raw), pairs(fields), "{raw}");
+        }
+    }
+
+    /// A request ry builds itself: what the wire bytes say and what parsing them must give.
+    struct Generated {
+        version: &'static str,
+        keep_alive: bool,
+        request: Request,
+    }
+
+    /// Random requests written to one stream back to back come back field for field, and the
+    /// stream then ends cleanly.
+    #[test]
+    fn generated_requests_parse_back() {
+        for_each_seed(300, |seed| {
+            let mut rng = SplitMix64(seed);
+            let mut wire = Vec::new();
+            let mut expected = Vec::new();
+            for _ in 0..1 + rng.below(4) {
+                let generated = generate(&mut rng, &mut wire);
+                expected.push(generated);
+            }
+            let mut reader = Cursor::new(wire);
+            let mut writer = Vec::new();
+            for generated in &expected {
+                let Ok(Some((version, keep_alive, request))) =
+                    read_request(&mut reader, &mut writer)
+                else {
+                    panic!("a generated request was refused");
+                };
+                assert_eq!(version, generated.version);
+                assert_eq!(keep_alive, generated.keep_alive);
+                assert_eq!(request.method, generated.request.method);
+                assert_eq!(request.path, generated.request.path);
+                assert_eq!(request.query, generated.request.query);
+                assert_eq!(
+                    String::from_utf8_lossy(&request.headers),
+                    String::from_utf8_lossy(&generated.request.headers)
+                );
+                assert_eq!(request.body, generated.request.body);
+            }
+            assert!(matches!(read_request(&mut reader, &mut writer), Ok(None)));
+        });
+    }
+
+    /// Mutated requests never panic, and whatever parses keeps the invariants the handler call
+    /// relies on.
+    #[test]
+    fn mutated_requests_never_break_the_parser() {
+        for_each_seed(600, |seed| {
+            let mut rng = SplitMix64(seed);
+            let mut wire = Vec::new();
+            for _ in 0..1 + rng.below(3) {
+                generate(&mut rng, &mut wire);
+            }
+            let wire = mutate_bytes(&mut rng, &String::from_utf8_lossy(&wire));
+            let length = wire.len() as u64;
+            let mut reader = Cursor::new(wire);
+            let mut writer = Vec::new();
+            // Every accepted request consumes at least its request line, so this terminates.
+            for _ in 0..=length {
+                let before = reader.position();
+                match read_request(&mut reader, &mut writer) {
+                    Ok(Some((version, _, request))) => {
+                        assert!(reader.position() > before, "a request consumed nothing");
+                        assert!(version.starts_with("HTTP/"));
+                        assert!(request.headers.starts_with(b"Request-Method: "));
+                        assert!(!request.path.contains('\0'));
+                    }
+                    Ok(None) | Err(()) => return,
+                }
+            }
+            panic!("the parser looped on one stream");
+        });
+    }
+
+    fn generate(rng: &mut SplitMix64, wire: &mut Vec<u8>) -> Generated {
+        const METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "DELETE"];
+        const VERSIONS: &[&str] = &["HTTP/1.0", "HTTP/1.1"];
+        let method = METHODS[rng.below(METHODS.len())];
+        let version = VERSIONS[rng.below(VERSIONS.len())];
+        if rng.chance(1, 4) {
+            wire.extend_from_slice(b"\r\n");
+        }
+        let mut path = String::from("/");
+        let mut target = String::from("/");
+        for _ in 0..rng.below(4) {
+            let (raw, text) = segment(rng);
+            target.push_str(&raw);
+            path.push_str(&text);
+            target.push('/');
+            path.push('/');
+        }
+        let query = rng.chance(1, 2).then(|| {
+            let mut fields = Vec::new();
+            target.push('?');
+            for index in 0..1 + rng.below(4) {
+                if index > 0 {
+                    target.push('&');
+                }
+                let (raw_value, value) = segment(rng);
+                let name = if rng.chance(3, 4) {
+                    let (raw_name, name) = segment(rng);
+                    target.push_str(&raw_name);
+                    target.push('=');
+                    name
+                } else {
+                    String::new()
+                };
+                target.push_str(&raw_value);
+                fields.push((name, value));
+            }
+            fields
+        });
+        let mut head = format!("{method} {target} {version}\r\n");
+        let mut headers = format!("Request-Method: {method}\n");
+        let connection = match rng.below(3) {
+            0 => Some("close"),
+            1 => Some("Keep-Alive"),
+            _ => None,
+        };
+        let keep_alive = match connection {
+            Some("close") => false,
+            Some(_) => true,
+            None => version == "HTTP/1.1",
+        };
+        let body = (method != "GET" && rng.chance(1, 2)).then(|| {
+            let length = 1 + rng.below(40);
+            (0..length)
+                .map(|_| (rng.next_u64() & 0xFF) as u8)
+                .collect::<Vec<u8>>()
+        });
+        let content_type = (body.is_some() && rng.chance(1, 2)).then(|| "text/plain".to_owned());
+        let mut lines = vec![format!("Host: 127.0.0.1:{}", rng.below(65536))];
+        if let Some(connection) = connection {
+            lines.push(format!("Connection: {connection}"));
+        }
+        if let Some(body) = &body {
+            lines.push(format!("Content-Length: {}", body.len()));
+        }
+        if let Some(content_type) = &content_type {
+            lines.push(format!("Content-Type: {content_type}"));
+        }
+        if rng.chance(1, 3) {
+            lines.push("X-Odd-Header-Without-Colon".to_owned());
+        }
+        for _ in 0..rng.below(4) {
+            let swap = rng.below(lines.len());
+            lines.swap(0, swap);
+        }
+        for line in &lines {
+            head.push_str(line);
+            head.push_str(if rng.chance(1, 5) { "\n" } else { "\r\n" });
+            headers.push_str(line);
+            headers.push('\n');
+        }
+        head.push_str("\r\n");
+        wire.extend_from_slice(head.as_bytes());
+        if let Some(body) = &body {
+            wire.extend_from_slice(body);
+        }
+        Generated {
+            version,
+            keep_alive,
+            request: Request {
+                method: method.to_owned(),
+                path,
+                query,
+                headers: headers.into_bytes(),
+                body: body.map(|body| (body, content_type)),
+            },
+        }
+    }
+
+    /// One path segment or query word, as it goes on the wire and as it decodes. It spells
+    /// characters plainly, as `+`, or as escapes in either case, and never produces a NUL, a
+    /// `#`, a `?` or anything that would split it.
+    fn segment(rng: &mut SplitMix64) -> (String, String) {
+        const PLAIN: &[u8] = b"abcXYZ019-._~!$'()*,;:@";
+        let mut raw = String::new();
+        let mut text = String::new();
+        for _ in 0..rng.below(6) {
+            match rng.below(4) {
+                0 => {
+                    raw.push('+');
+                    text.push(' ');
+                }
+                1 => {
+                    let character = (0x20 + rng.below(0x5F)) as u8 as char;
+                    if rng.chance(1, 2) {
+                        raw.push_str(&format!("%{:02X}", character as u32));
+                    } else {
+                        raw.push_str(&format!("%{:02x}", character as u32));
+                    }
+                    text.push(character);
+                }
+                _ => {
+                    let character = PLAIN[rng.below(PLAIN.len())] as char;
+                    raw.push(character);
+                    text.push(character);
+                }
+            }
+        }
+        (raw, text)
     }
 }

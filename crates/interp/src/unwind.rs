@@ -136,6 +136,29 @@ pub fn error_in(call: Sexp, message: impl Into<String>) -> Unwind {
     })
 }
 
+/// An error reported against `call` itself, as GNU R's `errorcall` reports it. Inside a complex
+/// assignment, `error_in` with the generated replacement call names the whole assignment
+/// (`resolve_call`), while this names the generated `` `[<-`(`*tmp*`, ...) `` call, which GNU R's
+/// replacement primitives use for a few messages such as an out-of-bounds matrix subscript.
+pub unsafe fn errorcall(call: Sexp, message: impl Into<String>) -> Unwind {
+    match generated_call(call) {
+        Ok(reported) => error_in(reported, message),
+        Err(failure) => failure,
+    }
+}
+
+/// `call` in a form `resolve_call` leaves alone: a copy when it is the generated replacement call
+/// of the complex assignment in progress, which `resolve_call` would otherwise report as the whole
+/// assignment.
+pub unsafe fn generated_call(call: Sexp) -> R<Sexp> {
+    match interp().assignment_call {
+        Some((replacement, _, _)) if replacement == call => {
+            crate::values::lcons(call.car(), call.cdr())
+        }
+        _ => Ok(call),
+    }
+}
+
 pub fn jump(jump: Jump) -> Unwind {
     Unwind::Jump(Box::new(jump))
 }

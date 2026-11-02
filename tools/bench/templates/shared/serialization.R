@@ -1,8 +1,7 @@
 #@ weight 3
 #@ param ROWS int 2 15
 # Round trips between R lists, JSON text and content hashes.
-#: fn(id: integer) -> list{id: integer, key: character, tags: character[], score: double}
-make_record_@ID@ <- function(id) {
+make_record_@ID@ <- function(id: integer) -> list{id: integer, key: character, tags: character[], score: double} {
   list(
     id = id,
     key = uuid::UUIDgenerate(use.time = FALSE),
@@ -11,36 +10,29 @@ make_record_@ID@ <- function(id) {
   )
 }
 
-#: @pure
-#: fn(records: Any) -> json
-records_to_json_@ID@ <- function(records) {
+records_to_json_@ID@ <- @pure function(records: Any) -> json {
   jsonlite::toJSON(records, auto_unbox = TRUE, digits = NA)
 }
 
-#: fn(text: json | character) -> Any
-json_to_records_@ID@ <- function(text) {
+json_to_records_@ID@ <- function(text: json | character) -> Any {
   jsonlite::fromJSON(text, simplifyVector = FALSE)
 }
 
-#: @pure
-#: fn(text: json | character) -> Any
-fast_parse_@ID@ <- function(text) {
+fast_parse_@ID@ <- @pure function(text: json | character) -> Any {
   RcppSimdJson::fparse(as.character(text))
 }
 
-#: fn(records: Any) -> character
-fingerprint_@ID@ <- function(records) {
+fingerprint_@ID@ <- function(records: Any) -> character {
   digest::digest(records_to_json_@ID@(records), algo = "sha256", serialize = FALSE)
 }
 #@ test
 test_that("serialization @ID@ round trips", {
   records <- lapply(seq_len(@ROWS@), make_record_@ID@)
   text <- records_to_json_@ID@(records)
-  #: list[list[named: Any]]
-  back <- json_to_records_@ID@(text)
+  back: list[list[named: Any]] <- json_to_records_@ID@(text)
   expect_length(back, @ROWS@)
   expect_equal(back[[1]]$id, 1L)
-  expect_equal(vapply(back, function(r) r$score, numeric(1)), seq_len(@ROWS@) / 7)
+  expect_equal(vapply(back, function(r: list[named: Any]) -> double r$score, numeric(1)), seq_len(@ROWS@) / 7)
   fast <- fast_parse_@ID@(text)
   expect_equal(NROW(fast), @ROWS@)
   expect_equal(nchar(fingerprint_@ID@(records)), 64L)

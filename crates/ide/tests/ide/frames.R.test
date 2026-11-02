@@ -65,7 +65,9 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
-completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
+action: Rewrite `:=` with `DataFrame.with_columns`
+  edit 57..85 -> "sales <- sales |> DataFrame.with_columns(tax = col(\"amount\") * 0.2)"
+completion (82): t, team, t.data.frame, t.default, t.test, table, tabulate, tail
 hint @5: DataFrame{team: character[], amount: double[]}
 
 #---- hover_on_a_column_named_by_a_string
@@ -79,6 +81,8 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+action: Rewrite `:=` with `DataFrame.with_columns`
+  edit 57..117 -> "sales <- sales |> DataFrame.with_columns(tax = col(\"amount\") * 0.2, net = col(\"amount\") * 0.8)"
 completion: none
 hint @5: DataFrame{team: character[], amount: double[]}
 
@@ -132,6 +136,27 @@ action: Add inferred type annotations for the whole file
 completion (1): team
 hint @5: DataFrame{team: character[], amount: double[]}
 hint @64: GroupBy{team: character[]; amount: double[]}
+
+#---- hover_on_a_column_string_inside_col
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+doubled <- sales |> DataFrame.with_columns(col("amo$0unt") * 2)
+#++++
+hover 104..112: amount: double[]
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotation for `doubled`
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
+completion (1): amount
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @64: DataFrame{team: character[], amount: double[]}
 
 #---- completion_in_a_verb_string_after_a_pipe
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))

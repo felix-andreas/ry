@@ -43,7 +43,19 @@ pub unsafe fn frame_value(env: Sexp, symbol: Sexp) -> Sexp {
 pub unsafe fn frame_lookup(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
     match runtime().heap.frame_cell(env, symbol) {
         Some(cell) => cell_value(cell),
+        None if base_binds_missing_arg(env, symbol) => Ok(symbol),
         None => Ok(runtime().heap.known().unbound),
+    }
+}
+
+/// A frame lookup that, like GNU R's `findVarInFrame3`, finds nothing in an object that is not
+/// an environment instead of failing. vctrs looks methods up in `R_UnboundValue` when a
+/// closure's environment has no S3 methods table, and relies on getting `R_UnboundValue` back.
+unsafe fn frame_lookup_unchecked(env: Sexp, symbol: Sexp) -> ApiResult<Sexp> {
+    match env.kind() {
+        SexpType::Environment => frame_lookup(env, symbol),
+        SexpType::Nil => Err(error("use of NULL environment is defunct")),
+        _ => Ok(runtime().heap.known().unbound),
     }
 }
 
@@ -62,9 +74,7 @@ pub unsafe fn cell_value(cell: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn assign_cell(cell: Sexp, value: Sexp) -> ApiResult<()> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
         if cell.has_gp(gp::BINDING_LOCKED) {
-            return Err(error(format!(
-                "cannot change active binding if binding is locked"
-            )));
+            return Err(error("cannot change active binding if binding is locked"));
         }
         let global = runtime().heap.known().global_env;
         crate::eval::apply_closure_or_primitive(cell.cdr(), &[value], global)?;
@@ -199,25 +209,13 @@ pub unsafe extern "C" fn Rf_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| lookup_in_frame(env, symbol, "findVarInFrame"))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// With `do_get` false GNU R only checks for existence; the value is cheap to return either way.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_findVarInFrame3(env: Sexp, symbol: Sexp, _do_get: Rboolean) -> Sexp {
-    enter(|| lookup_in_frame(env, symbol, "findVarInFrame3"))
-}
-
-/// GNU R reads `R_UnboundValue` as an environment with an empty frame, because the marker's
-/// fields line up with an empty frame and hash table. Packages rely on it: vctrs looks up a
-/// method's `.__S3MethodsTable__.` and searches whatever comes back, which is `R_UnboundValue`
-/// for a method defined in the global environment.
-unsafe fn lookup_in_frame(env: Sexp, symbol: Sexp, what: &str) -> ApiResult<Sexp> {
-    let unbound = runtime().heap.known().unbound;
-    if env == unbound {
-        return Ok(unbound);
-    }
-    frame_lookup(environment(env, what)?, symbol)
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_findVar` and `R_findVarInFrame`: the names GNU R's own code uses for `Rf_findVar` and
@@ -229,7 +227,7 @@ pub unsafe extern "C" fn R_findVar(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_findVarInFrame(env: Sexp, symbol: Sexp) -> Sexp {
-    enter(|| lookup_in_frame(env, symbol, "findVarInFrame"))
+    enter(|| frame_lookup_unchecked(env, symbol))
 }
 
 /// `R_varloc_t`: a binding cell, or null when there is no binding. It is a one-pointer struct
@@ -337,11 +335,20 @@ pub unsafe extern "C" fn R_getVarEx(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_existsVarInFrame(env: Sexp, symbol: Sexp) -> Rboolean {
     enter(|| {
-        Ok(runtime()
-            .heap
-            .frame_cell(environment(env, "existsVarInFrame")?, symbol)
-            .is_some() as Rboolean)
+        let env = environment(env, "existsVarInFrame")?;
+        Ok(
+            (runtime().heap.frame_cell(env, symbol).is_some()
+                || base_binds_missing_arg(env, symbol)) as Rboolean,
+        )
     })
+}
+
+/// GNU R's `R_MissingArg` is a symbol whose base value is itself (`mkSymMarker`), so the base
+/// frames report a binding for it. rlang's `captureArgInfo()` relies on that: it looks up the
+/// missing argument as a symbol and finds it bound, as missing, in base.
+unsafe fn base_binds_missing_arg(env: Sexp, symbol: Sexp) -> bool {
+    let known = runtime().heap.known();
+    symbol == known.missing_arg && (env == known.base_env || env == known.base_namespace)
 }
 
 #[unsafe(no_mangle)]
@@ -440,12 +447,22 @@ pub unsafe extern "C" fn R_unLockBinding(symbol: Sexp, env: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_BindingIsLocked(symbol: Sexp, env: Sexp) -> Rboolean {
-    enter(|| Ok(binding(symbol, env)?.has_gp(gp::BINDING_LOCKED) as Rboolean))
+    enter(|| {
+        if base_binds_missing_arg(env, symbol) {
+            return Ok(0);
+        }
+        Ok(binding(symbol, env)?.has_gp(gp::BINDING_LOCKED) as Rboolean)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_BindingIsActive(symbol: Sexp, env: Sexp) -> Rboolean {
-    enter(|| Ok(binding(symbol, env)?.has_gp(gp::ACTIVE_BINDING) as Rboolean))
+    enter(|| {
+        if base_binds_missing_arg(env, symbol) {
+            return Ok(0);
+        }
+        Ok(binding(symbol, env)?.has_gp(gp::ACTIVE_BINDING) as Rboolean)
+    })
 }
 
 unsafe fn ls(env: Sexp, all: bool, sorted: bool) -> ApiResult<Sexp> {
@@ -598,7 +615,11 @@ pub unsafe extern "C" fn R_GetBindingType(symbol: Sexp, env: Sexp) -> BindingTyp
     enter(|| {
         let env = environment(env, "R_GetBindingType")?;
         let Some(cell) = runtime().heap.frame_cell(env, symbol) else {
-            return Ok(BindingType::Unbound);
+            return Ok(if base_binds_missing_arg(env, symbol) {
+                BindingType::Missing
+            } else {
+                BindingType::Unbound
+            });
         };
         if cell.has_gp(gp::ACTIVE_BINDING) {
             return Ok(BindingType::Active);
@@ -733,7 +754,7 @@ pub unsafe extern "C" fn R_MakeActiveBinding(symbol: Sexp, function: Sexp, env: 
         if let Some(cell) = runtime().heap.frame_cell(env, symbol)
             && !cell.has_gp(gp::ACTIVE_BINDING)
         {
-            return Err(error(format!("symbol already has a regular binding")));
+            return Err(error("symbol already has a regular binding"));
         }
         let cell = rebind(symbol, function, env)?;
         cell.set_gp_bits(gp::ACTIVE_BINDING, true);

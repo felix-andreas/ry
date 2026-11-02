@@ -9,8 +9,8 @@ use {
         preflight::{self, Verdict},
     },
     loader::{
-        LoadError, LoadState, Loader, Plan,
-        r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
+        LoadError, LoadState, Loader, NamespaceConditions, Plan, parse_namespace_conditions,
+        r::{RUNTIME_GNUR, RValue, error_value, failure_value, plan_value, rds},
     },
     repl::{
         ConsoleHooks,
@@ -23,6 +23,7 @@ use {
         path::{Path, PathBuf},
         sync::{LazyLock, Mutex, PoisonError},
         thread,
+        time::Duration,
     },
 };
 
@@ -33,10 +34,10 @@ static LOADER: LazyLock<Mutex<Loader>> = LazyLock::new(Mutex::default);
 /// R statements that install `load_all()` in `tools:ry`, talking to this process.
 pub fn embedded_runtime() -> String {
     runtime(
-        r#".ry_request <- function(root, full) {
+        r#".ry_request <- function(root, full, conditions) {
   plan_file <- tempfile(fileext = ".rds")
   on.exit(unlink(plan_file))
-  failure <- .Call("ry_loader_plan", root, plan_file, full, PACKAGE = "(embedding)")
+  failure <- .Call("ry_loader_plan", root, plan_file, full, conditions, PACKAGE = "(embedding)")
   if (!is.null(failure)) stop(failure, call. = FALSE)
   readRDS(plan_file)
 }
@@ -47,6 +48,16 @@ pub fn embedded_runtime() -> String {
   callers <- .Call("ry_loader_callers", root, paste(names, collapse = "\n"), PACKAGE = "(embedding)")
   if (is.null(callers)) stop("ry's loader panicked; please report this", call. = FALSE)
   if (!nzchar(callers)) character() else strsplit(callers, "\n", fixed = TRUE)[[1L]]
+}
+.ry_wait_edits <- function(root, timeout) {
+  edits <- .Call("ry_loader_wait_edits", root, as.character(round(timeout * 1000)),
+                 PACKAGE = "(embedding)")
+  if (is.null(edits)) stop("ry's loader panicked; please report this", call. = FALSE)
+  if (startsWith(edits, "!")) stop(substring(edits, 2L), call. = FALSE)
+  if (!nzchar(edits)) return(character())
+  edits <- strsplit(edits, "\n", fixed = TRUE)[[1L]]
+  edits[edits == "*"] <- NA_character_
+  edits
 }"#,
     )
 }
@@ -63,11 +74,14 @@ pub fn process_runtime() -> String {
 .ry_state_file <- function(root) {{
   file.path(tempdir(), paste0("ry-load-", gsub("[^A-Za-z0-9]", "_", root), ".json"))
 }}
-.ry_request <- function(root, full) {{
+.ry_request <- function(root, full, conditions) {{
   plan_file <- tempfile(fileext = ".rds")
-  on.exit(unlink(plan_file))
+  conditions_file <- tempfile(fileext = ".txt")
+  on.exit(unlink(c(plan_file, conditions_file)))
+  writeLines(enc2utf8(conditions), conditions_file, useBytes = TRUE)
   arguments <- c("load", "--emit-plan", shQuote(plan_file), "--state",
-                 shQuote(.ry_state_file(root)), if (full) "--full", shQuote(root))
+                 shQuote(.ry_state_file(root)), "--conditions", shQuote(conditions_file),
+                 if (full) "--full", shQuote(root))
   status <- system2(.ry_executable(), arguments)
   if (!identical(status, 0L)) stop("`ry load` failed with status ", status, call. = FALSE)
   readRDS(plan_file)
@@ -196,7 +210,7 @@ pub fn call_routines() -> Vec<CallRoutine> {
         CallRoutine {
             name: c"ry_loader_plan",
             function: ry_loader_plan as *const (),
-            arguments: 3,
+            arguments: 4,
         },
         CallRoutine {
             name: c"ry_loader_commit",
@@ -208,11 +222,16 @@ pub fn call_routines() -> Vec<CallRoutine> {
             function: ry_loader_callers as *const (),
             arguments: 2,
         },
+        CallRoutine {
+            name: c"ry_loader_wait_edits",
+            function: ry_loader_wait_edits as *const (),
+            arguments: 2,
+        },
     ]
 }
 
 /// Plans a load into `plan_file`, returning `NULL`, or an error message R raises.
-extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
+extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp, conditions: Sexp) -> Sexp {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: R passes R objects to a `.Call` routine.
         let arguments = unsafe {
@@ -220,18 +239,20 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
                 libr::string_argument(root),
                 libr::string_argument(plan_file),
                 libr::logical_argument(full),
+                libr::string_argument(conditions),
             )
         };
-        let (Some(root), Some(plan_file), full) = arguments else {
-            return Err("ry_loader_plan needs a root and a plan file".to_owned());
+        let (Some(root), Some(plan_file), full, Some(conditions)) = arguments else {
+            return Err("ry_loader_plan needs a root, a plan file and conditions".to_owned());
         };
+        let conditions = parse_namespace_conditions(&conditions);
         let root = PathBuf::from(root);
         let value = on_analysis_thread(|| {
             let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
             loader.set_strict(strict_config(&root));
-            match loader.plan(&root, full) {
+            match loader.plan(&root, full, &conditions) {
                 Ok(plan) => strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true)),
-                Err(error) => error_value(&error.to_string()),
+                Err(failure) => failure_value(&failure),
             }
         });
         fs::write(&plan_file, rds(&value))
@@ -278,6 +299,49 @@ extern "C" fn ry_loader_callers(root: Sexp, names: Sexp) -> Sexp {
     match callers {
         Ok(Some(callers)) => libr::string_value(&callers),
         Ok(None) => libr::string_value(""),
+        Err(_) => libr::null(),
+    }
+}
+
+/// [`Loader::wait_edits`], with the timeout in milliseconds as text and the edited paths joined
+/// by line breaks. A line `*` means notifications were lost, and a leading `!` marks an error
+/// message instead.
+extern "C" fn ry_loader_wait_edits(root: Sexp, timeout: Sexp) -> Sexp {
+    let edits = catch_unwind(|| {
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let (root, timeout) =
+            unsafe { (libr::string_argument(root), libr::string_argument(timeout)) };
+        let (Some(root), Some(timeout)) = (root, timeout) else {
+            return "!ry_loader_wait_edits needs a root and a timeout".to_owned();
+        };
+        let Ok(milliseconds) = timeout.parse::<u64>() else {
+            return format!("!{timeout} is not a timeout in milliseconds");
+        };
+        let root = match loader::find_package_root(Path::new(&root)) {
+            Ok(root) => root,
+            Err(error) => return format!("!{error}"),
+        };
+        let edits = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wait_edits(&root, Duration::from_millis(milliseconds));
+        match edits {
+            Ok(edits) => {
+                let mut lines: Vec<String> = edits
+                    .paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                if edits.lost {
+                    lines.push("*".to_owned());
+                }
+                lines.join("\n")
+            }
+            Err(error) => format!("!{error}"),
+        }
+    });
+    match edits {
+        Ok(edits) => libr::string_value(&edits),
         Err(_) => libr::null(),
     }
 }
@@ -361,8 +425,15 @@ pub fn emit_plan(
     path: &Path,
     plan_file: &Path,
     state_file: &Path,
+    conditions_file: Option<&Path>,
     full: bool,
 ) -> Result<(), EmitError> {
+    let conditions = match conditions_file {
+        Some(file) => parse_namespace_conditions(
+            &fs::read_to_string(file).map_err(|error| EmitError::Io(file.to_path_buf(), error))?,
+        ),
+        None => NamespaceConditions::default(),
+    };
     let mut loader = Loader::default();
     loader.set_strict(strict_config(path));
     if !full {
@@ -379,7 +450,7 @@ pub fn emit_plan(
             Err(error) => return Err(EmitError::Io(state_file.to_path_buf(), error)),
         }
     }
-    let value = match loader.plan(path, full) {
+    let value = match loader.plan(path, full, &conditions) {
         Ok(plan) => {
             if let Some(state) = loader.pending(&plan.root) {
                 let pending = pending_state_path(state_file);
@@ -389,7 +460,7 @@ pub fn emit_plan(
             }
             strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true))
         }
-        Err(error) => error_value(&error.to_string()),
+        Err(failure) => failure_value(&failure),
     };
     write_plan(plan_file, &value)
 }

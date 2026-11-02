@@ -9,6 +9,18 @@
 //! fingerprint (see [`surface`]), and the files its check reached. When every changed file
 //! keeps its surface, only the changed files and the files that reached them are checked again;
 //! any other change checks everything.
+//!
+//! A run checks only the files it was asked about, so the record may hold files with no
+//! findings recorded: the run analysed them only as far as the requested files' checks reached
+//! them. A later run treats such a file as stale. `ry load` relies on this to share the record
+//! with `ry check` while checking only `R/`.
+//!
+//! A run asked only about package files leaves the tests and scripts unanalysed, because they
+//! read the package namespace but add nothing to it. Such a file is recorded without a surface,
+//! and so is every file of theirs whose text changed, and every file that kind could affect is
+//! recorded unchecked. A changed file without a recorded surface therefore cannot invalidate any
+//! recorded findings, and a later run computes its surface. For the same reason a run that
+//! leaves a file unanalysed does not compare that file's surface when its text changed.
 
 use {
     crate::config::{self, Config},
@@ -33,7 +45,7 @@ use {
 pub const DIRECTORY: &str = ".ry_cache";
 const RECORD: &str = "check.json";
 /// Bumped whenever the record's layout or its reuse rule changes.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 5;
 
 /// Whether a run may read and write the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +79,14 @@ pub struct Record {
 struct RecordedFile {
     path: PathBuf,
     content: Fingerprint,
-    surface: Fingerprint,
+    /// `None` for a file the run that wrote the record left unanalysed (see the module docs).
+    surface: Option<Fingerprint>,
     /// Positions, in the run's file order, of the files this file's findings depend on.
     dependencies: Vec<u32>,
     /// The NAMESPACE imports the file's code uses, which the NAMESPACE findings depend on.
     tokens: Vec<String>,
-    diagnostics: Vec<RecordedDiagnostic>,
+    /// `None` when the run that wrote the record did not check the file.
+    diagnostics: Option<Vec<RecordedDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +121,10 @@ struct RecordedFix {
 pub enum Plan {
     /// No usable record: check every file.
     Fresh,
-    /// Nothing changed: every file's findings come from the record.
+    /// Nothing changed and every file was checked: every file's findings come from the record.
     Replay(Record),
-    /// Only the files marked stale are checked; the others' findings come from the record.
+    /// Only the files marked stale are checked; the others' findings come from the record. A
+    /// file the recorded run did not check is stale.
     Partial { previous: Record, stale: Vec<bool> },
 }
 
@@ -117,10 +132,11 @@ pub enum Plan {
 pub struct FileOutcome<'a> {
     pub path: &'a Path,
     pub content: Fingerprint,
-    pub surface: Fingerprint,
+    pub surface: Option<Fingerprint>,
     pub dependencies: Vec<u32>,
     pub tokens: Vec<String>,
-    pub diagnostics: &'a [Diagnostic],
+    /// `None` for a file this run did not check.
+    pub diagnostics: Option<&'a [Diagnostic]>,
 }
 
 impl Fingerprinter {
@@ -146,6 +162,12 @@ impl Fingerprinter {
 
     pub fn finish(&self) -> Fingerprint {
         Fingerprint(self.fast.finish(), self.sip.finish())
+    }
+}
+
+impl Default for Fingerprinter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -199,11 +221,11 @@ pub fn is_project(root: &Path) -> bool {
 }
 
 /// The fingerprint of everything a run's findings depend on besides the files' text: the ry
-/// binary at `executable`, the settings, the root, the data files, `NAMESPACE`, `DESCRIPTION`
+/// binary (its [`build_identity`]), the settings, the root, the data files, `NAMESPACE`, `DESCRIPTION`
 /// and the project stubs. `ry check` and the language server compute it the same way, so the
 /// server trusts a record only when it would have computed the same findings.
 pub fn key<'a>(
-    executable: &Path,
+    build: &str,
     config: &Config,
     root: &Path,
     data_files: &impl Debug,
@@ -220,7 +242,7 @@ pub fn key<'a>(
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter
         .text(env!("CARGO_PKG_VERSION"))
-        .text(&build_identity(executable))
+        .text(build)
         .text(&format!("{config:?}"))
         .text(&root.to_string_lossy())
         .text(&format!("{data_files:?}"));
@@ -249,6 +271,7 @@ pub fn plan(
     key: Fingerprint,
     paths: &[PathBuf],
     contents: &[Fingerprint],
+    analysed: impl Fn(usize) -> bool,
     surface_of: impl Fn(usize) -> Fingerprint,
 ) -> Plan {
     let Some(previous) = previous else {
@@ -269,11 +292,22 @@ pub fn plan(
         .zip(contents)
         .map(|(recorded, content)| recorded.content != *content)
         .collect();
-    if !changed.contains(&true) {
+    let unchecked = |index: usize| {
+        previous
+            .files
+            .get(index)
+            .is_none_or(|recorded| recorded.diagnostics.is_none())
+    };
+    if !changed.contains(&true) && !(0..previous.files.len()).any(unchecked) {
         return Plan::Replay(previous);
     }
     for (index, recorded) in previous.files.iter().enumerate() {
-        if changed[index] && surface_of(index) != recorded.surface {
+        if changed[index]
+            && analysed(index)
+            && recorded
+                .surface
+                .is_some_and(|surface| surface != surface_of(index))
+        {
             return Plan::Fresh;
         }
     }
@@ -283,6 +317,7 @@ pub fn plan(
         .enumerate()
         .map(|(index, recorded)| {
             changed[index]
+                || unchecked(index)
                 || recorded
                     .dependencies
                     .iter()
@@ -293,7 +328,8 @@ pub fn plan(
 }
 
 impl Record {
-    /// The recorded findings of the file at `index`, against this run's files.
+    /// The recorded findings of the file at `index`, against this run's files. `None` for a
+    /// file the recorded run did not check, or whose findings cannot be read back.
     pub fn diagnostics(
         &self,
         index: usize,
@@ -302,6 +338,7 @@ impl Record {
         let recorded = self.files.get(index)?;
         recorded
             .diagnostics
+            .as_ref()?
             .iter()
             .map(|diagnostic| restore(diagnostic, &file_at))
             .collect()
@@ -319,7 +356,17 @@ impl Record {
     }
 
     pub fn surface(&self, index: usize) -> Option<Fingerprint> {
-        self.files.get(index).map(|recorded| recorded.surface)
+        self.files.get(index).and_then(|recorded| recorded.surface)
+    }
+
+    pub fn content(&self, index: usize) -> Option<Fingerprint> {
+        self.files.get(index).map(|recorded| recorded.content)
+    }
+
+    /// Whether the run that wrote the record analysed every file, so that its attached set is
+    /// the whole project's.
+    pub fn analysed_every_file(&self) -> bool {
+        self.files.iter().all(|recorded| recorded.surface.is_some())
     }
 
     pub fn tokens(&self, index: usize) -> Option<&[String]> {
@@ -365,16 +412,21 @@ pub fn record(
     let recorded_files = outcomes
         .into_iter()
         .map(|outcome| {
-            let diagnostics = outcome
-                .diagnostics
-                .iter()
-                .map(|diagnostic| recorded(diagnostic, &positions))
-                .collect::<Option<Vec<_>>>()?;
+            let diagnostics = match outcome.diagnostics {
+                None => None,
+                Some(diagnostics) => Some(
+                    diagnostics
+                        .iter()
+                        .map(|diagnostic| recorded(diagnostic, &positions))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+            };
             // A finding that points into another file shows that file's text.
             let mut dependencies = outcome.dependencies;
             dependencies.extend(
                 diagnostics
                     .iter()
+                    .flatten()
                     .flat_map(|diagnostic| diagnostic.related.iter())
                     .map(|related| related.file),
             );
@@ -514,7 +566,7 @@ fn restore(
 /// Identifies a ry binary by its bytes, so a record written by another build is never read
 /// back, even one with the same size and modification time. Hashing the binary takes a few
 /// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
-fn build_identity(executable: &Path) -> String {
+pub fn build_identity(executable: &Path) -> String {
     match fs::read(executable) {
         Ok(bytes) => {
             let mut hasher = FxHasher::default();

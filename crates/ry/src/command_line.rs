@@ -79,6 +79,9 @@ pub enum Command {
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
     },
+    /// Rewrite code written for another library into ry's own equivalents
+    #[command(subcommand)]
+    Migrate(Migrate),
     /// Run an R script on ry's runtime, or open ry's console without one
     ///
     /// Everything after FILE goes to the script. A top-level error in the script exits 1,
@@ -145,6 +148,9 @@ pub enum Command {
         /// Where `--emit-plan` keeps what the session has loaded
         #[arg(long, hide = true, requires = "emit_plan")]
         state: Option<PathBuf>,
+        /// A file holding the values R gave the conditions of `if` directives in `NAMESPACE`
+        #[arg(long, hide = true, requires = "emit_plan")]
+        conditions: Option<PathBuf>,
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
@@ -168,6 +174,22 @@ pub enum Command {
         /// Keep running, and rerun tests after every edit
         #[arg(long, default_value_t = false)]
         watch: bool,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
+    /// Generate a package's documentation with roxygen2, as `devtools::document()` does
+    ///
+    /// The package is loaded lazily, as `ry load` does, so roxygen2 reads the code without a
+    /// full load. The output files are the ones `devtools::document()` writes.
+    Document {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// A roxygen2 roclet to run, such as `rd` or `namespace` (repeatable; default: the
+        /// package's own, which are `collate`, `namespace` and `rd` unless it sets them)
+        #[arg(long = "roclet")]
+        roclets: Vec<String>,
         /// `gnu-r` runs on GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
@@ -217,11 +239,30 @@ pub struct SessionArguments {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum Migrate {
+    /// Rewrite data.table code as DataFrame code
+    ///
+    /// Each form with an exact DataFrame equivalent is rewritten, the same rewrites the editor
+    /// offers as code actions, and everything else is left as it is. Without `--write`, the
+    /// changes are printed as a diff.
+    DataTable {
+        /// R files or directories to rewrite
+        files: Option<Vec<PathBuf>>,
+        /// Write the rewritten files in place instead of printing a diff
+        #[arg(long, default_value_t = false)]
+        write: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Debug {
     /// Print the syntax tree for the given file
     Ast { path: PathBuf },
     /// Analyze a workspace and report where time and memory go
     AnalysisStats { path: Option<PathBuf> },
+    /// Rewrite the given R files in place as the plain R program they mean, with every inline
+    /// annotation removed
+    Erase { paths: Vec<PathBuf> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

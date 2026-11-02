@@ -1316,12 +1316,23 @@ impl Emitter<'_> {
                 F64,
                 &[x, y],
             ),
-            _ => self.helper(
-                runtime::jit_real_modulo as *const () as usize,
-                &[F64, F64],
-                F64,
-                &[x, y],
-            ),
+            _ => {
+                // Tier 0 raises the warning, so a modulus that loses accuracy fails over.
+                let loses = self.helper(
+                    runtime::jit_modulus_loses_accuracy as *const () as usize,
+                    &[F64, F64],
+                    I32,
+                    &[x, y],
+                );
+                let loses = self.builder.ins().icmp_imm_u(IntCC::NotEqual, loses, 0);
+                self.fail_if(loses);
+                self.helper(
+                    runtime::jit_real_modulo as *const () as usize,
+                    &[F64, F64],
+                    F64,
+                    &[x, y],
+                )
+            }
         }
     }
 }

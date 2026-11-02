@@ -2,37 +2,31 @@
 #@ param TESTS int 5 60
 #@ param ALPHA float 0.01 0.1 3
 # Multiple-testing correction and power calculations.
-#: fn([tests]: integer, [true_effects]: integer, [seed]: integer) -> double[]
-simulate_pvalues_@ID@ <- function(tests = @TESTS@L, true_effects = 2L, seed = 21L) {
+simulate_pvalues_@ID@ <- function(tests: integer = @TESTS@L, true_effects: integer = 2L, seed: integer = 21L) -> double[] {
   set.seed(seed)
   effects <- c(rep(3, true_effects), rep(0, tests - true_effects))
   z <- stats::rnorm(tests, mean = effects)
   2 * stats::pnorm(-abs(z))
 }
 
-#: fn(p: double[], [method]: character[]) -> double[]
-adjust_@ID@ <- function(p, method = c("bonferroni", "holm", "BH")) {
+adjust_@ID@ <- function(p: double[], method: character[] = c("bonferroni", "holm", "BH")) -> double[] {
   method <- match.arg(method)
   stats::p.adjust(p, method = method)
 }
 
-#: fn(p: double[], [alpha]: double) -> integer[]
-discoveries_@ID@ <- function(p, alpha = @ALPHA@) {
-  vapply(c("bonferroni", "holm", "BH"), function(m) sum(adjust_@ID@(p, m) < alpha), integer(1))
+discoveries_@ID@ <- function(p: double[], alpha: double = @ALPHA@) -> integer[] {
+  vapply(c("bonferroni", "holm", "BH"), function(m: character) -> integer sum(adjust_@ID@(p, m) < alpha), integer(1))
 }
 
-#: fn(delta: double, [sd]: double, [power]: double) -> double
-required_sample_@ID@ <- function(delta, sd = 1, power = 0.8) {
+required_sample_@ID@ <- function(delta: double, sd: double = 1, power: double = 0.8) -> double {
   ceiling(stats::power.t.test(delta = delta, sd = sd, power = power, sig.level = @ALPHA@)$n)
 }
 
-#: fn(x: double[], y: double[], [reps]: integer, [seed]: integer) -> double
-permutation_test_@ID@ <- function(x, y, reps = 200L, seed = 1L) {
+permutation_test_@ID@ <- function(x: double[], y: double[], reps: integer = 200L, seed: integer = 1L) -> double {
   set.seed(seed)
   observed <- mean(x) - mean(y)
   pooled <- c(x, y)
-  #: double[]
-  permuted <- replicate(reps, {
+  permuted: double[] <- replicate(reps, {
     index <- sample(length(pooled), length(x))
     mean(pooled[index]) - mean(pooled[-index])
   })

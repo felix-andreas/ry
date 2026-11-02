@@ -1,33 +1,25 @@
 #@ weight 3
 #@ param ROWS int 20 200
 # Evaluation metrics for regression and classification.
-#: fn(actual: double[], predicted: double[]) -> double
-rmse_@ID@ <- function(actual, predicted) sqrt(mean((actual - predicted)^2))
+rmse_@ID@ <- function(actual: double[], predicted: double[]) -> double sqrt(mean((actual - predicted)^2))
 
-#: fn(actual: double[], predicted: double[]) -> double
-mae_@ID@ <- function(actual, predicted) mean(abs(actual - predicted))
+mae_@ID@ <- function(actual: double[], predicted: double[]) -> double mean(abs(actual - predicted))
 
-#: fn(actual: double[], predicted: double[]) -> integer[]
-confusion_@ID@ <- function(actual, predicted) {
+confusion_@ID@ <- function(actual: double[], predicted: double[]) -> integer[] {
   table(actual = factor(actual, levels = c(0, 1)), predicted = factor(predicted, levels = c(0, 1)))
 }
 
-#: fn(actual: double[], predicted: double[]) -> double
-f1_@ID@ <- function(actual, predicted) {
+f1_@ID@ <- function(actual: double[], predicted: double[]) -> double {
   m <- confusion_@ID@(actual, predicted)
-  #: integer
-  true_positives <- m[2, 2]
-  #: integer[]
-  predicted_positives <- m[, 2]
-  #: integer[]
-  actual_positives <- m[2, ]
+  true_positives: integer <- m[2, 2]
+  predicted_positives: integer[] <- m[, 2]
+  actual_positives: integer[] <- m[2, ]
   precision <- true_positives / max(sum(predicted_positives), 1)
   recall <- true_positives / max(sum(actual_positives), 1)
   if (precision + recall == 0) 0 else 2 * precision * recall / (precision + recall)
 }
 
-#: fn(probability: double[], actual: double[], [bins]: integer) -> data.frame
-calibration_@ID@ <- function(probability, actual, bins = 5L) {
+calibration_@ID@ <- function(probability: double[], actual: double[], bins: integer = 5L) -> data.frame {
   bucket <- cut(probability, seq(0, 1, length.out = bins + 1L), include.lowest = TRUE)
   data.frame(
     bucket = levels(bucket),

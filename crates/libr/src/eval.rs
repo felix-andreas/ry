@@ -90,6 +90,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             }))
         },
         altrep_dataptr: |object| unsafe { Ok(crate::altrep::readable_dataptr(object)?) },
+        defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
             crate::boundary::run_pending_finalizers();
@@ -100,7 +101,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         },
         task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
         connection_method: |con, call| unsafe { crate::connections::call_method(con, call) },
-        enter_from_native: |body| unsafe { crate::boundary::enter(|| body()) },
+        enter_from_native: |body| unsafe { crate::boundary::enter(body) },
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
         find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
@@ -614,7 +615,7 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
         foreign_context(call.call, || dot_c(call, RoutineKind::Fortran))
     }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
-    internal("dyn.unload", 1, |_| Ok(runtime().nil())),
+    internal("dyn.unload", 1, |call| unsafe { do_dyn_unload(call) }).invisible(),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe {
         registered_routines(call.arg(0))
@@ -997,11 +998,26 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
     }
     let path = utf8_text(path.element(0))?.into_owned();
     if let Some(package) = builtin_libraries::builtin_library(&path) {
-        return Ok(builtin_libraries::load(package, &path)?);
+        return builtin_libraries::load(package, &path);
+    }
+    if let Some(reason) = builtin_libraries::refused_library(&path) {
+        return Err(error(reason));
     }
     let local = call.arg(1) == runtime().nil() || crate::vectors::as_logical(call.arg(1))? != 0;
     let dll = crate::dynload::load_library(&path, local)?;
     dll_info(dll)
+}
+
+unsafe fn do_dyn_unload(call: &Call<'_>) -> ApiResult<Sexp> {
+    let path = call.arg(0);
+    if path.kind() != SexpType::String || xlength(path)? != 1 {
+        return Err(error_in(call.call, "character argument expected"));
+    }
+    let path = utf8_text(path.element(0))?.into_owned();
+    if builtin_libraries::builtin_library(&path).is_none() {
+        crate::dynload::unload_library(&path)?;
+    }
+    Ok(runtime().nil())
 }
 
 unsafe fn loaded_dlls() -> ApiResult<Sexp> {
@@ -1328,7 +1344,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         return false;
     }
     if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
-        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = heap::GcStress::EveryAllocation);
     }
     true
 }

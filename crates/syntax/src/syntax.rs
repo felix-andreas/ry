@@ -11,44 +11,20 @@ pub mod testing;
 mod lexer;
 mod parser;
 mod reparse;
+mod tree;
 
+use std::{borrow::Cow, sync::Arc};
 pub use {
     kind::SyntaxKind,
     lexer::{Token, is_syntactic_name, lex},
     parser::parse,
-    rowan::{TextRange, TextSize, TokenAtOffset},
+    text_size::{TextLen, TextRange, TextSize},
+    tree::{
+        ChildrenRef, Direction, ElementRef, NodeOrToken, NodeRef, Preorder, PreorderWithTokens,
+        SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
+        TokenAtOffset, TokenRef, Tree, TreeEvent, WalkEvent, is_walked_token, walk_tree,
+    },
 };
-use {
-    rowan::{GreenNode, GreenNodeData, GreenTokenData, Language, NodeOrToken, WalkEvent},
-    std::{mem, ptr, sync::Arc},
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RLanguage {}
-
-impl rowan::Language for RLanguage {
-    type Kind = SyntaxKind;
-
-    fn kind_from_raw(raw: rowan::SyntaxKind) -> SyntaxKind {
-        assert!(
-            raw.0 <= SyntaxKind::ERROR as u16,
-            "invalid syntax kind {}",
-            raw.0
-        );
-        // SAFETY: `SyntaxKind` is `repr(u16)` with dense discriminants `0..=ERROR`,
-        // and the bound was just checked.
-        unsafe { mem::transmute::<u16, SyntaxKind>(raw.0) }
-    }
-
-    fn kind_to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
-        kind.into()
-    }
-}
-
-pub type SyntaxNode = rowan::SyntaxNode<RLanguage>;
-pub type SyntaxToken = rowan::SyntaxToken<RLanguage>;
-pub type SyntaxElement = rowan::SyntaxElement<RLanguage>;
-pub type SyntaxNodeChildren = rowan::SyntaxNodeChildren<RLanguage>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxError {
@@ -60,6 +36,10 @@ pub struct SyntaxError {
     /// Caused by the input ending too early: an opener it never closes, or a construct the end
     /// of the input cuts off. A console reads more input instead of reporting it.
     pub incomplete: bool,
+    /// The token the parser stood on when it found the error, or `None` at the end of the
+    /// input. R's own parser reports this token ("unexpected symbol"), not the construct the
+    /// message names.
+    pub found: Option<TextRange>,
 }
 
 impl SyntaxError {
@@ -69,6 +49,7 @@ impl SyntaxError {
             range,
             in_annotation: false,
             incomplete: false,
+            found: None,
         }
     }
 }
@@ -89,34 +70,34 @@ pub fn input_is_unfinished(text: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parse {
-    green: GreenNode,
+    tree: Arc<Tree>,
     errors: Arc<Vec<SyntaxError>>,
 }
 
 impl Parse {
-    pub fn new(green: GreenNode, mut errors: Vec<SyntaxError>) -> Parse {
+    pub fn new(tree: Arc<Tree>, mut errors: Vec<SyntaxError>) -> Parse {
         // Canonical order, so a splice reparse compares equal to a full parse.
         errors.sort_by_key(|error| (error.range.start(), error.range.end()));
         Parse {
-            green,
+            tree,
             errors: Arc::new(errors),
         }
     }
 
-    pub fn green(&self) -> &GreenNode {
-        &self.green
+    pub fn tree(&self) -> &Arc<Tree> {
+        &self.tree
     }
 
     pub fn syntax_node(&self) -> SyntaxNode {
-        SyntaxNode::new_root(self.green.clone())
+        SyntaxNode::new_root(self.tree.clone())
     }
 
     pub fn errors(&self) -> &[SyntaxError] {
         &self.errors
     }
 
-    pub fn text(&self) -> String {
-        self.syntax_node().text().to_string()
+    pub fn text(&self) -> &str {
+        self.tree.text()
     }
 
     pub fn debug_dump(&self) -> String {
@@ -248,11 +229,11 @@ fn definition_name(node: &SyntaxNode) -> Option<String> {
 
 /// Inline annotation syntax: R's own grammar has no reading for these nodes.
 pub fn is_inline_annotation(node: &SyntaxNode) -> bool {
-    is_green_inline_annotation(node.kind(), node.parent().map(|parent| parent.kind()))
+    is_inline_annotation_kind(node.kind(), node.parent().map(|parent| parent.kind()))
 }
 
 /// [`is_inline_annotation`] from a node's kind and its parent's.
-pub fn is_green_inline_annotation(kind: SyntaxKind, parent: Option<SyntaxKind>) -> bool {
+pub fn is_inline_annotation_kind(kind: SyntaxKind, parent: Option<SyntaxKind>) -> bool {
     match kind {
         SyntaxKind::TYPE_ASCRIPTION
         | SyntaxKind::RETURN_TYPE
@@ -264,401 +245,35 @@ pub fn is_green_inline_annotation(kind: SyntaxKind, parent: Option<SyntaxKind>) 
     }
 }
 
-/// A node of the immutable green tree. Unlike a [`SyntaxNode`], reading one allocates
-/// nothing, because it carries neither a parent link nor an offset.
-#[derive(Clone, Copy)]
-pub struct GreenRef<'a>(&'a GreenNodeData);
-
-impl<'a> GreenRef<'a> {
-    /// The green node behind a red one, for asking the green predicates about it:
-    /// `GreenRef::new(&node.green())`.
-    pub fn new(green: &'a GreenNodeData) -> GreenRef<'a> {
-        GreenRef(green)
-    }
-
-    pub fn kind(self) -> SyntaxKind {
-        RLanguage::kind_from_raw(self.0.kind())
-    }
-
-    pub fn child_nodes(self) -> impl Iterator<Item = GreenRef<'a>> {
-        self.0
-            .children()
-            .filter_map(|child| child.into_node().map(GreenRef))
-    }
-
-    /// The kinds of the node's children, tokens included.
-    pub fn child_kinds(self) -> impl Iterator<Item = SyntaxKind> + 'a {
-        self.0.children().map(|child| match child {
-            NodeOrToken::Node(node) => RLanguage::kind_from_raw(node.kind()),
-            NodeOrToken::Token(token) => RLanguage::kind_from_raw(token.kind()),
-        })
-    }
-
-    pub fn has_child(self, kind: SyntaxKind) -> bool {
-        self.child_nodes().any(|child| child.kind() == kind)
-    }
-
-    /// The text of a node that is a single token, such as most names.
-    pub fn single_token_text(self) -> Option<&'a str> {
-        let mut children = self.0.children();
-        match (children.next(), children.next()) {
-            (Some(NodeOrToken::Token(token)), None) => Some(token.text()),
-            _ => None,
-        }
-    }
-}
-
-/// A green node and where it starts. Ranges come out exactly as the matching [`SyntaxNode`]'s
-/// would, but walking it allocates nothing: a red node is heap-allocated and reference counted
-/// on every step, while this is two words copied.
-#[derive(Clone, Copy)]
-pub struct GreenNodeAt<'a> {
-    green: &'a GreenNodeData,
-    start: TextSize,
-}
-
-/// A token of a [`GreenNodeAt`].
-#[derive(Clone, Copy)]
-pub struct GreenTokenAt<'a> {
-    pub kind: SyntaxKind,
-    pub text: &'a str,
-    pub range: TextRange,
-}
-
-#[derive(Clone, Copy)]
-pub enum GreenElementAt<'a> {
-    Node(GreenNodeAt<'a>),
-    Token(GreenTokenAt<'a>),
-}
-
-impl<'a> GreenNodeAt<'a> {
-    pub fn new(green: &'a GreenNodeData, start: TextSize) -> GreenNodeAt<'a> {
-        GreenNodeAt { green, start }
-    }
-
-    pub fn kind(self) -> SyntaxKind {
-        RLanguage::kind_from_raw(self.green.kind())
-    }
-
-    pub fn range(self) -> TextRange {
-        TextRange::at(self.start, self.green.text_len())
-    }
-
-    pub fn green(self) -> GreenRef<'a> {
-        GreenRef(self.green)
-    }
-
-    /// Children in source order, tokens included.
-    pub fn children(self) -> GreenChildrenAt<'a> {
-        GreenChildrenAt {
-            children: self.green.children(),
-            start: self.start,
-            end: self.start + self.green.text_len(),
-        }
-    }
-
-    pub fn child_nodes(self) -> impl DoubleEndedIterator<Item = GreenNodeAt<'a>> {
-        self.children().filter_map(|child| match child {
-            GreenElementAt::Node(node) => Some(node),
-            GreenElementAt::Token(_) => None,
-        })
-    }
-
-    pub fn child_tokens(self) -> impl DoubleEndedIterator<Item = GreenTokenAt<'a>> {
-        self.children().filter_map(|child| match child {
-            GreenElementAt::Token(token) => Some(token),
-            GreenElementAt::Node(_) => None,
-        })
-    }
-
-    /// The first token in preorder, found the way [`SyntaxNode::first_token`] finds it, so an
-    /// empty first child node ends the search.
-    pub fn first_token(self) -> Option<GreenTokenAt<'a>> {
-        match self.children().next()? {
-            GreenElementAt::Token(token) => Some(token),
-            GreenElementAt::Node(node) => node.first_token(),
-        }
-    }
-}
-
-/// The children of a [`GreenNodeAt`]. A forward step places a child at `start` and a backward
-/// step places it before `end`, so both directions give exact ranges.
-pub struct GreenChildrenAt<'a> {
-    children: rowan::Children<'a>,
-    start: TextSize,
-    end: TextSize,
-}
-
-impl<'a> Iterator for GreenChildrenAt<'a> {
-    type Item = GreenElementAt<'a>;
-
-    fn next(&mut self) -> Option<GreenElementAt<'a>> {
-        let child = self.children.next()?;
-        let start = self.start;
-        self.start += child.text_len();
-        Some(place(child, start))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.children.size_hint()
-    }
-}
-
-impl DoubleEndedIterator for GreenChildrenAt<'_> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let child = self.children.next_back()?;
-        self.end -= child.text_len();
-        Some(place(child, self.end))
-    }
-}
-
-fn place<'a>(
-    child: NodeOrToken<&'a GreenNodeData, &'a GreenTokenData>,
-    start: TextSize,
-) -> GreenElementAt<'a> {
-    match child {
-        NodeOrToken::Node(green) => GreenElementAt::Node(GreenNodeAt { green, start }),
-        NodeOrToken::Token(token) => GreenElementAt::Token(GreenTokenAt {
-            kind: RLanguage::kind_from_raw(token.kind()),
-            text: token.text(),
-            range: TextRange::at(start, token.text_len()),
-        }),
-    }
-}
-
 /// Every node under `root`, `root` included, that `wanted` accepts, in preorder, exactly as
 /// `root.descendants().filter(..)` would yield them. `wanted` sees each node and its parent
-/// (`None` for `root`). The search reads the green tree, so a full walk allocates nothing
-/// and only the matches and their ancestors become [`SyntaxNode`]s, which makes a search
-/// for rare kinds several times cheaper than a red-tree walk.
+/// (`None` for `root`) as borrowed cursors, so rejected nodes cost no reference count.
 pub fn matching_nodes(
     root: &SyntaxNode,
-    mut wanted: impl FnMut(GreenRef<'_>, Option<GreenRef<'_>>) -> bool,
+    mut wanted: impl FnMut(NodeRef<'_>, Option<NodeRef<'_>>) -> bool,
 ) -> Vec<SyntaxNode> {
-    let root_green = root.green();
-    let mut matches = Vec::new();
-    if wanted(GreenRef(&root_green), None) {
-        matches.push(root.clone());
-    }
-    // One frame per open node: its remaining children, where the next one starts, and
-    // the red node once a match beneath it needed it.
-    let mut stack = vec![GreenFrame {
-        green: &root_green,
-        children: root_green.children(),
-        index: 0,
-        start: root.text_range().start(),
-        next_start: root.text_range().start(),
-        red: Some(root.clone()),
-    }];
-    while let Some(top) = stack.last_mut() {
-        let Some(child) = top.children.next() else {
-            stack.pop();
-            continue;
-        };
-        let start = top.next_start;
-        top.next_start += child.text_len();
-        let NodeOrToken::Node(green) = child else {
-            continue;
-        };
-        let parent = top.green;
-        let index = top.children_seen();
-        let accepted = wanted(GreenRef(green), Some(GreenRef(parent)));
-        stack.push(GreenFrame {
-            green,
-            children: green.children(),
-            index,
-            start,
-            next_start: start,
-            red: None,
-        });
-        if accepted {
-            // Every green node here was reached through its parent's children, so its red
-            // node exists; a miss is a broken tree, not an input the caller can handle.
-            let Some(node) = materialize(&mut stack) else {
-                panic!("matching_nodes: a green node at {start:?} has no red counterpart");
-            };
-            matches.push(node);
-        }
-    }
-    matches
+    let top = root.node_ref();
+    top.descendants()
+        .filter(|&node| wanted(node, (node != top).then(|| node.parent()).flatten()))
+        .map(|node| root.at(node))
+        .collect()
 }
 
-/// One step of [`walk_green`].
-#[derive(Clone, Copy)]
-pub enum GreenEvent<'a> {
-    /// A node, with its parent (`None` for the root) and its range.
-    Enter {
-        node: GreenRef<'a>,
-        parent: Option<GreenRef<'a>>,
-        range: TextRange,
-    },
-    /// The end of a node, after its last child.
-    Leave(GreenRef<'a>),
-    /// A comment or literal token, the only tokens a whole-file pass reads.
-    Token {
-        kind: SyntaxKind,
-        text: &'a str,
-        range: TextRange,
-    },
-}
-
-/// The nodes under `root`, `root` included, in preorder, read from the green tree, so the
-/// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
-/// few sites a pass needs. Tokens other than comments and literals only advance the offset:
-/// most elements of a tree are tokens, and the whole-file passes read only nodes, comments and
-/// literals.
-#[inline]
-pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
-    let root_green = root.green();
-    visit(GreenEvent::Enter {
-        node: GreenRef(&root_green),
-        parent: None,
-        range: root.text_range(),
-    });
-    let mut stack = vec![(
-        &*root_green,
-        root_green.children(),
-        root.text_range().start(),
-    )];
-    while let Some((parent, children, next_start)) = stack.last_mut() {
-        let Some(child) = children.next() else {
-            visit(GreenEvent::Leave(GreenRef(parent)));
-            stack.pop();
-            continue;
-        };
-        let start = *next_start;
-        *next_start += child.text_len();
-        match child {
-            NodeOrToken::Node(green) => {
-                visit(GreenEvent::Enter {
-                    node: GreenRef(green),
-                    parent: Some(GreenRef(parent)),
-                    range: TextRange::at(start, green.text_len()),
-                });
-                stack.push((green, green.children(), start));
-            }
-            NodeOrToken::Token(token) => {
-                let kind = RLanguage::kind_from_raw(token.kind());
-                if is_walked_token(kind) {
-                    visit(GreenEvent::Token {
-                        kind,
-                        text: token.text(),
-                        range: TextRange::at(start, token.text_len()),
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Whether [`walk_green`] reports a token of this kind; every other token only advances the offset.
-pub fn is_walked_token(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::COMMENT
-            | SyntaxKind::STRING
-            | SyntaxKind::DOUBLE
-            | SyntaxKind::INTEGER
-            | SyntaxKind::COMPLEX
-    )
-}
-
-/// The first node in preorder under `root` with this kind and exactly this range. A non-empty
-/// range lies inside at most one child, so the search descends one path through a binary search
-/// over the green children and builds only the red nodes on that path. An empty range can sit on
-/// the boundary of several children (and inside empty nodes), so it falls back to a preorder
-/// search over every child that contains it.
+/// The first node in preorder under `root` with this kind and exactly this range.
 pub fn node_at(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
-    if range.is_empty() {
-        return node_at_empty(root, kind, range);
-    }
-    if !root.text_range().contains_range(range) {
-        return None;
-    }
-    let mut node = root.clone();
-    loop {
-        if node.kind() == kind && node.text_range() == range {
-            return Some(node);
-        }
-        node = node.child_or_token_at_range(range)?.into_node()?;
-    }
+    Some(root.at(root.node_ref().find(kind, range)?))
 }
 
-fn node_at_empty(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
-    let mut stack = vec![root.clone()];
-    while let Some(node) = stack.pop() {
-        if node.kind() == kind && node.text_range() == range {
-            return Some(node);
-        }
-        let start = stack.len();
-        stack.extend(
-            node.children()
-                .filter(|child| child.text_range().contains_range(range)),
-        );
-        stack[start..].reverse();
-    }
-    None
+/// The source text of `node`: one slice of the file text, so it never allocates.
+pub fn node_text(node: &SyntaxNode) -> Cow<'_, str> {
+    Cow::Borrowed(node.text())
 }
 
-/// Every token under `node` in source order, read from the green tree.
+/// Every token under `node` in source order.
 pub fn for_each_token(node: &SyntaxNode, mut visit: impl FnMut(SyntaxKind, &str)) {
-    let green = node.green();
-    let mut stack = vec![green.children()];
-    while let Some(top) = stack.last_mut() {
-        match top.next() {
-            None => {
-                stack.pop();
-            }
-            Some(NodeOrToken::Node(child)) => stack.push(child.children()),
-            Some(NodeOrToken::Token(token)) => {
-                visit(RLanguage::kind_from_raw(token.kind()), token.text())
-            }
-        }
+    for token in node.node_ref().tokens() {
+        visit(token.kind, token.text);
     }
-}
-
-struct GreenFrame<'a> {
-    green: &'a GreenNodeData,
-    children: rowan::Children<'a>,
-    /// The node's position among its parent's children, tokens included.
-    index: usize,
-    start: TextSize,
-    next_start: TextSize,
-    red: Option<SyntaxNode>,
-}
-
-impl GreenFrame<'_> {
-    /// The position of the child `children` yielded last.
-    fn children_seen(&self) -> usize {
-        self.green.children().len() - self.children.len() - 1
-    }
-}
-
-/// The red node for the top frame, building only the ancestors no earlier match built.
-/// `None` only if a green child had no red counterpart under its red parent, which would
-/// mean the two trees disagree.
-fn materialize(stack: &mut [GreenFrame<'_>]) -> Option<SyntaxNode> {
-    let built = stack.iter().rposition(|frame| frame.red.is_some())?;
-    let mut parent = stack[built].red.clone()?;
-    for frame in &mut stack[built + 1..] {
-        let range = TextRange::at(frame.start, frame.green.text_len());
-        // A binary search by range finds the child unless it is empty, when its range
-        // is shared with a neighbor.
-        let found = parent
-            .child_or_token_at_range(range)
-            .and_then(SyntaxElement::into_node)
-            .filter(|node| !range.is_empty() && ptr::eq(&*node.green(), frame.green));
-        let node = match found {
-            Some(node) => node,
-            None => parent
-                .children_with_tokens()
-                .nth(frame.index)
-                .and_then(SyntaxElement::into_node)?,
-        };
-        frame.red = Some(node.clone());
-        parent = node;
-    }
-    Some(parent)
 }
 
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
@@ -670,9 +285,9 @@ pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSi
     if testing::invariants_enabled() {
         let full = parse(new_text);
         assert!(
-            spliced == full,
+            spliced == full && spliced.tree().same_parents(full.tree()),
             "a splice reparse differs from a full parse\nold text: {:?}\nnew text: {:?}\ndeleted: {deleted:?}\ninserted: {inserted:?}",
-            old.syntax_node().text().to_string(),
+            old.text(),
             new_text,
         );
     }

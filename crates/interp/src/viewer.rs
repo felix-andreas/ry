@@ -62,6 +62,19 @@ pub fn forget_orders() {
     });
 }
 
+/// Closes every view and numbers the next one 1, as in a fresh process, so a harness that runs
+/// one session after another sees the same view ids for the same session.
+pub fn reset() {
+    let open = VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.next = 1;
+        std::mem::take(&mut views.open)
+    });
+    for view in open {
+        crate::heap().release(view.object);
+    }
+}
+
 /// A view's rows as one search and sort leave them: the zero-based row numbers, in the order
 /// they are shown.
 struct Order {
@@ -331,7 +344,8 @@ unsafe fn rows_in_order(
     if let Some((column, _)) = sort
         && column >= width
     {
-        return Err(format!("the view has no column {}", column + 1));
+        // The index comes from the editor and may be `usize::MAX`.
+        return Err(format!("the view has no column {}", column as u128 + 1));
     }
     if shape == Shape::Table {
         let table = frame::table_of(object).map_err(message)?;

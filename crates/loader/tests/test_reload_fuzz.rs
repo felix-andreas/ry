@@ -3,18 +3,19 @@
 
 use {
     loader::{
-        Loader,
+        Loader, NamespaceConditions,
         testing::{ReloadLoaders, check_load_index_input, check_random_reload},
     },
-    syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes},
+    std::{path::PathBuf, time::Duration},
+    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations, mutate_seed, random_bytes},
 };
 
 #[test]
 fn a_reload_matches_a_fresh_load() {
     let mut loaders = ReloadLoaders::default();
-    for seed in 0..fuzz_iterations(400) as u64 {
+    for_each_seed(400, |seed| {
         check_random_reload(&mut loaders, &mut SplitMix64(seed));
-    }
+    });
 }
 
 #[test]
@@ -24,14 +25,14 @@ fn arbitrary_text_never_breaks_the_index() {
         "setMethod(\"show\", \"A\", function(object) cat(\"é\"))\n",
         "x <- 1; y <- function() x\nif (TRUE) z <- 2\n",
     ];
-    for seed in 0..fuzz_iterations(300) as u64 {
+    for_each_seed(300, |seed| {
         let mut rng = SplitMix64(seed);
         let text = match rng.below(3) {
             0 => random_bytes(&mut rng),
             _ => mutate_seed(&mut rng, &seeds, 24),
         };
         check_load_index_input(&text);
-    }
+    });
 }
 
 /// What the console asks before each command: a disk edit to a loaded package is reported once,
@@ -47,7 +48,9 @@ fn changed_roots_reports_each_disk_edit_once() {
     std::fs::write(root.join("R/b.R"), "g <- function( 1\n").expect("write");
     let mut loader = Loader::default();
     assert!(
-        loader.plan(root, false).is_err(),
+        loader
+            .plan(root, false, &NamespaceConditions::default())
+            .is_err(),
         "a syntax error fails the plan"
     );
     assert!(
@@ -62,10 +65,14 @@ fn changed_roots_reports_each_disk_edit_once() {
     );
     assert!(loader.changed_roots().is_empty(), "reported once");
     // A plan that is never committed, as when strict mode refuses it, is watched the same way.
-    loader.plan(root, false).expect("plans");
+    loader
+        .plan(root, false, &NamespaceConditions::default())
+        .expect("plans");
     std::fs::write(root.join("R/a.R"), "f <- function() 22\n").expect("write");
     assert_eq!(loader.changed_roots(), vec![root.to_path_buf()]);
-    loader.plan(root, false).expect("plans");
+    loader
+        .plan(root, false, &NamespaceConditions::default())
+        .expect("plans");
     loader.commit(root);
     assert!(
         loader.changed_roots().is_empty(),
@@ -88,4 +95,46 @@ fn changed_roots_reports_each_disk_edit_once() {
             "step {step}: reported twice"
         );
     }
+}
+
+/// An edit anywhere a load or a test run reads is reported by the watcher, tests and installed
+/// files included, while build outputs and snapshots are not; only the former reload.
+#[test]
+fn wait_edits_reports_sources_tests_and_installed_files() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path();
+    for path in ["R", "src", "tests/testthat/_snaps"] {
+        std::fs::create_dir_all(root.join(path)).expect("create dirs");
+    }
+    std::fs::write(root.join("DESCRIPTION"), "Package: demo\nVersion: 1.0\n").expect("write");
+    std::fs::write(root.join("R/a.R"), "f <- function() 1\n").expect("write");
+    let mut loader = Loader::default();
+    loader
+        .plan(root, false, &NamespaceConditions::default())
+        .expect("plans");
+    loader.commit(root);
+    let wait = |loader: &mut Loader, milliseconds| {
+        loader
+            .wait_edits(root, Duration::from_millis(milliseconds))
+            .expect("the package is watched")
+    };
+    assert!(wait(&mut loader, 50).is_empty(), "nothing changed yet");
+    std::fs::write(root.join("tests/testthat/test-a.R"), "1\n").expect("write");
+    std::fs::write(root.join("tests/testthat/_snaps/a.md"), "1\n").expect("write");
+    std::fs::write(root.join("src/code.o"), "binary").expect("write");
+    let edits = wait(&mut loader, 5000);
+    assert_eq!(edits.paths, [PathBuf::from("tests/testthat/test-a.R")]);
+    assert!(!edits.affects_load());
+    // A directory created after the watch started is watched from the next drain on.
+    std::fs::create_dir_all(root.join("inst")).expect("create inst/");
+    assert!(wait(&mut loader, 5000).paths.contains(&"inst".into()));
+    std::fs::write(root.join("inst/table.csv"), "a\n").expect("write");
+    std::fs::write(root.join("src/code.c"), "int x;\n").expect("write");
+    let edits = wait(&mut loader, 5000);
+    assert!(edits.paths.contains(&"src/code.c".into()), "{edits:?}");
+    assert!(edits.affects_load());
+    assert!(
+        loader.changed_roots().is_empty(),
+        "the wait drained the edits"
+    );
 }

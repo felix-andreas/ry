@@ -2,7 +2,7 @@
 # interpreter lowers each definition and statement straight from the analysis's syntax tree,
 # so no source text reaches R and nothing is parsed twice.
 
-.ry_request <- function(root, full) .Internal(ryLoaderPlan(root, full))
+.ry_request <- function(root, full, conditions) .Internal(ryLoaderPlan(root, full, conditions))
 
 .ry_commit <- function(root) invisible(.Internal(ryLoaderCommit(root)))
 
@@ -10,8 +10,24 @@
 
 .ry_await_verdict <- function() .Internal(ryLoaderAwaitVerdict())
 .ry_callers <- function(root, names) .Internal(ryLoaderCallers(root, names))
+.ry_wait_edits <- function(root, timeout) .Internal(ryLoaderWaitEdits(root, timeout))
 
 .ry_sources <- function(state, plan) invisible()
+
+# Compiled code builds with ry's toolchain against ry's R home, so it links ry's libR.
+.ry_compile <- function(root) .Internal(ryLoaderCompile(root, .libPaths()))
+
+# ry's `dyn.unload` keeps the old library mapped, and opening the same path again would return
+# it, so a reload loads a copy of the rebuilt library from a directory of its own. The copy keeps
+# the file name, which names the library's `R_init_` function.
+.ry_loadable <- function(path, reload) {
+  if (!reload) return(path)
+  directory <- tempfile("ry-dll-")
+  dir.create(directory)
+  copy <- file.path(directory, basename(path))
+  if (!file.copy(path, copy)) stop("cannot copy ", path, " to ", copy, call. = FALSE)
+  copy
+}
 
 .ry_bind_lazily <- function(state, plan, keep) .Internal(ryLoaderBind(state$root, state$ns))
 

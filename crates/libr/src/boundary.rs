@@ -404,7 +404,7 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     };
     runtime().heap.release_handles(mark);
     if let Err(unwind) = result {
-        report(&unwind, "Error in finalizer");
+        report(&unwind, "Error");
     }
 }
 
@@ -414,9 +414,10 @@ pub fn warn(message: impl Into<String>) {
     if !interp::is_installed() {
         return;
     }
+    // SAFETY: the interpreter is installed, and native code runs on its thread.
+    let limit = unsafe { interp::conditions::warning_limit() };
     let warnings = &mut interp::interp().warnings;
-    // GNU R keeps at most 50 deferred warnings.
-    if warnings.len() < 50 {
+    if warnings.len() < limit {
         warnings.push((runtime().nil(), message.into()));
     }
 }

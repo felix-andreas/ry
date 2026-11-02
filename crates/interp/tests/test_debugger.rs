@@ -13,15 +13,16 @@ use {
         heap, interp,
         testing::with_interpreter,
         values::global_env,
+        viewer,
     },
     serde_json::{Value, json},
     std::{
         cell::RefCell,
-        collections::{BTreeMap, VecDeque},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         path::PathBuf,
         rc::Rc,
     },
-    syntax::testing::{Entropy, SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
 
 #[test]
@@ -536,6 +537,33 @@ exited 0
     );
 }
 
+// A `ryTable` sort on column `u64::MAX` overflowed while the viewer named the missing column
+// in its error, which panicked the adapter (debugger seed 531).
+#[test]
+fn a_page_sorted_by_a_huge_column_is_refused() {
+    let log = session(
+        "v <- 1:5\nbrowser()\n",
+        &[],
+        false,
+        vec![
+            request("ryView", json!({ "expression": "v" })),
+            request(
+                "ryTable",
+                json!({ "viewId": 1, "sort": { "column": u64::MAX, "descending": true } }),
+            ),
+            request("continue", json!({ "threadId": 1 })),
+        ],
+    );
+    let page = log
+        .iter()
+        .find(|message| message["type"] == "response" && message["command"] == "ryTable")
+        .expect("the page request is answered");
+    assert_eq!(
+        page["message"],
+        "the view has no column 18446744073709551616"
+    );
+}
+
 const PROGRAMS: &[&str] = &[
     "\
 fib <- function(n) {
@@ -634,6 +662,7 @@ fn simulate(seed: u64) -> Result<Vec<Value>, String> {
     };
     let log = run(&path, Box::new(client));
     check_protocol(&log)?;
+    check_views(&log)?;
     Ok(log)
 }
 
@@ -657,6 +686,10 @@ impl SimulatedClient {
             if self.pauses < 3 && self.entropy.chance(1, 40) {
                 self.pauses += 1;
                 return Some(request("pause", json!({ "threadId": 1 })));
+            }
+            // Paging an open view is answered while the program runs, too.
+            if self.entropy.chance(1, 60) {
+                return Some(self.data_request(log));
             }
             return None;
         }
@@ -702,7 +735,7 @@ impl SimulatedClient {
                 false => request("disconnect", json!({})),
             });
         }
-        let resume = match self.entropy.below(20) {
+        let resume = match self.entropy.below(26) {
             0 => Some(request("terminate", json!({}))),
             1..=4 => Some(request("continue", json!({ "threadId": 1 }))),
             5..=7 => Some(request("next", json!({ "threadId": 1 }))),
@@ -734,7 +767,7 @@ impl SimulatedClient {
             .filter(|reference| *reference > 0)
             .collect::<Vec<_>>();
         let frame = self.pick(&frames);
-        match self.entropy.below(7) {
+        match self.entropy.below(17) {
             0 => request(
                 "stackTrace",
                 json!({
@@ -757,8 +790,89 @@ impl SimulatedClient {
                 request("evaluate", arguments)
             }
             5 => self.breakpoints(),
-            _ => request("threads", json!({})),
+            6 => request("threads", json!({})),
+            7..=10 => {
+                let expression = match self.entropy.chance(3, 4) {
+                    true => VIEW_EXPRESSIONS[self.entropy.below(VIEW_EXPRESSIONS.len())],
+                    false => EXPRESSIONS[self.entropy.below(EXPRESSIONS.len())],
+                };
+                let mut arguments = match self.entropy.below(8) {
+                    0 => json!({}),
+                    1 => json!({ "expression": 42 }),
+                    _ => json!({ "expression": expression }),
+                };
+                if self.entropy.chance(1, 3) {
+                    arguments["frameId"] = json!(frame);
+                }
+                request("ryView", arguments)
+            }
+            11..=14 => self.data_request(log),
+            _ => {
+                // A line typed at a `Browse[1]>` prompt, which prints its value.
+                let expression = EXPRESSIONS[self.entropy.below(EXPRESSIONS.len())];
+                let mut arguments = json!({ "expression": expression, "context": "ryBrowse" });
+                if self.entropy.chance(2, 3) {
+                    arguments["frameId"] = json!(frame);
+                }
+                request("evaluate", arguments)
+            }
         }
+    }
+
+    /// A `ryTable` or `ryRelease` for a view an earlier `ryView` opened, one released since, or
+    /// one that never existed, with paging arguments that may be out of range or malformed.
+    fn data_request(&mut self, log: &[Value]) -> Value {
+        let views = view_ids(log);
+        // Pages need a view first, and most made-up ids fail the same way.
+        if views.is_empty() && self.entropy.chance(3, 4) {
+            let expression = VIEW_EXPRESSIONS[self.entropy.below(4)];
+            return request("ryView", json!({ "expression": expression }));
+        }
+        let view = match views.is_empty() || self.entropy.chance(1, 6) {
+            true => [
+                json!(0),
+                json!(-1),
+                json!(u64::MAX),
+                json!("1"),
+                Value::Null,
+            ][self.entropy.below(5)]
+            .clone(),
+            false => json!(views[self.entropy.below(views.len())]),
+        };
+        let mut arguments = json!({});
+        if !view.is_null() {
+            arguments["viewId"] = view;
+        }
+        if self.entropy.chance(1, 4) {
+            return request("ryRelease", arguments);
+        }
+        let numbers = [
+            json!(0),
+            json!(1),
+            json!(3),
+            json!(49),
+            json!(-5),
+            json!(u64::MAX),
+            json!(i64::MIN),
+            json!(1.5),
+            json!("2"),
+        ];
+        for field in ["start", "count"] {
+            if self.entropy.chance(2, 3) {
+                arguments[field] = numbers[self.entropy.below(numbers.len())].clone();
+            }
+        }
+        if self.entropy.chance(1, 3) {
+            arguments["filter"] = json!(["1", "a", "", "NA", "\u{e9}"][self.entropy.below(5)]);
+        }
+        if self.entropy.chance(1, 3) {
+            let column = [json!(0), json!(1), json!(7), json!(u64::MAX), json!(-1)]
+                [self.entropy.below(5)]
+            .clone();
+            arguments["sort"] =
+                json!({ "column": column, "descending": self.entropy.chance(1, 2) });
+        }
+        request("ryTable", arguments)
     }
 
     /// One of `ids`, or now and then an id nothing gave out.
@@ -768,6 +882,32 @@ impl SimulatedClient {
             false => ids[self.entropy.below(ids.len())],
         }
     }
+}
+
+/// Expressions whose values the data viewer can show, and some it cannot.
+const VIEW_EXPRESSIONS: &[&str] = &[
+    "1:50",
+    "c(a = 1, b = NA)",
+    "list(1, \"two\", NULL)",
+    "matrix(1:6, 2)",
+    "letters",
+    "xs",
+    "w",
+    "character(0)",
+    "fib",
+    "environment()",
+];
+
+/// The ids of the views every successful `ryView` opened, oldest first.
+fn view_ids(log: &[Value]) -> Vec<u64> {
+    log.iter()
+        .filter(|message| {
+            message["type"] == "response"
+                && message["command"] == "ryView"
+                && message["success"] == true
+        })
+        .filter_map(|message| message.pointer("/body/viewId").and_then(Value::as_u64))
+        .collect()
 }
 
 fn latest_ids(log: &[Value], list: &str, field: &str) -> Vec<u64> {
@@ -837,6 +977,88 @@ fn check_protocol(log: &[Value]) -> Result<(), String> {
             "the session sent {terminated} terminated events (launched: {launched})"
         )),
     }
+}
+
+/// The data viewer's invariants over one session: a view answers pages until it is released and
+/// refuses them after, a page never reaches past its view's rows or columns, and a request that
+/// fails says why.
+fn check_views(log: &[Value]) -> Result<(), String> {
+    let mut requests: BTreeMap<u64, &Value> = BTreeMap::new();
+    // Each open view's column count, and the views released since.
+    let mut widths: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut released: BTreeSet<u64> = BTreeSet::new();
+    for message in log {
+        if message["type"] == "request" {
+            requests.insert(message["seq"].as_u64().unwrap_or_default(), message);
+            continue;
+        }
+        if message["type"] != "response" {
+            continue;
+        }
+        let command = message["command"].as_str().unwrap_or_default();
+        if !matches!(command, "ryView" | "ryTable" | "ryRelease") {
+            continue;
+        }
+        let request = requests
+            .get(&message["request_seq"].as_u64().unwrap_or_default())
+            .ok_or("a response to an unknown request")?;
+        let arguments = &request["arguments"];
+        let view = arguments["viewId"].as_u64();
+        if message["success"] == false {
+            if message["message"].as_str().is_none_or(str::is_empty) {
+                return Err(format!("a failed `{command}` says nothing: {message}"));
+            }
+            if command == "ryRelease" && view.is_some() {
+                return Err(format!("releasing view {view:?} failed: {message}"));
+            }
+            continue;
+        }
+        let body = &message["body"];
+        match command {
+            "ryView" => {
+                let id = body["viewId"].as_u64().ok_or("a view without an id")?;
+                body["rows"].as_u64().ok_or("a view without a row count")?;
+                let columns = body["columns"].as_array().ok_or("a view without columns")?;
+                widths.insert(id, columns.len());
+            }
+            "ryRelease" => {
+                let id = view.ok_or("a release without a numeric `viewId` succeeded")?;
+                widths.remove(&id);
+                released.insert(id);
+            }
+            _ => {
+                let id = view.ok_or("a page without a numeric `viewId` succeeded")?;
+                if released.contains(&id) {
+                    return Err(format!("view {id} answered a page after its release"));
+                }
+                let width = *widths
+                    .get(&id)
+                    .ok_or_else(|| format!("view {id} answered a page but was never opened"))?;
+                let start = body["start"].as_u64().ok_or("a page without `start`")?;
+                let total = body["total"].as_u64().ok_or("a page without `total`")?;
+                let rows = body["rows"].as_array().ok_or("a page without rows")?;
+                let asked = arguments["count"].as_u64().unwrap_or(100).min(1000);
+                if start > total || start + rows.len() as u64 > total || rows.len() as u64 > asked {
+                    return Err(format!(
+                        "a page of {} rows from {start} of {total} for count {asked}",
+                        rows.len()
+                    ));
+                }
+                if let Some(row) = rows
+                    .iter()
+                    .find(|row| row.as_array().map(Vec::len) != Some(width))
+                {
+                    return Err(format!("a row {row} in a view of {width} columns"));
+                }
+                if let Some(names) = body["rowNames"].as_array()
+                    && names.len() != rows.len()
+                {
+                    return Err(format!("{} row names for {} rows", names.len(), rows.len()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_stopped(message: &Value) -> Result<(), String> {
@@ -940,6 +1162,8 @@ fn run(path: &std::path::Path, client: Box<dyn Client>) -> Vec<Value> {
                 .remove_binding(global_env(), symbol)
                 .expect("a global binding can be removed");
         }
+        // Views outlive a session, and their ids and evictions would leak into the next one.
+        viewer::reset();
         let mut adapter = Box::new(Adapter::new(Box::new(recorder)));
         if let Some(launch) = adapter.configure() {
             assert_eq!(launch.program, path);

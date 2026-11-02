@@ -104,26 +104,25 @@ unsafe fn pairlist_names(list: Sexp) -> ApiResult<Sexp> {
 pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
     let nil = runtime.nil();
+    // R lets callers remove an attribute from `NULL`; data.table's unlock relies on it.
+    if object == nil && value == nil {
+        return Ok(nil);
+    }
+    if object == nil {
+        return Err(error("attempt to set an attribute on NULL"));
+    }
     if object.kind() == SexpType::Char {
         return Err(error("cannot set attribute on a CHARSXP"));
     }
     let name = attribute_symbol(name)?;
     runtime.heap.root(name);
     runtime.heap.root(value);
-    // GNU R removes before it rejects NULL, so removing an attribute from NULL succeeds, which
-    // data.table's `:=` relies on.
     if value == nil {
-        if object == nil {
-            return Ok(value);
-        }
         remove_attribute(object, name);
         if name == R_ClassSymbol.get() {
             object.set_object(false);
         }
         return Ok(value);
-    }
-    if object == nil {
-        return Err(error("attempt to set an attribute on NULL"));
     }
     if name == R_NamesSymbol.get() {
         return names_gets(object, value);
@@ -452,6 +451,15 @@ pub unsafe extern "C" fn Rf_inherits(object: Sexp, class: *const c_char) -> Rboo
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ATTRIB(object: Sexp) -> Sexp {
+    visible_attributes(object)
+}
+
+/// The attribute pairlist native code sees. A promise's attribute slot holds its compiled code,
+/// which GNU R keeps in `PRCODE` instead, so a promise has none.
+pub unsafe fn visible_attributes(object: Sexp) -> Sexp {
+    if object.kind() == SexpType::Promise {
+        return runtime().heap.known().nil;
+    }
     object.attrib()
 }
 
@@ -472,7 +480,7 @@ pub unsafe extern "C" fn SET_ATTRIB(object: Sexp, value: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ANY_ATTRIB(object: Sexp) -> c_int {
-    (object.attrib() != runtime().nil()) as c_int
+    (visible_attributes(object) != runtime().nil()) as c_int
 }
 
 #[unsafe(no_mangle)]

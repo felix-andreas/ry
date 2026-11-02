@@ -9,7 +9,8 @@ db-benchmark's questions at ten million rows takes about a quarter of the time d
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
 column is reported before the query runs. Code you already wrote for data.table keeps working, and
 most of its queries run on the same engine
-([Existing data.table code](#existing-datatable-code)).
+([Existing data.table code](#existing-datatable-code)). [Moving from data.table](/guides/from-data-table/)
+maps each common data.table idiom to its DataFrame equivalent.
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
@@ -61,8 +62,9 @@ and warnings. Otherwise data.table answers it. These go to data.table:
 - a keyed table, and a table with extra attributes or classes;
 - code inside data.table's own namespace, except a grouped query without `:=`, which is how
   `dcast` aggregates;
-- a `j` that only picks whole columns of every row, such as `x[, .(a, b)]` or
-  `x[, cols, with = FALSE]`, because data.table copies them faster;
+- a query without `by` that only picks rows and whole columns, such as `x[i]`,
+  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
+  data.table copies them faster and with less memory;
 - a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
 - `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
   summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
@@ -206,7 +208,8 @@ run as one step that keeps only each group's best rows, instead of sorting the w
 ### Joins
 
 `DataFrame.join` takes the key columns as `on`, or as `left_on` and `right_on` when the names
-differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"` or `"anti"`. The result has the left
+differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"`, `"anti"` or `"cross"`, which pairs every
+left row with every right row and takes no keys. The result has the left
 columns, then the right's non-key columns, and a right column whose name is already taken gets the
 `suffix` (`"_right"` by default), as in Polars.
 
@@ -243,6 +246,71 @@ DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
 1:      a     5    10   1.6
 2:      b     3    20   7.0
 3:      a     1    30    NA
+```
+
+### Windows and ranks
+
+`Expr.over(expr, "key")` computes `expr` within each group of the key columns and gives every row
+its group's value, so the frame keeps all of its rows. `Expr.rank` numbers the values from 1 in
+order, breaking ties by row order and ranking `NA` last; wrap it in `Expr.over` to rank within
+groups:
+
+```r
+sales |> DataFrame.with_columns(
+  region_units = Expr.over(Expr.sum(col("units")), "region"),
+  place = Expr.over(Expr.rank(col("units"), descending = TRUE), "region")
+)
+```
+
+```text ry run runtime=ry exact continue
+   region units price region_units place
+   <char> <int> <num>        <int> <int>
+1:     eu     3   1.5            5     1
+2:     us     5   2.0            6     1
+3:     eu     2   3.0            5     2
+4:   asia     7   0.5            7     1
+5:     us     1   4.0            6     2
+```
+
+### Reshaping
+
+`DataFrame.pivot(df, on, index, values, agg = NULL)` turns the values of the `on` column into
+columns, with one row per value of `index`, like data.table's `dcast`. Rows and new columns come
+out sorted. With several values for one cell, `agg` combines them: `"sum"`, `"mean"`, `"min"`,
+`"max"`, `"first"`, `"last"` or `"count"`. Because the new columns depend on the data, the
+checker types the result as a `DataFrame` without known columns.
+
+```r
+sales |> DataFrame.pivot(on = "region", index = "units", values = "price")
+```
+
+```text ry run runtime=ry exact continue
+   units  asia    eu    us
+   <int> <num> <num> <num>
+1:     1    NA    NA     4
+2:     2    NA   3.0    NA
+3:     3    NA   1.5    NA
+4:     5    NA    NA     2
+5:     7   0.5    NA    NA
+```
+
+### Dates
+
+A column of R `Date` values stays a date column. Adding or subtracting a number of days gives a
+date, subtracting one date column from another gives the whole days between them as an integer,
+and a date compares with another date, such as one from `as.Date`. The checker reports any other
+operator on a date, such as `col("placed") * 2`.
+
+```r
+orders <- DataFrame(id = [1L, 2L], placed = as.Date(c("2024-01-30", "2024-02-03")))
+shipped <- orders |> DataFrame.with_columns(due = col("placed") + 14L)
+shipped |> DataFrame.filter(col("due") >= as.Date("2024-02-15"))
+```
+
+```text ry run runtime=ry exact
+      id     placed        due
+   <int>     <Date>     <Date>
+1:     2 2024-02-03 2024-02-17
 ```
 
 ## Lazy queries

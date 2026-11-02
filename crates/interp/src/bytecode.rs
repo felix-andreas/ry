@@ -25,6 +25,12 @@
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
 //!
+//! A closure's argument that is a call compiles too, into a code object of its own whose source
+//! is the argument. A promise made from it keeps that code in its attribute slot, which a
+//! promise otherwise never uses, while its code slot keeps the expression for `substitute`,
+//! `PRCODE` and every other reader. Forcing the promise runs the code in the frame it was
+//! compiled for, through the same lookups and caches as the body (see [`Compiler::call_site`]).
+//!
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
 //! pointer to its window, stores its boxed values there (which roots them), and on
@@ -35,8 +41,8 @@ use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch,
-        eval::{self, as_condition},
-        interp,
+        eval::{self, SwitchSelector, as_condition},
+        interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -58,7 +64,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("mkCode", 2, do_mk_code),
     internal("bcClose", 3, |call| unsafe {
-        eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))
+        let closure = eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))?;
+        crate::heap().root(closure);
+        // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
+        // code passes constant arguments as values, which native code such as rlang observes.
+        // A body the compiler rejects stays an expression, as in `run_body`.
+        if let Ok(Some(code)) = compile(closure.cdr(), closure) {
+            crate::heap().set_cdr(closure, code);
+        }
+        Ok(closure)
     }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
@@ -107,9 +121,13 @@ const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 /// The optimizing tier's entry points.
 #[derive(Clone, Copy)]
 pub struct Tier {
-    /// Called whenever compiled bytecode starts running, with a fresh register window. Returns
-    /// `None` to let the interpreter run it from the start.
+    /// Called when compiled bytecode starts running with a fresh register window, if the code
+    /// has optimized code already, is on its first entry, or has been entered
+    /// [`Tier::entry_threshold`] times. Returns `None` to let the interpreter run it from the
+    /// start.
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
+    /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
+    pub entry_threshold: i32,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
@@ -130,7 +148,7 @@ pub enum TierExit {
 
 /// One activation of compiled bytecode as the interpreter sees it: what [`Tier`] receives.
 pub struct Machine<'a> {
-    /// The closure whose body `code` is.
+    /// The closure whose body `code` is, or `NULL` for a promise's code.
     pub function: Sexp,
     pub code: Sexp,
     pub env: Sexp,
@@ -144,6 +162,10 @@ pub struct Machine<'a> {
 /// Installs the optimizing tier.
 pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
+}
+
+pub fn tier() -> Option<Tier> {
+    interp().bytecode.tier
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -282,7 +304,7 @@ pub unsafe fn source_of_body(body: Sexp) -> Sexp {
     }
 }
 
-unsafe fn source_of(code: Sexp) -> Sexp {
+pub unsafe fn source_of(code: Sexp) -> Sexp {
     code.cdr().element(SOURCE)
 }
 
@@ -312,6 +334,92 @@ unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
     false
 }
 
+/// The arguments a closure called from `function`'s code makes its promises from: each one
+/// worth compiling replaced by a code object for `function`'s frame, or `NULL` when there is no
+/// function to compile against (the call is in promise code, whose frame is not known here).
+unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> {
+    if function == nil() {
+        return Ok(nil());
+    }
+    let mut formals = FxHashSet::default();
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        formals.insert(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut compiler = Compiler {
+        local_symbols: local_symbols(source_of_body(function.cdr()), function.car()),
+        formals,
+        code: Vec::new(),
+        constants: Vec::new(),
+        caches: 0,
+        loops: Vec::new(),
+        open_loops: Vec::new(),
+        registers: 0,
+        next_register: 0,
+        enclosure: function.tag(),
+        // `run_promise` restores the srcref that was current when forcing began, so the code
+        // never needs one of its own to return to.
+        srcref: nil(),
+        rebinding: None,
+        tail_updates: (Vec::new(), nil()),
+        bound: None,
+    };
+    let heap = crate::heap();
+    let mut list = nil();
+    for (tag, value) in values::pairlist_items(arguments).iter().rev() {
+        let value = if compiles_as_promise(*value) {
+            compiler.code.clear();
+            compiler.constants.clear();
+            compiler.caches = 0;
+            compiler.loops.clear();
+            compiler.open_loops.clear();
+            compiler.registers = 0;
+            compiler.next_register = 0;
+            // An argument the compiler rejects still runs, as a promise of its expression.
+            compiler.assemble(*value).unwrap_or(*value)
+        } else {
+            *value
+        };
+        heap.root(value);
+        list = values::cons(value, list)?;
+        heap.set_tag(list, *tag);
+        heap.root(list);
+    }
+    Ok(list)
+}
+
+/// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
+/// constant, whose evaluation needs nothing of the code that made it. `break`, `next` and
+/// `return` act on the activation that evaluates them, which for a promise is not the one that
+/// made it, and a loop or a function definition is left out so that promise code never runs a
+/// back edge or carries a body of its own.
+unsafe fn compiles_as_promise(expression: Sexp) -> bool {
+    unsafe fn free_of_control(expression: Sexp, depth: u32) -> bool {
+        match expression.kind() {
+            SexpType::Symbol => !matches!(
+                &*symbol_name(expression),
+                "break" | "next" | "return" | "function" | "for" | "while" | "repeat"
+            ),
+            SexpType::Language => {
+                if depth == 0 {
+                    return false;
+                }
+                let mut cell = expression;
+                while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+                    if !free_of_control(cell.car(), depth - 1) {
+                        return false;
+                    }
+                    cell = cell.cdr();
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+    expression.kind() == SexpType::Language && free_of_control(expression, LOOP_SEARCH_DEPTH)
+}
+
 /// A body is worth compiling when it does more than evaluate one constant or symbol.
 unsafe fn worth_compiling(body: Sexp) -> bool {
     body.kind() == SexpType::Language
@@ -336,7 +444,9 @@ pub enum Op {
     /// `dst function call base count`: calls a builtin with the values in registers
     /// `base..base + count`, tagged as in `call`.
     CallBuiltin,
-    /// `dst function call`: any other call, with the AST evaluator's argument handling.
+    /// `dst function call`: any other call, with the AST evaluator's argument handling. The
+    /// constant after `call` holds the arguments a closure's promises are made from
+    /// ([`Compiler::call_site`]).
     CallGeneric,
     /// `dst expression`: evaluates an expression the compiler did not compile.
     Ast,
@@ -429,9 +539,13 @@ pub enum Op {
     /// `dst src guard call`: sets `dst` to `TRUE` or `FALSE` as the value in `src` of the `match`
     /// guard `guard` holds or not. Errors name `call`, the `match`.
     MatchCondition,
+    /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
+    /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
+    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    SwitchArm,
 }
 
-pub const OPS: [Op; 40] = [
+pub const OPS: [Op; 41] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -472,6 +586,7 @@ pub const OPS: [Op; 40] = [
     Op::Move,
     Op::BoundEval,
     Op::MatchCondition,
+    Op::SwitchArm,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -633,46 +748,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         bound: None,
         tail_updates: tail_updates(body, function),
     };
-    let result = compiler.allocate();
-    compiler.expression(body, result)?;
-    compiler.emit(Op::Return, &[result]);
-    let heap = crate::heap();
-    let words = values::alloc(SexpType::Integer, compiler.code.len())?;
-    for (index, word) in compiler.code.iter().enumerate() {
-        values::ints_mut(words)[index] = *word as i32;
-    }
-    let constants = values::alloc(SexpType::List, FIRST_CONSTANT + compiler.constants.len())?;
-    heap.set_element(constants, SOURCE, body);
-    let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
-    values::reals_mut(epochs).fill(-1.0);
-    heap.set_element(constants, EPOCHS, epochs);
-    let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
-    values::ints_mut(feedback).fill(0);
-    heap.set_element(constants, FEEDBACK, feedback);
-    let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
-    values::ints_mut(profile).fill(0);
-    heap.set_element(constants, PROFILE, profile);
-    heap.set_element(constants, TIER1, nil());
-    let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
-    for (index, entry) in compiler.loops.iter().enumerate() {
-        let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
-        slots.copy_from_slice(&[
-            entry.start as i32,
-            entry.end as i32,
-            entry.exit as i32,
-            entry.step as i32,
-        ]);
-    }
-    heap.set_element(constants, LOOPS, loops);
-    let registers = values::scalar_integer(compiler.registers as i32)?;
-    heap.set_element(constants, REGISTERS, registers);
-    for (index, constant) in compiler.constants.iter().enumerate() {
-        heap.set_element(constants, FIRST_CONSTANT + index, *constant);
-    }
-    let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
-    heap.mark_weak_pairs(caches);
-    let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
-    Ok(Some(code))
+    compiler.assemble(body).map(Some)
 }
 
 /// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
@@ -728,13 +804,13 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// A constructor call's items, the layout it builds and each item's slot.
+type ConstructorPlan<'a> = (&'a [(Sexp, Sexp)], u32, Vec<usize>);
+
 /// The items of a `.ry_record`, `.ry_tuple` or `.ry_tag` call named `name`, the layout it
 /// builds and each item's slot, when its syntax fixes them and evaluating the items into
 /// registers is what the builtin's own evaluation would do.
-unsafe fn constructor<'a>(
-    name: &str,
-    args: &'a [(Sexp, Sexp)],
-) -> Option<(&'a [(Sexp, Sexp)], u32, Vec<usize>)> {
+unsafe fn constructor<'a>(name: &str, args: &'a [(Sexp, Sexp)]) -> Option<ConstructorPlan<'a>> {
     if args
         .iter()
         .any(|(_, value)| *value == symbols().dots || *value == missing_arg())
@@ -848,6 +924,127 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
         SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
         _ => true,
     }
+}
+
+/// Whether a `switch` call with these arguments compiles: the selector is a plain first
+/// argument, there are alternatives (the special warns when there are none), no alternative is
+/// `...` (whose alternatives are only known at run time), and at most one alternative is a
+/// default (the special reports a second one as an error).
+unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
+    let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
+        return false;
+    };
+    let defaults = alternatives
+        .iter()
+        .filter(|(tag, _)| switch_default(*tag))
+        .count();
+    *selector_tag == nil()
+        && *selector != symbols().dots
+        && *selector != missing_arg()
+        && !alternatives.is_empty()
+        && alternatives
+            .iter()
+            .all(|(_, value)| *value != symbols().dots)
+        && defaults <= 1
+}
+
+/// Whether an alternative with this tag is the default: it has no name, or an empty one.
+unsafe fn switch_default(tag: Sexp) -> bool {
+    tag == nil() || (tag.kind() == SexpType::Symbol && tag.car().bytes().is_empty())
+}
+
+/// Where [`switch_table`] keeps the alternatives' names, as a character vector.
+const SWITCH_NAMES: usize = 0;
+/// Where it keeps, for each name, the arm that name runs (0 for none).
+const SWITCH_NAME_ARMS: usize = 1;
+/// Where it keeps the default's arm (first; 0 for none, -1 for an empty default, which is an
+/// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
+/// alternative, which is an error).
+const SWITCH_POSITION_ARMS: usize = 2;
+/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+const SWITCH_NUMBERS: usize = 3;
+/// Where it keeps the `switch` call, which its errors name.
+const SWITCH_CALL: usize = 4;
+
+/// The table [`Op::SwitchArm`] reads for a `switch` with these alternatives, and the arms: the
+/// non-empty alternatives in order, numbered from 1. A name runs the first non-empty alternative
+/// at or after its own, as the special falls through empty ones.
+unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Vec<Sexp>)> {
+    let missing = missing_arg();
+    let mut arms = Vec::new();
+    let mut position_arms = vec![0];
+    for (tag, value) in alternatives {
+        if *value == missing {
+            position_arms.push(-1);
+            if switch_default(*tag) {
+                position_arms[0] = -1;
+            }
+        } else {
+            arms.push(*value);
+            position_arms.push(arms.len() as i32);
+            if switch_default(*tag) {
+                position_arms[0] = arms.len() as i32;
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut name_arms = Vec::new();
+    for (position, (tag, _)) in alternatives.iter().enumerate() {
+        if tag.kind() == SexpType::Symbol {
+            names.push(tag.car());
+            let arm = position_arms[position + 1..]
+                .iter()
+                .copied()
+                .find(|&arm| arm > 0)
+                .unwrap_or(0);
+            name_arms.push(arm);
+        }
+    }
+    let heap = crate::heap();
+    let name_vector = values::alloc(SexpType::String, names.len())?;
+    for (index, name) in names.iter().enumerate() {
+        heap.set_element(name_vector, index, *name);
+    }
+    let name_arms = values::integer_vector(&name_arms)?;
+    let position_arms = values::integer_vector(&position_arms)?;
+    let mut numbers = Vec::with_capacity(arms.len() + 1);
+    for number in 0..=arms.len() {
+        numbers.push(values::scalar_integer(number as i32)?);
+    }
+    let numbers = values::list_vector(&numbers)?;
+    let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
+    Ok((table, arms))
+}
+
+/// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
+/// the special's errors.
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
+    let numbers = table.element(SWITCH_NUMBERS);
+    let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
+    let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
+        SwitchSelector::Name(text) => {
+            let names = table.element(SWITCH_NAMES);
+            let matched = (0..length(names)).find(|&index| {
+                let name = names.element(index);
+                name == text || name.bytes() == text.bytes()
+            });
+            match matched {
+                Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
+                None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
+                None => position_arms[0],
+            }
+        }
+        SwitchSelector::Position(index) => match position_arms.get(index.max(0) as usize) {
+            Some(&arm) if index >= 1 => {
+                if arm < 0 {
+                    return Err(error("empty alternative in numeric switch"));
+                }
+                arm
+            }
+            _ => 0,
+        },
+    };
+    Ok(numbers.element(arm as usize))
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -1194,6 +1391,64 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
 }
 
 impl Compiler {
+    /// Compiles `source` as the whole code of a new code object, and builds that object.
+    unsafe fn assemble(&mut self, source: Sexp) -> R<Sexp> {
+        let result = self.allocate();
+        self.expression(source, result)?;
+        self.emit(Op::Return, &[result]);
+        let compiler = &*self;
+        let heap = crate::heap();
+        let words = values::alloc(SexpType::Integer, compiler.code.len())?;
+        for (index, word) in compiler.code.iter().enumerate() {
+            values::ints_mut(words)[index] = *word as i32;
+        }
+        let constants = values::alloc(SexpType::List, FIRST_CONSTANT + compiler.constants.len())?;
+        heap.set_element(constants, SOURCE, source);
+        let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
+        values::reals_mut(epochs).fill(-1.0);
+        heap.set_element(constants, EPOCHS, epochs);
+        let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
+        values::ints_mut(feedback).fill(0);
+        heap.set_element(constants, FEEDBACK, feedback);
+        let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
+        values::ints_mut(profile).fill(0);
+        heap.set_element(constants, PROFILE, profile);
+        heap.set_element(constants, TIER1, nil());
+        let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
+        for (index, entry) in compiler.loops.iter().enumerate() {
+            let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
+            slots.copy_from_slice(&[
+                entry.start as i32,
+                entry.end as i32,
+                entry.exit as i32,
+                entry.step as i32,
+            ]);
+        }
+        heap.set_element(constants, LOOPS, loops);
+        let registers = values::scalar_integer(compiler.registers as i32)?;
+        heap.set_element(constants, REGISTERS, registers);
+        for (index, constant) in compiler.constants.iter().enumerate() {
+            heap.set_element(constants, FIRST_CONSTANT + index, *constant);
+        }
+        let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
+        heap.mark_weak_pairs(caches);
+        let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
+        Ok(code)
+    }
+
+    /// The constant for a call that may call a closure, followed by the arguments its promises
+    /// are made from: the unbound marker when an argument is worth compiling, which
+    /// [`Op::CallGeneric`] replaces with the compiled arguments the first time it calls a
+    /// closure here, or `NULL` when none is.
+    unsafe fn call_site(&mut self, call: Sexp) -> u32 {
+        let index = self.constant(call);
+        let worth_compiling = values::pairlist_items(call.cdr())
+            .iter()
+            .any(|(_, value)| compiles_as_promise(*value));
+        self.constant(if worth_compiling { unbound() } else { nil() });
+        index
+    }
+
     unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
         self.local_symbols
             .as_ref()
@@ -1349,6 +1604,7 @@ impl Compiler {
                 ("break" | "next", 0) => !self.open_loops.is_empty(),
                 ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("&&" | "||", 2) => plain,
+                ("switch", 1..) => switch_compiles(&args),
                 ("function", 2..) => true,
                 (".Internal", 1) => plain && compiled_internal(args[0].1)?.is_some(),
                 ("local", 1) => plain && args[0].1 != symbols().dots && args[0].1 != missing_arg(),
@@ -1511,6 +1767,7 @@ impl Compiler {
                 | ".ry_tuple"
                 | ".ry_tag"
                 | ".ry_match"
+                | "switch"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1747,6 +2004,27 @@ impl Compiler {
                 }
                 self.patch(done);
             }
+            "switch" => {
+                self.expression(args[0].1, dst)?;
+                let (table, arms) = switch_table(call, &args[1..])?;
+                let numbers = table.element(SWITCH_NUMBERS);
+                let table = self.constant(table);
+                self.emit(Op::SwitchArm, &[dst, dst, table]);
+                let mut done = Vec::with_capacity(arms.len());
+                for (index, body) in arms.iter().enumerate() {
+                    let number = self.constant(numbers.element(index + 1));
+                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    self.expression(*body, dst)?;
+                    done.push(self.emit_patchable(Op::Jump, &[0]));
+                    self.patch(skip);
+                }
+                let constant = self.constant(nil());
+                self.emit(Op::Constant, &[dst, constant]);
+                self.emit(Op::Invisible, &[]);
+                for position in done {
+                    self.patch(position);
+                }
+            }
             "for" => self.for_loop(call, args, dst)?,
             "while" => {
                 let call_constant = self.constant(call);
@@ -1825,9 +2103,14 @@ impl Compiler {
                 // of a closure made on the spot, instead of `local`'s `eval.parent(substitute(
                 // eval(quote(expr), new.env())))`, which costs several calls and an `eval`.
                 let expression = args[0].1;
+                // The `function` call carries the srcref slot, NULL here, as the parser's does:
+                // rlang's `trace_back` zaps a frame call's `function` head by poking that slot.
                 let function_call = values::lcons(
                     symbols().function,
-                    values::cons(nil(), values::cons(expression, nil())?)?,
+                    values::cons(
+                        nil(),
+                        values::cons(expression, values::cons(nil(), nil())?)?,
+                    )?,
                 )?;
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
@@ -1836,7 +2119,7 @@ impl Compiler {
                 let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
-                let call_constant = self.constant(immediate_call);
+                let call_constant = self.call_site(immediate_call);
                 self.emit(Op::CallGeneric, &[dst, function, call_constant]);
                 self.release_to(mark);
             }
@@ -1980,7 +2263,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call);
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -2231,7 +2514,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call);
         let name_constant = self.constant(name);
         let shape = self.shape()?;
         let cache = self.cache();
@@ -2262,7 +2545,7 @@ impl Compiler {
             _ => None,
         };
         let symbol = self.constant(head);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call);
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -2336,6 +2619,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::MatchFail | Op::Move => 2,
         Op::BoundEval => 5,
         Op::MatchCondition => 4,
+        Op::SwitchArm => 3,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -2418,6 +2702,37 @@ pub unsafe fn loop_count(code: Sexp) -> usize {
     length(code.cdr().element(LOOPS)) / 4
 }
 
+/// Runs a compiled promise's code in `env`, the frame it was compiled for. Promise code has no
+/// loops (`compiles_as_promise` rejects them) and no closure of its own, so this skips the entry
+/// profile, the loop states and the optimizing tier that `run` sets up for a function body.
+pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    heap.root(code);
+    let mark = heap.handle_mark();
+    let register_count = values::ints(code.cdr().element(REGISTERS))[0] as usize;
+    let base = interp().bytecode.registers.len();
+    reserve_registers(base + register_count)?;
+    let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
+    env.set_gp_bits(gp::COMPILED_FRAME, true);
+    let srcref = interp().srcref;
+    let mut machine = Machine {
+        function: nil(),
+        code,
+        env,
+        base,
+        mark,
+        loops: &mut [],
+    };
+    let result = execute_code(&mut machine, 0);
+    interp().srcref = srcref;
+    interp().bytecode.registers.truncate(base);
+    env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    }
+}
+
 unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     heap.root(code);
@@ -2427,7 +2742,8 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let base = interp().bytecode.registers.len();
     reserve_registers(base + register_count)?;
     let profile = values::ints_mut(constants.element(PROFILE));
-    profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
+    let entries = profile[profile::ENTRIES].saturating_add(1);
+    profile[profile::ENTRIES] = entries;
     let mut loops: SmallVec<[LoopState; 4]> = smallvec![LoopState::default(); loop_count(code)];
     let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
     env.set_gp_bits(gp::COMPILED_FRAME, true);
@@ -2439,9 +2755,17 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
+    // Most bodies never compile, and asking the tier about every call of every body cost more
+    // than the compiled code saved on a test suite.
     let entered = match interp().bytecode.tier {
-        Some(tier) => (tier.enter)(&mut machine),
-        None => None,
+        Some(tier)
+            if constants.element(TIER1) != nil()
+                || ((entries == 1 || entries >= tier.entry_threshold)
+                    && profile[profile::TIER_STATE] >= 0) =>
+        {
+            (tier.enter)(&mut machine)
+        }
+        _ => None,
     };
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
@@ -2471,7 +2795,10 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                 // instruction rooted is released at once. Otherwise an object only a finished
                 // call held would stay alive until the body returns, past a later `gc()` and
                 // the finalizer GNU R runs there.
-                crate::heap().release_handles(machine.mark);
+                let heap = crate::heap();
+                if heap.handle_mark() > machine.mark {
+                    heap.release_handles(machine.mark);
+                }
                 if pc < at
                     && let Some(tier) = interp().bytecode.tier
                 {
@@ -2608,44 +2935,44 @@ unsafe fn step(
     pc: &mut usize,
 ) -> R<Option<Sexp>> {
     let env = machine.env;
+    // Only `code` and `registers` are read by nearly every instruction. The rest are read
+    // through `decoded` where an instruction needs them, so the dispatch path does not reload
+    // them from the stack on every instruction.
     let Decoded {
-        code,
-        constants,
-        cache,
-        registers,
-        ..
+        code, registers, ..
     } = *decoded;
     let at = *pc;
     let operand = |index: usize| *code.get_unchecked(at + 1 + index) as usize;
     let register = |index: usize| *registers.add(index);
     let set = |index: usize, value: Sexp| *registers.add(index) = value;
-    let op = OPS[code[at] as usize];
+    debug_assert!(at < code.len() && (code[at] as usize) < OPS.len());
+    let op = *OPS.get_unchecked(*code.get_unchecked(at) as usize);
     let next = at + 1 + operand_count(op);
     match op {
         Op::Constant => {
-            set(operand(0), constants.element(operand(1)));
+            set(operand(0), decoded.constants.element(operand(1)));
             interp().visible = true;
         }
         Op::GetVar => {
             // Visible before the lookup, so that forcing a promise to `invisible()` leaves the
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
-            let symbol = constants.element(operand(1));
+            let symbol = decoded.constants.element(operand(1));
             let held = machine.base..machine.base + operand(0);
-            let value = lookup_variable(symbol, env, cache, operand(2), held)?;
+            let value = lookup_variable(symbol, env, decoded.cache, operand(2), held)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::SetVar => {
-            let symbol = constants.element(operand(0));
+            let symbol = decoded.constants.element(operand(0));
             let value = register(operand(1));
             eval::assign_symbol(symbol, value, env, false)?;
             interp().visible = false;
         }
         Op::GetFun => {
-            let symbol = constants.element(operand(1));
-            let call = constants.element(operand(3));
-            let function = lookup_function(symbol, env, cache, operand(2), call)?;
+            let symbol = decoded.constants.element(operand(1));
+            let call = decoded.constants.element(operand(3));
+            let function = lookup_function(symbol, env, decoded.cache, operand(2), call)?;
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
@@ -2656,7 +2983,7 @@ unsafe fn step(
         }
         Op::CallBuiltin => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let first = operand(3);
             let count = operand(4);
             let definition = eval::builtin_def(function)?;
@@ -2681,44 +3008,61 @@ unsafe fn step(
         }
         Op::CallGeneric => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
-            let value = eval::apply_call(call, function, call.cdr(), env)?;
+            let call = decoded.constants.element(operand(2));
+            let value = if function.kind() == SexpType::Closure {
+                let mut compiled = decoded.constants.element(operand(2) + 1);
+                if compiled == unbound() {
+                    compiled = compile_promise_arguments(machine.function, call.cdr())?;
+                    crate::heap().set_element(decoded.constants, operand(2) + 1, compiled);
+                }
+                let arguments = if compiled == nil() {
+                    call.cdr()
+                } else {
+                    compiled
+                };
+                let mut args = eval::Args::new();
+                eval::compiled_args_into(arguments, env, &mut args)?;
+                eval::apply_closure(call, function, &args, env, None)?
+            } else {
+                // A special reads its arguments as expressions, so they stay uncompiled.
+                eval::apply_call(call, function, call.cdr(), env)?
+            };
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallRebinding => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
-            let target = constants.element(operand(3));
+            let call = decoded.constants.element(operand(2));
+            let target = decoded.constants.element(operand(3));
             let value = eval::rebind_call(call, function, target, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallTailUpdate => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
-            let target = constants.element(operand(3));
+            let call = decoded.constants.element(operand(2));
+            let target = decoded.constants.element(operand(3));
             let value = eval::tail_update(call, function, target, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Field => {
             let object = register(operand(1));
-            let name = constants.element(operand(2));
-            let call = constants.element(operand(3));
-            let shape = constants.element(operand(4));
+            let name = decoded.constants.element(operand(2));
+            let call = decoded.constants.element(operand(3));
+            let shape = decoded.constants.element(operand(4));
             let value = match crate::records::cached_field(object, name, shape)? {
                 Some(value) => value,
                 None => crate::subset::dollar_value(object, name.car(), call, env)?,
             };
-            record_feedback(constants, at, value);
+            record_feedback(decoded.constants, at, value);
             interp().visible = true;
             set(operand(0), value);
         }
         Op::Item => {
             let object = register(operand(1));
-            let index = constants.element(operand(2));
-            let shape = constants.element(operand(3));
+            let index = decoded.constants.element(operand(2));
+            let shape = decoded.constants.element(operand(3));
             match crate::records::cached_item(object, index, shape)? {
                 Some(value) => {
                     decoded.record(at, value);
@@ -2744,7 +3088,7 @@ unsafe fn step(
             }
         }
         Op::MatchLiteral => {
-            let pattern = constants.element(operand(1));
+            let pattern = decoded.constants.element(operand(1));
             if !crate::records::literal_matches(pattern, register(operand(0))) {
                 *pc = operand(2);
                 return Ok(None);
@@ -2756,7 +3100,7 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::MatchFail => {
-            let call = constants.element(operand(1));
+            let call = decoded.constants.element(operand(1));
             return Err(crate::records::no_arm_matches(register(operand(0)), call));
         }
         Op::Construct => {
@@ -2766,22 +3110,26 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::Move => set(operand(0), register(operand(1))),
+        Op::SwitchArm => {
+            let value = switch_arm(register(operand(1)), decoded.constants.element(operand(2)))?;
+            set(operand(0), value);
+        }
         Op::BoundEval => {
-            let expression = constants.element(operand(1));
-            let names = constants.element(operand(2));
+            let expression = decoded.constants.element(operand(1));
+            let names = decoded.constants.element(operand(2));
             let bound = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
             let value = crate::records::eval_bound_registers(expression, names, bound, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::MatchCondition => {
-            let guard = constants.element(operand(2));
-            let call = constants.element(operand(3));
+            let guard = decoded.constants.element(operand(2));
+            let call = decoded.constants.element(operand(3));
             let holds = crate::records::guard_holds(register(operand(1)), guard, call)?;
             set(operand(0), values::scalar_logical(i32::from(holds))?);
         }
         Op::BranchUnlessPrimitive => {
-            if register(operand(0)) != constants.element(operand(1)) {
+            if register(operand(0)) != decoded.constants.element(operand(1)) {
                 *pc = operand(2);
                 return Ok(None);
             }
@@ -2794,7 +3142,7 @@ unsafe fn step(
         }
         Op::DispatchSubject => {
             let function = register(operand(1));
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let definition = eval::builtin_def(function)?;
             let mut args = eval::Args::new();
             let value = match dispatch::dispatch_evaluated_subject(
@@ -2813,18 +3161,18 @@ unsafe fn step(
             set(operand(0), value);
         }
         Op::Ast => {
-            let expression = constants.element(operand(1));
+            let expression = decoded.constants.element(operand(1));
             let value = eval::eval(expression, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Guard => {
-            let symbol = constants.element(operand(0));
-            let expected = constants.element(operand(1));
+            let symbol = decoded.constants.element(operand(0));
+            let expected = decoded.constants.element(operand(1));
             let found = if operand(3) == 0 {
-                lookup_enclosing_function(symbol, env, cache, operand(2))
+                lookup_enclosing_function(symbol, env, decoded.cache, operand(2))
             } else {
-                lookup_function(symbol, env, cache, operand(2), unbound())
+                lookup_function(symbol, env, decoded.cache, operand(2), unbound())
             };
             if !matches!(found, Ok(function) if function == expected) {
                 *pc = operand(4);
@@ -2840,7 +3188,7 @@ unsafe fn step(
             return Ok(None);
         }
         Op::JumpUnless => {
-            let call = constants.element(operand(1));
+            let call = decoded.constants.element(operand(1));
             if !as_condition(register(operand(0)), call)? {
                 *pc = operand(2);
                 return Ok(None);
@@ -2852,8 +3200,8 @@ unsafe fn step(
             let value = match fast_arithmetic(ARITHS[operand(0)].0, left, right)? {
                 Some(value) => value,
                 None => {
-                    let call = constants.element(operand(4));
-                    let function = constants.element(operand(5));
+                    let call = decoded.constants.element(operand(4));
+                    let function = decoded.constants.element(operand(5));
                     let definition = eval::builtin_def(function)?;
                     let args = [
                         Arg {
@@ -2874,7 +3222,7 @@ unsafe fn step(
         }
         Op::Return => return Ok(Some(register(operand(0)))),
         Op::ForInit => {
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let mut sequence = register(operand(1));
             if values::inherits(sequence, "factor") {
                 sequence = crate::coerce::factor_as_character(sequence)?;
@@ -2904,7 +3252,7 @@ unsafe fn step(
                 return Ok(None);
             }
             let sequence = register(operand(1));
-            let variable = constants.element(operand(2));
+            let variable = decoded.constants.element(operand(2));
             let index = state.index;
             state.index += 1;
             if !overwrite_loop_variable(sequence, index, variable, env) {
@@ -2924,7 +3272,7 @@ unsafe fn step(
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
         Op::SetSrcref => {
-            interp().srcref = constants.element(operand(0));
+            interp().srcref = decoded.constants.element(operand(0));
             if operand(1) == 1 && interp().debugger.is_some() {
                 crate::debugger::statement()?;
             }
@@ -2936,7 +3284,7 @@ unsafe fn step(
             }
         }
         Op::LogicLeft => {
-            let call = constants.element(operand(2));
+            let call = decoded.constants.element(operand(2));
             let is_and = operand(3) == 1;
             let left = eval::logical_operand_of(
                 register(operand(1)),
@@ -2953,7 +3301,7 @@ unsafe fn step(
             set(operand(1), values::scalar_logical(left)?);
         }
         Op::LogicRight => {
-            let call = constants.element(operand(3));
+            let call = decoded.constants.element(operand(3));
             let is_and = operand(4) == 1;
             let left = values::ints(register(operand(1)))[0];
             let right = eval::logical_operand_of(
@@ -2969,9 +3317,9 @@ unsafe fn step(
             interp().visible = true;
         }
         Op::Closure => {
-            let formals = constants.element(operand(1));
-            let body = constants.element(operand(2));
-            let srcref = constants.element(operand(3));
+            let formals = decoded.constants.element(operand(1));
+            let body = decoded.constants.element(operand(2));
+            let srcref = decoded.constants.element(operand(3));
             let closure = eval::make_closure(formals, body, srcref, env)?;
             // Every closure this site creates shares one compiled body, as GNU R compiles inner
             // functions with their outer one. Compiling per closure object would leave a function
@@ -2982,21 +3330,22 @@ unsafe fn step(
             if body.kind() != SexpType::Bytecode && worth_compiling(body) {
                 // A body the compiler rejects (an error is its way of saying so, such as for a
                 // `break` outside a loop) stays source, which the AST evaluator runs.
-                match compile(body, closure) {
-                    Ok(Some(code)) => {
-                        crate::heap().set_element(constants, operand(2), code);
-                        crate::heap().set_cdr(closure, code);
-                    }
-                    Ok(None) | Err(_) => {}
+                if let Ok(Some(code)) = compile(body, closure) {
+                    crate::heap().set_element(decoded.constants, operand(2), code);
+                    crate::heap().set_cdr(closure, code);
                 }
             }
             set(operand(0), closure);
             interp().visible = true;
         }
         Op::SubAssign => {
-            let call = constants.element(operand(4));
+            let call = decoded.constants.element(operand(4));
             let value = register(operand(3));
-            eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            let variable = decoded.constants.element(operand(1));
+            let double = operand(5) != 0;
+            if !assign_element_in_place(env, variable, register(operand(2)), value, double)? {
+                eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            }
             set(operand(0), value);
             interp().visible = false;
         }
@@ -3022,6 +3371,76 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
     } else {
         0
     }
+}
+
+/// `x[[i]] <- value` or `x[i] <- value` done in place, without `complex_assign`'s replacement
+/// calls, when the result is certain to equal what `[[<-` or `[<-` would return: `x` is a local,
+/// unshared, classless vector, `i` a scalar position inside it, and `value` either any non-`NULL`
+/// element of a list under `[[`, or an attribute-free scalar of `x`'s own atomic type. Returns
+/// whether it did the assignment; otherwise the variable is unchanged.
+unsafe fn assign_element_in_place(
+    env: Sexp,
+    variable: Sexp,
+    index: Sexp,
+    value: Sexp,
+    double: bool,
+) -> R<bool> {
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(env, variable) else {
+        return Ok(false);
+    };
+    let target = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        || target == value
+        || target.is_object()
+        || target.is_array()
+        || target.is_altrep()
+        || index.is_altrep()
+        || values::has_attributes(index)
+        || length(index) != 1
+    {
+        return Ok(false);
+    }
+    let fits = match target.kind() {
+        SexpType::List => double && value != nil(),
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
+            value.kind() == target.kind()
+                && length(value) == 1
+                && !value.is_altrep()
+                && !values::has_attributes(value)
+        }
+        _ => false,
+    };
+    if !fits {
+        return Ok(false);
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return Ok(false),
+    };
+    // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
+    if !(position >= 1.0 && position < length(target) as f64 + 1.0) {
+        return Ok(false);
+    }
+    let position = position as usize - 1;
+    // The conditions under which `complex_assign` updates the variable's value in place.
+    moves::modifying(target)?;
+    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
+        return Ok(false);
+    }
+    match target.kind() {
+        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(target)[position] = value.slice::<i32>()[0]
+        }
+        SexpType::String => heap.set_element(target, position, value.element(0)),
+        _ => heap.set_element(target, position, value),
+    }
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(true)
 }
 
 unsafe fn call_builtin(

@@ -66,6 +66,9 @@ pub struct InferenceTable<'db> {
     /// cut are stored.
     resolve_cache: RefCell<(u64, FxHashMap<Ty<'db>, Ty<'db>>)>,
     epoch: Cell<u64>,
+    /// The variables and aliases `resolve` is expanding, kept between calls so the millions of
+    /// resolutions an item check runs do not each allocate a stack.
+    resolve_stack: RefCell<Vec<InferenceVar>>,
     /// `definitions` answers through two salsa fetches and a scan of the file's
     /// definitions, and relations ask about the same few names hundreds of times per item.
     definition_cache: RefCell<FxHashMap<Name<'db>, Option<&'db NamedDefinition<'db>>>>,
@@ -203,9 +206,18 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// Sizes the resolution cache up front, for a table about to check `expressions`
+    /// expressions: grown from empty, it rehashes several times in every item check.
+    pub fn reserve_resolutions(&mut self, expressions: usize) {
+        self.resolve_cache.get_mut().1.reserve(expressions);
+    }
+
     /// Also expands aliases. Self-referential bindings and aliases cut to
     /// `Unknown` instead of expanding forever.
     pub fn resolve(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+        if !ty.may_resolve() {
+            return ty;
+        }
         {
             let mut cache = self.resolve_cache.borrow_mut();
             if cache.0 != self.epoch.get() {
@@ -213,8 +225,12 @@ impl<'db> InferenceTable<'db> {
                 cache.1.clear();
             }
         }
-        let mut visiting = Vec::new();
-        self.resolve_rec(db, ty, &mut visiting).0
+        // Taken rather than borrowed, so a resolution nested inside this one gets its own stack.
+        let mut visiting = mem::take(&mut *self.resolve_stack.borrow_mut());
+        let resolved = self.resolve_rec(db, ty, &mut visiting).0;
+        visiting.clear();
+        *self.resolve_stack.borrow_mut() = visiting;
+        resolved
     }
 
     /// The bool is whether the subtree is clean (no cycle cut beneath it): only
@@ -638,7 +654,8 @@ impl<'db> InferenceTable<'db> {
     /// same shape (`f(1L, 0.5)` for `function(a, b) a * b`): R's arithmetic promotes, so
     /// the variable widens to the wider type. Earlier arguments still fit, because
     /// `integer` is compatible with `double`. Logicals never widen a binding, since a
-    /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type.
+    /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type. A `matrix`
+    /// absorbs any numeric shape the same way.
     fn widen_numeric_binding(
         &mut self,
         db: &'db dyn Db,
@@ -657,6 +674,51 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
+        // Arithmetic between a matrix and a plain number or vector gives a matrix, so a
+        // variable tied by `a * H` takes `f(2, m)` and `f(m, 2)` alike and binds the matrix.
+        let is_matrix = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Named(name, _) if name.text(db) == "matrix");
+        // An open argument meeting a variable a literal bound (`f(2, x)` inside a function of
+        // `x`) is constrained numeric instead of pinned to the literal's type, so the caller's
+        // parameter stays generic. The binding keeps the literal's type, which R's arithmetic
+        // promotes every narrower argument to, and no variable moves between levels.
+        let promotes = numeric_rank(db, bound).is_some_and(|(_, rank)| rank == 2);
+        let open_numeric = promotes
+            && match actual.kind(db) {
+                TyKind::Var(actual_var) => {
+                    let actual_representative = self.find(*actual_var);
+                    actual_representative != representative
+                        && matches!(
+                            *self.entry(actual_representative),
+                            Entry::Unbound {
+                                constraint: Constraint::Unconstrained | Constraint::Numeric,
+                                ..
+                            }
+                        )
+                        && self
+                            .constrain(db, actual_representative, Constraint::Numeric)
+                            .is_ok()
+                }
+                TyKind::Rigid(name) => {
+                    self.rigid_constraints.get(name) == Some(&Constraint::Numeric)
+                }
+                _ => false,
+            };
+        if open_numeric {
+            return true;
+        }
+        if is_matrix(bound) && numeric_rank(db, actual).is_some() {
+            return true;
+        }
+        if is_matrix(actual) && numeric_rank(db, bound).is_some() {
+            self.set(
+                representative,
+                Entry::Bound {
+                    ty: actual,
+                    numeric: true,
+                },
+            );
+            return true;
+        }
         match (numeric_rank(db, bound), numeric_rank(db, actual)) {
             (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
                 if actual_rank > bound_rank
@@ -1461,7 +1523,7 @@ pub fn apply_definition<'db>(
     if definition.parameters.is_empty() {
         return definition.body;
     }
-    let substitution: FxHashMap<Name<'db>, Ty<'db>> = definition
+    let substitution: Vec<_> = definition
         .parameters
         .iter()
         .enumerate()
@@ -1665,6 +1727,77 @@ fn constraint_rejects<'db>(
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))
 }
 
+/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
+/// only when both sides know it: a written `GroupBy{...}` names no keys.
+fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
+    match (left, right) {
+        (
+            FrameKind::GroupBy {
+                lazy: left_lazy,
+                keys: left_keys,
+            },
+            FrameKind::GroupBy {
+                lazy: right_lazy,
+                keys: right_keys,
+            },
+        ) => {
+            left_lazy == right_lazy
+                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
+        }
+        _ => left == right,
+    }
+}
+
+/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
+/// whether it is a vector. A union of numeric types ranks as its widest member, since every
+/// member coerces to that one (`double | integer` widens a binding to `double`).
+/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
+/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
+/// it). `None` when a type is not numeric.
+pub(crate) fn numeric_join<'db>(
+    db: &'db dyn Db,
+    types: impl IntoIterator<Item = Ty<'db>>,
+) -> Option<Ty<'db>> {
+    let (vector, rank) = types
+        .into_iter()
+        .try_fold((false, 0), |(vector, rank), ty| {
+            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
+            Some((vector || ty_vector, rank.max(ty_rank)))
+        })?;
+    let element = scalar(
+        db,
+        match rank {
+            2 => Atomic::Double,
+            1 => Atomic::Integer,
+            _ => Atomic::Logical,
+        },
+    );
+    Some(if vector {
+        Ty::new(db, TyKind::Vector(element))
+    } else {
+        element
+    })
+}
+
+fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
+    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(0),
+        TyKind::Scalar(Atomic::Integer) => Some(1),
+        TyKind::Scalar(Atomic::Double) => Some(2),
+        _ => None,
+    };
+    match ty.kind(db) {
+        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
+        TyKind::Union(members) => members
+            .iter()
+            .try_fold((false, 0), |(vector, rank), member| {
+                let (member_vector, member_rank) = numeric_rank(db, *member)?;
+                Some((vector || member_vector, rank.max(member_rank)))
+            }),
+        _ => atomic_rank(ty).map(|rank| (false, rank)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -1822,6 +1955,9 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         );
         let positional_interface = Ty::new(
@@ -1837,79 +1973,11 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
-    }
-}
-
-/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
-/// only when both sides know it: a written `GroupBy{...}` names no keys.
-fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
-    match (left, right) {
-        (
-            FrameKind::GroupBy {
-                lazy: left_lazy,
-                keys: left_keys,
-            },
-            FrameKind::GroupBy {
-                lazy: right_lazy,
-                keys: right_keys,
-            },
-        ) => {
-            left_lazy == right_lazy
-                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
-        }
-        _ => left == right,
-    }
-}
-
-/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
-/// whether it is a vector. A union of numeric types ranks as its widest member, since every
-/// member coerces to that one (`double | integer` widens a binding to `double`).
-/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
-/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
-/// it). `None` when a type is not numeric.
-pub(crate) fn numeric_join<'db>(
-    db: &'db dyn Db,
-    types: impl IntoIterator<Item = Ty<'db>>,
-) -> Option<Ty<'db>> {
-    let (vector, rank) = types
-        .into_iter()
-        .try_fold((false, 0), |(vector, rank), ty| {
-            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
-            Some((vector || ty_vector, rank.max(ty_rank)))
-        })?;
-    let element = scalar(
-        db,
-        match rank {
-            2 => Atomic::Double,
-            1 => Atomic::Integer,
-            _ => Atomic::Logical,
-        },
-    );
-    Some(if vector {
-        Ty::new(db, TyKind::Vector(element))
-    } else {
-        element
-    })
-}
-
-fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
-    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
-        TyKind::Scalar(Atomic::Logical) => Some(0),
-        TyKind::Scalar(Atomic::Integer) => Some(1),
-        TyKind::Scalar(Atomic::Double) => Some(2),
-        _ => None,
-    };
-    match ty.kind(db) {
-        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
-        TyKind::Union(members) => members
-            .iter()
-            .try_fold((false, 0), |(vector, rank), member| {
-                let (member_vector, member_rank) = numeric_rank(db, *member)?;
-                Some((vector || member_vector, rank.max(member_rank)))
-            }),
-        _ => atomic_rank(ty).map(|rank| (false, rank)),
     }
 }

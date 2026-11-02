@@ -2,31 +2,33 @@
 #@ param CENTERS int 2 5
 #@ param ROWS int 30 200
 # Unsupervised grouping with k-means and hierarchical clustering.
-#: fn([rows]: integer, [centers]: integer, [seed]: integer) -> list{points: matrix, membership: integer[]}
-blobs_@ID@ <- function(rows = @ROWS@L, centers = @CENTERS@L, seed = 6L) {
+#@ typed
+blobs_@ID@ <- function(rows: integer = @ROWS@L, centers: integer = @CENTERS@L, seed: integer = 6L) -> Record{points: matrix, membership: integer[]} {
+#@ untyped
+blobs_@ID@ <- function(rows: integer = @ROWS@L, centers: integer = @CENTERS@L, seed: integer = 6L) -> list{points: matrix, membership: integer[]} {
+#@ end
   set.seed(seed)
   means <- matrix(seq_len(centers * 2L) * 6, nrow = centers)
   membership <- sample(seq_len(centers), rows, replace = TRUE)
-  #: matrix
-  centres <- means[membership, , drop = FALSE]
+  centres: matrix <- means[membership, , drop = FALSE]
   points <- centres + matrix(stats::rnorm(rows * 2L), ncol = 2L)
+#@ typed
+  (points = points, membership = membership)
+#@ untyped
   list(points = points, membership = membership)
+#@ end
 }
 
-#: fn(points: matrix, [centers]: integer) -> integer[]
-cluster_kmeans_@ID@ <- function(points, centers = @CENTERS@L) {
+cluster_kmeans_@ID@ <- function(points: matrix, centers: integer = @CENTERS@L) -> integer[] {
   stats::kmeans(points, centers = centers, nstart = 25L)$cluster
 }
 
-#: fn(points: matrix, [centers]: integer) -> integer[]
-cluster_hierarchical_@ID@ <- function(points, centers = @CENTERS@L) {
+cluster_hierarchical_@ID@ <- function(points: matrix, centers: integer = @CENTERS@L) -> integer[] {
   stats::cutree(stats::hclust(stats::dist(points), method = "ward.D2"), k = centers)
 }
 
-#: fn(cluster: integer[], truth: integer[]) -> double
-purity_@ID@ <- function(cluster, truth) {
-  #: integer[]
-  majority <- apply(table(cluster, truth), 1, max)
+purity_@ID@ <- function(cluster: integer[], truth: integer[]) -> double {
+  majority: integer[] <- apply(table(cluster, truth), 1, max)
   sum(majority) / length(truth)
 }
 #@ test

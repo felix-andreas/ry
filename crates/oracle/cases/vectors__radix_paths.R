@@ -1,0 +1,51 @@
+# The radix order's paths: already sorted keys, dense keys counted in one pass, short slices,
+# and the digit sort for wide keys, with runs of ties on an earlier key both short and long.
+set.seed(7)
+n <- 5000L
+wide <- round(runif(n, -1e6, 1e6), 3)
+dense <- sample.int(40L, n, replace = TRUE)
+few <- sample.int(3L, n, replace = TRUE)
+digest <- function(o) c(length(o), sum(as.numeric(o) * seq_along(o)) %% 1e9, head(o, 5), tail(o, 5))
+digest(order(wide))
+digest(order(wide, decreasing = TRUE))
+digest(order(dense))
+digest(order(dense, wide))
+digest(order(few, dense, -wide))
+digest(order(dense, decreasing = TRUE))
+digest(order(sort(wide)))
+digest(order(rev(sort(wide))))
+digest(order(c(wide, NA, NaN, -0, 0, Inf, -Inf)))
+digest(order(c(wide, NA, NaN), na.last = FALSE))
+digest(order(c(dense, NA, NA, 1L), na.last = NA))
+digest(order(c(wide, wide), method = "radix"))
+digest(order(c(1e300, -1e300, 5e-324, -5e-324, wide)))
+digest(sort(wide, method = "radix"))
+x <- sample(c(1:20, NA), 2000, replace = TRUE)
+digest(order(x, -x))
+g <- sort.list(dense, method = "radix")
+digest(g)
+o <- order(c(3L, 1L, 2L, 1L, 3L), c(5, 4, 3, 2, 1))
+o
+
+# match and duplicated through the position table and dense integer ranges.
+match(c(5L, NA, 99L, -3L), c(NA, -3L, 5L, 5L))
+match(c(5L, NA, 99L), c(1L, 5L), nomatch = 0L)
+match(c(0, -0, NaN, NA, 1.5), c(NA, NaN, 0, 1.5))
+match(c("b", NA, "z"), c(NA, "a", "b"))
+match(c(2147483647L, -2147483647L), c(-2147483647L, 2147483647L))
+big <- c(1e9L, 1L, 1e9L, -5L, NA, NA)
+duplicated(big)
+duplicated(big, fromLast = TRUE)
+unique(c(0, -0, NaN, NA, NaN, NA, 1))
+anyDuplicated(c(3, 1, 2, 1))
+anyDuplicated(c(3, 1, 2, 1), fromLast = TRUE)
+digest(match(wide, sort(wide)))
+digest(which(duplicated(round(wide / 1000))))
+digest(match(dense * 1000003L, unique(dense * 1000003L)))
+# Integer keys with NA at either end, in either direction, including the extreme values.
+small <- c(3L, NA, -2147483647L, 2147483647L, 0L, NA, -1L, 3L)
+for (decreasing in c(FALSE, TRUE)) for (na.last in c(TRUE, FALSE, NA)) {
+  print(order(small, decreasing = decreasing, na.last = na.last, method = "radix"))
+  print(order(small, -small, decreasing = decreasing, na.last = na.last, method = "radix"))
+}
+print(sort(small, method = "radix", decreasing = TRUE))

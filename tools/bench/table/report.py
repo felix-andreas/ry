@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Runs the table benchmark under data.table, as R code on ry's DataFrame, and on the ry engine from
-Rust, one engine after the other so they never share the CPU, and prints a Markdown table of the
-faster of each question's two runs. With --write, the table replaces the one between the
-`bench-table:<rows>` markers in docs/src/content/docs/contributing/design/r-runtime.md.
+Rust, one engine after the other so they never share the CPU, and prints a Markdown table of
+the faster of each question's two runs and of each engine's peak resident memory. With --write,
+the table replaces the one between the `bench-table:<rows>` markers in
+docs/src/content/docs/contributing/design/r-runtime.md.
 
 The data is generated on first use. data.table must be installed in the library named by
 RY_BENCH_RLIB (default ~/R/library). Build ry, libR and the Rust driver first (`just bench-table`
 does).
 
-Usage: tools/bench/table/report.py <data-dir> [--rows 1e7] [--groupby-only] [--write]
+Usage: tools/bench/table/report.py <data-dir> [--rows 1e7] [--groupby-only | --joins-only] [--write]
+
+A limited run writes between its own markers, `bench-table:<rows>-groupby` or
+`bench-table:<rows>-joins`.
 """
-import argparse, json, math, os, pathlib, re, subprocess, sys
+import argparse, json, math, os, pathlib, re, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -43,28 +47,32 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dir")
     parser.add_argument("--rows", default="1e7")
-    parser.add_argument("--groupby-only", action="store_true")
+    limit = parser.add_mutually_exclusive_group()
+    limit.add_argument("--groupby-only", action="store_true")
+    limit.add_argument("--joins-only", action="store_true")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     data = pathlib.Path(args.dir).resolve()
     rlib = os.environ.get("RY_BENCH_RLIB", os.path.expanduser("~/R/library"))
     env = dict(os.environ, RY_BENCH_RLIB=rlib)
-    only = ["groupby"] if args.groupby_only else []
+    only = ["groupby"] if args.groupby_only else ["joins"] if args.joins_only else []
 
     prepare(data, args.rows, only, env)
     engines = [
         ("data.table", ["Rscript", str(here / "datatable.R"), str(data), *only]),
         ("ry, from R", [str(root / "target/release/ry"), "run", str(here / "ry.R"), str(data), *only]),
-        ("ry, from Rust", [rust_driver(), str(data), *(["--groupby-only"] if only else [])]),
+        ("ry, from Rust", [rust_driver(), str(data), *(f"--{part}-only" for part in only)]),
     ]
     results = {}
+    peaks = {}
     for name, command in engines:
         print(f"== {name}", file=sys.stderr, flush=True)
-        output = subprocess.run(command, env=env, capture_output=True, text=True, cwd=root)
-        sys.stderr.write(output.stdout)
-        if output.returncode != 0:
-            sys.exit(f"{name} failed:\n{output.stderr}")
-        results[name] = parse(output.stdout)
+        stdout, errors, status, peak = run(command, env)
+        sys.stderr.write(stdout)
+        if status != 0:
+            sys.exit(f"{name} failed with status {status}:\n{errors}")
+        results[name] = parse(stdout)
+        peaks[name] = peak
 
     questions = list(results["data.table"])
     lines = ["| Question | " + " | ".join(results) + " |", "|---|" + "---|" * len(results)]
@@ -82,25 +90,42 @@ def main():
                 mismatches.append(f"{question}: {name} gives {checksum:.6e}, data.table {reference:.6e}")
         lines.append(f"| {LABELS.get(question, question)} | " + " | ".join(cells) + " |")
     lines.append("| total | " + " | ".join(f"{total:.2f}" for total in totals.values()) + " |")
+    lines.append("| peak memory (GB) | " + " | ".join(f"{peaks[name]:.1f}" for name in results) + " |")
     table = "\n".join(lines)
     print(table)
     if mismatches:
         sys.exit("checksums differ:\n" + "\n".join(mismatches))
     if args.write:
-        write(args.rows, table)
+        write("-".join([args.rows, *only]), table)
+
+
+def run(command, env):
+    """Runs one engine and returns its output, its error output, its exit status, and its peak
+    resident memory in GB. `wait4` reports the peak of this child alone, where `getrusage` would
+    give the largest of every engine run so far. Linux reports it in KiB."""
+    with tempfile.TemporaryFile(mode="w+") as errors:
+        process = subprocess.Popen(
+            command, env=env, stdout=subprocess.PIPE, stderr=errors, text=True, cwd=root
+        )
+        with process.stdout:
+            stdout = process.stdout.read()
+        _, status, usage = os.wait4(process.pid, 0)
+        process.returncode = os.waitstatus_to_exitcode(status)
+        errors.seek(0)
+        return stdout, errors.read(), process.returncode, usage.ru_maxrss * 1024 / 1e9
 
 
 def prepare(data, rows, only, env):
     """Generates whatever data the run needs, and refuses a directory generated at another size,
     whose numbers would land under the wrong heading."""
-    needed = ["groupby.csv"]
-    if not only:
+    needed = []
+    if only != ["joins"]:
+        needed += ["groupby.csv"]
+    if only != ["groupby"]:
         needed += [f"join_{name}.csv" for name in ("x", "small", "medium", "big")]
+    if not only:
         needed += ["rolljoin_prices.csv", "rolljoin_trades.csv"]
     stamp = data / "rows"
-    if (data / "groupby.csv").exists() and not stamp.exists():
-        with open(data / "groupby.csv", "rb") as file:
-            stamp.write_text(f"{sum(1 for _ in file) - 1}\n")
     if stamp.exists() and int(stamp.read_text()) != int(float(rows)):
         sys.exit(f"{data} holds {stamp.read_text().strip()} rows, not {rows}")
     if not all((data / name).exists() for name in needed):
@@ -136,14 +161,14 @@ def parse(stdout):
     return answers
 
 
-def write(rows, table):
+def write(marker, table):
     text = page.read_text()
-    marker = re.escape(rows)
-    pattern = re.compile(rf"(<!-- bench-table:{marker} -->\n)(?:.*?\n)?(<!-- /bench-table:{marker} -->)", re.S)
+    escaped = re.escape(marker)
+    pattern = re.compile(rf"(<!-- bench-table:{escaped} -->\n)(?:.*?\n)?(<!-- /bench-table:{escaped} -->)", re.S)
     if not pattern.search(text):
-        sys.exit(f"no bench-table:{rows} markers in {page}")
+        sys.exit(f"no bench-table:{marker} markers in {page}")
     page.write_text(pattern.sub(lambda match: match.group(1) + table + "\n" + match.group(2), text, count=1))
-    print(f"wrote the {rows} table into {page.relative_to(root)}", file=sys.stderr)
+    print(f"wrote the {marker} table into {page.relative_to(root)}", file=sys.stderr)
 
 
 main()

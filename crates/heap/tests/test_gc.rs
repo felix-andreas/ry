@@ -4,14 +4,14 @@
 
 use {
     heap::{
-        Collection, GcStress, Heap, HeapError,
+        Collection, ENVIRONMENT_BYTES, GcStress, Heap, HeapError, TRIPLE_BYTES,
         arena::Arena,
         object::{NA_REAL, Sexp, SexpType, Slot, gp, is_na_real},
         records::{Fields, Layout},
         strings::Encoding,
     },
     std::collections::HashSet,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations},
 };
 
 #[derive(Clone)]
@@ -152,11 +152,16 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
 fn run(seed: u64, steps: usize, stress: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
-    heap.policy_mut().young_limit = 4096 + rng.below(64 * 1024);
-    heap.policy_mut().young_large_limit = 4096 + rng.below(256 * 1024);
-    if stress {
-        heap.policy_mut().stress = GcStress::EveryAllocation;
-    }
+    heap.update_policy(|policy| {
+        policy.young_limit = 4096 + rng.below(64 * 1024);
+        policy.young_large_limit = 4096 + rng.below(256 * 1024);
+        // Checks the barrier, and that each header's old bit agrees with its mark, before
+        // every minor collection.
+        policy.verify = true;
+        if stress {
+            policy.stress = GcStress::EveryAllocation;
+        }
+    });
     let mut model = Model {
         nodes: Vec::new(),
         roots: Vec::new(),
@@ -337,16 +342,12 @@ fn run(seed: u64, steps: usize, stress: bool) {
 
 #[test]
 fn fuzz_object_graphs_survive_collection() {
-    for seed in 0..fuzz_iterations(40) as u64 {
-        run(seed, 400, false);
-    }
+    for_each_seed(40, |seed| run(seed, 400, false));
 }
 
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
-    for seed in 0..fuzz_iterations(8) as u64 {
-        run(1000 + seed, 150, true);
-    }
+    for_each_seed(8, |seed| run(1000 + seed, 150, true));
 }
 
 #[test]
@@ -481,7 +482,7 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
                 text: "a\\0b".into()
             })
         );
-        for bytes in [&b"0123\0567abcdefgh"[..], b"abcdefgh01234\0"] {
+        for bytes in [&b"0123\x00567abcdefgh"[..], b"abcdefgh01234\0"] {
             assert!(
                 matches!(
                     heap.mk_char(bytes, Encoding::Native),
@@ -504,6 +505,68 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
             heap.string_count() < count,
             "unreferenced strings leave the table"
         );
+    }
+}
+
+/// The scan that hashes a string also finds its NUL and non-ASCII bytes, reading words that end at
+/// the last byte and may overlap. Every length up to several words and every byte position must
+/// still be seen, and equal bytes must still meet in the table.
+#[test]
+fn every_byte_position_is_scanned_at_every_length() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.inhibit_collection();
+        for length in 1..=48usize {
+            let text: Vec<u8> = (0..length).map(|index| b'a' + (index % 26) as u8).collect();
+            let first = heap.mk_char(&text, Encoding::Utf8).expect("mk_char");
+            assert!(first.has_gp(gp::ASCII), "length {length} is ASCII");
+            assert_eq!(first.bytes(), &text[..]);
+            let copy = text.clone();
+            let again = heap.mk_char(&copy, Encoding::Latin1).expect("mk_char");
+            assert_eq!(first, again, "length {length} interns once");
+            for position in 0..length {
+                let mut with_nul = text.clone();
+                with_nul[position] = 0;
+                assert!(
+                    matches!(
+                        heap.mk_char(&with_nul, Encoding::Native),
+                        Err(HeapError::EmbeddedNul { .. })
+                    ),
+                    "a NUL at {position} of {length} is found"
+                );
+                let mut high = text.clone();
+                high[position] = 0xE9;
+                let latin1 = heap.mk_char(&high, Encoding::Latin1).expect("mk_char");
+                assert_eq!(
+                    Encoding::of(latin1),
+                    Encoding::Latin1,
+                    "a high byte at {position} of {length} is not ASCII"
+                );
+                assert_ne!(latin1, first, "one changed byte at {position} of {length}");
+                let bytes = heap.mk_char(&high, Encoding::Bytes).expect("mk_char");
+                assert_ne!(latin1, bytes, "the encoding is part of the key");
+            }
+        }
+        heap.allow_collection();
+    }
+}
+
+/// The allocator reserves address space lazily, so without a bound a petabyte vector would be
+/// handed out and fail only when touched. GNU R reports it as an allocation failure up front.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vector_larger_than_the_machine_is_refused() {
+    if std::fs::read("/proc/sys/vm/overcommit_memory").is_ok_and(|mode| mode.trim_ascii() == b"1") {
+        return;
+    }
+    let mut heap = Heap::new();
+    unsafe {
+        let length = 1isize << 47;
+        assert!(matches!(
+            heap.alloc_vector(SexpType::Real, length),
+            Err(HeapError::CannotAllocate { .. })
+        ));
+        assert!(heap.alloc_vector(SexpType::Real, 1 << 20).is_ok());
     }
 }
 
@@ -653,8 +716,8 @@ fn the_protect_stack_reports_imbalance_in_gnu_r_words() {
 
 #[test]
 fn fuzz_arena_watermarks_nest() {
-    let mut rng = SplitMix64(7);
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
         let mut arena = Arena::default();
         let mut marks = Vec::new();
         let mut blocks: Vec<(usize, u8, usize)> = Vec::new();
@@ -690,6 +753,135 @@ fn fuzz_arena_watermarks_nest() {
             }
             let encoded = Arena::encode(arena.watermark());
             assert_eq!(Arena::decode(encoded), arena.watermark());
+        }
+    });
+}
+
+#[test]
+fn bump_runs_fill_the_holes_a_collection_leaves() {
+    let mut heap = Heap::new();
+    unsafe {
+        // Frees what the heap's own start left behind, so the only holes are the test's.
+        heap.collect(Collection::Major);
+        let count = 3000;
+        let kept = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(kept);
+        for index in 0..count * 2 {
+            let scalar = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            scalar.slice_mut::<i32>()[0] = index as i32;
+            // Every other object dies, so the survivors leave runs of one free slot.
+            if index % 2 == 0 {
+                heap.set_element(kept, index / 2, scalar);
+            }
+        }
+        heap.collect(Collection::Minor);
+        let pages = heap.stats().pages;
+        let fresh = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(fresh);
+        for index in 0..count {
+            let scalar = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            scalar.slice_mut::<i32>()[0] = -(index as i32) - 1;
+            heap.set_element(fresh, index, scalar);
+        }
+        heap.collect(Collection::Minor);
+        assert_eq!(
+            heap.stats().pages,
+            pages,
+            "the holes left room for every new object"
+        );
+        for index in 0..count {
+            assert_eq!(kept.element(index).slice::<i32>(), &[(index * 2) as i32]);
+            assert_eq!(fresh.element(index).slice::<i32>(), &[-(index as i32) - 1]);
+        }
+    }
+}
+
+#[test]
+fn a_reserved_batch_survives_the_collections_that_follow_it() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.update_policy(|policy| {
+            policy.stress = GcStress::EveryAllocation;
+            policy.verify = true;
+        });
+        let count = 200;
+        let kept = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.root(kept);
+        for index in 0..count {
+            let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            value.slice_mut::<i32>()[0] = index as i32;
+            // Only `value` and `kept` are rooted while the batch is built, so the reservation's
+            // own collection must keep `value` and nothing in the batch may collect.
+            heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES, &[value]);
+            let nil = heap.nil();
+            let env = heap.alloc_environment_uncollected(nil, 1).expect("alloc");
+            let inner = heap.cons_uncollected(value, nil).expect("alloc");
+            let outer = heap.cons_uncollected(env, inner).expect("alloc");
+            heap.set_element(kept, index, outer);
+        }
+        heap.collect(Collection::Major);
+        for index in 0..count {
+            let outer = kept.element(index);
+            assert_eq!(outer.car().kind(), SexpType::Environment);
+            assert_eq!(outer.cdr().car().slice::<i32>(), &[index as i32]);
+        }
+    }
+}
+
+/// The intern table against a model through growth, removal by minor and major collections,
+/// and the rebuilds that drop its tombstones: a rooted string always interns to itself, and
+/// after a major collection the table holds exactly the strings still rooted.
+#[test]
+fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
+    let mut random = SplitMix64(0x5EED_7AB1E);
+    let mut heap = Heap::new();
+    unsafe {
+        let base = heap.string_count();
+        let base_mark = heap.handle_mark();
+        let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
+        for round in 0..fuzz_iterations(24) {
+            for _ in 0..random.below(20_000) {
+                // One string in a hundred is longer than the largest small-object slot, so the
+                // large strings' own young list is exercised too.
+                let padding = if random.chance(1, 100) { 3000 } else { 0 };
+                let bytes = format!("s{round}_{}{}", random.below(50_000), "x".repeat(padding))
+                    .into_bytes();
+                let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
+                if random.chance(1, 4) {
+                    heap.root(string);
+                    rooted.push((bytes, string));
+                }
+            }
+            rooted.retain(|_| !random.chance(1, 3));
+            // The kept strings move into one list while every string is still rooted.
+            let holder = heap
+                .alloc_vector(SexpType::List, rooted.len() as isize)
+                .unwrap();
+            for (index, (_, string)) in rooted.iter().enumerate() {
+                heap.set_element(holder, index, *string);
+            }
+            heap.release_handles(base_mark);
+            heap.root(holder);
+            let kind = if random.chance(1, 3) {
+                Collection::Major
+            } else {
+                Collection::Minor
+            };
+            heap.collect(kind);
+            for (bytes, string) in &rooted {
+                assert_eq!(heap.mk_char(bytes, Encoding::Native).unwrap(), *string);
+            }
+            if kind == Collection::Major {
+                let distinct: HashSet<&[u8]> =
+                    rooted.iter().map(|(bytes, _)| bytes.as_slice()).collect();
+                assert_eq!(heap.string_count(), base + distinct.len(), "round {round}");
+            }
         }
     }
 }

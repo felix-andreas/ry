@@ -361,7 +361,9 @@ object. Long vectors use `R_xlen_t` lengths throughout.
 
 - **Interned strings.** `CHARSXP`s live in a global, weakly held intern table keyed by bytes and
   encoding, so pointer equality means string equality, as native code expects. Encoding flags
-  (`IS_UTF8`, `IS_ASCII`) are stored at interning time.
+  (`IS_UTF8`, `IS_ASCII`) are stored at interning time. The table is one open-addressed array of
+  slots that pack each address with hash bits, so a lookup touches a string only when the hash
+  bits match and its cost does not grow with the number of live strings.
 - **Symbols** are interned `SYMSXP`s with a cached global binding cell, which is what makes base
   function lookup and JIT watchpoints cheap.
 - **Pairlists** are kept for language objects, attributes and `.External` arguments, because native
@@ -560,15 +562,18 @@ that the gain over a good interpreter is real but modest.
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
-  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  3000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  only a few dozen times, which made the load slower, and on a test suite, whose bodies mostly run
+  a few hundred to a few thousand times, 1000 entries cost more to compile than it saved. A fully typed closure, one with an inline
   type on every formal, compiles on its first entry instead: the declared types seed the type
-  feedback of the instructions that have not run yet, and the guards on them stay. When even the
-  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
-  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
-  the body, which then follows the thresholds.
+  feedback of the instructions that have not run yet, and the guards on them stay. A base builtin
+  call or an element-wise operation that has not returned yet takes the type the builtin computes
+  for its argument types (`seq_len(n)` an integer vector, `sum` of doubles a double, `x * y` on
+  double vectors a double vector), checked after the call like any fed-back type. When an
+  operand's type is still unknown (the result of an untyped closure, say), the first-call compile
+  is declined without counting against the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -587,8 +592,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   position without the general matcher. Evaluating early is invisible only if nothing can assign
   what an argument reads before the callee forces it, so the callee must be frame-safe: its body
   and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
-  The call goes through tier 0 instead when a calling handler is established, because a handler
-  could run R code in between. A call of a small closure defined in the same body, which computes a scalar
+  When a calling handler is established, a handler could run R code in between, so compiled code
+  then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
+  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar
   from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
   such a computation, branches, locals and calls of itself or other such closures included, is
   compiled once per argument type to a native function on unboxed values with no frame
@@ -615,8 +621,8 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
-  types for builtins and for subscripts, which the early profiles of the next section need to cover
-  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
+  types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
+  bodies.
 
 ### How the static types feed the JIT
 
@@ -814,59 +820,92 @@ generates the data on first use), and `--groupby-only` limits a run to the group
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
-same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
-driven from Rust, without R.
+same checksums. Each cell is the faster of two runs, in seconds, and the last row is each engine's
+peak resident memory over the whole run. The last column is the same engine driven from Rust,
+without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
-| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
-| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
-| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
-| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
-| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
-| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
-| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
-| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
-| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
-| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
-| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
-| keyed rolling join | 0.127 | 0.115 | 0.083 |
-| total | 25.91 | 6.27 | 9.16 |
+| groupby q1: `sum(v1)` by `id1` | 0.172 | 0.034 | 0.026 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.204 | 0.035 | 0.024 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.252 | 0.105 | 0.112 |
+| groupby q4: three means by `id4` | 0.391 | 0.145 | 0.125 |
+| groupby q5: three sums by `id6` | 0.376 | 0.126 | 0.126 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.637 | 0.151 | 0.158 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.727 | 0.068 | 0.065 |
+| groupby q8: the two largest `v3` by `id6` | 0.753 | 0.291 | 0.241 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.871 | 0.081 | 0.081 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.998 | 0.671 | 0.558 |
+| `:=` on a whole column, 100 times | 5.432 | 0.301 | 0.296 |
+| `:=` on 1% of rows, 100 times | 3.722 | 0.915 | 0.872 |
+| `:=` adding a column, 100 times | 5.865 | 1.074 | 0.770 |
+| join q1: small, on `id1` | 0.340 | 0.129 | 0.102 |
+| join q2: medium, on `id2` | 0.469 | 0.142 | 0.113 |
+| join q3: medium, left, on `id2` | 0.623 | 0.149 | 0.138 |
+| join q4: medium, on factor `id5` | 0.446 | 0.135 | 0.113 |
+| join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
+| keyed rolling join | 0.137 | 0.100 | 0.109 |
+| total | 27.01 | 5.54 | 4.86 |
+| peak memory (GB) | 6.9 | 8.0 | 7.6 |
 <!-- /bench-table:1e7 -->
 
-At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
-that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
-out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
-at 6.4 GB, and both grow with the row count.
+At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
+group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
+machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At both
+sizes the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
+The R script reads only the answer's numeric columns back into R for its checksum (`DataFrame.schema`
+picks them), because reading q10's six key columns as R vectors would add about 1 GB at 5e7 rows.
 
-<!-- bench-table:5e7 -->
+<!-- bench-table:5e7-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
-| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
-| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
-| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
-| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
-| total | 29.84 | 11.83 | 15.97 |
-<!-- /bench-table:5e7 -->
+| groupby q1: `sum(v1)` by `id1` | 0.762 | 0.152 | 0.132 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.919 | 0.167 | 0.164 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.284 | 0.618 | 0.608 |
+| groupby q4: three means by `id4` | 1.683 | 0.609 | 0.577 |
+| groupby q5: three sums by `id6` | 1.356 | 0.636 | 0.680 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.222 | 0.673 | 0.863 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.120 | 0.470 | 0.480 |
+| groupby q8: the two largest `v3` by `id6` | 3.233 | 1.659 | 1.576 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.072 | 0.311 | 0.309 |
+| groupby q10: `sum(v3)`, count by all six ids | 10.177 | 4.036 | 4.100 |
+| total | 30.83 | 9.33 | 9.49 |
+| peak memory (GB) | 6.6 | 6.1 | 5.9 |
+<!-- /bench-table:5e7-groupby -->
+
+<!-- bench-table:1e8-groupby -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.990 | 0.293 | 0.301 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.906 | 2.519 | 1.573 |
+| groupby q4: three means by `id4` | 3.602 | 1.214 | 1.168 |
+| groupby q5: three sums by `id6` | 2.741 | 1.836 | 1.539 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.343 | 1.533 | 1.617 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 11.334 | 1.188 | 1.163 |
+| groupby q8: the two largest `v3` by `id6` | 7.691 | 4.108 | 3.491 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 4.513 | 0.708 | 0.536 |
+| groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
+| total | 69.22 | 22.42 | 20.81 |
+| peak memory (GB) | 13.7 | 13.4 | 12.6 |
+<!-- /bench-table:1e8-groupby -->
+
+The join questions are measured separately (`just bench-table 2e7 --joins-only`), because their
+inputs are larger than the group-by file. At 2e7 rows ry answers the five joins in 3.7 s from R
+(3.1 s from Rust) against data.table's 22.3 s, but peaks at 11.6 GB against 5.2 GB. Nearly all of
+that memory is reading the CSVs: `join_x` alone takes 4.9 GB, because every distinct `id4`..`id6`
+string becomes a factor level and a Polars Enum spends about 135 bytes per level (it stores each
+level twice, in a string array and in a hash map). At 1e8 rows neither engine fits the inputs in
+15 GB: data.table and ry both run out of memory reading `join_x` with factors, and ry reading the
+key columns as text loads `join_x` at an 11.7 GB peak but cannot then load `join_big`. Closing that
+gap needs a factor type outside Polars (integer codes plus one level array) and a text reader that
+does not hold the parsed chunks and the final columns at once; `backlog.md` tracks both.
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
-in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
-allocation-heavy questions, because the allocator returns large blocks to the OS between queries
-(`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
+in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
+same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
+calls around it.
 
 `tools/bench/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the
@@ -899,6 +938,43 @@ two runs is 0.086 s against 0.10 s) and every other helper is faster than on GNU
 (1e8 rows) needs more than the 15 GB of memory the measuring machine has, because `rbindlist(list(x,
 x))` alone holds 15 GB of columns.
 
+
+### Real code: the benchmark modules
+
+The three benchmark code bases each have a module built on data.table (`tables` in data science,
+`market_data` in finance, `trials` in biostatistics). Their templates carry a DataFrame variant
+next to the data.table code, and the typed program uses it, so the typed module is ordinary ry
+code that checks clean in strict mode. `just bench-frames` generates both variants from one seed,
+strict-checks the typed one, runs each module's functions end to end on the same inputs (the
+driver is `tools/bench/frames/driver.R`), and refuses the result if any step's checksum differs.
+Each cell is a step's faster run in seconds; memory is each engine's peak resident size.
+
+<!-- bench-frames:start -->
+10,000,000 rows:
+
+| Step | data.table on GNU R | data.table on ry | DataFrame on ry, typed |
+|---|---:|---:|---:|
+| `tables`: `make_events` | 1.714 | 1.245 | 1.601 |
+| `tables`: `summarise_groups` | 0.547 | 0.425 | 0.433 |
+| `tables`: `add_features` | 3.734 | 3.643 | 1.727 |
+| `tables`: `join_labels` | 1.301 | 1.586 | 0.255 |
+| `tables`: `reshape_wide` | 0.318 | 0.358 | 0.429 |
+| `market_data`: `fetch_prices` | 1.193 | 0.724 | 1.249 |
+| `market_data`: `latest_prices` | 1.129 | 0.818 | 0.393 |
+| `market_data`: `to_wide` | 2.590 | 2.589 | 0.884 |
+| `market_data`: `read_reference` | 0.653 | 0.678 | 0.590 |
+| `trials`: `enrol` | 1.023 | 0.514 | 0.647 |
+| `trials`: `visit_schedule` | 4.274 | 3.370 | 1.488 |
+| `trials`: `visits_per_month` | 1.898 | 1.797 | 1.929 |
+| total | 20.37 | 17.75 | 11.62 |
+| peak memory (GB) | 1.53 | 2.29 | 2.24 |
+<!-- bench-frames:end -->
+
+The typed program wins where the engine does the work (windows, joins, pivots, grouped
+aggregation) and loses a little where a step mostly builds R vectors and hands them over. Building
+a DataFrame copies each column into the engine, where `data.table()` keeps R's vectors, which is
+most of the gap in `make_events`, `fetch_prices` and `enrol`; `visits_per_month` spends its time in
+`lubridate::floor_date` on both sides.
 
 ## 8. Typing integration
 
@@ -1060,7 +1136,7 @@ Each step ends with something real running, and each one is a large, whole chang
    Magick++. Two package-test rates are tracked, both counting only the packages whose
    tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
    ry passes the tests of 137 of 144 (95.1%). With the packages ry installed itself
-   (`.corpus/ry-library`, `oracle packages --installed`), it passes 126 of 164 (76.8%). The rest
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 154 of 164 (93.9%). The rest
    fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime

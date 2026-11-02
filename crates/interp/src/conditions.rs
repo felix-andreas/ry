@@ -114,7 +114,7 @@ pub unsafe fn signal_error(failure: RError) -> Unwind {
 
 unsafe fn call_simple_error_handler(handler: Sexp, message: &str, call: Sexp) -> R<()> {
     let hook = values::install(".handleSimpleError")?;
-    let quoted_call = values::call(symbols().quote, &[call])?;
+    let quoted_call = base_quote(call)?;
     let text = scalar_string(message)?;
     if crate::heap()
         .frame_cell(values::base_namespace(), hook)
@@ -417,19 +417,19 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     }
 }
 
-/// Signals a warning from a builtin: the calling handlers run through `.signalSimpleWarning`,
-/// as in GNU R, and without one the warning is deferred or printed per `options(warn)`.
+/// Signals a warning from a builtin through `.signalSimpleWarning(message, base::quote(call))`,
+/// whose `.dfltWarn` defers or prints it per `options(warn)`. GNU R takes this route even with no
+/// warning handler established, and the frames it pushes are observable: rlang recognises a
+/// warning promoted to an error by finding `.signalSimpleWarning` on the stack.
 pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     let call = resolve_call(call);
     let message = message.into();
-    let classes: [&[u8]; 3] = [b"simpleWarning", b"warning", b"condition"];
     let hook = values::install(".signalSimpleWarning")?;
-    if find_handler(&interp().handlers, &classes).is_some()
-        && crate::heap()
-            .frame_cell(values::base_namespace(), hook)
-            .is_some()
+    if crate::heap()
+        .frame_cell(values::base_namespace(), hook)
+        .is_some()
     {
-        let quoted_call = values::call(symbols().quote, &[call])?;
+        let quoted_call = base_quote(call)?;
         let text = scalar_string(&message)?;
         let hook_call = values::call(hook, &[text, quoted_call])?;
         let visible = interp().visible;
@@ -438,6 +438,17 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         return Ok(());
     }
     default_warning(call, &message)
+}
+
+/// `base::quote(call)`, the form in which GNU R hands a condition's call to the R-level hooks
+/// `.signalSimpleWarning` and `.handleSimpleError`, where `sys.calls()` shows it.
+unsafe fn base_quote(call: Sexp) -> R<Sexp> {
+    let quote = values::call(
+        symbols().double_colon,
+        &[values::install("base")?, symbols().quote],
+    )?;
+    crate::heap().root(quote);
+    values::call(quote, &[call])
 }
 
 /// A warning attributed to the innermost closure call.
@@ -474,11 +485,27 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
+    let limit = warning_limit();
     let state = interp();
-    if state.warnings.len() < 50 {
+    if state.warnings.len() < limit {
         state.warnings.push((call, message.to_owned()));
     }
     Ok(())
+}
+
+/// How many deferred warnings are kept: `getOption("nwarnings")`, 50 by default.
+pub unsafe fn warning_limit() -> usize {
+    let option = crate::envir::get_option("nwarnings");
+    let value = if option == nil() {
+        f64::NAN
+    } else {
+        values::as_real_scalar(option)
+    };
+    if value.is_finite() && value >= 1.0 {
+        value as usize
+    } else {
+        50
+    }
 }
 
 /// A warning printed as it happens: the first line of the call, then the message on the same
@@ -521,13 +548,15 @@ pub unsafe fn print_warnings() -> R<()> {
         }
         text.push('\n');
     } else {
+        let limit = warning_limit();
         match warnings.len() {
             ..=10 => text.push_str("Warning messages:\n"),
-            count @ ..50 => text.push_str(&format!(
+            count if count < limit => text.push_str(&format!(
                 "There were {count} warnings (use warnings() to see them)\n"
             )),
-            _ => text
-                .push_str("There were 50 or more warnings (use warnings() to see the first 50)\n"),
+            _ => text.push_str(&format!(
+                "There were {limit} or more warnings (use warnings() to see the first {limit})\n"
+            )),
         }
         if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {

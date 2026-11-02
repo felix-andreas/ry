@@ -1,0 +1,25 @@
+[stdout]
+| [1] 1
+| [1] "2020-02-01" "2020-02-01"
+| 1 zero-length component [[1]] in non-empty "POSIXlt" structure 
+| 2 zero-length component [[2]] in non-empty "POSIXlt" structure 
+| 3 zero-length component [[3]] in non-empty "POSIXlt" structure 
+| 4 zero-length component [[4]] in non-empty "POSIXlt" structure 
+| 5 zero-length component [[5]] in non-empty "POSIXlt" structure 
+| 6 zero-length component [[6]] in non-empty "POSIXlt" structure 
+| 7 zero-length component [[7]] in non-empty "POSIXlt" structure 
+| 8 zero-length component [[8]] in non-empty "POSIXlt" structure 
+| 9 zero-length component [[9]] in non-empty "POSIXlt" structure 
+| 10 zero-length component [[10]] in non-empty "POSIXlt" structure 
+| 11 zero-length component [[11]] in non-empty "POSIXlt" structure 
+| 1 zero-length component [[1]] in non-empty "POSIXlt" structure 
+| 7 2020-01-01 10:00:00 
+| 8 2020-01-01 10:00:00 
+| 9 zero-length component [[9]] in non-empty "POSIXlt" structure 
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

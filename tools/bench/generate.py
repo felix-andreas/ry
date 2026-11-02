@@ -9,11 +9,15 @@ with a testthat test. The output is deterministic for a given seed.
 
 Usage:
     python3 -I generate.py --out DIR [--domain NAME|all] [--lines N] [--files N] [--seed N]
-                           [--typed] [--only TEMPLATE,...]
+                           [--typed] [--roxygen] [--only TEMPLATE,...] [--ry PATH]
 
-The templates carry `#:` type annotations. By default they are stripped, which gives the plain
-R code base. `--typed` keeps them and turns on ry's strict mode in `ry.toml`, so ry checks the code
-base as fully typed strict code against the dependency types shipped in `types/`.
+The templates carry inline type annotations. By default the generated package is erased with
+`ry debug erase` (the same erasure `ry R` runs), which gives the plain R code base, so a ry binary
+must be built (`--ry`, default `target/release/ry`). `--typed` keeps the annotations and turns on
+ry's strict mode in `ry.toml`, so ry checks the code base as fully typed strict code against the
+dependency types shipped in `types/`, and ry's runtime checks and compiles the typed functions.
+`--roxygen` documents every exported definition with a roxygen2 block (a title, its parameters,
+`@export`) and leaves `NAMESPACE` and `man/` to roxygen2, which is what `ry document` is timed on.
 `--only` restricts generation to the named templates, which is how a slice is checked alone.
 
 Template format (see templates/README.md): header lines start with `#@`, the R code
@@ -27,6 +31,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 
 IMPORTS = """
@@ -70,7 +75,9 @@ def main():
     parser.add_argument("--files", type=int, help="number of R files per package (default: lines / 600)")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--typed", action="store_true", help="keep the type annotations and turn on strict mode")
+    parser.add_argument("--roxygen", action="store_true", help="document exports with roxygen2 blocks")
     parser.add_argument("--only", help="comma-separated template names to draw from, such as returns,caching")
+    parser.add_argument("--ry", help="the ry binary that erases annotations for an untyped run (default: target/release/ry)")
     args = parser.parse_args()
     if args.lines < 1 or (args.files is not None and args.files < 1):
         parser.error("--lines and --files must be at least 1")
@@ -84,7 +91,9 @@ def main():
             parser.error(f"unknown templates: {', '.join(sorted(wanted - known))}")
         templates = {domain: [template for template in loaded if template.name in wanted] for domain, loaded in templates.items()}
     if not args.typed:
-        templates = {domain: [strip_annotations(template) for template in loaded] for domain, loaded in templates.items()}
+        args.ry = args.ry or os.path.join(here, "..", "..", "target", "release", "ry")
+        if not os.path.exists(args.ry):
+            parser.error(f"an untyped run erases annotations with ry, and {args.ry} does not exist; build it or pass --ry")
     for domain in DOMAINS if args.domain == "all" else [args.domain]:
         if not templates[domain] and not templates["shared"]:
             continue
@@ -101,9 +110,13 @@ def load_templates(directory, domain):
 
 
 def parse_template(name, domain, text):
-    weight, params, ns, code, test, in_test = 1, [], [], [], [], False
+    weight, params, ns, code, test, in_test, branch = 1, [], [], [], [], False, None
     for line in text.splitlines():
-        if line.startswith("#@"):
+        marker = VARIANT.match(line)
+        if marker:
+            branch = None if marker.group(1) == "end" else marker.group(1)
+            (test if in_test else code).append(line)
+        elif line.startswith("#@"):
             fields = line[2:].strip().split(None, 1)
             key, rest = fields[0], fields[1] if len(fields) > 1 else ""
             if key == "test":
@@ -113,7 +126,8 @@ def parse_template(name, domain, text):
             elif key == "param":
                 params.append(parse_param(rest))
             elif key == "ns":
-                ns.append(rest)
+                # A NAMESPACE line inside a variant block belongs to that variant only.
+                ns.append((branch, rest))
             else:
                 raise SystemExit(f"{domain}/{name}: unknown header `{key}`")
         else:
@@ -122,35 +136,23 @@ def parse_template(name, domain, text):
 
 
 ANNOTATION = re.compile(r"^[ \t]*#:.*\n", flags=re.M)
+VARIANT = re.compile(r"^[ \t]*#@ (typed|untyped|end)[ \t]*$")
 
 
-def annotated(args, text):
-    return typed_program(text) if args.typed else ANNOTATION.sub("", text)
-
-
-TYPED_LINE = re.compile(r"^([ \t]*)#:= ?(.*)$")
-
-
-def typed_program(text):
-    """The typed program: a run of `#:= CODE` lines replaces, one for one, the lines right after
-    it, so the typed program can use ry's records, tuples and tags where the untyped one, which
-    drops every `#:` line, keeps plain lists."""
-    lines, out, index = text.split("\n"), [], 0
-    while index < len(lines):
-        run = []
-        while index < len(lines) and (match := TYPED_LINE.match(lines[index])):
-            run.append(match.group(1) + match.group(2))
-            index += 1
-        out.extend(run)
-        index += len(run)
-        if not run and index < len(lines):
-            out.append(lines[index])
-            index += 1
-    return "\n".join(out)
-
-
-def strip_annotations(template):
-    return dataclasses.replace(template, code=ANNOTATION.sub("", template.code), test=ANNOTATION.sub("", template.test))
+def variant(text, typed):
+    """The text between `#@ typed` and `#@ untyped` (or `#@ end`) is the typed run's, and the text
+    between `#@ untyped` and `#@ end` the untyped run's. ry's records, tuples and tags have no
+    erasure to plain R, so code that uses them carries its plain-R spelling beside it."""
+    kept, branch = [], None
+    for line in text.split("\n"):
+        marker = VARIANT.match(line)
+        if marker:
+            branch = None if marker.group(1) == "end" else marker.group(1)
+        elif branch is None or (branch == "typed") == typed:
+            kept.append(line)
+    if branch is not None:
+        raise SystemExit(f"a `#@ {branch}` block has no `#@ end`")
+    return "\n".join(kept)
 
 
 def parse_param(spec):
@@ -194,39 +196,58 @@ def generate_package(args, domain, domain_templates, shared_templates):
             identifier = f"{counter:05d}"
             values = dict(draw(rng, param) for param in template.params)
             values["ID"] = identifier
-            code = fill(template.code, values)
-            code_parts.append(typed_program(code) if args.typed else code)
-            test_parts.append(fill(typed_program(template.test) if args.typed else template.test, values))
-            namespace.update(fill(line, values) for line in template.ns)
+            code = fill(variant(template.code, args.typed), values)
+            if args.roxygen:
+                code = roxygen_documented(code)
+            code_parts.append(code)
+            test_parts.append(fill(variant(template.test, args.typed), values))
+            namespace.update(fill(line, values) for branch, line in template.ns if branch is None or (branch == "typed") == args.typed)
             exports.extend(exported_names(code))
-            used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + template.test))
-            # Counting the code without its annotations makes `--typed` generate the same program
-            # as an untyped run with the same seed, so the two can be timed against each other.
-            lines += ANNOTATION.sub("", code).count("\n") + 1
+            used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", code + variant(template.test, args.typed)))
+            # Counting the same text in both runs makes `--typed` generate the same program as an
+            # untyped run with the same seed, so the two can be timed against each other.
+            lines += ANNOTATION.sub("", fill(variant(template.code, False), values)).count("\n") + 1
             label = label or template.name
         stem = f"{label.replace('_', '-')}-{index:04d}"
         write(os.path.join(root, "R", f"{stem}.R"), f"# {package}: {label}\n\n" + "\n".join(code_parts))
         write(os.path.join(root, "tests", "testthat", f"test-{stem}.R"), "\n".join(test_parts))
 
-    write(os.path.join(root, "R", "zzz.R"), annotated(args, ZZZ.format(package=package)))
-    write(os.path.join(root, "R", "dependencies.R"), annotated(args, dependencies_file()))
-    write(os.path.join(root, "tests", "testthat", "test-dependencies.R"), annotated(args, DEPENDENCY_TEST))
+    write(os.path.join(root, "R", "zzz.R"), ZZZ.format(package=package))
+    write(os.path.join(root, "R", "dependencies.R"), dependencies_file())
+    write(os.path.join(root, "tests", "testthat", "test-dependencies.R"), DEPENDENCY_TEST)
     used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", dependencies_file()))
     exports.extend(["backend_registry", "dependency_versions", "missing_dependencies", "reload_package", "run_package_tests", "azure_token", "highs_available"])
     write(os.path.join(root, "DESCRIPTION"), description(package, title))
-    write(os.path.join(root, "NAMESPACE"), namespace_file(exports, namespace))
+    if args.roxygen:
+        # roxygen2 owns NAMESPACE, so the template's directives become raw ones it copies.
+        directives = "".join(f"#' @rawNamespace {line}\n" for line in sorted(namespace))
+        write(os.path.join(root, "R", f"{package}-package.R"), f"#' @keywords internal\n{directives}\"_PACKAGE\"\n")
+        write(os.path.join(root, "NAMESPACE"), "# Generated by roxygen2: do not edit by hand\n\n")
+    else:
+        write(os.path.join(root, "NAMESPACE"), namespace_file(exports, namespace))
     write(os.path.join(root, "tests", "testthat.R"), f"library(testthat)\nlibrary({package})\n\ntest_check(\"{package}\")\n")
-    write(os.path.join(root, "tests", "testthat", "helper-seed.R"), annotated(args, HELPER))
+    write(os.path.join(root, "tests", "testthat", "helper-seed.R"), HELPER)
     write(os.path.join(root, ".Rbuildignore"), "^dev$\n")
     write(os.path.join(root, "dev", "reload.R"), RELOAD.format(package=package))
     if args.typed:
         write(os.path.join(root, "ry.toml"), "[check]\nstrict = true\n")
+    else:
+        erase(args.ry, root)
 
     uncovered = sorted({name.split(">=")[0] for name in IMPORTS} - used_packages - {"zeallot", "ROI.plugin.highs"})
     total = sum(count_lines(os.path.join(root, "R", name)) for name in os.listdir(os.path.join(root, "R")))
     print(f"{package}: {files} files, {total} R lines, {counter} instances, {len(exports)} exports", file=sys.stderr)
     if uncovered:
         print(f"{package}: dependencies never referenced with `::`: {' '.join(uncovered)}", file=sys.stderr)
+
+
+def erase(ry, root):
+    paths = [os.path.join(directory, name) for directory, _, names in os.walk(root) for name in names if name.endswith(".R")]
+    subprocess.run([ry, "debug", "erase", *sorted(paths)], check=True)
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        write(path, ANNOTATION.sub("", text))
 
 
 def fill(text, values):
@@ -236,7 +257,48 @@ def fill(text, values):
 
 
 def exported_names(code):
-    return re.findall(r"^([A-Za-z][A-Za-z0-9._]*) <- (?:function|R6::R6Class)", code, flags=re.M)
+    return re.findall(r"^([A-Za-z][A-Za-z0-9._]*)(?:: [^\n]*?)? <- (?:@pure )?(?:function|R6::R6Class)", code, flags=re.M)
+
+
+def roxygen_documented(code):
+    """Puts a roxygen2 block above each top-level definition that `exported_names` exports."""
+    lines = code.split("\n")
+    out = []
+    for position, line in enumerate(lines):
+        match = re.match(r"^([A-Za-z][A-Za-z0-9._]*) <- (function\s*\(|R6::R6Class\b)", line)
+        if match:
+            name = match.group(1)
+            out.append(f"#' {name.replace('_', ' ').capitalize()}")
+            out.append("#'")
+            out.append(f"#' Computes `{name}` for the benchmark code base.")
+            if match.group(2).startswith("function"):
+                for parameter in function_parameters("\n".join(lines[position:])):
+                    out.append(f"#' @param {parameter} The `{parameter}` argument.")
+                out.append("#' @return The result.")
+            out.append("#' @export")
+        out.append(line)
+    return "\n".join(out)
+
+
+def function_parameters(text):
+    """The parameter names of the `function(...)` that starts in `text`."""
+    start = text.index("function(") + len("function(")
+    depth, current, names = 1, "", []
+    for character in text[start:]:
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+            if depth == 0:
+                break
+        if character == "," and depth == 1:
+            names.append(current)
+            current = ""
+        else:
+            current += character
+    names.append(current)
+    names = [re.split(r"[=:\s]", name.strip(), maxsplit=1)[0] for name in names]
+    return [name for name in names if name]
 
 
 def namespace_file(exports, extra):
@@ -312,52 +374,47 @@ def dependencies_file():
     allow = {"R6": " # ry: allow(object-system)"}
     listed = [name for name in names if name in REGISTRY]
     entries = "\n    ".join(
-        f"`{name}` = function(...) {name}::{REGISTRY[name]}(...){'' if index == len(listed) - 1 else ','}{allow.get(name, '')}"
+        f"`{name}` = function(...: Any) -> Any {name}::{REGISTRY[name]}(...){'' if index == len(listed) - 1 else ','}{allow.get(name, '')}"
         for index, name in enumerate(listed)
     )
     return DEPENDENCIES.replace("@PACKAGES@", packages).replace("@ENTRIES@", entries)
 
 
 DEPENDENCIES = """# The packages this code base builds on, and the entry points that reload and test it.
-#: character[]
-backend_packages <- c(
+backend_packages: character[] <- c(
   @PACKAGES@
 )
 
-#: fn() -> character[]
-dependency_versions <- function() {
-  vapply(backend_packages, function(name) as.character(utils::packageVersion(name)), character(1))
+dependency_versions <- function() -> character[] {
+  vapply(backend_packages, function(name: character) -> character as.character(utils::packageVersion(name)), character(1))
 }
 
-#: fn() -> character[]
-missing_dependencies <- function() {
+missing_dependencies <- function() -> character[] {
   installed <- vapply(backend_packages, requireNamespace, logical(1), quietly = TRUE)
   backend_packages[!installed]
 }
 
 # One thin wrapper per backend, resolved only when called.
-#: fn() -> list[named: fn(...: Any) -> Any]
-backend_registry <- function() {
+backend_registry <- function() -> list[named: fn(...: Any) -> Any] {
   list(
     @ENTRIES@
   )
 }
 
-#: fn() -> logical
-highs_available <- function() requireNamespace("ROI.plugin.highs", quietly = TRUE)
+highs_available <- function() -> logical requireNamespace("ROI.plugin.highs", quietly = TRUE)
 
-#: fn([scopes]: character[], [provider]: fn(scopes: character[]) -> character) -> character
-azure_token <- function(scopes = "https://management.azure.com/.default", provider = azidentity::default_azure_credential) {
+azure_token <- function(
+  scopes: character[] = "https://management.azure.com/.default",
+  provider: fn(scopes: character[]) -> character = azidentity::default_azure_credential
+) -> character {
   provider(scopes)
 }
 
-#: fn([path]: character, [fast]: logical) -> environment | list[named: Any] | NULL
-reload_package <- function(path = ".", fast = FALSE) {
+reload_package <- function(path: character = ".", fast: logical = FALSE) -> environment | list[named: Any] | NULL {
   if (fast) loadfast::load_fast(path) else devtools::load_all(path)
 }
 
-#: fn([path]: character, [reporter]: character) -> Any
-run_package_tests <- function(path = ".", reporter = "check") {
+run_package_tests <- function(path: character = ".", reporter: character = "check") -> Any {
   testthat::test_local(path, reporter = reporter, stop_on_failure = FALSE)
 }
 """
@@ -374,8 +431,7 @@ DEPENDENCY_TEST = """test_that("the registry names every backend", {
 
 ZZZ = """.datatable.aware <- TRUE
 
-#: fn(libname: character, pkgname: character) -> NULL
-.onLoad <- function(libname, pkgname) {{
+.onLoad <- function(libname: character, pkgname: character) -> NULL {{
   options(
     {package}.verbose = getOption("{package}.verbose", FALSE),
     {package}.seed = getOption("{package}.seed", 20240229L)

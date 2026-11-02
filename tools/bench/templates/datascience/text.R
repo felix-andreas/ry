@@ -1,33 +1,28 @@
 #@ weight 2
 #@ param DOCS int 3 20
 # Bag-of-words text features.
-#: fn([docs]: integer) -> character[]
-corpus_@ID@ <- function(docs = @DOCS@L) {
+corpus_@ID@ <- function(docs: integer = @DOCS@L) -> character[] {
   vocabulary <- c("data", "model", "table", "query", "cache", "index", "frame", "vector")
-  vapply(seq_len(docs), function(i) {
+  vapply(seq_len(docs), function(i: integer) -> character {
     paste(vocabulary[((i + 0:4) %% length(vocabulary)) + 1L], collapse = " ")
   }, character(1))
 }
 
-#: fn(docs: character[]) -> matrix
-term_matrix_@ID@ <- function(docs) {
+term_matrix_@ID@ <- function(docs: character[]) -> matrix {
   tokens <- stringr::str_split(docs, "\\s+")
   vocabulary <- sort(unique(unlist(tokens)))
-  #: matrix
-  counts <- t(vapply(tokens, function(words) table(factor(words, levels = vocabulary)), numeric(length(vocabulary))))
+  counts: matrix <- t(vapply(tokens, function(words: character[]) -> integer[] table(factor(words, levels = vocabulary)), numeric(length(vocabulary))))
   colnames(counts) <- vocabulary
   counts
 }
 
-#: fn(counts: matrix) -> matrix
-tf_idf_@ID@ <- function(counts) {
+tf_idf_@ID@ <- function(counts: matrix) -> matrix {
   tf <- counts / pmax(rowSums(counts), 1)
   idf <- log(nrow(counts) / pmax(colSums(counts > 0), 1))
   sweep(tf, 2, idf, `*`)
 }
 
-#: fn(matrix: matrix) -> matrix
-similarity_@ID@ <- function(matrix) {
+similarity_@ID@ <- function(matrix: matrix) -> matrix {
   normalised <- matrix / pmax(sqrt(rowSums(matrix^2)), 1e-12)
   normalised %*% t(normalised)
 }

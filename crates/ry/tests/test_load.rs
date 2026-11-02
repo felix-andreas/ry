@@ -710,7 +710,8 @@ fn source_references_point_into_the_file() {
     let script = format!(
         "options(keep.source = TRUE)\nload_all({root:?}, full = TRUE)\n\
          cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n\
-         print(later)\ncat('byte', utils::getSrcLocation(n, 'byte'), '\\n')\nprint(n)\n",
+         print(later)\ncat('byte', utils::getSrcLocation(n, 'byte'), '\\n')\n\
+         cat('column', utils::getSrcLocation(n, 'column'), '\\n')\nprint(n)\n",
         root = root.path().display().to_string(),
     );
     for runtime in RUNTIMES {
@@ -724,7 +725,7 @@ fn source_references_point_into_the_file() {
             "{runtime}: {printed}"
         );
         assert!(
-            printed.contains("byte 28 \nfunction() 3\n"),
+            printed.contains("byte 28 \ncolumn 27 \nfunction() 3\n"),
             "{runtime}: {printed}"
         );
     }
@@ -918,8 +919,18 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
         "writeLines(c('# typing: strict', '#: fn(x: double) -> double', \
          'g <- function(x) x + \"a\"'), {file:?})\n\
          cat(tryCatch(load_all({root:?}), error = conditionMessage), '\\n')\n\
-         cat(g(1), '\\n')\n",
+         cat(g(1), '\\n')\n\
+         writeLines(c('# typing: strict', '#: fn(x: double) -> double', \
+         'g <- function(x) x + 2'), {file:?})\n\
+         writeLines(c('# typing: strict', '#: fn() -> double', 'h <- function() \"a\"'), \
+         {added:?})\n\
+         cat(tryCatch(load_all({root:?}), error = conditionMessage), '\\n')\n\
+         cat(g(1), '\\n')\n\
+         invisible(file.remove({added:?}))\n\
+         invisible(load_all({root:?}))\n\
+         cat('fixed', g(1), '\\n')\n",
         root = root.path().display().to_string(),
+        added = root.path().join("R/b.R").display().to_string(),
     );
     for runtime in RUNTIMES {
         fs::write(
@@ -927,6 +938,9 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
             "# typing: strict\n#: fn(x: double) -> double\ng <- function(x) x + 1\n",
         )
         .expect("write file");
+        if let Err(error) = fs::remove_file(root.path().join("R/b.R")) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        }
         let output = ry_load_on(runtime, root.path(), &[&script]);
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
@@ -936,6 +950,16 @@ fn strict_mode_refuses_a_reload_on_both_runtimes() {
         );
         // The refused reload ran nothing, so the old definition stays.
         assert!(printed.contains("\n2 \n"), "{runtime}: {printed}");
+        // The check of each reload keeps the previous analysis: a file added with an error
+        // refuses the next reload, and deleting it lets the fixed code load.
+        assert_eq!(
+            printed
+                .matches("strictreload was not loaded, because strict mode refused it")
+                .count(),
+            2,
+            "{runtime}: {printed}"
+        );
+        assert!(printed.contains("fixed 3 \n"), "{runtime}: {printed}");
     }
 }
 
@@ -1020,6 +1044,50 @@ fn s3_registrations_refuse_a_missing_method_and_keep_one_delayed_hook() {
 }
 
 #[test]
+fn s3_refusal_comes_first_when_sysdata_changes_and_after_code_that_may_define_the_method() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: timely\nVersion: 1.0\n"),
+        ("NAMESPACE", "S3method(print, foo)\nexport(make)\n"),
+        ("R/a.R", ""),
+    ]);
+    let original = "make <- function() structure(1, class = 'foo')\n\
+                    print.foo <- function(x, ...) cat('a foo', limit, '\\n')\n";
+    let file = root.path().join("R/a.R").display().to_string();
+    let sysdata = root.path().join("R/sysdata.rda").display().to_string();
+    // The first reload drops `print.foo` and rewrites `sysdata.rda`, which is refused before
+    // `limit` changes. The second defines the method with a computed name, which only running
+    // the statement can show.
+    let script = format!(
+        "limit <- 1; save(limit, file = {sysdata:?}); load_all({root:?}, quiet = TRUE)\n\
+         print(make())\n\
+         writeLines(\"make <- function() structure(1, class = 'foo')\", {file:?})\n\
+         limit <- 2; save(limit, file = {sysdata:?})\n\
+         cat(tryCatch({{ load_all({root:?}, quiet = TRUE); 'loaded' }}, error = conditionMessage), '\\n')\n\
+         print(make())\n\
+         writeLines(c(\"make <- function() structure(1, class = 'foo')\", \
+         \"assign(paste0('print', '.foo'), function(x, ...) cat('computed foo', limit, '\\\\n'))\"), {file:?})\n\
+         load_all({root:?}, quiet = TRUE)\nprint(make())\n",
+        root = root.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(root.path().join("R/a.R"), original).expect("write file");
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains(
+                "a foo 1 \nobject 'print.foo' not found whilst loading namespace 'timely' \n\
+                 a foo 1 \ncomputed foo 2 \n"
+            ),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
     if !r_available() || !installed("testthat") {
         return;
@@ -1057,13 +1125,311 @@ fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
         assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
         assert!(printed.contains("broken: 1"), "{runtime}: {printed}");
         assert!(printed.contains("step: ."), "{runtime}: {printed}");
+        // The wording of a failed expectation changes between testthat versions.
         assert!(
-            printed.contains("Expected `scale` to equal 11."),
+            printed.contains("`scale`") && printed.contains("11"),
             "{runtime}: {printed}"
         );
         let output = run(Some("step"));
         let printed = text(&output);
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(!printed.contains("broken"), "{runtime}: {printed}");
+    }
+}
+
+/// A package whose `src/` registers one `.Call` routine, `C_twice` under `.fixes = "C_"`.
+const COMPILED: &[(&str, &str)] = &[
+    ("DESCRIPTION", "Package: cpkg\nVersion: 1.0\n"),
+    (
+        "NAMESPACE",
+        "useDynLib(cpkg, .registration = TRUE, .fixes = \"C_\")\nexport(twice)\n",
+    ),
+    ("R/twice.R", "twice <- function(x) .Call(C_twice, x)\n"),
+    (
+        "src/init.c",
+        "#include <R.h>\n#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+         SEXP twice(SEXP x) { return Rf_ScalarReal(2 * Rf_asReal(x)); }\n\
+         static const R_CallMethodDef calls[] = {{\"twice\", (DL_FUNC) &twice, 1}, {NULL, NULL, 0}};\n\
+         void R_init_cpkg(DllInfo *dll) { R_registerRoutines(dll, NULL, calls, NULL, NULL); \
+         R_useDynamicSymbols(dll, FALSE); }\n",
+    ),
+];
+
+#[test]
+fn compiled_code_builds_with_rys_toolchain_and_a_rebuild_reloads_it() {
+    if !r_available() {
+        return;
+    }
+    // `ry load` compiles with the `ry-rcmd` beside ry's runtime, and cargo test does not build
+    // another package's binary.
+    let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+        .parent()
+        .expect("the ry binary has a directory");
+    let mut build = Command::new(env!("CARGO"));
+    build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
+    if profile_directory
+        .file_name()
+        .is_some_and(|name| name == "release")
+    {
+        build.arg("--release");
+    }
+    assert!(
+        build.status().expect("run cargo build").success(),
+        "building ry-rcmd failed"
+    );
+
+    let root = package(COMPILED);
+    let cache = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("src/init.c");
+    let edited =
+        fs::read_to_string(&source)
+            .expect("read")
+            .replacen("2 * Rf_asReal", "3 * Rf_asReal", 1);
+    let reload = format!(
+        "cat('before:', twice(21), '\\n'); writeLines({edited:?}, {source:?}); \
+         load_all({root:?}); cat('after:', twice(21), '\\n')",
+        source = source.display().to_string(),
+        root = root.path().display().to_string(),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("load")
+        .arg(root.path())
+        .arg("-e")
+        .arg(&reload)
+        .env("XDG_CACHE_HOME", cache.path())
+        .output()
+        .expect("run ry load");
+    let printed = text(&output);
+    assert!(output.status.success(), "{printed}");
+    assert!(printed.contains("before: 42"), "{printed}");
+    assert!(printed.contains("after: 63"), "{printed}");
+}
+
+#[test]
+fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let namespace = "export(always)\n\
+         if (getRversion() >= \"3.0.0\") {\n  export(modern)\n  \
+         if (Sys.getenv(\"RY_FLAG\") == \"on\") export(flagged) else export(unflagged)\n\
+         } else export(ancient)\n\
+         if (FALSE) export(never)\n";
+    let root = package(&[
+        ("DESCRIPTION", "Package: ifpkg\nVersion: 1.0\n"),
+        ("NAMESPACE", namespace),
+        (
+            "R/a.R",
+            "always <- function() 1\nmodern <- function() 2\nflagged <- function() 3\n\
+             unflagged <- function() 4\nancient <- function() 5\nnever <- function() 6\n\
+             later <- function() 7\n",
+        ),
+    ]);
+    let path = root.path().join("NAMESPACE");
+    let probe = |label: &str| {
+        format!(
+            "load_all({root:?}, export_all = FALSE); \
+             cat('{label}:', sort(getNamespaceExports('ifpkg')), '\\n')",
+            root = root.path().display().to_string(),
+        )
+    };
+    let edited = format!("{namespace}if (TRUE) export(later)\n");
+    // A condition the file no longer holds is not evaluated, even one that would now fail,
+    // and an `if` inside a top-level `{` block is resolved like any other.
+    let braced = "{\n  export(always)\n  if (FALSE) export(never) else export(modern)\n}\n";
+    for runtime in RUNTIMES {
+        fs::write(&path, namespace).expect("write NAMESPACE");
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                &probe("first"),
+                "Sys.setenv(RY_FLAG = 'on')",
+                &probe("flag"),
+                &format!(
+                    "writeLines({edited:?}, {path:?})",
+                    path = path.display().to_string()
+                ),
+                &probe("edited"),
+                "Sys.getenv <- function(...) stop('a stale condition ran')",
+                &format!(
+                    "writeLines({braced:?}, {path:?})",
+                    path = path.display().to_string()
+                ),
+                &probe("braced"),
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("first: always modern unflagged"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("flag: always flagged modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("edited: always flagged later modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("braced: always modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(!printed.contains("ignored"), "{runtime}: {printed}");
+    }
+}
+
+const ROXYGEN: &[(&str, &str)] = &[
+    (
+        "DESCRIPTION",
+        "Package: roxy\nTitle: Roxygen Test\nVersion: 0.1.0\nDescription: A test.\n\
+         License: MIT\nImports: R6\nEncoding: UTF-8\nRoxygen: list(markdown = TRUE)\n",
+    ),
+    (
+        "R/account.R",
+        "#' An account\n#'\n#' Holds a balance.\n#' @export\n\
+         Account <- R6::R6Class(\"Account\", public = list(\n\
+         #' @field balance The balance.\nbalance = 0,\n\
+         #' @description Deposit money.\n#' @param x How much.\n\
+         deposit = function(x) {\nself$balance <- self$balance + x\ninvisible(self)\n}\n))\n",
+    ),
+    (
+        "R/add.R",
+        "#' Add two numbers\n#'\n#' Adds `x` and `y`.\n#' @param x A number.\n\
+         #' @param y A number.\n#' @return The sum.\n#' @export\n#' @examples\n#' add(1, 2)\n\
+         add <- function(x, y = 1) x + y\n\n#' @rdname add\n#' @export\n\
+         sub2 <- function(x, y) x - y\n\n#' Print a thing\n#' @param x Thing.\n\
+         #' @param ... Unused.\n#' @export\nprint.thing <- function(x, ...) cat(\"thing\\n\")\n",
+    ),
+    (
+        "R/scale.R",
+        "#' Scale\n#' @inheritParams add\n#' @param factor How much.\n#' @importFrom stats median\n\
+         #' @export\nscale_by <- function(x, factor) x * factor\n",
+    ),
+];
+
+/// Every file under `root` except `.git`, by relative path, with its bytes.
+fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).expect("under root");
+                files.push((
+                    relative.display().to_string(),
+                    fs::read(&path).expect("read"),
+                ));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// `ry document` writes what `devtools::document()` writes, byte for byte, on a cold run and on
+/// a run after an edit, which reuses the blocks of the unchanged file.
+#[test]
+fn ry_document_matches_devtools_on_both_runtimes() {
+    if !r_available() || !installed("roxygen2") || !installed("devtools") || !installed("R6") {
+        return;
+    }
+    let edit = |root: &Path| {
+        let path = root.join("R/scale.R");
+        let text = fs::read_to_string(&path).expect("read");
+        fs::write(&path, text.replace("How much.", "How much to scale by.")).expect("write");
+    };
+    let reference = package(ROXYGEN);
+    let devtools = || {
+        let output = Command::new("Rscript")
+            .args(["-e", "devtools::document()"])
+            .current_dir(reference.path())
+            .output()
+            .expect("run devtools");
+        assert!(output.status.success(), "{}", text(&output));
+    };
+    devtools();
+    let cold = tree(reference.path());
+    edit(reference.path());
+    devtools();
+    let edited = tree(reference.path());
+    assert!(
+        cold.iter().any(|(path, _)| path == "man/add.Rd"),
+        "{cold:?}"
+    );
+    for runtime in RUNTIMES {
+        let root = package(ROXYGEN);
+        let cache = tempfile::tempdir().expect("temp dir");
+        let document = || {
+            let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .args(["document", "--runtime", runtime])
+                .arg(root.path())
+                .env("XDG_CACHE_HOME", cache.path())
+                .output()
+                .expect("run ry document");
+            assert!(output.status.success(), "{runtime}: {}", text(&output));
+        };
+        document();
+        assert!(tree(root.path()) == cold, "{runtime}: the cold run differs");
+        edit(root.path());
+        document();
+        assert!(
+            tree(root.path()) == edited,
+            "{runtime}: the run after an edit differs"
+        );
+    }
+}
+
+/// A reload after an edit under `src/` rebuilds the shared library and the session calls the
+/// new code, which on ry's runtime needs `dyn.unload` to retire the old library so the next
+/// load maps the rebuilt file instead of returning the one already open.
+#[test]
+fn a_reload_rebuilds_compiled_code_on_both_runtimes() {
+    if !r_available() || !installed("pkgbuild") {
+        return;
+    }
+    let source = |answer: u32| {
+        format!(
+            "#include <R.h>\n#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+             SEXP c_answer(void) {{ return ScalarInteger({answer}); }}\n\
+             static const R_CallMethodDef calls[] = {{{{\"c_answer\", (DL_FUNC) &c_answer, 0}}, {{NULL, NULL, 0}}}};\n\
+             void R_init_cpkg(DllInfo *info) {{ R_registerRoutines(info, NULL, calls, NULL, NULL); R_useDynamicSymbols(info, FALSE); }}\n"
+        )
+    };
+    for runtime in RUNTIMES {
+        let original = source(41);
+        let root = package(&[
+            ("DESCRIPTION", "Package: cpkg\nVersion: 1.0\n"),
+            (
+                "NAMESPACE",
+                "useDynLib(cpkg, .registration = TRUE)\nexport(answer)\n",
+            ),
+            ("R/answer.R", "answer <- function() .Call(c_answer)\n"),
+            ("src/a.c", &original),
+        ]);
+        let path = root.path().join("src/a.c").display().to_string();
+        let edit = format!(
+            "Sys.sleep(1.1); writeLines({edited:?}, {path:?}); load_all({root:?})",
+            edited = source(44),
+            root = root.path().display().to_string(),
+        );
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                "cat('before:', answer(), '\\n')",
+                &edit,
+                "cat('after:', answer(), '\\n')",
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("before: 41"), "{runtime}: {printed}");
+        assert!(printed.contains("after: 44"), "{runtime}: {printed}");
     }
 }
