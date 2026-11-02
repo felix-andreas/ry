@@ -375,6 +375,13 @@ fuzz tables are small, so the kernels' parallel paths get large-table tests of t
 data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
 data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
 
+`just bench-base [--rows 1e5,1e6 --only REGEX --memory]` times base R's own kernels (sorting,
+string formatting and regex, grouping, `merge`, `match`, matrix margins, cumulative sums, xts and
+zoo rolling operations) under `ry run` and GNU R, and prints the ratio ry / GNU R per kernel. A
+kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory` every kernel
+runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
+`RY_BENCH_RLIB` (default `~/R/library`).
+
 ### Coverage-guided fuzzing
 
 `fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. Each target is a
