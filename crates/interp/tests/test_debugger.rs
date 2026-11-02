@@ -9,8 +9,10 @@
 use {
     interp::{
         debugger::{Adapter, Transport},
-        interp,
+        envir::env_symbols,
+        heap, interp,
         testing::with_interpreter,
+        values::global_env,
     },
     serde_json::{Value, json},
     std::{
@@ -930,6 +932,14 @@ fn run(path: &std::path::Path, client: Box<dyn Client>) -> Vec<Value> {
         seq: 0,
     };
     with_interpreter(|| unsafe {
+        // The interpreter is shared by every test in this binary, and the client sees the global
+        // scope, so globals another test left behind would make a seed replay depend on which
+        // test took the interpreter in between.
+        for symbol in env_symbols(global_env(), true, false) {
+            heap()
+                .remove_binding(global_env(), symbol)
+                .expect("a global binding can be removed");
+        }
         let mut adapter = Box::new(Adapter::new(Box::new(recorder)));
         if let Some(launch) = adapter.configure() {
             assert_eq!(launch.program, path);
