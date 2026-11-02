@@ -1,6 +1,10 @@
 default:
     @just --list
 
+# No recipe exports its parameters (`$name`): Windows environment names are case-insensitive, so an
+# exported `version` merges into a workflow's `VERSION` and the recipe's bash never sees `version`.
+# A script assigns each parameter to a shell variable with `quote()` instead.
+
 # Run ry from source, e.g. `just ry check` or `just ry run script.R`. ry's runtime (libR) is a
 # separate library that `ry run` loads at run time, so cargo would not build it for `cargo run`.
 # Build warnings show only when the build fails, so they do not bury ry's own output.
@@ -71,9 +75,12 @@ docs-test page="":
 docs-bless page="":
     RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
 
-# The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
-fuzz-deep:
-    cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
+# Every seeded harness at `depth` times its default seeds (`FUZZ_DEPTH`) for `minutes`, each round
+# starting at a fresh seed from `base`, plus the
+# libr package suites under collection stress; failures are logged with their replay commands to
+# target/fuzz-deep.log. A scheduled run passes a fresh base, e.g. `just fuzz-deep 480 $(date +%s)`.
+fuzz-deep minutes="120" base="1000000" depth="10" *args:
+    python3 -I tools/fuzz-deep.py --minutes {{ minutes }} --base {{ base }} --depth {{ depth }} {{ args }}
 
 # One libFuzzer target (`cargo fuzz list` names them all); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
@@ -113,6 +120,12 @@ bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/base/run.py {{ args }}
 
+# Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
+# `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/stdlib/results.md`.
+bench-stdlib filter="" n="1e6" *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
+
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
 # (`--joins-only` runs the join questions alone).
@@ -130,9 +143,10 @@ docs:
 # Build the docs site from this checkout and upload it to Cloudflare Pages as BRANCH: `main` is the
 # production deploy (while main is the Pages project's production branch), any other name a preview.
 # Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_PAGES_PROJECT.
-docs-deploy $branch:
+docs-deploy branch:
     #!/usr/bin/env bash
     set -euo pipefail
+    branch={{ quote(branch) }}
     missing=""
     for variable in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT; do
     	if [ -z "${!variable:-}" ]; then missing="$missing $variable"; fi
@@ -159,7 +173,7 @@ install-extension:
 build *args:
     cargo build --workspace --exclude zed_ry {{ args }}
 
-zigbuild $target *args:
+zigbuild target *args:
     cargo zigbuild --target {{ target }} {{ args }}
 
 # Package the VS Code extension for one platform from its unpacked archive in DIR/ry-TARGET. The
@@ -171,15 +185,16 @@ build-platform-vsix target vscode-target dir kind:
     find {{ dir }}/ry-{{ target }} -maxdepth 1 -type f ! -name LICENSE -exec cp {} editors/code/bin/ \;
     just build-extension {{ kind }} --target {{ vscode-target }} --out ../../{{ dir }}/ry-{{ vscode-target }}.vsix
 
-build-extension $kind *args:
+build-extension kind *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    kind={{ quote(kind) }}
 
-    release_flag=$(just vsce-release-flag $kind)
+    release_flag=$(just vsce-release-flag "$kind")
     cp LICENSE editors/code
     just vsce package $release_flag {{ args }}
 
-bump-version $version:
+bump-version version:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -264,9 +279,10 @@ release-dry-run version="0.0.0-dry-run":
 # Fail unless VERSION is a valid release version and Cargo.toml, the VS Code extension and the Zed
 # extension all carry it (the extensions without its -alpha/-beta suffix). The `::error::` prefix
 # makes GitHub Actions show the message as an annotation.
-release-check $version:
+release-check version:
     #!/usr/bin/env bash
     set -euo pipefail
+    version={{ quote(version) }}
     workspace=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
     extension=$(sed -n 's/^[[:space:]]*"version": "\(.*\)",$/\1/p' editors/code/package.json | head -n 1)
     zed=$(sed -n 's/^version = "\(.*\)"/\1/p' editors/zed/extension.toml)
@@ -280,9 +296,10 @@ release-check $version:
 # per platform, bundling that archive's binaries, plus `ry.vsix` without a binary for every other
 # platform. A platform whose archive is missing is skipped with a note, so this runs locally on one
 # machine's archive; the release workflow always has all three.
-release-assets $version:
+release-assets version:
     #!/usr/bin/env bash
     set -euo pipefail
+    version={{ quote(version) }}
     dir="release/$version"
     kind=$(just release-kind "$version")
     (cd editors/code && bun install --frozen-lockfile)
@@ -307,9 +324,10 @@ release-assets $version:
 # Publish release/VERSION: create the GitHub release with every archive and `.vsix` (or refresh the
 # assets of one a failed run left behind), then publish each `.vsix` to the VS Code Marketplace.
 # Needs `gh` signed in (GH_TOKEN in CI) and, outside CI, a VSCE_PAT.
-release-publish $version:
+release-publish version:
     #!/usr/bin/env bash
     set -euo pipefail
+    version={{ quote(version) }}
     dir="release/$version"
     kind=$(just release-kind "$version")
     assets=("$dir"/ry-*.tar.gz "$dir"/ry-*.zip "$dir"/*.vsix)
@@ -347,17 +365,18 @@ rlib-clone:
 rlib *args:
     cd .local/rlib && for dir in */; do (echo "$dir" && cd "$dir" && git {{ args }}); done
 
-vsce-release-flag $kind:
+vsce-release-flag kind:
     @echo {{ if kind == "release" { "" } else if kind == "pre-release" { "--pre-release" } else { error("kind must be either release or pre-release") } }}
 
 # The channel: a bare `X.Y.Z` is a release; anything else, a git revision included, is a pre-release.
-release-kind $version:
+release-kind version:
     #!/usr/bin/env bash
     set -euo pipefail
+    version={{ quote(version) }}
 
-    case "{{ version }}" in
+    case "$version" in
     	*-alpha|*-beta) echo pre-release ;;
-    	*-*) echo "error: version suffix must be -alpha or -beta, got {{ version }}" >&2; exit 1 ;;
+    	*-*) echo "error: version suffix must be -alpha or -beta, got $version" >&2; exit 1 ;;
     	[0-9]*.[0-9]*.[0-9]*) echo release ;;
     	*) echo pre-release ;;
     esac

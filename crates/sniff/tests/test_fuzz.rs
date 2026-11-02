@@ -1,9 +1,10 @@
 //! Delimited files sniff under the contract in `sniff::check_sniff_invariants`, over seeds, byte
-//! mutations of them, and random bytes. `FUZZ_ITERS` scales the budget.
+//! mutations of them, and random bytes. Each generated case is one seed of [`for_each_seed`],
+//! so `FUZZ_SEED` replays a failure.
 
 use {
     sniff::check_sniff_invariants,
-    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes, mutate_seed, random_bytes},
+    syntax::testing::{SplitMix64, for_each_seed, mutate_bytes, mutate_seed, random_bytes},
 };
 
 const SEEDS: &[&str] = &[
@@ -38,8 +39,8 @@ fn fuzz_regressions_hold_invariants() {
 
 #[test]
 fn fuzz_mutations_and_random_bytes() {
-    let mut rng = SplitMix64(0x5a1f_f00d);
-    for _ in 0..fuzz_iterations(3000) {
+    for_each_seed(3000, |seed| {
+        let mut rng = SplitMix64(0x5a1f_f00d ^ seed);
         let input = match rng.below(3) {
             0 => random_bytes(&mut rng).into_bytes(),
             1 => {
@@ -49,19 +50,19 @@ fn fuzz_mutations_and_random_bytes() {
             _ => mutate_seed(&mut rng, SEEDS, 24).into_bytes(),
         };
         check_sniff_invariants(&input);
-    }
+    });
 }
 
 /// A file with more records than the head sample reads takes the jump-point path.
 #[test]
 fn fuzz_large_files() {
-    let mut rng = SplitMix64(0x05a1_fb16);
-    for _ in 0..fuzz_iterations(3000) / 100 {
+    for_each_seed(30, |seed| {
+        let mut rng = SplitMix64(0x05a1_fb16 ^ seed);
         let mut text = String::from("a,b,c\n");
         for row in 0..1200 + rng.below(3000) {
             let cell = ["1", "2.5", "x", "", "NA", "\"q,\nq\"", "TRUE"][rng.below(7)];
             text.push_str(&format!("{row},{cell},{}\n", rng.below(10)));
         }
         check_sniff_invariants(&mutate_bytes(&mut rng, &text));
-    }
+    });
 }

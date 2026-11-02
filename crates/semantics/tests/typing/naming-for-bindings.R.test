@@ -31,7 +31,7 @@ x
 == R/main.R
 x: integer
 NULL
-integer
+integer | NULL
 
 #---- assignment_inside_loop_rhs_can_use_other_outer_binding
 #~~~~ R/main.R
@@ -67,7 +67,7 @@ x
 == R/main.R
 x: integer
 NULL
-integer
+integer | NULL
 
 #---- for_variable_beats_final_package_global_winner
 #~~~~ R/a.R
@@ -90,4 +90,4 @@ x: integer
   = 0..1 the earlier binding is here.
 == R/c.R
 NULL
-integer
+integer | NULL

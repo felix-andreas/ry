@@ -52,3 +52,10 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> logical
+
+#---- a_range_endpoint_from_a_nullable_parameter_field_is_checked
+#: @param cfg {list{off: integer | NULL}}
+span <- function(cfg) cfg$off:3L
+#++++
+span: fn(cfg: list{off: integer | NULL}) -> Unknown
+64..71 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer | NULL`

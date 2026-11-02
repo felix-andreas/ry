@@ -971,17 +971,24 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
     let name = call.arg(2);
-    // An environment is attached as a copy of its bindings, as in GNU R, so its own enclosure
-    // (a namespace's imports, for one) stays as it was.
+    // An attached environment is a copy of `what`'s bindings, as in GNU R, so attaching a
+    // namespace leaves its own parent, the imports, in place.
     let env = new_env(empty_env())?;
-    match what.kind() {
-        SexpType::List => fill_env(env, what)?,
-        SexpType::Environment => {
-            for symbol in env_symbols(what, true, false) {
-                define(symbol, find_var_in_frame(symbol, what)?, env)?;
+    if what.kind() == SexpType::List {
+        fill_env(env, what)?;
+    } else if what.kind() == SexpType::Environment {
+        let heap = crate::heap();
+        for symbol in env_symbols(what, true, false) {
+            if let Some(cell) = heap.frame_cell(what, symbol) {
+                heap.define(env, symbol, cell.cdr())?;
+                // An active binding stays active, so reading the copy still calls its function.
+                if cell.has_gp(gp::ACTIVE_BINDING)
+                    && let Some(copy) = heap.frame_cell(env, symbol)
+                {
+                    copy.set_gp_bits(gp::ACTIVE_BINDING, true);
+                }
             }
         }
-        _ => {}
     }
     let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
@@ -1900,7 +1907,7 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
                     {
                         let mut code = dot_value;
                         while code.kind() == SexpType::Promise {
-                            code = code.cdr();
+                            code = crate::bytecode::source_of_body(code.cdr());
                         }
                         let value = match code.kind() {
                             SexpType::Symbol | SexpType::Language => {

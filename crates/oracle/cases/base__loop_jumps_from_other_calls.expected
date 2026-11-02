@@ -1,0 +1,23 @@
+[stdout]
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| b 1 
+| b 3 
+| c 1 
+| [1] "c done"
+| d 1 
+| [1] "d done"
+| e 1 
+| [1] "e done"
+| [1] "q done"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "w3 done"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "w3 done"

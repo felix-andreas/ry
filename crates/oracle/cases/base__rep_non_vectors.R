@@ -1,0 +1,10 @@
+# rep and rep_len replicate only vectors, lists and NULL.
+x <- getClass("MethodDefinition")
+tryCatch(rep_len(x, 4), error = function(e) conditionMessage(e))
+tryCatch(rep(x, length.out = 4), error = function(e) conditionMessage(e))
+tryCatch(rep(quote(f(x)), 2), error = function(e) conditionMessage(e))
+tryCatch(rep(function() 1, 2), error = function(e) conditionMessage(e))
+rep(NULL, 3)
+rep_len(NULL, 2)
+rep(expression(a, b), 2)
+rep(list(1, "a"), length.out = 3)

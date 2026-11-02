@@ -28,3 +28,9 @@ libc = "0.2"
 
 [dev-dependencies]
 portable-pty = "0.9"
+
+# Its `main` either drives sessions or, when the driver starts it as a child, runs the console
+# on its own main thread, which R requires.
+[[test]]
+name = "test_console_session"
+harness = false

@@ -15,8 +15,8 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef,
-            Traversal, Ty, jump_target, status,
+            self, Action, Argument, Effect, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
+            StateRef, Ty, jump_target, status,
         },
         native,
         runtime::{self, Activation, offset, outcome, reason, representation},
@@ -510,38 +510,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
                 self.set_visible(&before, true);
             }
-            Action::Traverse {
-                traversal,
-                list,
-                accumulator,
-                expected,
-                element,
-                prelude,
-                steps,
-                result,
-                dst,
-            } => {
-                if let Some((callback, function)) = expected {
-                    let held = self.load_register(callback);
-                    let same =
-                        self.builder
-                            .ins()
-                            .icmp_imm_u(IntCC::Equal, held, function.as_ptr() as i64);
-                    self.hand_off_unless(position, &before, same);
-                }
-                for &(step, state) in prelude {
-                    self.action(position, self.plan.state(state), step)?;
-                }
-                self.traverse(
-                    position,
-                    &before,
-                    traversal,
-                    (list, accumulator),
-                    element,
-                    steps,
-                    result,
-                    dst,
-                )?;
+            action @ Action::Traverse { .. } => {
+                self.traverse(position, &before, action)?;
                 self.set_visible(&before, true);
             }
             Action::Call {
@@ -824,6 +794,25 @@ impl<'p, 'b> Translator<'p, 'b> {
                 right,
             } => {
                 self.arithmetic(position, &before, arith, numeric, dst, left, right)?;
+                self.set_visible(&before, true);
+            }
+            Action::Select {
+                dst,
+                condition,
+                then,
+                otherwise,
+                ty,
+            } => {
+                let flag = self.use_register(condition, Ty::Lgl);
+                let answered =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::NotEqual, flag, NA_INTEGER as i64);
+                self.hand_off_unless(position, &before, answered);
+                let then = self.use_register(then, ty);
+                let otherwise = self.use_register(otherwise, ty);
+                let value = self.builder.ins().select(flag, then, otherwise);
+                self.def_register(dst, ty, value);
                 self.set_visible(&before, true);
             }
             Action::Comparison {
@@ -1275,42 +1264,140 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// The loop of an [`Action::Traverse`]. A list being built lives in the register window at
     /// `dst`, which roots it while the loop allocates, and the helpers that fill it read it
     /// from there; tier 0 overwrites that register when it runs the call after a hand-off.
-    #[allow(clippy::too_many_arguments)]
     unsafe fn traverse(
         &mut self,
         position: usize,
         before: &StateRef<'p>,
-        traversal: Traversal,
-        (list, accumulator): (usize, Option<(usize, usize)>),
-        (element, element_ty): (usize, Ty),
-        steps: &[(Action<'p>, StateId)],
-        (result, result_ty): (usize, Ty),
-        dst: usize,
+        action: Action<'p>,
     ) -> Result<(), Refusal> {
-        // The library reads any list without an Array bit or ALTREP methods the same way, its
-        // attributes included, so only those two are checked.
-        let vector = self.load_register(list);
-        let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
-        let is_list = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, SexpType::List as i64);
-        let bits = self.builder.ins().uload8(I32, flags(), vector, FLAGS);
-        let special = self
-            .builder
-            .ins()
-            .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
-        let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, special, 0);
-        let plain = self.builder.ins().band(is_list, ordinary);
-        self.hand_off_unless(position, before, plain);
-        let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+        let Action::Traverse {
+            traversal,
+            collection,
+            start,
+            accumulator,
+            expected,
+            items,
+            index,
+            parts,
+            prelude,
+            steps,
+            result: (result, result_ty),
+            broke,
+            dst,
+        } = action
+        else {
+            return Err(Refusal("a traversal without its loop"));
+        };
+        if let Some((callback, function)) = expected {
+            let held = self.load_register(callback);
+            let same = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, held, function.as_ptr() as i64);
+            self.hand_off_unless(position, before, same);
+        }
+        for &(step, state) in prelude {
+            self.action(position, self.plan.state(state), step)?;
+        }
+        let object = self.load_register(collection);
+        let (length, keys, stored) = match parts {
+            // The library reads any list without an Array bit or ALTREP methods the same way,
+            // its attributes included, so only those two are checked.
+            None => {
+                let kind = self.builder.ins().uload8(I32, flags(), object, KIND);
+                let is_list =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::List as i64);
+                let bits = self.builder.ins().uload8(I32, flags(), object, FLAGS);
+                let special = self
+                    .builder
+                    .ins()
+                    .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
+                let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, special, 0);
+                let plain = self.builder.ins().band(is_list, ordinary);
+                self.hand_off_unless(position, before, plain);
+                let length = self.builder.ins().load(I64, flags(), object, LENGTH);
+                (length, object, object)
+            }
+            Some((keys, stored)) => {
+                let dict = self
+                    .builder
+                    .ins()
+                    .iconst(I32, i64::from(traversal.source == analysis::Source::Dict));
+                let key = match items[0] {
+                    Some((_, Ty::Int)) => SexpType::Integer as i64,
+                    Some((_, Ty::Dbl)) => SexpType::Real as i64,
+                    Some((_, Ty::Lgl)) => SexpType::Logical as i64,
+                    _ => -1,
+                };
+                let key = self.builder.ins().iconst(I32, key);
+                let keys_register = iconst(&mut self.builder, keys);
+                let stored_register = iconst(&mut self.builder, stored);
+                let length = self
+                    .call(
+                        runtime::jit_collection_parts as *const () as usize,
+                        &[I64, I64, I32, I32, I64, I64],
+                        Some(I64),
+                        &[
+                            self.activation,
+                            object,
+                            dict,
+                            key,
+                            keys_register,
+                            stored_register,
+                        ],
+                    )
+                    .ok_or(Refusal("the collection helper returned nothing"))?;
+                let found =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, length, 0);
+                self.hand_off_unless(position, before, found);
+                let keys = self.load_register(keys);
+                let stored = self.load_register(stored);
+                (length, keys, stored)
+            }
+        };
         if let Some((initial, register)) = accumulator {
             let ty = before.registers[initial];
             let value = self.use_register(initial, ty);
             self.def_register(register, ty, value);
         }
+        let first = match start {
+            None if traversal.backwards => self.builder.ins().iadd_imm_s(length, -1),
+            None => self.builder.ins().iconst(I64, 0),
+            // `List.walk_from` takes a whole position of 1 or more; tier 0 raises the library's
+            // error for anything else.
+            Some((register, ty)) => {
+                let value = self.use_register(register, ty);
+                let whole = match ty {
+                    Ty::Dbl => {
+                        let whole = self.builder.ins().fcvt_to_sint_sat(I64, value);
+                        let back = self.builder.ins().fcvt_from_sint(F64, whole);
+                        let exact = self.builder.ins().fcmp(FloatCC::Equal, back, value);
+                        self.hand_off_unless(position, before, exact);
+                        // Tier 0 reads the position as an R integer, so a larger one is an error.
+                        let fits = self.builder.ins().icmp_imm_s(
+                            IntCC::SignedLessThanOrEqual,
+                            whole,
+                            i32::MAX as i64,
+                        );
+                        self.hand_off_unless(position, before, fits);
+                        whole
+                    }
+                    _ => self.builder.ins().sextend(I64, value),
+                };
+                let positive =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, whole, 1);
+                self.hand_off_unless(position, before, positive);
+                self.builder.ins().iadd_imm_s(whole, -1)
+            }
+        };
         let destination = iconst(&mut self.builder, dst);
-        if matches!(traversal, Traversal::Map | Traversal::Filter(_)) {
+        if matches!(traversal.fold, Fold::Map | Fold::Filter(_)) {
             let made = self
                 .call(
                     runtime::jit_list_new as *const () as usize,
@@ -1322,16 +1409,19 @@ impl<'p, 'b> Translator<'p, 'b> {
             let made = self.builder.ins().icmp_imm_s(IntCC::NotEqual, made, 0);
             self.hand_off_unless(position, before, made);
         }
-        let index = self.builder.declare_var(I64);
+        let at_var = self.builder.declare_var(I64);
         let count = self.builder.declare_var(I64);
         let answer = self.builder.declare_var(I32);
+        let found = self.builder.declare_var(I64);
+        self.builder.def_var(at_var, first);
         let zero = self.builder.ins().iconst(I64, 0);
-        self.builder.def_var(index, zero);
         self.builder.def_var(count, zero);
+        let none = self.builder.ins().iconst(I64, -1);
+        self.builder.def_var(found, none);
         let initial_answer = self
             .builder
             .ins()
-            .iconst(I32, i64::from(traversal == Traversal::All));
+            .iconst(I32, i64::from(traversal.fold == Fold::All));
         self.builder.def_var(answer, initial_answer);
         let header = self.builder.create_block();
         let body = self.builder.create_block();
@@ -1339,17 +1429,61 @@ impl<'p, 'b> Translator<'p, 'b> {
         let exit = self.builder.create_block();
         self.builder.ins().jump(header, &[]);
         self.builder.switch_to_block(header);
-        let at = self.builder.use_var(index);
-        let more = self.builder.ins().icmp(IntCC::SignedLessThan, at, length);
+        let at = self.builder.use_var(at_var);
+        let more = if traversal.backwards {
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0)
+        } else {
+            self.builder.ins().icmp(IntCC::SignedLessThan, at, length)
+        };
         self.builder.ins().brif(more, body, &[], exit, &[]);
         self.builder.switch_to_block(body);
         let offset = self.builder.ins().imul_imm_s(at, 8);
-        let address = self.builder.ins().iadd(vector, offset);
-        let item = self.builder.ins().load(I64, flags(), address, DATA);
-        let fits = self.check(item, element_ty);
-        self.hand_off_unless(position, before, fits);
-        let unboxed = self.unbox(item, element_ty);
-        self.def_register(element, element_ty, unboxed);
+        // A list's element, or a dictionary's value: either way a boxed item of a plain list.
+        let item = match parts {
+            None => {
+                let address = self.builder.ins().iadd(keys, offset);
+                Some(self.builder.ins().load(I64, flags(), address, DATA))
+            }
+            Some(_) if traversal.source == analysis::Source::Dict && items[1].is_some() => {
+                let address = self.builder.ins().iadd(stored, offset);
+                Some(self.builder.ins().load(I64, flags(), address, DATA))
+            }
+            Some(_) => None,
+        };
+        match parts {
+            None => {
+                if let (Some((register, ty)), Some(item)) = (items[0], item) {
+                    self.unbox_item(position, before, item, register, ty);
+                }
+            }
+            Some(_) => {
+                // The helper checked the keys vector has the key's type.
+                if let Some((register, ty)) = items[0] {
+                    let key = match ty {
+                        Ty::Dbl => {
+                            let address = self.builder.ins().iadd(keys, offset);
+                            self.builder.ins().load(F64, flags(), address, DATA)
+                        }
+                        _ => {
+                            let offset = self.builder.ins().imul_imm_s(at, 4);
+                            let address = self.builder.ins().iadd(keys, offset);
+                            self.builder.ins().load(I32, flags(), address, DATA)
+                        }
+                    };
+                    self.def_register(register, ty, key);
+                }
+                if let (Some((register, ty)), Some(item)) = (items[1], item) {
+                    self.unbox_item(position, before, item, register, ty);
+                }
+            }
+        }
+        if let Some(register) = index {
+            let at = self.builder.ins().ireduce(I32, at);
+            let index = self.builder.ins().iadd_imm_s(at, 1);
+            self.def_register(register, Ty::Int, index);
+        }
         for &(step, state) in steps {
             self.action(position, self.plan.state(state), step)?;
         }
@@ -1362,14 +1496,22 @@ impl<'p, 'b> Translator<'p, 'b> {
                 .icmp_imm_s(IntCC::NotEqual, value, NA_INTEGER as i64);
             self.hand_off_unless(position, before, answered);
         }
-        match traversal {
-            Traversal::Walk => {
+        match traversal.fold {
+            Fold::Walk { .. } => {
                 if let Some((_, register)) = accumulator {
                     self.def_register(register, result_ty, value);
                 }
-                self.builder.ins().jump(next, &[]);
+                match broke {
+                    Some(broke) => {
+                        let flag = self.use_register(broke, Ty::Lgl);
+                        self.builder.ins().brif(flag, exit, &[], next, &[]);
+                    }
+                    None => {
+                        self.builder.ins().jump(next, &[]);
+                    }
+                }
             }
-            Traversal::Map => {
+            Fold::Map => {
                 let (kind, bits) = match result_ty {
                     Ty::Dbl => (
                         representation::DOUBLE,
@@ -1387,7 +1529,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.store_item(position, before, destination, at, kind, bits)?;
                 self.builder.ins().jump(next, &[]);
             }
-            Traversal::Filter(keep) => {
+            Fold::Filter(keep) => {
+                let item = item.ok_or(Refusal("a filter without its element"))?;
                 let store = self.builder.create_block();
                 let condition = if keep { IntCC::NotEqual } else { IntCC::Equal };
                 let passes = self.builder.ins().icmp_imm_s(condition, value, 0);
@@ -1406,12 +1549,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.def_var(count, kept);
                 self.builder.ins().jump(next, &[]);
             }
-            Traversal::Any | Traversal::All => {
+            Fold::Any | Fold::All | Fold::Find { .. } => {
                 let decided = self.builder.create_block();
-                let stops = if traversal == Traversal::Any {
-                    IntCC::NotEqual
-                } else {
+                let stops = if traversal.fold == Fold::All {
                     IntCC::Equal
+                } else {
+                    IntCC::NotEqual
                 };
                 let stop = self.builder.ins().icmp_imm_s(stops, value, 0);
                 self.builder.ins().brif(stop, decided, &[], next, &[]);
@@ -1419,11 +1562,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let flipped = self
                     .builder
                     .ins()
-                    .iconst(I32, i64::from(traversal == Traversal::Any));
+                    .iconst(I32, i64::from(traversal.fold != Fold::All));
                 self.builder.def_var(answer, flipped);
+                self.builder.def_var(found, at);
                 self.builder.ins().jump(exit, &[]);
             }
-            Traversal::CountIf => {
+            Fold::CountIf => {
                 let passed = self.builder.ins().sextend(I64, value);
                 let counted = self.builder.use_var(count);
                 let counted = self.builder.ins().iadd(counted, passed);
@@ -1432,20 +1576,21 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
         }
         self.builder.switch_to_block(next);
-        let at = self.builder.use_var(index);
-        let following = self.builder.ins().iadd_imm_s(at, 1);
-        self.builder.def_var(index, following);
+        let at = self.builder.use_var(at_var);
+        let step = if traversal.backwards { -1 } else { 1 };
+        let following = self.builder.ins().iadd_imm_s(at, step);
+        self.builder.def_var(at_var, following);
         self.builder.ins().jump(header, &[]);
         self.builder.switch_to_block(exit);
-        match traversal {
-            Traversal::Walk => {
+        match traversal.fold {
+            Fold::Walk { .. } => {
                 if let Some((_, register)) = accumulator {
                     let value = self.use_register(register, result_ty);
                     self.def_register(dst, result_ty, value);
                 }
             }
-            Traversal::Map => {}
-            Traversal::Filter(_) => {
+            Fold::Map => {}
+            Fold::Filter(_) => {
                 let kept = self.builder.use_var(count);
                 let done = self
                     .call(
@@ -1458,17 +1603,48 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let done = self.builder.ins().icmp_imm_s(IntCC::NotEqual, done, 0);
                 self.hand_off_unless(position, before, done);
             }
-            Traversal::Any | Traversal::All => {
+            Fold::Any | Fold::All => {
                 let value = self.builder.use_var(answer);
                 self.def_register(dst, Ty::Lgl, value);
             }
-            Traversal::CountIf => {
+            Fold::CountIf => {
                 let counted = self.builder.use_var(count);
                 let counted = self.builder.ins().ireduce(I32, counted);
                 self.def_register(dst, Ty::Int, counted);
             }
+            Fold::Find { index } => {
+                let list = iconst(&mut self.builder, collection);
+                let at = self.builder.use_var(found);
+                let index = self.builder.ins().iconst(I32, i64::from(index));
+                let done = self
+                    .call(
+                        runtime::jit_found as *const () as usize,
+                        &[I64, I64, I64, I64, I32],
+                        Some(I32),
+                        &[self.activation, destination, list, at, index],
+                    )
+                    .ok_or(Refusal("the find helper returned nothing"))?;
+                let done = self.builder.ins().icmp_imm_s(IntCC::NotEqual, done, 0);
+                self.hand_off_unless(position, before, done);
+            }
         }
         Ok(())
+    }
+
+    /// Checks a boxed item a traversal reads has the type its callback expects, handing the
+    /// call to tier 0 when it does not, and unboxes it into `register`.
+    fn unbox_item(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        item: Value,
+        register: usize,
+        ty: Ty,
+    ) {
+        let fits = self.check(item, ty);
+        self.hand_off_unless(position, before, fits);
+        let unboxed = self.unbox(item, ty);
+        self.def_register(register, ty, unboxed);
     }
 
     /// Stores an item into the list a traversal builds in register `destination`, handing the

@@ -773,10 +773,6 @@ p <- p - 1L
 #++++
 p: character
 p: Unknown
-0..1 warning[duplicate] Top-level binding `p` is overwritten by a later top-level binding in this package.
-  = 12..13 the later binding is here.
-12..13 warning[duplicate] Top-level binding `p` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
 17..18 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- self_referential_first_writer_stays_tolerated
@@ -876,3 +872,49 @@ find <- function(scopes) {
 #++++
 parse: fn(x: character) -> list{scheme: character, host: character}
 find: <T> fn(scopes: T) -> list{} | list{scheme: character, host: character}
+
+#---- a_scalar_bounded_variable_fills_a_vector_parameter
+# `1:n` bounds `n` as a scalar, and a scalar is a length-one vector, so `lapply` still takes it
+# (gmp's `BernoulliQ`).
+B1 <- function(n) {
+  for (k in 1:n) B1(2 * k)
+}
+bernoulli <- function(n) {
+  B1(n)
+  lapply(n, B1)
+}
+counted <- function(n) {
+  for (i in 1:n) NULL
+  vapply(n, function(k) k + 1, double(1))
+}
+#++++
+B1: <T: scalar numeric> fn(n: T) -> NULL
+bernoulli: <T: scalar numeric> fn(n: T) -> list[NULL]
+counted: <T: scalar numeric> fn(n: T) -> double[]
+
+#---- is_false_rules_out_a_false_result
+# car returns `FALSE` when a fit fails and tests the result with `isFALSE()`.
+fit <- function(a) {
+  if (isFALSE(a)) return(FALSE)
+  as.list(a)
+}
+use <- function(a) {
+  x <- fit(a)
+  if (isFALSE(x)) 0 else x$m
+}
+check <- function(flag) if (isTRUE(flag)) "on" else "off"
+#++++
+fit: <T> fn(a: T) -> logical | list[Any]
+use: <T> fn(a: T) -> Any
+check: <T> fn(flag: T) -> character
+
+#---- a_guard_on_an_assignment_narrows_the_assigned_local
+# diffobj stores a checked value and tests it in one expression.
+check_limit <- function(x) if (x > 0) as.integer(x) else "bad limit"
+use <- function(limit) {
+  if (!is.integer(out <- check_limit(limit))) stop(sprintf(out, "limit"))
+  out + 1L
+}
+#++++
+check_limit: <T> fn(x: T) -> integer | character
+use: <T> fn(limit: T) -> integer
