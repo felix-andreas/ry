@@ -12,7 +12,7 @@ use {
     heap::{
         Collection, HeapError,
         arena::Arena,
-        object::{Header, NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+        object::{Header, NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
     std::ffi::{c_char, c_int, c_long, c_void},
@@ -394,12 +394,9 @@ pub unsafe extern "C" fn Rf_allocS4Object() -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarLogical(value: c_int) -> Sexp {
-    let value = if value == NA_LOGICAL {
-        NA_LOGICAL
-    } else {
-        (value != 0) as i32
-    };
-    enter(|| scalar(SexpType::Logical, value))
+    // GNU R returns its shared `TRUE`, `FALSE` and `NA` here, and packages compare the result's
+    // address against them (data.table's `setattr` does).
+    enter(|| Ok(interp::values::scalar_logical(value)?))
 }
 
 #[unsafe(no_mangle)]

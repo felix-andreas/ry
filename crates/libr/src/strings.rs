@@ -219,7 +219,27 @@ pub unsafe extern "C" fn Rf_translateChar(object: Sexp) -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_translateCharUTF8(object: Sexp) -> *const c_char {
-    enter(|| translate(object, "translateCharUTF8"))
+    enter(|| {
+        let translated = translate(object, "translateCharUTF8")?;
+        // Outside a UTF-8 locale a native string's non-ASCII bytes are not valid input to the
+        // conversion, and GNU R writes each as `<xx>`, which data.table's sorting relies on.
+        if object == runtime().heap.known().na_string
+            || object.has_gp(gp::LATIN1 | gp::UTF8 | gp::BYTES)
+            || object.bytes().is_ascii()
+            || interp::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
+        {
+            return Ok(translated);
+        }
+        let mut escaped = Vec::with_capacity(object.bytes().len() * 2);
+        for &byte in object.bytes() {
+            if byte.is_ascii() {
+                escaped.push(byte);
+            } else {
+                escaped.extend_from_slice(format!("<{byte:02x}>").as_bytes());
+            }
+        }
+        arena_c_string(&escaped)
+    })
 }
 
 /// The variant that fails politely: a null pointer instead of an error.
