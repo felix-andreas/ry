@@ -2857,8 +2857,7 @@ impl<'db> Checker<'db, '_> {
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 let default_reads = self.default_reads(&module[parameters], &uses, &named);
-                let flag_return =
-                    self.flag_return(&module[parameters], *body, early_returns.len());
+                let flag_return = self.flag_return(&module[parameters], *body, early_returns.len());
                 let null_unless =
                     self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
                 let reduces = if early_returns.is_empty() {
@@ -8041,7 +8040,8 @@ impl<'db> Checker<'db, '_> {
     /// list(value = prob, error = err)`. A flag the body never reassigns decides the branch
     /// from the call alone, so its two branch types are kept beside the joined return. A
     /// branch may also end in `return(value)`, as pracma's `gcd(..., extended = FALSE)` does,
-    /// provided those are the body's only early returns.
+    /// or be an earlier `if (flag) return(value)` before the tail, as in Matrix's `iam(j, both =
+    /// FALSE)`, provided those are the body's only early returns.
     fn flag_return(
         &self,
         parameters: &[Formal],
@@ -8055,17 +8055,52 @@ impl<'db> Checker<'db, '_> {
             }
             id
         };
+        let mut statements: &[ExprId] = &[];
         let mut tail = strip(body);
-        while let ExpressionKind::Block { statements } = module.kind(tail) {
-            tail = strip(*module[statements].last()?);
+        while let ExpressionKind::Block { statements: block } = module.kind(tail) {
+            statements = &module[block];
+            tail = strip(*statements.last()?);
         }
-        let ExpressionKind::If {
-            condition,
-            then_branch,
-            else_branch: Some(else_branch),
-        } = module.kind(tail)
-        else {
-            return None;
+        // Either the tail branches on the flag, or a statement before it returns early on the
+        // flag (`if (both) return(list(row.index = j))`) and the tail is the other value.
+        let (condition, then_branch, else_branch) = match module.kind(tail) {
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch: Some(else_branch),
+            } => (condition, then_branch, else_branch),
+            _ => {
+                let returns_early = |branch: ExprId| {
+                    let mut value = strip(branch);
+                    if let ExpressionKind::Block { statements } = module.kind(value)
+                        && let Some(&last) = module[statements].last()
+                    {
+                        value = strip(last);
+                    }
+                    matches!(
+                        module.kind(value),
+                        ExpressionKind::Call { callee, .. }
+                            if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
+                    )
+                };
+                let guard = statements[..statements.len().saturating_sub(1)]
+                    .iter()
+                    .find_map(|&statement| match module.kind(strip(statement)) {
+                        ExpressionKind::If {
+                            condition,
+                            then_branch,
+                            else_branch: None,
+                        } if matches!(
+                            module.kind(strip(*condition)),
+                            ExpressionKind::NameRef(_)
+                        ) && returns_early(*then_branch) =>
+                        {
+                            Some((condition, then_branch))
+                        }
+                        _ => None,
+                    })?;
+                (guard.0, guard.1, statements.last()?)
+            }
         };
         let ExpressionKind::NameRef(name) = module.kind(strip(*condition)) else {
             return None;

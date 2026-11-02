@@ -2299,3 +2299,15 @@ predict_fit <- function(nlp, x) {
 }
 #++++
 predict_fit: <T, U: numeric> fn(nlp: T, x: U) -> Unknown
+
+#---- a_flag_default_selects_an_early_return
+iam <- function(j, both = FALSE) {
+  if (both) return(list(row.index = j))
+  j + 1
+}
+rows <- function() iam(1, both = TRUE)$row.index
+next_index <- function() iam(1) * 2
+#++++
+iam: <T: numeric, U> fn(j: T, [both]: U) -> list{row.index: T} | double
+rows: fn() -> double
+next_index: fn() -> double
