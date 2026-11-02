@@ -42,8 +42,8 @@ try-editor:
 test *args:
     cargo test -- --nocapture {{ args }}
 
-# The pre-landing check: tests, clippy at -D warnings, and fmt.
-gate: battery clippy fmt-check
+# The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
+gate: battery clippy fmt-check (notices "--check")
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -169,6 +169,12 @@ install-extension:
     just build-extension pre-release --out ../../release/dev/ry.vsix
     code --install-extension release/dev/ry.vsix
 
+# Regenerate THIRD_PARTY_NOTICES from Cargo.lock, the crates' licence files and the GNU R
+# provenance headers; `just notices --check` fails if it is stale or a crate's licence breaks the
+# rule in LICENSE.
+notices *args:
+    python3 -I tools/third-party-notices.py {{ args }}
+
 # Build every binary and ry's runtime (libR), e.g. `just build --release`.
 build *args:
     cargo build --workspace --exclude zed_ry {{ args }}
@@ -176,13 +182,12 @@ build *args:
 zigbuild target *args:
     cargo zigbuild --target {{ target }} {{ args }}
 
-# Package the VS Code extension for one platform from its unpacked archive in DIR/ry-TARGET. The
-# extension bundles everything but LICENSE (`ry`, the runtime and `ry-rcmd`), because the bundled
-# `ry` looks for its runtime beside itself.
+# Package the VS Code extension for one platform from its unpacked archive in DIR/ry-TARGET: it
+# bundles the archive's `ry` binary, and build-extension adds the licence and notices.
 build-platform-vsix target vscode-target dir kind:
     rm -rf editors/code/bin
     mkdir -p editors/code/bin
-    find {{ dir }}/ry-{{ target }} -maxdepth 1 -type f ! -name LICENSE -exec cp {} editors/code/bin/ \;
+    find {{ dir }}/ry-{{ target }} -maxdepth 1 -type f ! -name LICENSE ! -name THIRD_PARTY_NOTICES -exec cp {} editors/code/bin/ \;
     just build-extension {{ kind }} --target {{ vscode-target }} --out ../../{{ dir }}/ry-{{ vscode-target }}.vsix
 
 build-extension kind *args:
@@ -191,7 +196,18 @@ build-extension kind *args:
     kind={{ quote(kind) }}
 
     release_flag=$(just vsce-release-flag "$kind")
-    cp LICENSE editors/code
+    # The extension's own code is MIT, but a platform extension bundles the GPL `ry` binary, so
+    # the vsix carries both licences and the binary's third-party notices.
+    {
+    	printf 'The ry extension for VS Code is licensed under the MIT License below. A platform-specific\n'
+    	printf 'build of the extension also bundles the `ry` program in bin/, which is licensed under the\n'
+    	printf 'GNU General Public License, version 2 or later, as described after the MIT License.\n'
+    	printf 'THIRD_PARTY_NOTICES lists the third-party code in `ry`.\n\n'
+    	cat editors/code/LICENSE-MIT
+    	printf '\n\n'
+    	cat LICENSE
+    } > editors/code/LICENSE
+    cp THIRD_PARTY_NOTICES editors/code
     just vsce package $release_flag {{ args }}
 
 bump-version version:
@@ -216,7 +232,7 @@ bump-version version:
     git commit -m "chore: release {{ version }}"
 
 # Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) embedded in it,
-# and the license. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
+# LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
 # an LLVM mingw toolchain (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages
 # share the UCRT.
 package version target="":
@@ -247,11 +263,11 @@ package version target="":
     			echo "error: ry.exe or R.dll imports a toolchain runtime the archive lacks: $runtimes" >&2
     			exit 1
     		fi
-    		cp "$build/ry.exe" LICENSE "$stage/"
-    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
+    		cp "$build/ry.exe" LICENSE THIRD_PARTY_NOTICES "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE THIRD_PARTY_NOTICES >/dev/null)
     		;;
     	*)
-    		cp "$build/ry" LICENSE "$stage/"
+    		cp "$build/ry" LICENSE THIRD_PARTY_NOTICES "$stage/"
     		tar -czf "$dir/ry-$target.tar.gz" -C "$stage" .
     		;;
     esac

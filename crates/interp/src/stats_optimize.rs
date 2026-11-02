@@ -1,3 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/appl/integrate.c (QUADPACK's dqagse, dqagie and dqelg)
+//     Copyright (C) 2001-2023 The R Core Team
+//
+// GNU R: src/library/stats/src/optimize.c (Brent_fmin)
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 2003-2004 The R Foundation
+//     Copyright (C) 1998--2014 The R Core Team
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! stats' optimizers, root finder and quadrature: `optimize` (Brent's minimizer), `uniroot`
 //! (Brent's root finder), `optim` (Nelder and Mead's simplex, BFGS, conjugate gradients,
 //! L-BFGS-B and simulated annealing) with its Hessian, and `integrate` (QUADPACK's adaptive
@@ -7,7 +27,8 @@
 //! without Derivatives" (1973); Nash, "Compact Numerical Methods for Computers" (1990,
 //! algorithms 19, 21 and 22); Byrd, Lu, Nocedal and Zhu, "A limited memory algorithm for bound
 //! constrained optimization" (1995); Piessens, de Doncker-Kapenga, Überhuber and Kahaner,
-//! "QUADPACK" (1983). Every objective is an R function called back from here, each call in its
+//! "QUADPACK" (1983). Brent's minimizer and the QUADPACK routines follow GNU R's C versions
+//! (named above). Every objective is an R function called back from here, each call in its
 //! own handle scope so that long runs do not accumulate handles.
 
 use {

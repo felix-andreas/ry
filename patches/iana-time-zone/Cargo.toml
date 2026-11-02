@@ -2,6 +2,7 @@
 name = "iana-time-zone"
 version = "0.1.65"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]

@@ -88,7 +88,7 @@ local({
       if (is.null(path)) {
         path <<- file.path(tempdir(), "ry")
         dir.create(path, showWarnings = FALSE)
-        writeLines(c("Package: ry", "Version: 0.0.0", "Title: The ry runtime", "License: UPL-1.0"),
+        writeLines(c("Package: ry", "Version: 0.0.0", "Title: The ry runtime", "License: GPL (>= 2)"),
                    file.path(path, "DESCRIPTION"))
       }
       path

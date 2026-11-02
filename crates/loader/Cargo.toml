@@ -1,6 +1,7 @@
 [package]
 name = "loader"
 edition = "2024"
+license = "GPL-2.0-or-later"
 version.workspace = true
 publish = false
 

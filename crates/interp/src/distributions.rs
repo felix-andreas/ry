@@ -1,3 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/nmath/rgamma.c (rgamma)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000--2016 The R Core Team
+//
+// GNU R: src/nmath/rbeta.c (rbeta)
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 2000--2016 The R Core Team
+//     Copyright (C) 2001--2016 The R Foundation
+//
+// GNU R: src/nmath/rpois.c (rpois)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000-2011 The R Core Team
+//
+// GNU R: src/nmath/rbinom.c (rbinom)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000-2014 The R Core Team
+//     Copyright (C) 2007 The R Foundation
+//
+// GNU R: src/nmath/rhyper.c (rhyper)
+//     Copyright (C) 2000-2020 The R Core Team
+//     Copyright (C) 2005-2020 The R Foundation
+//     Copyright (C) 1998 Ross Ihaka
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! Probability distributions: the density, distribution, quantile and random generation
 //! functions behind `.Internal(dnorm(...))` and its relatives, the Bessel functions and
 //! `psigamma`.
@@ -9,14 +44,15 @@
 //! argument of that length, an `NA` argument gives `NA`, and a NaN computed from non-NaN arguments
 //! raises "NaNs produced".
 //!
-//! The algorithms are the published ones GNU R's results come from, implemented from the papers:
+//! The algorithms are the published ones GNU R's results come from:
 //! Cody (1969) for the normal distribution function, Wichura's AS 241 for its quantile, Loader's
 //! (2000) saddle point expansion for the binomial and Poisson densities, continued fractions and
 //! series for the incomplete gamma and beta functions, Lenth's AS 226 and AS 243 for the
 //! noncentral beta and t distributions, Copenhaver and Holland (1988) for the studentized range,
 //! and Ahrens and Dieter, Cheng, and Kachitvichyanukul and Schmeiser for the random generators,
 //! which consume the uniform stream in exactly GNU R's order so that `set.seed` reproduces its
-//! draws.
+//! draws. The random generators are translations of GNU R's nmath versions (the files named
+//! above).
 //!
 //! Numerical warnings that Rmath reports through `MATHLIB_WARNING` (a non-integer count, lost
 //! precision) are collected while the functions run and raised by the builtin afterwards, which

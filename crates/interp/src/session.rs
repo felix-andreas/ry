@@ -2,7 +2,7 @@
 //! the C-level options, base R's own loader (`library/base/R/base`, which lazy-loads base from
 //! its database), the system profile, `methods`, then `.First.sys` for the default packages.
 //! Base R's R code is read from the user's GNU R installation, never vendored (see
-//! `decisions.md`, "runtime licensing").
+//! `decisions.md`, "licensing").
 
 use {
     crate::{

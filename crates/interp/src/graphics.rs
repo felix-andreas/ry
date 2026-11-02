@@ -1,3 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/library/graphics/src/plot3d.c (contour label placement, persp)
+//     Copyright (C) 1998--2018 The R Core Team
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! The native routines of grDevices and graphics: colours, palettes, axis ticks, convex hulls
 //! and contour lines, which need no device, and the devices and the base graphics engine.
 //!
@@ -2502,6 +2517,11 @@ unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
 
 // graphics: text metrics and coordinate conversion.
 
+// The metrics below are extracted and reformatted from Adobe's Core 14 AFM files
+// (Helvetica.afm, Helvetica-Bold.afm), Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems
+// Incorporated. All Rights Reserved.
+// Adobe's terms for those files are in THIRD_PARTY_NOTICES at the repository root.
+
 /// The widths of the printable ASCII characters in Helvetica, in thousandths of the font
 /// size, from Adobe's published font metrics. Other characters get the width of a digit.
 const HELVETICA_WIDTHS: [u16; 95] = [
@@ -2985,6 +3005,10 @@ pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
     }
     f64::from(total) / 1000.0
 }
+
+// The metrics below are extracted and reformatted from Adobe's Core 14 AFM files (Symbol.afm),
+// Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated. All Rights Reserved.
+// Adobe's terms for those files are in THIRD_PARTY_NOTICES at the repository root.
 
 /// The Symbol font's metrics for Adobe Symbol codes 32 to 255, in thousandths of the font
 /// size, from GNU R's `afm/Symbol.afm`: the width, the top of the glyph above the baseline,

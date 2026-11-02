@@ -1287,9 +1287,11 @@ JIT fits around them.
 - **How much of base R to reimplement natively versus reuse as R source.** The plan above reuses the
   R sources, which is less work but ties ry to GNU R's base implementation details.
 
-Settled: **licensing.** Base R's R sources are GPL-2-or-later, so ry loads them at runtime from the
-user's own GNU R installation instead of vendoring them, and needs GNU R installed. The owner
-confirmed this default; the reasoning is in `.agents/memory/decisions.md` ("runtime licensing").
+Settled: **licensing.** The runtime is GPL-2.0-or-later, as GNU R is, because parts of it
+translate R's C sources ([licensing](/reference/licensing/)). ry still loads base R's R sources
+at runtime from the user's own GNU R installation instead of vendoring them, which keeps ry small
+and lets it behave like the R version it finds; the reasoning is in
+`.agents/memory/decisions.md` ("licensing").
 
 ## Sources
 

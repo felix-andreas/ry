@@ -3,7 +3,7 @@ name = "table"
 description = "ry's built-in typed table type, an engine over Polars"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 publish = false
 # `benches/allocator.rs` is a module the benchmarks share, not a benchmark.
 autobenches = false

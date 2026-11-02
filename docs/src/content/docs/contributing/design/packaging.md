@@ -159,7 +159,7 @@ installation that matches.[^rv] Otherwise ry keeps today's behavior and asks the
 can read its layout.[^rig]
 
 ry's runtime still needs a GNU R 4.6 installation on disk, because it loads base R's R sources from
-one instead of vendoring them (the runtime licensing decision in `.agents/memory/decisions.md`). So
+one instead of vendoring them (the licensing decision in `.agents/memory/decisions.md`). So
 ry's runtime has an `R_HOME` of its own, assembled like this:
 
 - `bin/R` and `bin/Rscript` (on Windows also `bin/<arch>/Rterm.exe` and `Rscript.exe`) start ry, so
