@@ -12,19 +12,18 @@ use {
         coerce::{coerce_vector, parse_real},
         conditions::warning,
         format::{format_complex_alone, format_real_alone_scipen},
-        platform,
         unwind::{R, Unwind, error},
         values::{
             self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
             string_vector, symbols,
         },
-        write_console,
+        platform, write_console,
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
     std::{
         cell::RefCell,
-        collections::BTreeMap,
         fs::File,
+        collections::BTreeMap,
         io::{BufWriter, Read, Write},
         net::{Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs},
         sync::{
@@ -1973,9 +1972,7 @@ pub unsafe fn stop_memory_profiler() -> R<()> {
 fn record_allocation(size: usize) -> bool {
     let mut line = format!("{size} :");
     for frame in crate::interp().frames.iter().rev() {
-        line.push_str(&format!("\"{}\" ", unsafe {
-            profile_name(frame.call.car())
-        }));
+        line.push_str(&format!("\"{}\" ", unsafe { profile_name(frame.call.car()) }));
     }
     line.push('\n');
     let written = MEMORY_PROFILE.with_borrow_mut(|output| match output {
@@ -2287,8 +2284,8 @@ unsafe fn do_download(call: &NativeCall<'_>) -> R<Sexp> {
     if length(destination) > 1 {
         warning("only first element of 'destfile' argument used")?;
     }
-    let destination =
-        values::string_at(destination, 0).ok_or_else(|| error("invalid 'destfile' argument"))?;
+    let destination = values::string_at(destination, 0)
+        .ok_or_else(|| error("invalid 'destfile' argument"))?;
     let mode = values::require_string(call.arg(3), "mode")?;
     let Some(path) = url.strip_prefix("file://") else {
         let scheme = ["http", "ftp"]
