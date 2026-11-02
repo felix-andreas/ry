@@ -22,12 +22,11 @@ use {
     },
     heap::object::{NA_INTEGER, Sexp, SexpType},
     std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         io::{BufRead, BufReader, Read, Write},
-        net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+        net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
         sync::{
-            Arc, Condvar, Mutex, MutexGuard, PoisonError,
-            atomic::{AtomicBool, Ordering},
+            Condvar, Mutex, MutexGuard, PoisonError,
             mpsc::{SyncSender, sync_channel},
         },
         time::Duration,
@@ -43,8 +42,8 @@ pub const PORT_IN_USE: i32 = -2;
 /// Starts serving on `ip:port`. Returns [`STARTED`], [`PORT_IN_USE`] when the port is taken, or
 /// [`FAILED`] for any other failure, including a server that is already running.
 pub fn start(ip: &str, port: u16) -> i32 {
-    let mut server = lock(&SERVER);
-    if server.is_some() {
+    let mut state = lock(&STATE);
+    if state.server.is_some() {
         return FAILED;
     }
     let listener = match TcpListener::bind((ip, port)) {
@@ -55,48 +54,75 @@ pub fn start(ip: &str, port: u16) -> i32 {
     let Ok(address) = listener.local_addr() else {
         return FAILED;
     };
-    let stopping = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stopping);
+    state.generation += 1;
+    let generation = state.generation;
     let accepting = std::thread::Builder::new()
         .name("ry-help-accept".to_owned())
-        .spawn(move || accept(listener, &flag));
+        .spawn(move || accept(listener, generation));
     if accepting.is_err() {
         return FAILED;
     }
-    *server = Some(Server { address, stopping });
+    state.server = Some(Server {
+        address,
+        connections: HashMap::new(),
+        next_connection: 0,
+    });
     STARTED
 }
 
-/// Stops accepting connections and drops the requests still queued, whose connections then close.
+/// Stops accepting connections, closes every open one, and drops the requests still queued.
 pub fn stop() {
-    let Some(server) = lock(&SERVER).take() else {
+    let server = {
+        let mut state = lock(&STATE);
+        state.queue.clear();
+        state.server.take()
+    };
+    let Some(server) = server else {
         return;
     };
-    server.stopping.store(true, Ordering::Relaxed);
-    // `accept` blocks, so a connection of our own wakes it to see the flag. A failure means the
-    // listener is already gone.
-    TcpStream::connect_timeout(&server.address, Duration::from_secs(1)).ok();
-    lock(&QUEUE).clear();
+    for stream in server.connections.values() {
+        stream.shutdown(Shutdown::Both).ok();
+    }
+    // `accept` blocks, so a connection of our own wakes it to see that its generation ended. A
+    // listener on every address is reached through loopback. A failure means it is already gone.
+    let mut wake = server.address;
+    if wake.ip().is_unspecified() {
+        wake.set_ip(match wake {
+            SocketAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+            SocketAddr::V6(_) => Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    TcpStream::connect_timeout(&wake, Duration::from_secs(1)).ok();
 }
 
 /// Whether the server is running, so the console knows to answer requests while it waits.
 pub fn running() -> bool {
-    lock(&SERVER).is_some()
+    lock(&STATE).server.is_some()
 }
 
-/// Answers every queued request.
+/// Answers every queued request. A Ctrl-C while a handler runs answers that request with an
+/// error and is passed on once the queue is empty, so the code that was waiting stops too.
 ///
 /// # Safety
 /// Called on the interpreter's thread, at a point where R code may run: the console's prompt,
-/// `Sys.sleep()` or `process.events()`.
-pub unsafe fn serve_pending() {
-    while let Some(exchange) = lock(&QUEUE).pop_front() {
+/// `Sys.sleep()`, `process.events()` or an HTTP transfer.
+pub unsafe fn serve_pending() -> R<()> {
+    let mut interrupted = false;
+    loop {
+        let Some(exchange) = lock(&STATE).queue.pop_front() else {
+            break;
+        };
         let mark = crate::heap().handle_mark();
-        let response = unsafe { answer(&exchange.request) };
+        let (response, stopped) = unsafe { answer(&exchange.request) };
         crate::heap().release_handles(mark);
+        interrupted |= stopped;
         // The connection may have closed meanwhile; then nobody wants the answer.
         exchange.reply.send(response).ok();
     }
+    if interrupted {
+        return Err(Unwind::Interrupt);
+    }
+    Ok(())
 }
 
 /// Waits up to `timeout` for a request and answers what arrived; without a running server it
@@ -104,28 +130,40 @@ pub unsafe fn serve_pending() {
 ///
 /// # Safety
 /// As for [`serve_pending`].
-pub unsafe fn wait_and_serve(timeout: Duration) {
-    if !running() {
-        std::thread::sleep(timeout);
-        return;
-    }
+pub unsafe fn wait_and_serve(timeout: Duration) -> R<()> {
     {
-        let queue = lock(&QUEUE);
-        if queue.is_empty() {
+        let state = lock(&STATE);
+        if state.server.is_none() {
+            drop(state);
+            std::thread::sleep(timeout);
+            return Ok(());
+        }
+        if state.queue.is_empty() {
             // A spurious wake-up only ends this slice early.
             drop(
                 ARRIVED
-                    .wait_timeout(queue, timeout)
+                    .wait_timeout(state, timeout)
                     .unwrap_or_else(PoisonError::into_inner),
             );
         }
     }
-    unsafe { serve_pending() };
+    unsafe { serve_pending() }
+}
+
+/// The server and the requests waiting for the interpreter share one lock, so a request is
+/// queued only while the server that accepted it still runs.
+struct State {
+    server: Option<Server>,
+    /// Counts started servers; an accept thread whose server is no longer the current one ends.
+    generation: u64,
+    queue: VecDeque<Exchange>,
 }
 
 struct Server {
     address: SocketAddr,
-    stopping: Arc<AtomicBool>,
+    /// Clones of the open connections, which [`stop`] shuts down to end their threads.
+    connections: HashMap<u64, TcpStream>,
+    next_connection: u64,
 }
 
 /// A request waiting for the interpreter, and where its response goes.
@@ -154,50 +192,105 @@ struct Response {
     close: bool,
 }
 
-static SERVER: Mutex<Option<Server>> = Mutex::new(None);
-static QUEUE: Mutex<VecDeque<Exchange>> = Mutex::new(VecDeque::new());
+static STATE: Mutex<State> = Mutex::new(State {
+    server: None,
+    generation: 0,
+    queue: VecDeque::new(),
+});
 static ARRIVED: Condvar = Condvar::new();
 
 /// A request body larger than this is refused; help pages and handlers take small forms.
-const MAX_BODY: usize = 64 << 20;
+const MAX_BODY: u64 = 64 << 20;
+/// The request line and headers together may not exceed this. GNU R's server sets no limit, and
+/// takes a header line of 70 kB.
+const MAX_HEAD: u64 = 1 << 20;
+/// A connection that sends nothing for this long is closed, so an idle client cannot hold a
+/// thread forever.
+const IDLE: Duration = Duration::from_secs(120);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn accept(listener: TcpListener, stopping: &AtomicBool) {
+fn accept(listener: TcpListener, generation: u64) {
     for stream in listener.incoming() {
-        if stopping.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(stream) = stream else { continue };
-        // A connection whose thread cannot start is closed by the drop.
-        std::thread::Builder::new()
+        let id = {
+            let mut state = lock(&STATE);
+            if state.generation != generation {
+                return;
+            }
+            let Some(server) = state.server.as_mut() else {
+                return;
+            };
+            let stream = match &stream {
+                Ok(stream) => stream.try_clone(),
+                Err(failure) => Err(failure.kind().into()),
+            };
+            match stream {
+                Ok(stream) => {
+                    let id = server.next_connection;
+                    server.next_connection += 1;
+                    server.connections.insert(id, stream);
+                    Some(id)
+                }
+                Err(_) => None,
+            }
+        };
+        let (Some(id), Ok(stream)) = (id, stream) else {
+            // Out of descriptors, say; retrying at once would only spin.
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        let spawned = std::thread::Builder::new()
             .name("ry-help-connection".to_owned())
-            .spawn(move || converse(stream))
-            .ok();
+            .spawn(move || {
+                converse(stream, generation);
+                forget(id, generation);
+            });
+        if spawned.is_err() {
+            forget(id, generation);
+        }
+    }
+}
+
+/// Drops a closed connection's entry, unless its server has stopped already.
+fn forget(id: u64, generation: u64) {
+    let mut state = lock(&STATE);
+    if state.generation == generation
+        && let Some(server) = state.server.as_mut()
+        && let Some(stream) = server.connections.remove(&id)
+    {
+        stream.shutdown(Shutdown::Both).ok();
     }
 }
 
 /// Reads requests from one connection and writes each answer, until either side closes.
-fn converse(stream: TcpStream) {
+fn converse(stream: TcpStream, generation: u64) {
+    if stream.set_read_timeout(Some(IDLE)).is_err() {
+        return;
+    }
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };
     let mut reader = BufReader::new(stream);
     loop {
-        let (version, keep_alive, request) = match read_request(&mut reader) {
+        let (version, keep_alive, request) = match read_request(&mut reader, &mut writer) {
             Ok(Some(parsed)) => parsed,
             Ok(None) => return,
             Err(()) => {
                 writer.write_all(b"HTTP/1.0 400 Bad Request\r\n\r\n").ok();
-                writer.shutdown(Shutdown::Both).ok();
                 return;
             }
         };
         let head_only = request.method == "HEAD";
         let (reply, response) = sync_channel(1);
-        lock(&QUEUE).push_back(Exchange { request, reply });
+        {
+            let mut state = lock(&STATE);
+            if state.generation != generation || state.server.is_none() {
+                return;
+            }
+            state.queue.push_back(Exchange { request, reply });
+        }
         ARRIVED.notify_all();
         crate::console_server::wake();
         // The server stopped and dropped the request.
@@ -210,20 +303,33 @@ fn converse(stream: TcpStream) {
             || response.close
             || !keep_alive
         {
-            writer.shutdown(Shutdown::Both).ok();
             return;
         }
     }
 }
 
 /// One request, with its HTTP version and whether the connection stays open after it. `Ok(None)`
-/// is a clean close before a request began; `Err` a request GNU R's server would refuse.
-fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<(String, bool, Request)>, ()> {
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) | Err(_) => return Ok(None),
-        Ok(_) => {}
-    }
+/// is a clean close (or an idle timeout) before a request began; `Err` a request GNU R's server
+/// would refuse.
+fn read_request(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut TcpStream,
+) -> Result<Option<(String, bool, Request)>, ()> {
+    let mut budget = MAX_HEAD;
+    // Blank lines before a request line are skipped, as HTTP allows.
+    let line = loop {
+        let mut line = Vec::new();
+        match reader.by_ref().take(budget).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return Ok(None),
+            Ok(read) => budget -= read as u64,
+        }
+        if !line.ends_with(b"\n") {
+            return Err(());
+        }
+        if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            break String::from_utf8(line).map_err(|_| ())?;
+        }
+    };
     let mut parts = line.split_ascii_whitespace();
     let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
     else {
@@ -236,11 +342,19 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<(String, boo
     let mut content_length = 0;
     let mut content_type = None;
     let mut connection = None;
+    let mut expect_continue = false;
     loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header).map_err(|_| ())? == 0 {
+        let mut header = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(budget)
+            .read_until(b'\n', &mut header)
+            .map_err(|_| ())?;
+        budget -= read as u64;
+        if !header.ends_with(b"\n") {
             return Err(());
         }
+        let header = String::from_utf8_lossy(&header);
         let header = header.trim_end_matches(['\r', '\n']);
         if header.is_empty() {
             break;
@@ -252,19 +366,34 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<(String, boo
         };
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
-            content_length = value.parse::<usize>().map_err(|_| ())?;
+            content_length = value.parse::<u64>().map_err(|_| ())?;
         } else if name.eq_ignore_ascii_case("content-type") {
             content_type = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("connection") {
             connection = Some(value.to_ascii_lowercase());
+        } else if name.eq_ignore_ascii_case("expect") {
+            expect_continue = value.eq_ignore_ascii_case("100-continue");
         }
     }
     if content_length > MAX_BODY {
         return Err(());
     }
     let body = if content_length > 0 {
-        let mut body = vec![0; content_length];
-        reader.read_exact(&mut body).map_err(|_| ())?;
+        // A client that announced `Expect: 100-continue` waits for this before sending the body.
+        if expect_continue {
+            writer
+                .write_all(format!("{version} 100 Continue\r\n\r\n").as_bytes())
+                .map_err(|_| ())?;
+        }
+        let mut body = Vec::new();
+        reader
+            .by_ref()
+            .take(content_length)
+            .read_to_end(&mut body)
+            .map_err(|_| ())?;
+        if body.len() as u64 != content_length {
+            return Err(());
+        }
         Some((body, content_type))
     } else {
         None
@@ -366,16 +495,23 @@ const DISPATCH: &str = r#"local({
     try(eval(as.call(list(handler, path, query, body, headers))), silent = TRUE)
 })"#;
 
-unsafe fn answer(request: &Request) -> Response {
+/// The response to a request, and whether a Ctrl-C stopped its handler.
+unsafe fn answer(request: &Request) -> (Response, bool) {
     match unsafe { call_handler(request) } {
-        Ok(result) => unsafe { response_of(result) },
-        Err(failure) => error_response(
-            "Evaluation error",
-            match failure {
-                Unwind::Error(failure) => failure.message,
-                Unwind::Interrupt => "interrupted".to_owned(),
-                _ => interp().error_message.trim_end().to_owned(),
-            },
+        Ok(result) => (unsafe { response_of(result) }, false),
+        Err(Unwind::Interrupt) => (
+            error_response("Evaluation error", "interrupted".to_owned()),
+            true,
+        ),
+        Err(Unwind::Error(failure)) => (error_response("Evaluation error", failure.message), false),
+        // The handler runs with no handlers or restarts of the waiting code in reach, so no jump
+        // can target a frame outside it.
+        Err(Unwind::Jump(jump)) => (
+            error_response(
+                "Evaluation error",
+                format!("unexpected jump out of the handler: {jump:?}"),
+            ),
+            false,
         ),
     }
 }
@@ -391,9 +527,9 @@ unsafe fn call_handler(request: &Request) -> R<Sexp> {
         let query = match &request.query {
             None => nil(),
             Some(fields) => {
-                let values_: Vec<&str> = fields.iter().map(|(_, value)| value.as_str()).collect();
+                let answers: Vec<&str> = fields.iter().map(|(_, value)| value.as_str()).collect();
                 let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
-                let query = values::string_vector(&values_)?;
+                let query = values::string_vector(&answers)?;
                 values::set_attr(query, symbols().names, values::string_vector(&names)?)?;
                 query
             }
@@ -421,12 +557,21 @@ unsafe fn call_handler(request: &Request) -> R<Sexp> {
         )?;
         let expressions = lower::parse_text(DISPATCH, "<help server>")?;
         crate::heap().root(expressions);
+        // Like GNU R's `R_ToplevelExec`, the handler sees none of the waiting code's condition
+        // handlers or restarts, so a warning it signals cannot jump into a `tryCatch()` around
+        // `Sys.sleep()`.
         let state = interp();
         let shown = std::mem::replace(&mut state.show_error_messages, false);
+        let suspended = (state.handlers.take(), state.restarts.take());
+        state.suspended_handlers.push(suspended);
         let srcref = state.srcref;
         let result = eval::eval(expressions.element(0), env);
         let state = interp();
         state.show_error_messages = shown;
+        if let Some((handlers, restarts)) = state.suspended_handlers.pop() {
+            state.handlers = handlers;
+            state.restarts = restarts;
+        }
         state.srcref = srcref;
         let result = result?;
         crate::heap().root(result);

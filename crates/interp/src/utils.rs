@@ -45,7 +45,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("flushconsole", do_flush_console),
     ("processevents", |_| {
         // SAFETY: `process.events()` is a point where GNU R's event loop runs R handlers.
-        unsafe { crate::help_server::serve_pending() };
+        unsafe { crate::help_server::serve_pending()? };
         Ok(nil())
     }),
     ("tzcode_type", |_| unsafe { scalar_string("internal") }),

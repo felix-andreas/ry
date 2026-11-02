@@ -313,7 +313,7 @@ mod platform {
             return read();
         }
         // Requests that arrived while a command ran were left for the prompt.
-        unsafe { help_server::serve_pending() };
+        serve_help();
         // A command a client terminated unwinds at its next statement; one that ended first must
         // not take the stale adapter into the next command.
         let state = interp();
@@ -347,11 +347,21 @@ mod platform {
                     }
                     Some(Event::Request(connection, message)) => idle_request(connection, message),
                     Some(Event::Closed(connection)) => closed(connection),
-                    Some(Event::Help) => unsafe { help_server::serve_pending() },
+                    Some(Event::Help) => serve_help(),
                     None => {}
                 }
             }
         })
+    }
+
+    /// Answers help requests while waiting for input. A Ctrl-C that stopped a handler has
+    /// nothing else to stop here, as at GNU R's prompt.
+    fn serve_help() {
+        // SAFETY: the console waits for input on the interpreter's thread, where GNU R's event
+        // loop runs R handlers too.
+        if let Err(unwind) = unsafe { help_server::serve_pending() } {
+            drop(unwind);
+        }
     }
 
     pub unsafe fn service() {
@@ -529,7 +539,7 @@ mod platform {
                     }
                     // A line typed while a request's code is stopped waits for the prompt; the
                     // stop itself must not end, or the debugger would take it for a hang-up.
-                    Some(Event::Help) if wait => unsafe { help_server::serve_pending() },
+                    Some(Event::Help) if wait => serve_help(),
                     Some(Event::Help) => {}
                     Some(Event::Input(input)) if wait => *lock(&STASHED_INPUT) = Some(input),
                     Some(Event::Input(input)) => {

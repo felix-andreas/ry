@@ -108,8 +108,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                     text.extend_from_slice(&contents);
                     text.push(b'\n');
                     if delete {
-                        // A temporary file the pager could not remove is left for the session's
-                        // temporary directory cleanup, as under GNU R.
+                        // GNU R's pager ignores a failed removal too.
                         std::fs::remove_file(&expanded).ok();
                     }
                 }
@@ -214,7 +213,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("Sys.which", 1, do_sys_which),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
-    internal("Sys.umask", 1, do_sys_umask),
+    internal("Sys.umask", 1, do_sys_umask).keep_visibility(),
     internal("Sys.getpid", 0, |_| unsafe {
         scalar_integer(std::process::id() as i32)
     }),
@@ -240,7 +239,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 {
                     crate::unwind::poll_interrupt()?;
                     // GNU R answers help server requests while it sleeps.
-                    crate::help_server::wait_and_serve(left.min(slice));
+                    crate::help_server::wait_and_serve(left.min(slice))?;
                 }
             }
             Ok(nil())
@@ -258,7 +257,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", -1, do_system),
+    internal("system", -1, do_system).keep_visibility(),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
     internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
@@ -3085,6 +3084,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
                 format!("running command '{command}' had status {status}"),
             )?;
         }
+        interp().visible = true;
         return Ok(result);
     }
     // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
@@ -3800,6 +3800,7 @@ unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_sys_umask(call: &Call<'_>) -> R<Sexp> {
     let mode = values::as_integer_scalar(call.arg(0));
     let old = if mode == NA_INTEGER {
+        interp().visible = true;
         crate::platform::umask()
     } else {
         interp().visible = false;

@@ -146,7 +146,13 @@ fn on_transfer_thread<T: Send>(
         while crate::help_server::running() && !transfer.is_finished() {
             // SAFETY: transfers start from R calls on the interpreter's thread, where GNU R
             // runs event handlers too.
-            unsafe { crate::help_server::wait_and_serve(Duration::from_millis(5)) };
+            let served = unsafe { crate::help_server::wait_and_serve(Duration::from_millis(5)) };
+            if served.is_err() {
+                // The transfer cannot be cut short from here, so the Ctrl-C waits for the next
+                // interrupt check after it.
+                crate::unwind::INTERRUPT_REQUESTED
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         transfer.join()
     })
