@@ -29,7 +29,7 @@
 		"Debuggers"
 	],
 	"engines": {
-		"vscode": "^1.75.0"
+		"vscode": "^1.90.0"
 	},
 	"scripts": {
 		"vscode:prepublish": "bun run compile",
@@ -158,6 +158,16 @@
 				"title": "Source File in Console",
 				"category": "ry",
 				"command": "ry.sourceFile"
+			},
+			{
+				"title": "Attach to Console",
+				"category": "ry",
+				"command": "ry.attachConsole"
+			},
+			{
+				"title": "View Data",
+				"category": "ry",
+				"command": "ry.viewData"
 			}
 		],
 		"configuration": {
@@ -229,12 +239,23 @@
 				{
 					"command": "ry.sourceFile",
 					"when": "editorLangId == r"
+				},
+				{
+					"command": "ry.viewData",
+					"when": "false"
 				}
 			],
 			"editor/title/run": [
 				{
 					"command": "ry.runFile",
 					"when": "resourceLangId == r",
+					"group": "navigation"
+				}
+			],
+			"debug/variables/context": [
+				{
+					"command": "ry.viewData",
+					"when": "debugType == ry",
 					"group": "navigation"
 				}
 			]
@@ -303,6 +324,14 @@
 								"description": "Run only the top-level `test_that` call with this description."
 							}
 						}
+					},
+					"attach": {
+						"properties": {
+							"socket": {
+								"type": "string",
+								"description": "The console's socket. Defaults to the newest `ry run` console in the workspace."
+							}
+						}
 					}
 				},
 				"initialConfigurations": [
@@ -333,6 +362,15 @@
 							"name": "Debug tests",
 							"program": "^\"\\${file}\"",
 							"prelude": "load_all(\".\"); library(testthat)"
+						}
+					},
+					{
+						"label": "ry: Attach to console",
+						"description": "Attach to a running `ry run` console in the workspace",
+						"body": {
+							"type": "ry",
+							"request": "attach",
+							"name": "Attach to Console"
 						}
 					}
 				]
