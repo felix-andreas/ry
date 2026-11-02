@@ -4672,15 +4672,7 @@ check` releases its trees once, and memoized records are compact" below).
 - **Impact.** Typed `ry check` on finbench went from 2.43 s / 831 MiB to about 1.9 s / 644 MiB
   (untyped 1.65 s / 533 MiB). The per-name projection also means an edit to one type definition
   re-verifies only the readers of that name.
-- **`ry load` remembers a clean strict verdict** (`preflight::check_package`). The pre-check cannot
-  share a database with the runtime's loader, which lives in `libR.so`, so instead a clean result is
-  stored in `<cache dir>/ry/strict/<hash of the package root>`, holding a 128-bit fingerprint (two
-  differently seeded SipHashes) of the ry binary's path, size and mtime, the configuration's `Debug`
-  form, every R file the project analysis walks, the override stubs, `DESCRIPTION`, `NAMESPACE` and the
-  data-file layouts. One record per package keeps the cache from growing with edits, and a refusal is
-  never stored, so its errors print every time. A first load still pays the check; running the check
-  inside the runtime loader's own analysis would remove that and was not done, because that loader
-  analyses only what purity needs.
+- **`ry load` reuses `ry check`'s record for its strict verdict**: see "The strict load check shares the check record".
 
 # Decision record: matching GNU R's own tests where its behavior is an artifact
 
@@ -5019,7 +5011,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - An eager item is effect-free (`EagerItem.effect_free`, `load_index.rs`) when it binds a function literal, or when `item_effect_free` (`top_level.rs`) holds: a strict constant, or a definition whose declaring calls' arguments have no effect. Strict mode's `Definition` alone is not enough, because it leaves a declaring call's arguments to R, so `setRefClass(..., methods = list(m = { cat(1); function() 1 }))` passes strict mode yet prints. Loading an imported package (NAMESPACE imports, `library()` with effect-free arguments) is allowed before the verdict; this package's own code with an effect never is.
 - `.ry_await_verdict()` sits before `sysdata.rda` and `data/*.R`, because a data file is ordinary code.
 - A constant may call a user `@pure` function before the verdict. That purity is trusted, not checked, which is the documented contract of `@pure`.
-- The check walks only `R/` and computes diagnostics only for requested files (`analyze_project`'s `walk` and `requested`): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. That cut the check's CPU from 6.3 to 4.3 s on typed finbench.
+- The check computes diagnostics only for the `R/` files (`analyze_project`'s requested paths): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. It walks the whole root so it can share the check record ("The strict load check shares the check record").
 - `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
 - The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
 
@@ -5253,3 +5245,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
+
+## The strict load check shares the check record
+
+- **Previous shape.** `preflight::check_package` stored a clean verdict in `<cache dir>/ry/strict/<hash of the root>` under one fingerprint of every input, beside `ry check`'s own record in `.ry_cache/check.json`. Two mechanisms recorded the same fact, any edit invalidated the whole verdict, and a package that `ry check` or the editor had just checked still paid a full check on load.
+- **Target shape.** The load check is `ry check`'s analysis (`cli::analyze_project`, walking the whole root) asked about `R/` alone, reading and writing the same record. A recorded file's `diagnostics` is `None` when the run that wrote it did not check that file, and `check_cache::plan` treats such a file as stale, so a later `ry check` still checks the tests a load skipped. Kind isolation makes the sharing sound: a name only a test file defines stays unresolved in `R/`, and a test's `library()` does not attach in `R/`, so the `R/` verdict is the same as from an `R/`-only walk.
+- **A verdict-only pass was measured and rejected.** A lint may be configured as an error, and `is_strict_error` counts it, so lints cannot be skipped. What a verdict could skip (rendering, annotation agreement) is about 0.3 of 5.3 CPU-s on typed finbench.
+- **Impact.** On typed finbench (4 cores, release) a load after `ry check` takes 0.55 to 0.64 s, the same as an untyped load, and an edit inside one body rechecks one file. A verdict-cold load costs 2.5 to 2.7 s, about 0.15 s more than the old `R/`-only walk because the record needs the whole root walked; the rest is analysis CPU (parse about 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), which belongs to the type checker's own speed.

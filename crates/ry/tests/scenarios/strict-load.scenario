@@ -1,6 +1,6 @@
 # A package author in strict mode loads the package, fixes what strict mode refuses, and loads
-# again. A clean verdict is remembered, so the next load skips the check, but an edit that
-# breaks strict mode is still refused.
+# again. The check shares `ry check`'s record in `.ry_cache`, so a load after either one reuses
+# its verdict, but an edit that breaks strict mode is still refused.
 
 requires ry-runtime
 
@@ -25,6 +25,18 @@ file R/area.R
 run ry load -e "print(area(2, 3))"
 expect exit 0
 expect stdout "[1] 6"
+
+run ry load -e "print(area(2, 3))"
+expect exit 0
+expect stdout "[1] 6"
+
+# The load checked only `R/`, so `ry check` still checks the test file it never looked at.
+file tests/testthat/test-area.R
+| stopifnot(area(2, 3) == undefined_total)
+
+run ry check
+expect exit 1
+expect stderr "undefined_total"
 
 run ry load -e "print(area(2, 3))"
 expect exit 0
