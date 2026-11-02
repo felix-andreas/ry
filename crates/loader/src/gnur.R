@@ -2,6 +2,9 @@
 # code is parsed from it in R, at its real position in the file, so source references, and
 # with them tracebacks and debuggers, point into the file on disk.
 
+# A console on GNU R names the roots that changed in its call to `.ry_autoreload()`.
+.ry_changed_roots <- function() ls(.ry_packages, all.names = TRUE)
+
 # ry checks a package before GNU R loads it, so the load never waits for a verdict.
 .ry_await_verdict <- function() invisible()
 
@@ -27,9 +30,9 @@
     previous <- options(keep.parse.data = FALSE)
     on.exit(options(previous))
     padded <- c(character(line - 1L), paste0(strrep(" ", column), text))
-    parse(text = padded, srcfile = .ry_srcfile(state, path), keep.source = TRUE)
+    parse(text = padded, srcfile = .ry_srcfile(state, path), keep.source = TRUE, encoding = "UTF-8")
   } else {
-    parse(text = text, keep.source = FALSE)
+    parse(text = text, keep.source = FALSE, encoding = "UTF-8")
   }
 }
 

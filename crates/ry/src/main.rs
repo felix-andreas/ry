@@ -198,14 +198,16 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
         return ExitCode::from(1);
     }
     match runtime {
-        Runtime::Ry => runtime_exit(repl::run_on_ry_runtime(
-            Some(file),
-            None,
-            &arguments,
-            runtime_flags(preflight.config()),
-            None,
-            None,
-        )),
+        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
+            repl::run_on_ry_runtime(
+                Some(file),
+                None,
+                &arguments,
+                runtime_flags(preflight.config()),
+                None,
+                None,
+            )
+        })),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],
@@ -276,18 +278,20 @@ fn run_console(
         .map(|root| load::load_statement(root, true));
     match runtime {
         // ry's runtime carries its own loader, so it needs only the load statement.
-        Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
-            repl::RunOptions {
-                keybindings,
-                startup: load.into_iter().collect(),
-                input,
-                filter: Some(filter),
-                completer,
-                package,
-                ..repl::RunOptions::default()
-            },
-            flags,
-        )),
+        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
+            repl::run_console_on_ry_runtime(
+                repl::RunOptions {
+                    keybindings,
+                    startup: load.into_iter().collect(),
+                    input,
+                    filter: Some(filter),
+                    completer,
+                    package,
+                    ..repl::RunOptions::default()
+                },
+                flags,
+            )
+        })),
         Runtime::GnuR => {
             if let Some(root) = package {
                 load::prepare(root);
@@ -367,14 +371,16 @@ fn run_load(
                 }
                 Err(error) => panic!("the strict check's thread should spawn: {error}"),
             }
-            let status = repl::run_on_ry_runtime(
-                file,
-                Some(&input),
-                &[],
-                runtime_flags(preflight.config()),
-                Some(&root),
-                Some(package_verdict),
-            );
+            let status = checking_loads().and_then(|()| {
+                repl::run_on_ry_runtime(
+                    file,
+                    Some(&input),
+                    &[],
+                    runtime_flags(preflight.config()),
+                    Some(&root),
+                    Some(package_verdict),
+                )
+            });
             // A load that failed before it asked still reports the check, and a refusal
             // decides the status.
             match package_verdict() {
@@ -457,6 +463,12 @@ fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
 }
 
 /// ry's runtime returns the script's status; failing to start it is ry's failure, so 2.
+/// Makes ry's runtime run strict mode's check before every load of a strict package, as GNU
+/// R's loader in `ry R` does: `load_all()`, a console's reload, and a script's own loads.
+fn checking_loads() -> Result<(), repl::ReplError> {
+    repl::set_package_check_on_ry_runtime(load::strict_check_on_ry_runtime)
+}
+
 fn runtime_exit(result: Result<i32, repl::ReplError>) -> ExitCode {
     match result {
         Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),

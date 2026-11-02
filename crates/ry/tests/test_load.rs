@@ -700,12 +700,156 @@ fn source_references_point_into_the_file() {
     ]);
     let script = format!(
         "options(keep.source = TRUE)\nload_all({root:?}, full = TRUE)\n\
-         cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n",
+         cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n\
+         print(later)\n",
         root = root.path().display().to_string(),
     );
-    // ry's interpreter keeps no source references yet.
-    let output = ry_load_on("gnu-r", root.path(), &[&script]);
-    let printed = text(&output);
-    assert!(output.status.success(), "{printed}");
-    assert!(printed.contains("at 4 a.R"), "{printed}");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("at 4 a.R"), "{runtime}: {printed}");
+        // The function prints as written, not deparsed.
+        assert!(
+            printed.contains("later <- function() {") || printed.contains("function() {\n  2\n}"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
+fn system_file_finds_inst_and_helpers_are_sourced() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: located\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(where)\n"),
+        ("inst/extdata/a.txt", "hello\n"),
+        (
+            "R/a.R",
+            ".onLoad <- function(lib, pkg) {\n\
+             \x20 assign(\"at_load\", system.file(\"extdata\", \"a.txt\", package = \"located\"), envir = topenv())\n\
+             }\n\
+             where <- function() system.file(\"extdata\", \"a.txt\", package = \"located\")\n",
+        ),
+        (
+            "tests/testthat/helper-values.R",
+            "helper_value <- function() 42\n",
+        ),
+    ]);
+    let code = "cat(readLines(where()), readLines(at_load), \
+                readLines(system.file('extdata/a.txt', package = 'located')), helper_value(), '\\n')";
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &[code]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("hello hello hello 42"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
+fn a_latin1_package_loads() {
+    if !r_available() {
+        return;
+    }
+    let directory = package(&[
+        (
+            "DESCRIPTION",
+            "Package: accents\nVersion: 1.0\nEncoding: latin1\n",
+        ),
+        ("NAMESPACE", "export(greet)\n"),
+    ]);
+    fs::create_dir_all(directory.path().join("R")).expect("create R/");
+    fs::write(
+        directory.path().join("R/a.R"),
+        b"greet <- function() \"caf\xe9\"\n",
+    )
+    .expect("write file");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(
+            runtime,
+            directory.path(),
+            &["cat(greet() == paste0('caf', '\\u00e9'), Encoding(greet()), '\\n')"],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("TRUE UTF-8"), "{runtime}: {printed}");
+    }
+}
+
+#[test]
+fn an_importer_sees_the_changed_bindings_of_a_reloaded_package() {
+    if !r_available() {
+        return;
+    }
+    let base = package(&[
+        ("DESCRIPTION", "Package: basepkg\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(value)\n"),
+        ("R/a.R", "value <- function() 1\n"),
+    ]);
+    let user = package(&[
+        (
+            "DESCRIPTION",
+            "Package: userpkg\nVersion: 1.0\nImports: basepkg\n",
+        ),
+        ("NAMESPACE", "export(uses)\nimportFrom(basepkg, value)\n"),
+        ("R/b.R", "uses <- function() value()\n"),
+    ]);
+    let script = format!(
+        "load_all({user:?}, quiet = TRUE)\ncat(userpkg::uses(), '\\n')\n\
+         writeLines('value <- function() 2', file.path({base:?}, 'R', 'a.R'))\n\
+         load_all({base:?}, quiet = TRUE)\ncat(userpkg::uses(), '\\n')\n",
+        base = base.path().display().to_string(),
+        user = user.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(base.path().join("R/a.R"), "value <- function() 1\n").expect("write file");
+        let output = ry_load_on(runtime, base.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("1 \n2 \n"), "{runtime}: {printed}");
+    }
+}
+
+#[test]
+fn strict_mode_refuses_a_reload_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: strictreload\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(g)\n"),
+        (
+            "R/a.R",
+            "# typing: strict\n#: fn(x: double) -> double\ng <- function(x) x + 1\n",
+        ),
+    ]);
+    let file = root.path().join("R/a.R").display().to_string();
+    let script = format!(
+        "writeLines(c('# typing: strict', '#: fn(x: double) -> double', \
+         'g <- function(x) x + \"a\"'), {file:?})\n\
+         cat(tryCatch(load_all({root:?}), error = conditionMessage), '\\n')\n\
+         cat(g(1), '\\n')\n",
+        root = root.path().display().to_string(),
+    );
+    for runtime in RUNTIMES {
+        fs::write(
+            root.path().join("R/a.R"),
+            "# typing: strict\n#: fn(x: double) -> double\ng <- function(x) x + 1\n",
+        )
+        .expect("write file");
+        let output = ry_load_on(runtime, root.path(), &[&script]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("strictreload was not loaded, because strict mode refused it"),
+            "{runtime}: {printed}"
+        );
+        // The refused reload ran nothing, so the old definition stays.
+        assert!(printed.contains("\n2 \n"), "{runtime}: {printed}");
+    }
 }

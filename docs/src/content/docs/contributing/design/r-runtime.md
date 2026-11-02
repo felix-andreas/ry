@@ -687,8 +687,9 @@ The rules the implementation settled:
   `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
   pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
-  copies other development packages hold of a changed binding is not implemented; a session loads
-  one development package at a time without that cascade.
+  copies other development packages hold is done after every load: each loaded development package
+  whose `NAMESPACE` imports from the reloaded one runs its import directives again
+  (`.ry_update_importers` in `runtime.R`), which costs one pass over those directives.
 - **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
   Statements in a changed file are matched to the file's old statements by content, in order, so an
   inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it

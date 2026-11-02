@@ -37,8 +37,10 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(plan$warnings)) {
     for (warning_text in plan$warnings) warning(warning_text, call. = FALSE)
   }
-  # Switching `export_all` changes what is exported even when no file changed.
-  resync <- !identical(state$export_all, export_all)
+  helpers <- .ry_helpers(state, root, export_all, plan$full)
+  # Switching `export_all` changes what is exported even when no file changed, and so does
+  # sourcing the helpers again.
+  resync <- !identical(state$export_all, export_all) || (!plan$full && !is.null(helpers))
   if (!plan$full && plan$noop && current && !resync) {
     .ry_commit(root)
     if (!quiet && report_noop) {
@@ -61,6 +63,10 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   applied <- FALSE
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
+  if (!is.null(helpers)) {
+    .ry_source_helpers(state, helpers)
+  }
+  .ry_update_importers(state)
   applied <- TRUE
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
@@ -77,6 +83,47 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   invisible(state$ns)
 }
 
+# The testthat helpers, `tests/testthat/helper*.R`, which `load_all()` sources into the
+# namespace when it exports everything, as `pkgload` does, so they are at hand interactively.
+# A reload sources them again only when their names, sizes or modification times changed, and
+# returns NULL otherwise.
+.ry_helpers <- function(state, root, export_all, full) {
+  if (!isTRUE(export_all)) {
+    return(if (length(state$helper_names)) list(files = character(), stamp = NULL))
+  }
+  files <- sort(list.files(file.path(root, "tests", "testthat"), pattern = "^helper.*\\.[rR]$",
+                           full.names = TRUE))
+  info <- file.info(files, extra_cols = FALSE)
+  stamp <- paste(files, info$size, as.numeric(info$mtime), collapse = "\n")
+  if (!full && identical(state$helpers_stamp, stamp)) {
+    return(NULL)
+  }
+  list(files = files, stamp = stamp)
+}
+
+# Names a helper bound are removed before the helpers run again, so a deleted helper leaves
+# nothing behind.
+.ry_source_helpers <- function(state, helpers) {
+  ns <- state$ns
+  if (length(state$helper_names)) {
+    rm(list = intersect(state$helper_names, names(ns)), envir = ns)
+  }
+  state$helper_names <- character()
+  state$helpers_stamp <- helpers$stamp
+  before <- names(ns)
+  keep <- isTRUE(getOption("keep.source", interactive()))
+  for (file in helpers$files) {
+    withCallingHandlers(
+      sys.source(file, envir = ns, chdir = TRUE, keep.source = keep),
+      error = function(error) {
+        message(sprintf("Error while loading %s", file))
+      }
+    )
+  }
+  state$helper_names <- setdiff(names(ns), before)
+  .ry_sync_exports(ns, state$namespace_spec, state$export_all)
+}
+
 # With `options(ry.load.verbose = TRUE)`, reports how long each phase of a load took.
 .ry_phase <- function(label) {
   now <- proc.time()[["elapsed"]]
@@ -86,20 +133,60 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   .ry_timing$last <- now
 }
 
-# Reloads every package loaded through ry whose sources changed. `ry repl` calls it before
-# each command when it sees a change on disk, and it keeps `.Last.value`.
-.ry_autoreload <- function() {
+# Reloads the packages whose sources changed, including one whose load failed, which has no
+# state yet. A console calls it before a command when the host sees a change on disk, and it
+# keeps `.Last.value`.
+.ry_autoreload <- function(roots = .ry_changed_roots()) {
   last <- .Last.value
-  for (root in ls(.ry_packages, all.names = TRUE)) {
+  for (root in roots) {
+    export_all <- .ry_packages[[root]]$export_all
     tryCatch(
-      .ry_load(root, .ry_packages[[root]]$export_all, attach = TRUE, full = FALSE,
-               quiet = FALSE, report_noop = FALSE),
+      .ry_load(root, if (is.null(export_all)) TRUE else export_all, attach = TRUE,
+               full = FALSE, quiet = FALSE, report_noop = FALSE),
       error = function(error) {
         message("ry: reloading ", root, " failed: ", conditionMessage(error))
       }
     )
   }
   invisible(last)
+}
+
+# `system.file()` as `pkgload` shims it, for a package loaded from source: a path is looked up in
+# `inst/` first and then at the root, because installing moves the contents of `inst/` to the
+# top. Package code reaches this through the namespace's imports and other code through
+# `tools:ry`; any other package gets base R's.
+system.file <- function(..., package = "base", lib.loc = NULL, mustWork = FALSE) {
+  root <- if (is.null(lib.loc)) .ry_source_root(package)
+  if (is.null(root)) {
+    return(base::system.file(..., package = package, lib.loc = lib.loc, mustWork = mustWork))
+  }
+  if (!...length()) {
+    return(root)
+  }
+  inst <- file.path(root, "inst", ...)
+  top <- file.path(root, ...)
+  in_inst <- file.exists(inst)
+  files <- ifelse(in_inst, inst, top)[in_inst | file.exists(top)]
+  if (length(files)) {
+    sub("/$", "", normalizePath(files, winslash = "/"))
+  } else if (mustWork) {
+    stop("no file found", call. = FALSE)
+  } else {
+    ""
+  }
+}
+
+# The root of the package named `package` when the loaded namespace of that name is one ry
+# loaded from source.
+.ry_source_root <- function(package) {
+  if (!is.character(package) || length(package) != 1L || !isNamespaceLoaded(package)) {
+    return(NULL)
+  }
+  ns <- asNamespace(package)
+  for (root in ls(.ry_packages, all.names = TRUE)) {
+    if (identical(.ry_packages[[root]]$ns, ns)) return(root)
+  }
+  NULL
 }
 
 # A lazy `View()`: the editor connected to the console pages through `x` and formats only the
@@ -177,9 +264,28 @@ View <- function(x, title) {
   state
 }
 
+# Another package loaded from source that imports this one holds copies of its bindings, which
+# this load replaced, so its imports are rebuilt from its own `NAMESPACE` directives, and its
+# attached environment follows when it exports its imports.
+.ry_update_importers <- function(state) {
+  for (root in ls(.ry_packages, all.names = TRUE)) {
+    importer <- .ry_packages[[root]]
+    if (identical(importer$name, state$name) || is.null(importer$import_directives) ||
+        !isNamespaceLoaded(importer$name) ||
+        !identical(asNamespace(importer$name), importer$ns) ||
+        !(state$name %in% names(getNamespaceInfo(importer$ns, "imports")))) {
+      next
+    }
+    .ry_import(importer$ns, importer$name, importer$import_directives)
+    if (!is.null(importer$package_env) && isTRUE(importer$export_all)) {
+      .ry_sync_package_env(importer)
+    }
+  }
+}
+
 # A namespace that other namespaces import cannot be unloaded, which is the normal case when
-# several development packages import each other, so it is unregistered instead and its
-# importers keep their copies until they reload.
+# several development packages import each other, so it is unregistered instead, and
+# the load that follows rebuilds its importers' copies (see `.ry_update_importers`).
 .ry_teardown <- function(name) {
   package <- paste0("package:", name)
   if (package %in% search()) {
@@ -201,6 +307,7 @@ View <- function(x, title) {
   keep <- isTRUE(getOption("keep.source", interactive()))
   if (!is.null(plan$imports)) {
     .ry_import(ns, state$name, plan$imports)
+    state$import_directives <- plan$imports
   }
   .ry_phase("imports")
   .ry_sources(state, plan)
@@ -534,6 +641,7 @@ View <- function(x, title) {
     )
   }
   setNamespaceInfo(ns, "imports", canonical)
+  assign("system.file", system.file, envir = environment)
 }
 
 .ry_unregister <- function(ns, registration) {

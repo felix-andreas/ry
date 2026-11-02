@@ -19,7 +19,7 @@ use {
     interp::{
         builtins::{BuiltinDef, Call, internal, internal_function},
         eval::{define, eval, make_promise},
-        lower::{file_srcfile, lower_node, lower_node_in_file, parse_text},
+        lower::{file_srcfile, lower_node, lower_node_at_line, parse_text},
         methods::{DeferredDefinitions, defer_definitions, drop_deferred_definitions},
         scope,
         unwind::{R, error},
@@ -28,7 +28,8 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     semantics::ANALYSIS_STACK_SIZE,
     std::{
-        ffi::{c_int, c_void},
+        cell::RefCell,
+        ffi::{CString, c_char, c_int, c_void},
         path::{Path, PathBuf},
         sync::{
             LazyLock, Mutex, OnceLock, PoisonError,
@@ -44,12 +45,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderCommit", 1, do_commit).invisible(),
     internal("ryLoaderBind", 2, do_bind).invisible(),
     internal("ryLoaderRun", 3, do_run).invisible(),
-    internal("ryLoaderForce", 3, do_force),
+    internal("ryLoaderForce", 2, do_force),
     internal("ryLoaderAwaitVerdict", 0, do_await_verdict).invisible(),
     internal("ryLoaderDefer", 5, do_defer).invisible(),
     internal("ryLoaderDeferred", 1, do_deferred),
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
+    internal("ryLoaderChanged", 0, do_changed),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
@@ -71,10 +73,23 @@ pub unsafe fn attach() -> R<()> {
     })
 }
 
-/// Whether a loaded package's sources changed on disk since it was loaded, which the console
-/// asks before each command to decide whether to reload. A change is reported once.
+/// Whether a loaded package's sources changed on disk since it was loaded, or a package whose
+/// load failed changed since then, which the console asks before each command to decide
+/// whether to reload. A change is reported once, and `.ry_autoreload()` reads the roots that
+/// changed with `.Internal(ryLoaderChanged())`.
 pub fn changed() -> bool {
-    !session().loader.changed_roots().is_empty()
+    let mut session = session();
+    session.changed = session.loader.changed_roots();
+    !session.changed.is_empty()
+}
+
+/// `.Internal(ryLoaderChanged())`: the roots [`changed`] last reported, which it forgets.
+unsafe fn do_changed(_call: &Call<'_>) -> R<Sexp> {
+    let roots: Vec<String> = std::mem::take(&mut session().changed)
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    values::string_vector(&roots)
 }
 
 const ATTACH: &str = r#"
@@ -96,12 +111,13 @@ struct Session {
     pending: FxHashMap<String, Pending>,
     /// Statements a load held back until first use, per package root as R names it.
     deferred: FxHashMap<String, Deferred>,
+    /// The roots whose sources changed, until the console's reload reads them.
+    changed: Vec<PathBuf>,
 }
 
 struct Deferred {
     /// Each statement with its position in the plan's `run`.
     code: Vec<(usize, Code)>,
-    sources: FxHashMap<String, Source>,
 }
 
 struct Pending {
@@ -111,6 +127,49 @@ struct Pending {
     run: Vec<Code>,
     /// The code of every file the plan's code comes from.
     sources: FxHashMap<String, Source>,
+}
+
+thread_local! {
+    /// The source handle ([`source_handle`]) of each file whose code a load lowered, per package
+    /// root as R names it and then per file: the pending plan's, and the held-back statements'.
+    /// They live on the interpreter's thread, which owns every R object, and are preserved, so
+    /// a srcfile built for one statement of a file serves the next.
+    static HANDLES: RefCell<Handles> = RefCell::default();
+}
+
+#[derive(Default)]
+struct Handles {
+    pending: FxHashMap<String, FxHashMap<String, Sexp>>,
+    deferred: FxHashMap<String, FxHashMap<String, Sexp>>,
+}
+
+/// What a source handle owns: one file's code, its absolute path, which its source references
+/// name, and whether the load that made it keeps source references (`options(keep.source)`).
+struct FileSource {
+    source: Source,
+    path: String,
+    keep: bool,
+}
+
+/// Where a lazy definition or a statement is in its file: the byte range of its syntax node,
+/// and the 1-based line and the column it starts at.
+#[derive(Clone, Copy)]
+struct Position {
+    start: u32,
+    end: u32,
+    line: u32,
+    column: u32,
+}
+
+impl Position {
+    fn of(code: &Code) -> Position {
+        Position {
+            start: code.source_start,
+            end: code.source_end,
+            line: code.line,
+            column: code.column,
+        }
+    }
 }
 
 /// Kept outside the session, so setting it never waits for a [`prepare`] that holds the
@@ -134,6 +193,25 @@ static VERDICT: OnceLock<Verdict> = OnceLock::new();
 pub fn set_verdict(verdict: Verdict) {
     if VERDICT.set(verdict).is_err() {
         panic!("the host sets the package verdict once per session");
+    }
+}
+
+/// Asks the host to run strict mode's check of the package at `root`, a NUL-terminated path,
+/// before a load runs any of it: 0 lets the load run, 1 means strict mode refused the package,
+/// and any other value that the check failed. The host has reported why. It may block.
+pub type Check = extern "C" fn(*const c_char) -> c_int;
+
+static CHECK: OnceLock<Check> = OnceLock::new();
+
+/// Whether a plan has been made in this session, whose first load the verdict covers.
+static PLANNED: AtomicBool = AtomicBool::new(false);
+
+/// Lets the host check every load of a strict package that changes something, before the
+/// load runs any of it. The first load of a session with a [`set_verdict`] is the verdict's
+/// to check instead, while its definitions bind.
+pub fn set_check(check: Check) {
+    if CHECK.set(check).is_err() {
+        panic!("the host sets the strict check once per session");
     }
 }
 
@@ -191,6 +269,7 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     });
     let value =
         value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
+    release_handles(|handles| handles.pending.remove(&root));
     scope(|| r_value(&value))
 }
 
@@ -201,6 +280,27 @@ fn plan(root: &str, full: bool) -> RValue {
         Ok(plan) => plan,
         Err(failure) => return error_value(&failure.to_string()),
     };
+    let covered = VERDICT.get().is_some() && !PLANNED.swap(true, Ordering::Relaxed);
+    if plan.strict
+        && !plan.is_noop()
+        && !covered
+        && let Some(check) = CHECK.get()
+    {
+        let Ok(path) = CString::new(plan.root.to_string_lossy().into_owned()) else {
+            return error_value(&format!("{} has a NUL byte in its path", plan.package));
+        };
+        let reason = match check(path.as_ptr()) {
+            0 => None,
+            1 => Some("strict mode refused it"),
+            _ => Some("its strict check failed"),
+        };
+        if let Some(reason) = reason {
+            return error_value(&format!(
+                "{} was not loaded, because {reason}",
+                plan.package
+            ));
+        }
+    }
     let mut sources = FxHashMap::default();
     for code in plan.bind.iter().chain(&plan.run) {
         if !sources.contains_key(&code.path)
@@ -235,44 +335,31 @@ unsafe fn do_commit(call: &Call<'_>) -> R<Sexp> {
     if let Some(pending) = session.pending.remove(&root) {
         session.loader.commit(&pending.root);
     }
+    drop(session);
+    release_handles(|handles| handles.pending.remove(&root));
     Ok(nil())
 }
 
 /// `.Internal(ryLoaderBind(root, ns))`: binds every definition of the pending plan as a promise
-/// that calls `ryLoaderForce` on its file's code.
+/// that calls `ryLoaderForce` on its file's source handle and its position there.
 unsafe fn do_bind(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
-    let (bind, sources) = {
-        let session = session();
-        let pending = session
-            .pending
-            .get(&root)
-            .ok_or_else(|| error(format!("no load of {root} is pending")))?;
-        (pending.bind.clone(), pending.sources.clone())
-    };
+    let bind = session()
+        .pending
+        .get(&root)
+        .ok_or_else(|| error(format!("no load of {root} is pending")))?
+        .bind
+        .clone();
     let force = internal_function(install("ryLoaderForce")?)
         .ok_or_else(|| error("the loader's internals are not installed"))?;
     scope(|| {
-        let mut handles: FxHashMap<&str, Sexp> = FxHashMap::default();
         for code in &bind {
-            let handle = match handles.get(code.path.as_str()) {
-                Some(&handle) => handle,
-                None => {
-                    let source = sources
-                        .get(&code.path)
-                        .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-                    let srcfile = debug_srcfile(&root, &code.path, source)?;
-                    let handle = source_handle(source.clone(), srcfile)?;
-                    handles.insert(&code.path, handle);
-                    handle
-                }
-            };
             let Some(name) = &code.name else { continue };
+            let handle = pending_handle(&root, &code.path)?;
             scope(|| {
-                let start = values::scalar_integer(code.source_start as i32)?;
-                let end = values::scalar_integer(code.source_end as i32)?;
-                let promise = make_promise(values::call(force, &[handle, start, end])?, namespace)?;
+                let position = position_value(Position::of(code))?;
+                let promise = make_promise(values::call(force, &[handle, position])?, namespace)?;
                 define(install(name)?, promise, namespace)
             })?;
         }
@@ -285,28 +372,24 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
     let index = values::as_integer_scalar(call.arg(2));
-    let (code, source) = {
+    let code = {
         let session = session();
         let pending = session
             .pending
             .get(&root)
             .ok_or_else(|| error(format!("no load of {root} is pending")))?;
-        let code = usize::try_from(index - 1)
+        usize::try_from(index - 1)
             .ok()
             .and_then(|index| pending.run.get(index))
-            .ok_or_else(|| error(format!("the plan has no statement {index}")))?;
-        let source = pending
-            .sources
-            .get(&code.path)
-            .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-        (code.clone(), source.clone())
+            .ok_or_else(|| error(format!("the plan has no statement {index}")))?
+            .clone()
     };
     if !code.effect_free {
         await_verdict();
     }
     let expression = scope(|| {
-        let srcfile = debug_srcfile(&root, &code.path, &source)?;
-        lower_range(&source, code.source_start, code.source_end, srcfile)
+        let handle = pending_handle(&root, &code.path)?;
+        lower_handle_code(handle, Position::of(&code))
     })?;
     eval(expression, namespace)?;
     Ok(nil())
@@ -345,13 +428,24 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("the plan has no statement {position}")))?;
         code.push(found);
     }
-    let sources = code
-        .iter()
-        .filter_map(|(_, code)| Some((code.path.clone(), pending.sources.get(&code.path)?.clone())))
-        .collect();
     session
         .deferred
-        .insert(root.clone(), Deferred { code, sources });
+        .insert(root.clone(), Deferred { code: code.clone() });
+    drop(session);
+    let mut handles = FxHashMap::default();
+    let held = scope(|| {
+        for (_, code) in &code {
+            if !handles.contains_key(&code.path) {
+                let handle = pending_handle(&root, &code.path)?;
+                interp::heap().preserve(handle);
+                handles.insert(code.path.clone(), handle);
+            }
+        }
+        Ok(())
+    });
+    let previous = HANDLES.with_borrow_mut(|all| all.deferred.insert(root.clone(), handles));
+    release(previous);
+    held?;
     defer_definitions(DeferredDefinitions {
         key: root,
         classes,
@@ -407,7 +501,7 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
     let index = values::as_integer_scalar(call.arg(2));
-    let (code, source) = {
+    let code = {
         let session = session();
         let deferred = session
             .deferred
@@ -417,19 +511,15 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
             .ok()
             .and_then(|index| deferred.code.get(index))
             .ok_or_else(|| error(format!("{root} holds back no statement {index}")))?;
-        let source = deferred
-            .sources
-            .get(&code.path)
-            .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-        (code.clone(), source.clone())
+        code.clone()
     };
     if !code.effect_free {
         await_verdict();
     }
-    let expression = scope(|| {
-        let srcfile = debug_srcfile(&root, &code.path, &source)?;
-        lower_range(&source, code.source_start, code.source_end, srcfile)
-    })?;
+    let handle = HANDLES
+        .with_borrow(|handles| handles.deferred.get(&root)?.get(&code.path).copied())
+        .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
+    let expression = scope(|| lower_handle_code(handle, Position::of(&code)))?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -438,6 +528,7 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_undefer(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     session().deferred.remove(&root);
+    release_handles(|handles| handles.deferred.remove(&root));
     drop_deferred_definitions(&root);
     Ok(nil())
 }
@@ -445,55 +536,142 @@ unsafe fn do_undefer(call: &Call<'_>) -> R<Sexp> {
 /// The code of a lazy binding: lowers its function literal and evaluates it in the namespace
 /// the promise was made in.
 unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
-    let handle = call.arg(0);
-    if handle.kind() != SexpType::ExternalPtr || handle.external_tag() != source_tag()? {
-        return Err(error("ryLoaderForce needs a source file from ry's loader"));
-    }
-    let address = handle.external_address() as *const Source;
-    if address.is_null() {
-        return Err(error("the source of this definition was released"));
-    }
-    // SAFETY: the address is a `Box<Source>` that `source_handle` leaked, and its finalizer
-    // only runs once nothing references the handle, which this call does.
-    let source = &*address;
-    let offset = |argument: Sexp| u32::try_from(values::as_integer_scalar(argument)).ok();
-    let (Some(start), Some(end)) = (offset(call.arg(1)), offset(call.arg(2))) else {
-        return Err(error("ryLoaderForce needs two byte offsets"));
-    };
-    let function = lower_range(source, start, end, handle.external_protected())?;
+    let function = lower_handle_code(call.arg(0), position_of_value(call.arg(1))?)?;
     eval(function, call.env)
 }
 
-/// Lowers the code at `start..end` of `source`, with source references when `srcfile` is a
-/// srcfile environment. In a tree that is the outermost node spanning exactly that range. In text
-/// it is the code alone, parsed on its own: a top-level item parses the same either way, so a
-/// file whose text is all the loader holds is never parsed whole, except for a debugger, whose
-/// source references need offsets into the whole file.
-unsafe fn lower_range(source: &Source, start: u32, end: u32, srcfile: Sexp) -> R<Sexp> {
-    let missing = || error("a definition's code is not in its source file");
-    let with_srcfile = srcfile.kind() == SexpType::Environment;
-    let parsed;
-    let tree = match source {
-        Source::Tree(tree) => tree,
-        Source::Text(text) if with_srcfile => {
-            parsed = syntax::parse(text);
-            &parsed
-        }
-        Source::Text(text) => {
-            let code = text.get(start as usize..end as usize).ok_or_else(missing)?;
-            let parse = syntax::parse(code);
-            if !parse.errors().is_empty() {
-                return Err(missing());
-            }
-            let root = SyntaxNode::new_root(parse.green().clone());
-            let whole = root.text_range();
-            let node = root
-                .children()
-                .find(|node| node.text_range() == whole)
-                .ok_or_else(missing)?;
-            return lower_node(&node);
-        }
+/// The handle of the pending plan's file `path`, made on first use.
+unsafe fn pending_handle(root: &str, path: &str) -> R<Sexp> {
+    let found = HANDLES.with_borrow(|handles| handles.pending.get(root)?.get(path).copied());
+    if let Some(handle) = found {
+        return Ok(handle);
+    }
+    let source = session()
+        .pending
+        .get(root)
+        .and_then(|pending| pending.sources.get(path).cloned())
+        .ok_or_else(|| error(format!("{path} was not analyzed")))?;
+    let keep = values::as_logical_scalar(interp::envir::get_option("keep.source")) == 1;
+    let file = Path::new(root).join(path).to_string_lossy().into_owned();
+    let handle = source_handle(FileSource {
+        source,
+        path: file,
+        keep,
+    })?;
+    interp::heap().preserve(handle);
+    HANDLES.with_borrow_mut(|handles| {
+        handles
+            .pending
+            .entry(root.to_owned())
+            .or_default()
+            .insert(path.to_owned(), handle)
+    });
+    Ok(handle)
+}
+
+/// Releases the handles `take` removes from the session's.
+unsafe fn release_handles(take: impl FnOnce(&mut Handles) -> Option<FxHashMap<String, Sexp>>) {
+    release(HANDLES.with_borrow_mut(take));
+}
+
+unsafe fn release(handles: Option<FxHashMap<String, Sexp>>) {
+    let heap = interp::heap();
+    for handle in handles.into_iter().flat_map(FxHashMap::into_values) {
+        heap.release(handle);
+    }
+}
+
+/// A position as the one integer vector a promise carries: start, end, line, column.
+unsafe fn position_value(position: Position) -> R<Sexp> {
+    let numbers = [position.start, position.end, position.line, position.column]
+        .map(|number| i32::try_from(number).unwrap_or(i32::MAX));
+    values::integer_vector(&numbers)
+}
+
+unsafe fn position_of_value(value: Sexp) -> R<Position> {
+    let invalid = || error("ryLoaderForce needs a definition's position");
+    if value.kind() != SexpType::Integer {
+        return Err(invalid());
+    }
+    let number = |index: usize| {
+        values::ints(value)
+            .get(index)
+            .and_then(|&number| u32::try_from(number).ok())
+            .ok_or_else(invalid)
     };
+    Ok(Position {
+        start: number(0)?,
+        end: number(1)?,
+        line: number(2)?,
+        column: number(3)?,
+    })
+}
+
+/// Lowers the code at `position` in the file `handle` owns, with source references when the
+/// load that made the handle keeps them or a debugger is attached, which can stop only where
+/// code has them. The file's srcfile is built on first use and kept in the handle, because
+/// building it costs a string per line of the file and most files of a package never need one.
+unsafe fn lower_handle_code(handle: Sexp, position: Position) -> R<Sexp> {
+    if handle.kind() != SexpType::ExternalPtr || handle.external_tag() != source_tag()? {
+        return Err(error("ry's loader needs a source file it made"));
+    }
+    let address = handle.external_address() as *const FileSource;
+    if address.is_null() {
+        return Err(error("the source of this definition was released"));
+    }
+    // SAFETY: the address is a `Box<FileSource>` that `source_handle` leaked, and its finalizer
+    // only runs once nothing references the handle, which the caller does.
+    let file = &*address;
+    if !file.keep && interp::interp().debugger.is_none() {
+        return lower_code(&file.source, position, None);
+    }
+    let mut srcfile = handle.external_protected();
+    if srcfile.kind() != SexpType::Environment {
+        let text = match &file.source {
+            Source::Tree(tree) => SyntaxNode::new_root(tree.green().clone())
+                .text()
+                .to_string(),
+            Source::Text(text) => text.to_string(),
+        };
+        srcfile = file_srcfile(&file.path, &text)?;
+        interp::heap().set_external_protected(handle, srcfile);
+    }
+    lower_code(&file.source, position, Some(srcfile))
+}
+
+/// Lowers the code at `position` of `source`, with source references against `srcfile` when
+/// there is one. In a tree the code is the outermost node spanning exactly its range, and in text
+/// it is the code alone, parsed on its own: a top-level item parses the same either way, so a
+/// file whose text is all the loader holds is never parsed whole. Source references count lines
+/// and columns as the file does, so their code is parsed alone after as many spaces as its
+/// column, and its lines are shifted to the line it starts on.
+unsafe fn lower_code(source: &Source, position: Position, srcfile: Option<Sexp>) -> R<Sexp> {
+    let missing = || error("a definition's code is not in its source file");
+    let Position {
+        start,
+        end,
+        line,
+        column,
+    } = position;
+    let code = match (source, srcfile) {
+        (Source::Tree(tree), None) => return lower_node(&node_spanning(tree, start, end)?),
+        (Source::Tree(tree), Some(_)) => node_spanning(tree, start, end)?.text().to_string(),
+        (Source::Text(text), _) => text
+            .get(start as usize..end as usize)
+            .ok_or_else(missing)?
+            .to_owned(),
+    };
+    let Some(srcfile) = srcfile else {
+        return lower_node(&sole_node(&code, 0)?);
+    };
+    let padded = format!("{}{code}", " ".repeat(column as usize));
+    let node = sole_node(&padded, column)?;
+    lower_node_at_line(&node, &padded, line as usize, srcfile)
+}
+
+/// The outermost node of `tree` spanning exactly `start..end`.
+fn node_spanning(tree: &syntax::Parse, start: u32, end: u32) -> R<SyntaxNode> {
+    let missing = || error("a definition's code is not in its source file");
     let root = SyntaxNode::new_root(tree.green().clone());
     if start > end
         || !root
@@ -517,41 +695,33 @@ unsafe fn lower_range(source: &Source, start: u32, end: u32, srcfile: Sexp) -> R
     if node == root || node.text_range() != range {
         return Err(missing());
     }
-    if with_srcfile {
-        lower_node_in_file(&node, &root.text().to_string(), srcfile)
-    } else {
-        lower_node(&node)
-    }
+    Ok(node)
 }
 
-/// A debugger can stop only where code has source references, so while one is attached the
-/// loader keeps them, against a srcfile naming the file's absolute path. Otherwise it skips them,
-/// as they cost memory on every statement of every loaded function.
-unsafe fn debug_srcfile(root: &str, path: &str, source: &Source) -> R<Sexp> {
-    if interp::interp().debugger.is_none() {
-        return Ok(nil());
+/// The one top-level node of `text` that starts at byte `start` and runs to its end.
+fn sole_node(text: &str, start: u32) -> R<SyntaxNode> {
+    let missing = || error("a definition's code is not in its source file");
+    let parse = syntax::parse(text);
+    if !parse.errors().is_empty() {
+        return Err(missing());
     }
-    let file = Path::new(root).join(path);
-    let text = match source {
-        Source::Tree(tree) => SyntaxNode::new_root(tree.green().clone())
-            .text()
-            .to_string(),
-        Source::Text(text) => text.to_string(),
-    };
-    file_srcfile(&file.to_string_lossy(), &text)
+    let root = SyntaxNode::new_root(parse.green().clone());
+    let range = TextRange::new(TextSize::from(start), root.text_range().end());
+    root.children()
+        .find(|node| node.text_range() == range)
+        .ok_or_else(missing)
 }
 
-/// An external pointer owning `source`, freed by the collector once no promise references it. It
-/// protects `srcfile`, which the definitions lowered from the source keep source references
-/// against.
-unsafe fn source_handle(source: Source, srcfile: Sexp) -> R<Sexp> {
+/// An external pointer owning `file`, freed by the collector once nothing references it. It
+/// protects the file's srcfile once one is built.
+unsafe fn source_handle(file: FileSource) -> R<Sexp> {
     let heap = interp::heap();
-    let address = Box::into_raw(Box::new(source)) as *mut c_void;
-    let handle = heap.alloc_external_ptr(address, source_tag()?, srcfile);
+    let address = Box::into_raw(Box::new(file)) as *mut c_void;
+    let handle = heap.alloc_external_ptr(address, source_tag()?, nil());
     let handle = match handle {
         Ok(handle) => handle,
         Err(failure) => {
-            drop(Box::from_raw(address as *mut Source));
+            drop(Box::from_raw(address as *mut FileSource));
             return Err(failure.into());
         }
     };
@@ -570,7 +740,7 @@ extern "C" fn release_source(handle: Sexp) {
     // SAFETY: the collector calls this once, with the handle `source_handle` made, after which
     // nothing can reach the handle's address.
     unsafe {
-        let address = handle.external_address() as *mut Source;
+        let address = handle.external_address() as *mut FileSource;
         if !address.is_null() {
             handle.set_external_address(std::ptr::null_mut());
             drop(Box::from_raw(address));

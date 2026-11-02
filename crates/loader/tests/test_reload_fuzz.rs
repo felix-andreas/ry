@@ -35,8 +35,8 @@ fn arbitrary_text_never_breaks_the_index() {
 }
 
 /// What the console asks before each command: a disk edit to a loaded package is reported once,
-/// a package whose plan was never committed is not watched, and a plan read after an edit
-/// absorbs it.
+/// so is an edit to a package whose first load failed or was refused, and a plan read after an
+/// edit absorbs it.
 #[test]
 fn changed_roots_reports_each_disk_edit_once() {
     let directory = tempfile::tempdir().expect("temp dir");
@@ -44,13 +44,27 @@ fn changed_roots_reports_each_disk_edit_once() {
     std::fs::create_dir_all(root.join("R")).expect("create R/");
     std::fs::write(root.join("DESCRIPTION"), "Package: demo\nVersion: 1.0\n").expect("write");
     std::fs::write(root.join("R/a.R"), "f <- function() 1\n").expect("write");
+    std::fs::write(root.join("R/b.R"), "g <- function( 1\n").expect("write");
     let mut loader = Loader::default();
-    loader.plan(root, false).expect("plans");
-    std::fs::write(root.join("R/a.R"), "f <- function() 22\n").expect("write");
+    assert!(
+        loader.plan(root, false).is_err(),
+        "a syntax error fails the plan"
+    );
     assert!(
         loader.changed_roots().is_empty(),
-        "an uncommitted plan is not watched"
+        "nothing changed since the attempt"
     );
+    std::fs::write(root.join("R/b.R"), "g <- function() 1\n").expect("write");
+    assert_eq!(
+        loader.changed_roots(),
+        vec![root.to_path_buf()],
+        "a failed first load is retried after an edit"
+    );
+    assert!(loader.changed_roots().is_empty(), "reported once");
+    // A plan that is never committed, as when strict mode refuses it, is watched the same way.
+    loader.plan(root, false).expect("plans");
+    std::fs::write(root.join("R/a.R"), "f <- function() 22\n").expect("write");
+    assert_eq!(loader.changed_roots(), vec![root.to_path_buf()]);
     loader.plan(root, false).expect("plans");
     loader.commit(root);
     assert!(

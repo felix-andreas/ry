@@ -67,9 +67,9 @@ the console without loading the package at all.
 
 ## Differences from devtools
 
-One thing `devtools::load_all()` does is missing: `system.file()` does not find files under the
-package's `inst/`.
-[Package loading](/reference/package-loading#limits) lists every difference.
+A load does what `devtools::load_all()` does, including mapping `system.file()` to `inst/` and
+sourcing testthat helpers, apart from a few edge cases that
+[Package loading](/reference/package-loading#limits) lists.
 
 ## Which R runs your package
 

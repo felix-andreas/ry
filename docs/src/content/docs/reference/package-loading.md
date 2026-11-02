@@ -43,6 +43,16 @@ This page is the exact behavior.
   `load_all()`.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled with
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
+- **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
+  `inst/` is found as if the package were installed, so `system.file("extdata", "a.txt", package =
+  "mypkg")` returns `inst/extdata/a.txt`, and other paths are looked up in the package root. The
+  package's own code, `.onLoad` included, and every other caller see this mapping.
+- **testthat helpers**, the `tests/testthat/helper*.R` files, are sourced into the namespace after
+  the code, so tests and the console can call them. A reload sources them again when one was added,
+  changed or deleted. With `export_all = TRUE` their objects are attached with the package's.
+- **A file in latin1** loads when `DESCRIPTION` says `Encoding: latin1` (or `ISO-8859-1`): its text
+  is read as latin1, and its strings arrive in R as UTF-8. Without that field, a file that is not
+  valid UTF-8 refuses the load with a message naming the field.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
 - **With [strict mode](/type-checking/strict-mode) on**, in `ry.toml` or in a file's
@@ -54,8 +64,10 @@ This page is the exact behavior.
   `data/*.R`, compiled code, `.onLoad`, or your `-e` and `-f` code. The
   `R/` files are checked together, so a name one file defines resolves in the others, and test
   files are not part of the check.
-  A later `load_all()` in the same session, and the load a console makes, do not check.
-  A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
+  Every later load checks too: `load_all()`, a reload, and the load a console makes at start, on
+  either runtime. When the check refuses one of them, the load raises
+  `<package> was not loaded, because strict mode refused it` before anything runs, so the session
+  keeps the code it had. A load that changes nothing skips the check. A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
   so loading it again without changing its files, configuration, stubs, data files or the ry
   binary skips the check.
 
@@ -111,9 +123,11 @@ directory is safe to delete.
 
 ### Source references
 
-On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
-into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an
-interactive session.
+Functions keep their source references on both runtimes, so `print()` shows them as written and
+`getSrcLocation()`, tracebacks and the debugger point into your files, as long as
+`options(keep.source = TRUE)` is set, which is the default in an interactive session. On ry's runtime
+a lazily bound definition gets its source reference when it is first used, and a file's `srcfile` is
+built only then.
 
 ## The load-index cache
 
@@ -146,21 +160,21 @@ A reload works out which top-level items changed and touches only those:
 A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
 `NAMESPACE`, the code files in `R/` and `R/unix/`, `R/sysdata.rda` or the datasets in `data/`
 changed since the last load, so it never reads a file to find out.
-An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
-call `load_all()` after either.
+A package whose load failed, or was refused by strict mode, is watched the same way, so fixing the
+file loads it before the next command. An edit under `src/` is not noticed: call `load_all()`
+after one.
+
+When a package another development package imports reloads, the importer's imports are rebuilt
+too, so it calls the new definitions without reloading itself.
 
 ## Limits
 
-- `system.file()` does not map a source package's `inst/` directory; `load_all()` does.
 - Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
-- testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
-- On ry's own runtime (`ry load`, the `ry run` console, and `load_all()` in a `ry run` script),
-  functions carry no source references. Load in `ry R` when you need them.
 - Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
   GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
   ry's own `libR.so` already provides.
