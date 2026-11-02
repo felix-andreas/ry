@@ -14,7 +14,6 @@ use {
         Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
         package_cache_path, parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
-        s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
     interp::{
