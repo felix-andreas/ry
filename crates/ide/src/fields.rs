@@ -146,6 +146,36 @@ pub(crate) fn receiver_fields(
     (!names.is_empty()).then_some(names)
 }
 
+/// The function a field read is bound to (an R6 method, a function stored in a list), as the
+/// item and `Function` expression of its declaration. Only a precise site counts, because a
+/// by-name guess would show some unrelated function's parameters.
+pub(crate) fn field_function<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    field: ExprId,
+) -> Option<(Item<'db>, ExprId)> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Field {
+        target,
+        name: Some(name),
+        ..
+    } = hir.kind(field)
+    else {
+        return None;
+    };
+    let mut resolver = Resolver::new(db, files);
+    resolver
+        .sites(item, *target, hir[*name].name, 0)
+        .into_iter()
+        .find_map(|site| {
+            let value = site.value?;
+            let declaring = item_hir(db, site.item).as_ref()?;
+            matches!(declaring.kind(value), ExpressionKind::Function { .. })
+                .then_some((site.item, value))
+        })
+}
+
 /// Where the field read or written by `field` (a `Field` expression of `item`) is declared.
 pub(crate) fn resolve_field<'db>(
     db: &'db dyn Db,

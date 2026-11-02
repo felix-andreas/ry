@@ -14,7 +14,7 @@ action: Add inferred type annotation for `result`
   edit 98..98 -> ": integer"
 action: Add inferred type annotations for the whole file
   edit 98..98 -> ": integer"
-completion (128+): describe, integer, result, function, character, break, else, FALSE
+completion (128+): describe, result, integer, function, character, break, else, FALSE
 hint @98: integer
 
 #---- pre_rest_optional_fills_positionally
@@ -66,7 +66,7 @@ action: Add inferred type annotation for `result`
   edit 89..89 -> ": list[integer]"
 action: Add inferred type annotations for the whole file
   edit 89..89 -> ": list[integer]"
-completion (128+): result, function, lapply, list, break, else, FALSE, for
+completion (128+): result, lapply, list, function, break, else, FALSE, for
 hint @89: list[integer]
 hint @114FUN =
 
@@ -84,3 +84,49 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(x: T, [y]: U) -> T\n"
 completion (128+): x = , y = , pick, value, function, break, else, FALSE
 hint @4: <T, U> fn(x: T, [y]: U) -> T
+
+#---- r6_method_through_self
+Pool <- R6::R6Class("Pool", public = list(
+  take = function(count, wait = TRUE) count,
+  run = function() self$take(3, w$0)
+))
+#++++
+hover 120..121: w
+hover-definition: installed w from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed w from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(count, wait = TRUE)
+parameters: count | [wait = TRUE]
+completion (40): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
+
+#---- r6_method_on_an_instance
+Pool <- R6::R6Class("Pool", public = list(
+  take = function(count, wait = TRUE) count
+))
+use <- function() {
+  pool <- Pool$new()
+  pool$take(1, $0)
+}
+#++++
+hover 133..147: Unknown
+definition: none
+references: none
+rename: none
+signature: fn(count, wait = TRUE)
+parameters: count | [wait = TRUE]
+completion (128+): wait = , pool, Pool, use, new, function, TRUE, list
+
+#---- function_stored_in_a_list
+helpers <- list(scale = function(x, by = 2) x * by)
+helpers$scale(1, b$0)
+#++++
+hover 69..70: b
+hover-definition: installed b from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed b from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(x: double, [by]: double) -> double
+parameters: x: double | [[by]: double]
+completion (73): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
+hint @69by =

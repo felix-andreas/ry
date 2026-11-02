@@ -150,7 +150,7 @@ definition 5..6
 references: 5..6*, 29..30
 rename: 2 edit(s)
 signature: none
-completion (128+): i, I, in, if, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): i, in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical
 hint @6: integer
 
 #---- loop_var_use_hover
@@ -163,7 +163,7 @@ references: 5..6*, 29..30
 rename: 2 edit(s)
 signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
 parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
-completion (128+): i, I, in, if, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): i, in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical
 hint @6: integer
 
 #---- completion_argument_names
@@ -182,7 +182,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (82): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
+completion (82): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 hint @52first =
 hint @56second =
@@ -462,7 +462,8 @@ hover-definition: installed paste from utils
 definition: installed paste from utils
 references: none
 rename: none
-signature: none
+signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+parameters: [...: Any] | [sep]: character | [collapse]: character | NULL | [recycle0]: logical
 completion (7): paste, package.skeleton, packageDescription, packageStatus, getParseData, getParseText, make.packages.html
 
 #---- abbreviated_argument_is_not_followed
@@ -622,7 +623,8 @@ hover 143..146: add: Unknown
 definition 71..74
 references: 71..74*, 143..146
 rename: 2 edit(s)
-signature: none
+signature: fn()
+parameters:
 completion (1): add
 
 #---- field_r6_inherit
@@ -636,7 +638,8 @@ hover 154..159: greet: Unknown
 definition 42..47
 references: 42..47*, 154..159
 rename: 2 edit(s)
-signature: none
+signature: fn()
+parameters:
 completion (1): greet
 
 #---- field_record
@@ -720,8 +723,9 @@ hover 127..131: deep: logical
 definition 67..71
 references: 67..71*, 81..85, 127..131
 rename: 3 edit(s)
-signature: none
-completion (53): de, de.ncols, de.restore, de.setup, debug, debugcall, debugger, debuggingState
+signature: fn(deep = FALSE)
+parameters: [deep = FALSE]
+completion (54): de, deep, de.ncols, de.restore, de.setup, debug, debugcall, debugger
 
 #---- block_function_argument
 encapsulate <- function(expr) eval(substitute(expr), globalenv())

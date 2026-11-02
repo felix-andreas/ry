@@ -318,7 +318,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     if let Some(&median) = by_loc.get(by_loc.len() / 2) {
         editor_requests(&mut db, &records, median, &config);
         editor_coverage(&db, &records, &root);
-        completion_coverage(&mut db, &records);
+        completion_coverage(&mut db, &records, &root);
     }
 
     Ok(())
@@ -437,7 +437,25 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
                 });
             tally.hover += usize::from(hover);
             tally.definition += usize::from(definition);
-            if !(hover && definition) && tally.misses.len() < COVERAGE_EXAMPLES {
+            // A call head asks inside its parentheses, as typing `(` would.
+            let signature_offset = match role {
+                IdentifierRole::CallHead => record.source[usize::from(offset)..]
+                    .find('(')
+                    .map(|open| offset + TextSize::from(open as u32 + 1)),
+                IdentifierRole::ArgumentName => Some(offset),
+                _ => None,
+            };
+            let mut signature = true;
+            if let Some(signature_offset) = signature_offset {
+                signature =
+                    ide::signature_help_with(db, record.file, signature_offset, &mut |target| {
+                        installed.formals(target)
+                    })
+                    .is_some();
+                tally.signature_total += 1;
+                tally.signature += usize::from(signature);
+            }
+            if !(hover && definition && signature) && tally.misses.len() < COVERAGE_EXAMPLES {
                 let line_start = record.source[..usize::from(offset)]
                     .rfind('\n')
                     .map_or(0, |index| index + 1);
@@ -446,9 +464,10 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
                     .map_or(record.source.len(), |index| line_start + index);
                 let line = record.source[..line_start].matches('\n').count() + 1;
                 tally.misses.push(format!(
-                    "{}{} {}:{line}: {}   [{hover_text}]",
+                    "{}{}{} {}:{line}: {}   [{hover_text}]",
                     if hover { ' ' } else { 'H' },
                     if definition { ' ' } else { 'D' },
+                    if signature { ' ' } else { 'S' },
                     record
                         .path
                         .file_name()
@@ -462,8 +481,16 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     println!("editor coverage ({sampled} identifiers in package files):");
     for (role, tally) in &tallies {
         let share = |answered: usize| answered as f64 * 100.0 / tally.total.max(1) as f64;
+        let signature = if tally.signature_total > 0 {
+            format!(
+                "   signature {:>5.1}%",
+                tally.signature as f64 * 100.0 / tally.signature_total as f64
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "  {:<16} {:>6}   hover {:>5.1}%   definition {:>5.1}%",
+            "  {:<16} {:>6}   hover {:>5.1}%   definition {:>5.1}%{signature}",
             role.label(),
             tally.total,
             share(tally.hover),
@@ -479,13 +506,14 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
 /// [`COMPLETION_TOP`] items, after cutting the identifier back in the file to the prefix a user
 /// would have typed: half the name, and the first [`COMPLETION_PREFIX`] characters. Declarations
 /// are skipped, since nothing can complete a name before it exists.
-fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
+fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Path) {
     let Some(files) = ProjectFiles::try_get(db) else {
         return;
     };
     let mut tallies: BTreeMap<IdentifierRole, CompletionTally> = BTreeMap::new();
     let mut planned_per_role: BTreeMap<IdentifierRole, usize> = BTreeMap::new();
     let mut latencies = Vec::new();
+    let mut installed = InstalledPackages::new(root, None);
     for record in records {
         if record.file.kind(db) != &DocumentKind::Package {
             continue;
@@ -515,7 +543,7 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
             if word.chars().count() <= COMPLETION_PREFIX
                 || is_declaration(&token, &record.source[start..])
                 || (role == IdentifierRole::ArgumentName
-                    && names_a_dots_element(db, record.file, offset, word))
+                    && names_a_dots_element(db, record.file, offset, word, &mut installed))
             {
                 continue;
             }
@@ -546,7 +574,9 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
                     .to(text);
                 let cursor = TextSize::from(prefix_end as u32);
                 let began = Instant::now();
-                let result = ide::completion(db, files, record.file, cursor);
+                let result = ide::completion_with(db, files, record.file, cursor, &mut |target| {
+                    installed.formals(target)
+                });
                 latencies.push(began.elapsed());
                 let labels: Vec<String> = result
                     .map(|result| {
@@ -587,9 +617,11 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
                     match role {
                         IdentifierRole::ArgumentName => format!(
                             "   signature: {}",
-                            ide::signature_help(db, record.file, cursor)
-                                .and_then(|help| help.signatures.into_iter().next())
-                                .map_or_else(|| "none".to_owned(), |signature| signature.label)
+                            ide::signature_help_with(db, record.file, cursor, &mut |target| {
+                                installed.formals(target)
+                            })
+                            .and_then(|help| help.signatures.into_iter().next())
+                            .map_or_else(|| "none".to_owned(), |signature| signature.label)
                         ),
                         _ => String::new(),
                     },
@@ -627,9 +659,16 @@ fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
 
 /// `list(total = 1)` or `tryCatch(warning = ...)`: an argument name the known signature does not
 /// declare, which `...` takes as a new name that nothing could complete.
-fn names_a_dots_element(db: &RootDatabase, file: SourceFile, offset: TextSize, word: &str) -> bool {
+fn names_a_dots_element(
+    db: &RootDatabase,
+    file: SourceFile,
+    offset: TextSize,
+    word: &str,
+    installed: &mut InstalledPackages,
+) -> bool {
     let Some(signature) =
-        ide::signature_help(db, file, offset).and_then(|help| help.signatures.into_iter().next())
+        ide::signature_help_with(db, file, offset, &mut |target| installed.formals(target))
+            .and_then(|help| help.signatures.into_iter().next())
     else {
         return false;
     };
@@ -643,7 +682,7 @@ fn names_a_dots_element(db: &RootDatabase, file: SourceFile, offset: TextSize, w
         };
         let name = parameter
             .trim_start_matches('[')
-            .split([']', ':'])
+            .split([']', ':', ' '])
             .next()
             .unwrap_or_default()
             .trim();
@@ -703,6 +742,10 @@ struct CoverageTally {
     total: usize,
     hover: usize,
     definition: usize,
+    /// Call heads and argument names only: how many were asked for signature help, and how many
+    /// got a signature.
+    signature_total: usize,
+    signature: usize,
     misses: Vec<String>,
 }
 

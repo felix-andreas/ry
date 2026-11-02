@@ -27,7 +27,7 @@ definition: installed va from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion (11): value, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
 
 #---- outer_local_visible_in_nested_function
 wrapper <- function() {
@@ -64,7 +64,7 @@ definition: installed va from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (11): var_b, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion (11): var_b, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
 hint @55: integer
 hint @107: integer
 
@@ -155,7 +155,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> NULL"
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion (11): value, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
 hint @5: fn() -> NULL
 hint @56: integer
 
@@ -225,7 +225,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 9..9 -> ": integer"
-completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
+completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, formals, format
 hint @9: integer
 
 #---- no_matching_prefix

@@ -168,7 +168,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (128+): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
+completion (128+): n, next, n2mfrow, na.action, na.contiguous, na.exclude, na.fail, na.omit
 hint @1: fn() -> double
 hint @21: double
 hint @30: double
@@ -333,7 +333,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> NULL"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> NULL"
-completion (128+): I, item, in, if, Inf, iconv, iconvlist, icuGetCollate
+completion (128+): item, in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical
 hint @1: fn() -> NULL
 hint @29: integer
 
@@ -357,7 +357,7 @@ action: Add inferred type annotations for the whole file
   edit 278..278 -> ": T"
   edit 281..281 -> ": T"
   edit 286..286 -> " -> T"
-completion (128+): x = , y = , f, function, g, break, else, FALSE
+completion (128+): x = , y = , f, g, function, break, else, FALSE
 hint @264: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- second_after_comma
@@ -378,7 +378,7 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
   edit 45..45 -> " -> double"
-completion (128+): y = , f, function, g, break, else, FALSE, for
+completion (128+): y = , f, g, function, break, else, FALSE, for
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 hint @31: fn() -> double
 
@@ -397,7 +397,7 @@ action: Add inferred type annotations for the whole file
   edit 15..15 -> ": T"
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
-completion (128+): f, function, g, break, else, FALSE, for, if
+completion (128+): f, g, function, break, else, FALSE, for, if
 hint @1: <T: numeric> fn(x: T, [y]: T) -> T
 
 #---- stub_with_dots
@@ -413,7 +413,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> character"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> character"
-completion (128+): h, function, paste, break, else, FALSE, for, if
+completion (128+): h, paste, function, break, else, FALSE, for, if
 hint @1: fn() -> character
 
 #---- unknown_name_hits_dots
@@ -453,7 +453,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
-completion (128+): h, function, sum, break, else, FALSE, for, if
+completion (128+): h, sum, function, break, else, FALSE, for, if
 hint @1: fn() -> integer
 
 #---- overload_second_candidate_active
@@ -477,7 +477,7 @@ action: Add inferred type annotation for `h`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (128+): h, function, sum, break, else, FALSE, for, if
+completion (128+): h, sum, function, break, else, FALSE, for, if
 hint @1: fn() -> double
 
 #==== hints
@@ -736,7 +736,7 @@ references: 12..16*, 52..56, 71..75, 107..111
 rename: 4 edit(s)
 calls area: in (top level) [107..111] | out
 signature: none
-completion (24): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, Arg
+completion (24): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, args
 hint @11name =
 hint @19def =
 hint @78signature =
@@ -797,7 +797,7 @@ action: Add inferred type annotation for `touch`
   edit 71..71 -> " -> UserId"
 action: Add inferred type annotations for the whole file
   edit 71..71 -> " -> UserId"
-completion (54): uid, UCBAdmissions, UKDriverDeaths, UKgas, unCfillPOSIXlt, unclass, undebug, undebugcall
+completion (54): uid, unCfillPOSIXlt, unclass, undebug, undebugcall, union, unique, unique.array
 hint @57: fn() -> UserId
 
 #==== actions

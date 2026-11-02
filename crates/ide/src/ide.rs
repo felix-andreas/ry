@@ -5,7 +5,7 @@
 use {
     bumpalo::Bump,
     semantics::{
-        Db, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
+        Db, DocumentKind, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
         check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
@@ -20,7 +20,10 @@ use {
         metadata::{PackageMetadata, is_own_package},
         naming::{BindingId, BindingKind, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
-        stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
+        stubs::{
+            STANDARD_LIBRARY, StubSources, declaring_namespace, exporting_namespaces,
+            stub_declaration, stubs,
+        },
         types::{
             Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
             contains_inference_var,
@@ -1572,15 +1575,40 @@ pub struct SignatureData {
     pub active_parameter: Option<usize>,
 }
 
+/// A parameter of a function the analysis has no type for, as R spells it: `...` is a formal
+/// like any other, and `default` is the default's source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Formal {
+    pub name: String,
+    pub default: Option<String>,
+}
+
+/// The parameters of the first function definition in `source`, for a host that reads code the
+/// project does not hold, such as an installed package's generated source.
+pub fn function_formals(source: &str) -> Option<Vec<Formal>> {
+    formals_of(&syntax::parse(source).syntax_node())
+}
+
 /// The active parameter follows R's argument matching: a named argument takes the parameter it
 /// names, a positional one the first open slot (parameters after `...` match by name only).
 pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<SignatureHelp> {
+    signature_help_with(db, file, offset, &mut |_| None)
+}
+
+/// [`signature_help`] that can also show a call into an installed package the stubs do not
+/// declare, whose parameters `installed` reads from the package.
+pub fn signature_help_with(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+) -> Option<SignatureHelp> {
     let position = position_in_item(db, file, offset)?;
     let hir = item_hir(db, position.item).as_ref()?;
     let check = item_check(db, position.item)?;
 
-    // The innermost call whose callee has a function type wins, so a cursor in `list(...)`
-    // inside `f(...)` still shows `f`.
+    // The innermost call that has a signature wins, so a cursor in `c(...)` inside `f(...)`
+    // still shows `f`.
     let mut calls: Vec<(TextRange, ExprId)> = hir
         .expressions()
         .enumerate()
@@ -1593,28 +1621,53 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         .collect();
     calls.sort_by_key(|(range, id)| (range.len(), range.start(), *id));
 
-    let (callee, function, overloads, arguments) = calls.iter().find_map(|(_, id)| {
+    let mut typed = None;
+    for (_, id) in &calls {
         let ExpressionKind::Call { callee, arguments } = &hir.kind(*id) else {
-            return None;
+            continue;
         };
+        let arguments = &hir[arguments];
         let function = check
             .expression_types
             .get(callee)
             .copied()
             .filter(|ty| matches!(ty.kind(db), TyKind::Function(_)));
-        let overloads = callee_name(hir, *callee)
-            .and_then(|name| stubs(db)?.schemes.get(&name))
-            .filter(|schemes| schemes.len() > 1);
-        (function.is_some() || overloads.is_some())
-            .then_some((*callee, function, overloads, arguments))
-    })?;
+        let schemes = callee_name(hir, *callee).and_then(|name| stubs(db)?.schemes.get(&name));
+        let overloads = schemes.filter(|schemes| schemes.len() > 1);
+        if function.is_some() || overloads.is_some() {
+            typed = Some((*callee, function, overloads, arguments));
+            break;
+        }
+        // A call the checker types specially (`list`, or anything in quoted code such as an R6
+        // class body) still has the one signature its stub declares.
+        if let Some([scheme]) = schemes.map(Vec::as_slice) {
+            return Some(single_signature(scheme_signature(
+                db,
+                scheme,
+                arguments,
+                hir,
+                position.relative,
+            )));
+        }
+        if let Some(signature) = untyped_signature(
+            db,
+            position.item,
+            *callee,
+            arguments,
+            position.relative,
+            installed,
+        ) {
+            return Some(single_signature(signature));
+        }
+    }
+    let (callee, function, overloads, arguments) = typed?;
 
     // An overloaded stub name lists every candidate, even before a commitment: an incomplete call
     // matches none, which is exactly when a reader needs the shapes on offer.
     if let Some(schemes) = overloads {
         let mut signatures: Vec<SignatureData> = schemes
             .iter()
-            .map(|scheme| scheme_signature(db, scheme, &hir[arguments], hir, position.relative))
+            .map(|scheme| scheme_signature(db, scheme, arguments, hir, position.relative))
             .collect();
         let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
         // The committed candidate renders instantiated with this call site's types.
@@ -1624,7 +1677,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
             *entry = scheme_signature(
                 db,
                 &TypeScheme::monomorphic(function),
-                &hir[arguments],
+                arguments,
                 hir,
                 position.relative,
             );
@@ -1648,39 +1701,203 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     } else {
         TypeScheme::monomorphic(function)
     };
-    let mut signature = scheme_signature(db, &scheme, &hir[arguments], hir, position.relative);
+    let mut signature = scheme_signature(db, &scheme, arguments, hir, position.relative);
     if let Some(name) = callee_name(hir, callee)
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
         && let Some(files) = ProjectFiles::try_get(db)
         && let Some(&definition) = package_definitions(db, files).get(&Symbol::new(&name))
         && let Some(node) = item_node(db, definition)
     {
-        show_defaults(&mut signature, &parameter_defaults(&node));
+        show_defaults(&mut signature, &formals_of(&node).unwrap_or_default());
     }
-    Some(SignatureHelp {
-        signatures: vec![signature],
-        active_signature: 0,
-    })
+    Some(single_signature(signature))
 }
 
-/// The default of each parameter of the function a definition assigns, as written.
-fn parameter_defaults(definition: &SyntaxNode) -> Vec<(String, String)> {
-    let Some(parameters) = definition
+fn single_signature(signature: SignatureData) -> SignatureHelp {
+    SignatureHelp {
+        signatures: vec![signature],
+        active_signature: 0,
+    }
+}
+
+/// The signature of a call whose callee has no type: a method of an R6 class or a function
+/// stored in a list, read from its definition, or a function of an installed package.
+fn untyped_signature(
+    db: &dyn Db,
+    item: Item<'_>,
+    callee: ExprId,
+    arguments: &[Argument],
+    position: TextSize,
+    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+) -> Option<SignatureData> {
+    let formals = untyped_formals(db, item, callee, installed)?;
+    let hir = item_hir(db, item).as_ref()?;
+    Some(formals_signature(&formals, arguments, hir, position))
+}
+
+/// The formals of an untyped callee, as [`untyped_signature`] finds them.
+fn untyped_formals(
+    db: &dyn Db,
+    item: Item<'_>,
+    callee: ExprId,
+    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+) -> Option<Vec<Formal>> {
+    let files = ProjectFiles::try_get(db)?;
+    let hir = item_hir(db, item).as_ref()?;
+    if matches!(hir.kind(callee), ExpressionKind::Field { .. }) {
+        let (declaring, function) = fields::field_function(db, files, item, callee)?;
+        let declaring_hir = item_hir(db, declaring).as_ref()?;
+        let ExpressionKind::Function { parameters, .. } = declaring_hir.kind(function) else {
+            return None;
+        };
+        let text = item_node(db, declaring)?.text().to_string();
+        return Some(
+            declaring_hir[parameters]
+                .iter()
+                .map(|parameter| Formal {
+                    name: parameter.name.to_string(),
+                    default: parameter.default.and_then(|default| {
+                        text.get(std::ops::Range::<usize>::from(declaring_hir.range(default)))
+                            .map(str::to_owned)
+                    }),
+                })
+                .collect(),
+        );
+    }
+    let naming = item_naming(db, item).as_ref()?;
+    match expression_target(db, files, item, naming, callee)? {
+        Target::Package(target) => installed(&target),
+        // A stub name without a scheme (`list`, which the checker types itself) still has the
+        // formals its package defines.
+        Target::StubGlobal(name) => installed(&library_target(db, name)),
+        _ => None,
+    }
+}
+
+/// An untyped signature in R's own spelling, `fn(x, n = 1L, ...)`.
+fn formals_signature(
+    formals: &[Formal],
+    arguments: &[Argument],
+    hir: &Module,
+    position: TextSize,
+) -> SignatureData {
+    let mut label = String::from("fn(");
+    let mut parameters = Vec::with_capacity(formals.len());
+    for (index, formal) in formals.iter().enumerate() {
+        if index > 0 {
+            label.push_str(", ");
+        }
+        let start = TextSize::of(label.as_str());
+        label.push_str(&formal.name);
+        if let Some(default) = &formal.default {
+            label.push_str(" = ");
+            label.push_str(&one_line_default(default));
+        }
+        parameters.push(TextRange::new(start, TextSize::of(label.as_str())));
+    }
+    label.push(')');
+    SignatureData {
+        label,
+        parameters,
+        active_parameter: formals_active_parameter(formals, arguments, hir, position),
+    }
+}
+
+/// R's matching for the cursor's argument: every exactly named argument takes its formal first,
+/// then positional arguments fill the open formals before `...` in order, and whatever is left
+/// goes to `...`.
+fn formals_active_parameter(
+    formals: &[Formal],
+    arguments: &[Argument],
+    hir: &Module,
+    cursor: TextSize,
+) -> Option<usize> {
+    if formals.is_empty() {
+        return None;
+    }
+    let dots = formals.iter().position(|formal| formal.name == "...");
+    let positional_end = dots.unwrap_or(formals.len());
+    let slot_for_name = |name: &str| {
+        formals
+            .iter()
+            .position(|formal| formal.name == name && formal.name != "...")
+    };
+    let cursor_index = arguments
+        .iter()
+        .filter(|argument| {
+            argument
+                .value
+                .is_some_and(|value| hir.range(value).end() < cursor)
+        })
+        .count();
+    let mut consumed = vec![false; formals.len()];
+    for (index, argument) in arguments.iter().enumerate() {
+        if index != cursor_index
+            && let Some(name) = hir.argument_name(argument)
+            && let Some(slot) = slot_for_name(name.as_str())
+        {
+            consumed[slot] = true;
+        }
+    }
+    let first_open = |consumed: &mut [bool]| {
+        let slot = (0..positional_end).find(|slot| !consumed[*slot])?;
+        consumed[slot] = true;
+        Some(slot)
+    };
+    for argument in arguments.iter().take(cursor_index) {
+        if hir.argument_name(argument).is_none() {
+            first_open(&mut consumed);
+        }
+    }
+    let target = match arguments
+        .get(cursor_index)
+        .and_then(|argument| hir.argument_name(argument))
+    {
+        Some(name) => slot_for_name(name.as_str()).or(dots),
+        None => first_open(&mut consumed).or(dots),
+    };
+    Some(target.unwrap_or(formals.len() - 1))
+}
+
+/// The formals of the first function definition in `node`.
+fn formals_of(node: &SyntaxNode) -> Option<Vec<Formal>> {
+    let parameters = node
         .descendants()
         .find(|node| node.kind() == FUNCTION_DEF)
-        .and_then(|function| child_node(&function, PARAMETER_LIST))
-    else {
-        return Vec::new();
-    };
-    parameters
-        .children()
-        .filter(|parameter| parameter.kind() == PARAMETER)
-        .filter_map(|parameter| {
-            let name = child_token(&parameter, IDENT)?;
-            let default = parameter.children().last()?;
-            Some((name.text().to_owned(), default.text().to_string()))
-        })
-        .collect()
+        .and_then(|function| child_node(&function, PARAMETER_LIST))?;
+    Some(
+        parameters
+            .children()
+            .filter(|parameter| parameter.kind() == PARAMETER)
+            .filter_map(|parameter| {
+                let name = parameter
+                    .children_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .find(|token| matches!(token.kind(), IDENT | DOTS))?;
+                let has_default = parameter
+                    .children_with_tokens()
+                    .any(|element| element.kind() == EQ);
+                Some(Formal {
+                    name: name.text().trim_matches('`').to_owned(),
+                    default: has_default
+                        .then(|| parameter.children().last())
+                        .flatten()
+                        .map(|default| default.text().to_string()),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// A default written over several lines still fits the one-line label, and a long one is cut.
+fn one_line_default(default: &str) -> String {
+    let default = default.split_whitespace().collect::<Vec<_>>().join(" ");
+    if default.chars().count() > DEFAULT_WIDTH {
+        let cut: String = default.chars().take(DEFAULT_WIDTH).collect();
+        format!("{cut}...")
+    } else {
+        default
+    }
 }
 
 /// A long default is cut, since the label is one line in a popup.
@@ -1688,7 +1905,7 @@ const DEFAULT_WIDTH: usize = 24;
 
 /// Rewrites an optional parameter `[name]: T` as `name: T = default` when the definition spells
 /// its default, which tells a reader more than the brackets do.
-fn show_defaults(signature: &mut SignatureData, defaults: &[(String, String)]) {
+fn show_defaults(signature: &mut SignatureData, defaults: &[Formal]) {
     if defaults.is_empty() {
         return;
     }
@@ -1706,16 +1923,12 @@ fn show_defaults(signature: &mut SignatureData, defaults: &[(String, String)]) {
         label.push_str(before);
         let rewritten = part.strip_prefix('[').and_then(|rest| {
             let (name, ty) = rest.split_once("]: ")?;
-            let (_, default) = defaults.iter().find(|(parameter, _)| parameter == name)?;
-            // A default written over several lines still fits the one-line label.
-            let default = default.split_whitespace().collect::<Vec<_>>().join(" ");
-            let default = if default.chars().count() > DEFAULT_WIDTH {
-                let cut: String = default.chars().take(DEFAULT_WIDTH).collect();
-                format!("{cut}...")
-            } else {
-                default
-            };
-            Some(format!("{name}: {ty} = {default}"))
+            let default = defaults
+                .iter()
+                .find(|formal| formal.name == name)?
+                .default
+                .as_deref()?;
+            Some(format!("{name}: {ty} = {}", one_line_default(default)))
         });
         let at = TextSize::of(label.as_str());
         label.push_str(rewritten.as_deref().unwrap_or(part));
@@ -1862,6 +2075,18 @@ pub fn completion(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<CompletionResult> {
+    completion_with(db, files, file, offset, &mut |_| None)
+}
+
+/// [`completion`] that also offers the argument names of a call into an installed package the
+/// stubs do not declare, whose parameters `installed` reads from the package.
+pub fn completion_with(
+    db: &dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
+) -> Option<CompletionResult> {
     let (context, query) = completion_context(file.text(db), offset)?;
     let root = semantics::parse(db, file).syntax_node();
     if annotation_at(&root, offset).is_some() || at_inline_type_start(&root, offset) {
@@ -1919,7 +2144,9 @@ pub fn completion(
                 })
                 .collect();
             items.extend(frame_query_completions(db, file, offset, &query));
-            items.extend(argument_name_completions(db, file, offset, &query));
+            items.extend(argument_name_completions(
+                db, file, offset, &query, installed,
+            ));
             items.extend(package_completions(db, files, &query));
             if let Some(position) = position_in_item(db, file, offset)
                 && let Some(naming) = item_naming(db, position.item)
@@ -2063,6 +2290,9 @@ pub enum CodeActionKind {
     DiagnosticFix(Applicability),
     /// Every safe fix in the file at once, as `ry check --fix` applies them in one pass.
     FixAll,
+    /// Makes an unresolved name reach the package that exports it: `pkg::` before the name, or
+    /// in a script a `library(pkg)` call.
+    ImportName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2196,6 +2426,100 @@ pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<
             })
         })
         .collect()
+}
+
+/// Whether a finding offers a quick fix: its own mechanical fix, or for an unresolved name the
+/// imports [`import_fixes`] finds.
+pub fn has_quick_fix(diagnostic: &Diagnostic) -> bool {
+    diagnostic.fix.is_some() || diagnostic.code == "unresolved"
+}
+
+/// Most packages an unresolved name offers imports from; more would bury the list.
+const IMPORT_CANDIDATES: usize = 3;
+
+/// For each unresolved-name finding that touches `viewport` whose name a stub package exports,
+/// the edits that reach that package. The caller passes the findings it publishes, as for
+/// [`diagnostic_fixes`].
+pub fn import_fixes(
+    db: &dyn Db,
+    file: SourceFile,
+    diagnostics: &[Diagnostic],
+    viewport: TextRange,
+) -> Vec<CodeAction> {
+    let Some(sources) = StubSources::try_get(db) else {
+        return Vec::new();
+    };
+    let exporting = &exporting_namespaces(db, sources).0;
+    let text = file.text(db);
+    let mut actions = Vec::new();
+    for diagnostic in diagnostics.iter().filter(|diagnostic| {
+        diagnostic.code == "unresolved" && ranges_overlap(diagnostic.range, viewport)
+    }) {
+        let Some(name) = text
+            .get(std::ops::Range::<usize>::from(diagnostic.range))
+            .map(|spelled| spelled.trim_matches('`'))
+            .filter(|name| !name.is_empty() && !name.contains([':', '$', '@']))
+        else {
+            continue;
+        };
+        let Some(packages) = exporting.get(name) else {
+            continue;
+        };
+        for package in packages
+            .iter()
+            .filter(|package| package.as_str() != STANDARD_LIBRARY)
+            .take(IMPORT_CANDIDATES)
+        {
+            actions.push(CodeAction {
+                title: format!("Qualify as `{package}::{name}`"),
+                kind: CodeActionKind::ImportName,
+                edits: vec![TextEdit {
+                    range: TextRange::empty(diagnostic.range.start()),
+                    replacement: format!("{package}::"),
+                }],
+            });
+            // A package declares its imports in NAMESPACE, which a `library` call would bypass.
+            if *file.kind(db) != DocumentKind::Package {
+                actions.push(CodeAction {
+                    title: format!("Add `library({package})`"),
+                    kind: CodeActionKind::ImportName,
+                    edits: vec![TextEdit {
+                        range: TextRange::empty(library_call_position(db, file)),
+                        replacement: format!("library({package})\n"),
+                    }],
+                });
+            }
+        }
+    }
+    actions
+}
+
+/// Where a new `library` call goes: after the file's last top-level `library` or `require`
+/// call, so attachments stay together, or else at the start of the file.
+fn library_call_position(db: &dyn Db, file: SourceFile) -> TextSize {
+    let root = semantics::parse(db, file).syntax_node();
+    root.children()
+        .filter(|statement| {
+            statement.kind() == CALL_EXPR
+                && statement.first_child().is_some_and(|callee| {
+                    matches!(
+                        callee.text().to_string().as_str(),
+                        "library" | "require" | "requireNamespace"
+                    )
+                })
+        })
+        .last()
+        .and_then(|statement| {
+            // The new line starts after the newline that ends the call's line.
+            let end = usize::from(statement.text_range().end());
+            let text = file.text(db);
+            let line_end = text
+                .get(end..)?
+                .find('\n')
+                .map_or(text.len(), |index| end + index + 1);
+            TextSize::try_from(line_end).ok()
+        })
+        .unwrap_or_default()
 }
 
 /// `None` when the file has no safe fix. Overlapping fixes keep the first, so a fix this pass
@@ -4353,12 +4677,22 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
     spelled
 }
 
-/// How often the project spells each name, summed over [`spelled_names`]. An edit recomputes it
-/// only when it changes a file's counts, and the merge is linear in the distinct names per file.
+/// Files per [`chunk_uses`] sum.
+const USE_CHUNK_FILES: usize = 32;
+
+/// How often one chunk of the project's files spells each name, summed over [`spelled_names`].
+/// A keystroke changes its file's counts, so a single project-wide sum would be redone over
+/// every file on every completion; a chunk is redone over its own files only, and a lookup adds
+/// up one count per chunk.
 #[salsa::tracked(returns(ref))]
-fn project_uses(db: &dyn Db, files: ProjectFiles) -> NameUses {
+fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize) -> NameUses {
     let mut uses: HashMap<String, u32> = HashMap::new();
-    for &file in files.files(db) {
+    for &file in files
+        .files(db)
+        .iter()
+        .skip(chunk * USE_CHUNK_FILES)
+        .take(USE_CHUNK_FILES)
+    {
         for (name, count) in &spelled_names(db, file).uses {
             match uses.get_mut(name.as_str()) {
                 Some(total) => *total += count,
@@ -5250,7 +5584,7 @@ fn finish_completions(
 /// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the
 /// names it has just used.
 struct Usage<'db> {
-    project: Option<&'db NameUses>,
+    project: Vec<&'db NameUses>,
     file: Option<&'db SpelledNames>,
     item: HashMap<String, u32>,
 }
@@ -5276,7 +5610,9 @@ impl<'db> Usage<'db> {
             }
         }
         Usage {
-            project: Some(project_uses(db, files)),
+            project: (0..files.files(db).len().div_ceil(USE_CHUNK_FILES))
+                .map(|chunk| chunk_uses(db, files, chunk))
+                .collect(),
             file: Some(spelled_names(db, file)),
             item,
         }
@@ -5284,7 +5620,7 @@ impl<'db> Usage<'db> {
 
     fn none() -> Usage<'static> {
         Usage {
-            project: None,
+            project: Vec::new(),
             file: None,
             item: HashMap::new(),
         }
@@ -5292,8 +5628,9 @@ impl<'db> Usage<'db> {
 
     fn project_count(&self, name: &str) -> u32 {
         self.project
-            .and_then(|uses| uses.0.get(name).copied())
-            .unwrap_or(0)
+            .iter()
+            .filter_map(|uses| uses.0.get(name))
+            .sum()
     }
 
     fn count(&self, name: &str) -> u32 {
@@ -5326,6 +5663,7 @@ fn argument_name_completions(
     file: SourceFile,
     offset: TextSize,
     query: &str,
+    installed: &mut dyn FnMut(&PackageTarget) -> Option<Vec<Formal>>,
 ) -> Vec<CompletionItem> {
     let Some(position) = position_in_item(db, file, offset) else {
         return Vec::new();
@@ -5386,12 +5724,66 @@ fn argument_name_completions(
             typed = Some(index);
         }
     }
-    let Some(ty) = check.expression_types.get(&callee) else {
-        return Vec::new();
-    };
-    let TyKind::Function(function) = ty.kind(db) else {
-        return Vec::new();
-    };
+    // Each parameter that can be named, with its detail, and how many come before `...` (the
+    // ones a positional argument fills).
+    let typed_function = check
+        .expression_types
+        .get(&callee)
+        .copied()
+        .filter(|ty| matches!(ty.kind(db), TyKind::Function(_)))
+        .or_else(|| {
+            // A call the checker types specially still has the one signature its stub declares.
+            let name = callee_name(hir, callee)?;
+            match stubs(db)?.schemes.get(&name)?.as_slice() {
+                [scheme] => Some(scheme.body),
+                _ => None,
+            }
+        })
+        .and_then(|ty| match ty.kind(db) {
+            TyKind::Function(function) => Some(function),
+            _ => None,
+        });
+    let (parameters, positional_slots): (Vec<(String, Option<String>)>, usize) =
+        match typed_function {
+            Some(function) => (
+                function
+                    .named
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.text(db).to_owned(),
+                            Some(TypeRenderer::default().render(db, field.ty)),
+                        )
+                    })
+                    .collect(),
+                function
+                    .variadic
+                    .as_ref()
+                    .map_or(function.named.len(), |rest| rest.preceding_named),
+            ),
+            None => {
+                let Some(formals) = untyped_formals(db, position.item, callee, installed) else {
+                    return Vec::new();
+                };
+                let positional_slots = formals
+                    .iter()
+                    .position(|formal| formal.name == "...")
+                    .unwrap_or(formals.len());
+                (
+                    formals
+                        .into_iter()
+                        .filter(|formal| formal.name != "...")
+                        .map(|formal| {
+                            let detail = formal
+                                .default
+                                .map(|default| format!("= {}", one_line_default(&default)));
+                            (formal.name, detail)
+                        })
+                        .collect(),
+                    positional_slots,
+                )
+            }
+        };
     let claimed: HashSet<&str> = arguments
         .iter()
         .enumerate()
@@ -5405,18 +5797,12 @@ fn argument_name_completions(
             argument.name.is_none() && argument.value.is_some() && typed != Some(*index)
         })
         .count();
-    let positional_slots = function
-        .variadic
-        .as_ref()
-        .map_or(function.named.len(), |rest| rest.preceding_named);
     let mut skipped = 0;
-    function
-        .named
-        .iter()
+    parameters
+        .into_iter()
         .enumerate()
-        .filter(|(index, field)| {
-            let name = field.name.text(db);
-            if claimed.contains(name) {
+        .filter(|(index, (name, _))| {
+            if claimed.contains(name.as_str()) {
                 return false;
             }
             if *index < positional_slots && skipped < positional {
@@ -5425,19 +5811,16 @@ fn argument_name_completions(
             }
             search_match(name, query).is_some()
         })
-        .map(|(_, field)| {
-            let name = field.name.text(db);
-            CompletionItem {
-                detail: Some(TypeRenderer::default().render(db, field.ty)),
-                ..CompletionItem::new(
-                    match renaming {
-                        Some(_) => insertable_name(name),
-                        None => format!("{} = ", insertable_name(name)),
-                    },
-                    CompletionKind::Variable,
-                    CompletionSource::Argument,
-                )
-            }
+        .map(|(_, (name, detail))| CompletionItem {
+            detail,
+            ..CompletionItem::new(
+                match renaming {
+                    Some(_) => insertable_name(&name),
+                    None => format!("{} = ", insertable_name(&name)),
+                },
+                CompletionKind::Variable,
+                CompletionSource::Argument,
+            )
         })
         .collect()
 }

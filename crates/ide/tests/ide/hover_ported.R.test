@@ -189,7 +189,7 @@ action: Add inferred type annotation for `chooser`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 19..19 -> ": integer"
-completion (128+): I, if, in, Inf, iconv, iconvlist, icuGetCollate, icuSetCollate
+completion (128+): if, in, iconv, iconvlist, icuGetCollate, icuSetCollate, identical, identify
 hint @5: integer
 hint @19: integer
 
@@ -207,7 +207,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 18..18 -> ": NULL"
-completion (102): F, for, FALSE, function, factanal, factor, factor.scope, factorial
+completion (102): for, function, factanal, factor, factor.scope, factorial, faithful, family
 hint @5: integer
 hint @18: NULL
 hint @31: integer
@@ -386,7 +386,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (95): trusted, TRUE, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (95): trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, TRUE, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -513,7 +513,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 18..18 -> ": logical"
   edit 19..19 -> " -> integer"
-completion (29): x, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
 hint @1: fn(flag: logical) -> integer
 hint @25: integer
 hint @51: integer
@@ -539,7 +539,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 18..18 -> ": logical"
   edit 19..19 -> " -> integer | character"
-completion (29): x, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
 hint @1: fn(flag: logical) -> integer | character
 hint @25: integer
 hint @51: character
@@ -731,7 +731,7 @@ action: Add inferred type annotation for `total`
   edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
-completion (128+): sum, S3Class, S3Part, sample, sample.int, sapply, save, save.image
+completion (128+): sum, sample, sample.int, sapply, save, save.image, savehistory, savePlot
 hint @5: integer
 
 #==== hover_untyped_callees
@@ -768,7 +768,7 @@ definition: installed c from base, stats, utils, methods, graphics, grDevices, d
 references: none
 rename: none
 signature: none
-completion (128+): a, b, x, f, function, c, break, else
+completion (128+): a, b, x, f, c, function, break, else
 
 #---- base_argument_name
 f <- function(env) {

@@ -40,7 +40,7 @@ action: Add inferred type annotation for `wrapper`
   edit 21..21 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
-completion (128+): helper, function, wrapper, break, else, FALSE, for, if
+completion (128+): helper, wrapper, function, break, else, FALSE, for, if
 hint @7: fn() -> integer
 
 #==== definition_redefinition
@@ -305,7 +305,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 6..6 -> ": integer"
   edit 21..21 -> ": integer"
-completion (128+): value, other, result, break, else, FALSE, for, function
+completion (128+): value, result, other, break, else, FALSE, for, function
 hint @6: integer
 hint @21: integer
 
@@ -331,7 +331,7 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
   edit 45..45 -> ": integer"
-completion (128+): helper, function, result, wrapper, break, else, FALSE, for
+completion (128+): helper, wrapper, function, result, break, else, FALSE, for
 hint @7: fn() -> integer
 hint @45: integer
 
