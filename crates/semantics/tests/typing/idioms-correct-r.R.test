@@ -1481,6 +1481,21 @@ gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
 full: <T: numeric> fn(x: T) -> double
 either: <T: numeric, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
 
+#---- a_flag_default_selects_a_returned_branch_written_with_return
+# pracma's `gcd(a, b, extended = FALSE)` returns from each branch.
+gcd <- function(a, b, extended = FALSE) {
+  g <- a + b
+  if (extended) {
+    return(list(g = g, c = a))
+  } else {
+    return(g)
+  }
+}
+lcm <- function(a, b) a / gcd(a, b, extended = FALSE) * b
+#++++
+gcd: <T: numeric, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
+lcm: <T: numeric> fn(a: T, b: T) -> double
+
 #---- the_other_branch_of_a_flag_default_is_still_checked
 p_dist <- function(q, valueOnly = TRUE) {
   prob <- q * 2

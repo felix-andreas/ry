@@ -2853,11 +2853,8 @@ impl<'db> Checker<'db, '_> {
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 let default_reads = self.default_reads(&module[parameters], &uses, &named);
-                let flag_return = if early_returns.is_empty() {
-                    self.flag_return(&module[parameters], *body)
-                } else {
-                    None
-                };
+                let flag_return =
+                    self.flag_return(&module[parameters], *body, early_returns.len());
                 let null_unless =
                     self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
                 let reduces = if early_returns.is_empty() {
@@ -8019,8 +8016,15 @@ impl<'db> Checker<'db, '_> {
 
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
     /// list(value = prob, error = err)`. A flag the body never reassigns decides the branch
-    /// from the call alone, so its two branch types are kept beside the joined return.
-    fn flag_return(&self, parameters: &[Formal], body: ExprId) -> Option<FlagReturn<'db>> {
+    /// from the call alone, so its two branch types are kept beside the joined return. A
+    /// branch may also end in `return(value)`, as pracma's `gcd(..., extended = FALSE)` does,
+    /// provided those are the body's only early returns.
+    fn flag_return(
+        &self,
+        parameters: &[Formal],
+        body: ExprId,
+        early_returns: usize,
+    ) -> Option<FlagReturn<'db>> {
         let module = self.module;
         let strip = |mut id: ExprId| {
             while let ExpressionKind::Paren(inner) = module.kind(id) {
@@ -8052,11 +8056,30 @@ impl<'db> Checker<'db, '_> {
         if self.writes_name(body, *name) {
             return None;
         }
+        let mut returns = 0;
+        let mut branch_value = |branch: ExprId| {
+            let mut value = strip(branch);
+            if let ExpressionKind::Block { statements } = module.kind(value) {
+                value = strip(*module[statements].last()?);
+            }
+            if let ExpressionKind::Call { callee, arguments } = module.kind(value)
+                && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
+            {
+                returns += 1;
+                return module[arguments].first()?.value;
+            }
+            Some(branch)
+        };
+        let then_value = branch_value(*then_branch)?;
+        let else_value = branch_value(*else_branch)?;
+        if returns != early_returns {
+            return None;
+        }
         Some(FlagReturn {
             parameter: Name::new(self.db, name),
             default: *default,
-            when_true: *self.recorded.get(then_branch)?,
-            when_false: *self.recorded.get(else_branch)?,
+            when_true: *self.recorded.get(&then_value)?,
+            when_false: *self.recorded.get(&else_value)?,
         })
     }
 
