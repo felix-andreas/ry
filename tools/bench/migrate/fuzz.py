@@ -75,9 +75,12 @@ def run_all(args, env, domains, scratch):
             migrated = scratch / variant / "migrated" / original.name
             shutil.copytree(original, migrated)
             label = f"{original.name} ({variant})"
-            failures += migrate_and_check(args.ry, env, label, original, migrated, strict=typed)
+            found = migrate_and_check(args.ry, env, label, original, migrated, strict=typed)
             if not typed:
-                failures += compare_checksums(args, env, label, original, migrated, scratch, rng)
+                found += compare_checksums(args, env, label, original, migrated, scratch, rng)
+            # Printed as each package finishes, so a run stopped by a time limit still shows them.
+            print(f"{label}: {len(found)} failures", file=sys.stderr, flush=True)
+            failures += found
     for index, corpus in enumerate([*args.corpus, oracle_cases(scratch)]):
         original = project(corpus, scratch / "corpus" / f"{index}-original")
         migrated = scratch / "corpus" / f"{index}-migrated"
