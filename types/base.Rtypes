@@ -599,6 +599,7 @@ Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logic
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
 invisible : @pure <T> fn([x]: T) -> T
 force : <T> fn(x: T) -> T
+withVisible : <T> fn(x: T) -> list{value: T, visible: logical}
 # `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
 # arguments to the callee. `Negate` needs a variadic-generic signature.
