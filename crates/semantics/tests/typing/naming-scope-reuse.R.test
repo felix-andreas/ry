@@ -68,7 +68,7 @@ x
 == R/main.R
 x: integer
 NULL
-integer
+integer | NULL
 
 #---- assignment_inside_loop_body_remains_visible_later_in_same_body
 #~~~~ R/main.R

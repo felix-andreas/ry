@@ -63,12 +63,16 @@ pub fn try_splice(
     }
 
     // An unterminated string in the prefix ends at its line break only because no closing quote
-    // follows it; a quote anywhere after it would extend it across the edit.
-    if old
-        .errors()
-        .iter()
-        .any(|error| error.range.start() < prefix_len && error.message.starts_with("unterminated"))
-    {
+    // follows it; a quote anywhere after it would extend it across the edit. An unclosed
+    // delimiter in the prefix is the same: recovery ended its group early, and a closer the edit
+    // adds anywhere after it would close it there instead. A `[[` closed by a single `]`
+    // reports its missing closer without the word "unclosed", so the closer phrase counts too.
+    if old.errors().iter().any(|error| {
+        error.range.start() < prefix_len
+            && (error.message.starts_with("unterminated")
+                || error.message.starts_with("unclosed")
+                || error.message.contains("to close"))
+    }) {
         return None;
     }
     let middle_text = &new_text[usize::from(prefix_len)..new_suffix_start];

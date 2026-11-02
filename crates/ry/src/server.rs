@@ -1349,9 +1349,14 @@ impl Worker {
         let (file, text) = self.document(&item.uri)?;
         let offset = self.to_offset(&text, item.selection_range.start);
         let files = ProjectFiles::get(&self.db);
+        // Every item this server hands out sits at its function's own definition, so its name
+        // resolves back into the same file. One that resolves elsewhere is stale (the function
+        // moved since the answer), and both directions decline it: outgoing call ranges are
+        // relative to the item's document, and incoming calls would describe a different item.
         self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
             .ok()
             .flatten()
+            .filter(|resolved| resolved.file == file)
     }
 
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
@@ -1719,19 +1724,11 @@ impl Worker {
             .is_some_and(|installed| installed.is_generated(path))
     }
 
-    fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) {
-        let Some(path) = self.document_path(&params.text_document.uri) else {
-            return;
-        };
-        if !self.open_documents.contains(&path) {
-            // Config reloads run off the file watcher, not didSave.
-            return;
-        }
-        assert!(
-            self.files.contains_key(&path),
-            "open documents must be tracked"
-        );
-        // A package-visible save can move diagnostics in dependent files.
+    /// An edit republishes only the edited document, so a save is when every open document's
+    /// settled publish catches up with edits made elsewhere. That holds whatever was saved: a
+    /// NAMESPACE or stub buffer is open in the editor but is not an analyzed open document,
+    /// and the saved file's own content reaches analysis through the buffer or the watcher.
+    fn did_save(&mut self) {
         self.refresh_all_diagnostics();
     }
 
@@ -2442,8 +2439,8 @@ impl LanguageServer for ServerState {
         self.notify(move |worker| worker.did_change(params))
     }
 
-    fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) -> Self::NotifyResult {
-        self.notify(move |worker| worker.did_save(params))
+    fn did_save(&mut self, _params: lsp_types::DidSaveTextDocumentParams) -> Self::NotifyResult {
+        self.notify(|worker| worker.did_save())
     }
 
     fn did_close(&mut self, params: lsp_types::DidCloseTextDocumentParams) -> Self::NotifyResult {
@@ -2948,7 +2945,7 @@ impl LanguageServer for ServerState {
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
             ]
             .iter()
-            .any(|kind| wants(kind));
+            .any(&wants);
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);

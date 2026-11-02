@@ -9,7 +9,7 @@ use {
     heap::{Heap, object::Sexp},
     interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
     std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed, replay_command},
 };
 
 const SETUP: &str = r#"
@@ -1468,8 +1468,8 @@ unsafe fn named_argument_failures() -> Vec<String> {
 /// that its hash index is rebuilt several times.
 unsafe fn collection_model_failures() -> Vec<String> {
     let mut failures = Vec::new();
-    let mut random = SplitMix64(0x5EED_D1C7);
-    for round in 0..fuzz_iterations(24) {
+    for_each_seed(24, |seed| {
+        let mut random = SplitMix64(0x5EED_D1C7 ^ seed);
         let mut model: Vec<(i64, i64)> = Vec::new();
         let mut code = String::from("{ m <- Dict.empty(); t <- Set.empty()\n");
         let mut probes = Vec::new();
@@ -1516,7 +1516,8 @@ unsafe fn collection_model_failures() -> Vec<String> {
         let checks = unsafe { printed(&code) };
         if checks != "[1] TRUE TRUE TRUE TRUE TRUE\n" {
             failures.push(format!(
-                "round {round}: the collections disagree with the model: {checks:?}"
+                "seed {seed}: the collections disagree with the model: {checks:?}; replay with {}",
+                replay_command(seed)
             ));
         }
         for (variable, expected) in probes {
@@ -1524,11 +1525,12 @@ unsafe fn collection_model_failures() -> Vec<String> {
             let printed = unsafe { printed(&variable) };
             if printed.trim_end() != expected {
                 failures.push(format!(
-                    "round {round}: `{variable}` printed {printed:?}, expected {expected}"
+                    "seed {seed}: `{variable}` printed {printed:?}, expected {expected}; replay with {}",
+                    replay_command(seed)
                 ));
             }
         }
-    }
+    });
     failures
 }
 

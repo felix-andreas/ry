@@ -2933,23 +2933,19 @@ mod tests {
     /// Seeded edits to a small package, each followed by a cached run of the whole project or of
     /// `R/` alone. Invariants are on, so
     /// every run that reuses recorded findings is compared with a fresh run and panics on any
-    /// difference. `CACHE_SEED=<seed>` replays one sequence; `FUZZ_ITERS` sets how many run.
+    /// difference. Each sequence is one seed of `for_each_seed`, so `FUZZ_SEED` replays it and
+    /// `FUZZ_ITERS` sets how many run; `CACHE_SEED=<seed>` is the same as `FUZZ_SEED=<seed>`.
     #[test]
     fn cached_checks_match_fresh_checks_across_seeded_edits() {
         syntax::testing::enable_invariants();
-        let seeds: Vec<u64> = match env::var("CACHE_SEED")
+        if let Some(seed) = env::var("CACHE_SEED")
             .ok()
             .and_then(|seed| seed.parse().ok())
         {
-            Some(seed) => vec![seed],
-            None => (0..syntax::testing::fuzz_iterations(3) as u64).collect(),
-        };
-        for seed in seeds {
-            let outcome = std::panic::catch_unwind(|| simulate_cached_checks(seed, 24));
-            if outcome.is_err() {
-                panic!("check cache seed {seed} failed; replay with CACHE_SEED={seed}");
-            }
+            simulate_cached_checks(seed, 24);
+            return;
         }
+        syntax::testing::for_each_seed(3, |seed| simulate_cached_checks(seed, 24));
     }
 
     struct SimulatedFunction {

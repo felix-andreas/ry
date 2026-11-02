@@ -57,7 +57,7 @@ prompt waits, and the editor shows the stop with its variables and steps from th
 These stops need a debugger attached from your editor (see
 [editors](/guides/editors#running-and-debugging)); without one, `f` runs as usual. In a script
 that `ry run file.R` runs, `browser()` does nothing, as in a non-interactive R session. The editor's connection also lets `View(df)` open the
-editor's data viewer and gives hover and completion the console's live values. Without an editor,
+editor's data viewer, shows plots in an editor panel, and gives hover and completion the console's live values. Without an editor,
 `View()` stops with an error that says how to connect one.
 
 ## Two runtimes
@@ -92,6 +92,6 @@ ry prints a warning first when an inline annotation and a `#:` comment disagree,
 [strict mode](/type-checking/strict-mode) a command with a strict-mode error does not run. GNU R runs
 each command with the annotations erased.
 
-Only the commands that run code (`ry R`, `ry run` and `ry load`) need R installed, and even ry's own
-runtime still takes base R from it. Checking, formatting and the editor read the source and never
-run it. The [command reference](/reference/cli#run-and-r) lists every option.
+Only the commands that run code (`ry R`, `ry run`, `ry load`, `ry test` and `ry document`) need R
+installed, and even ry's own runtime still takes base R from it. Checking, formatting and the
+editor read the source and never run it. The [command reference](/reference/cli#run-and-r) lists every option.

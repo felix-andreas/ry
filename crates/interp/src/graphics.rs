@@ -4933,149 +4933,19 @@ fn push_symbol(
         push_symbol(device, clip, centre, &pch, size, cex, colour, fill, lwd)?;
         return Ok(());
     }
+    // The shapes are GNU R's `GESymbol`, which sizes each symbol in device units.
     let stroke = stroke_with(&device.pars, colour, LTY_SOLID, lwd);
-    let radius = 0.375 * size;
-    let [x, y] = centre;
-    let square_half = radius * std::f64::consts::PI.sqrt() / 2.0;
-    let triangle_radius = radius * (4.0 * std::f64::consts::PI / (3.0 * 3f64.sqrt())).sqrt();
-    let diamond_half = radius * (std::f64::consts::PI / 2.0).sqrt();
-    let square = |half: f64| {
-        vec![
-            [x - half, y - half],
-            [x + half, y - half],
-            [x + half, y + half],
-            [x - half, y + half],
-        ]
-    };
-    // An equilateral triangle about the centre, its apex up or down.
-    let triangle = |up: bool| {
-        let r = if up {
-            triangle_radius
-        } else {
-            -triangle_radius
-        };
-        let half_base = triangle_radius * 3f64.sqrt() / 2.0;
-        vec![
-            [x, y + r],
-            [x + half_base, y - r / 2.0],
-            [x - half_base, y - r / 2.0],
-        ]
-    };
-    let diamond = |half: f64| vec![[x, y - half], [x + half, y], [x, y + half], [x - half, y]];
-    let polygon = |points: Vec<[f64; 2]>, fill: Colour, stroke: Option<Stroke>| Shape::Path {
-        points,
-        closed: true,
-        fill,
-        stroke,
-    };
-    let circle = |radius: f64, fill: Colour, stroke: Option<Stroke>| Shape::Circle {
-        centre,
-        radius,
-        fill,
-        stroke,
-    };
-    let plus = |half: f64| {
-        [
-            vec![[x - half, y], [x + half, y]],
-            vec![[x, y - half], [x, y + half]],
-        ]
-    };
-    let cross = |half: f64| {
-        [
-            vec![[x - half, y - half], [x + half, y + half]],
-            vec![[x - half, y + half], [x + half, y - half]],
-        ]
-    };
-    let none = TRANSPARENT_WHITE;
-    let mut shapes: Vec<Shape> = Vec::new();
-    let mut lines: Vec<Vec<[f64; 2]>> = Vec::new();
-    match code {
-        0 => shapes.push(polygon(square(square_half), none, Some(stroke))),
-        1 => shapes.push(circle(radius, none, Some(stroke))),
-        2 => shapes.push(polygon(triangle(true), none, Some(stroke))),
-        3 => lines.extend(plus(radius * std::f64::consts::SQRT_2)),
-        4 => lines.extend(cross(radius)),
-        5 => shapes.push(polygon(diamond(diamond_half), none, Some(stroke))),
-        6 => shapes.push(polygon(triangle(false), none, Some(stroke))),
-        7 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.extend(cross(radius));
-        }
-        8 => {
-            lines.extend(plus(radius * std::f64::consts::SQRT_2));
-            lines.extend(cross(radius));
-        }
-        9 => {
-            shapes.push(polygon(
-                diamond(radius * std::f64::consts::SQRT_2),
-                none,
-                Some(stroke),
-            ));
-            lines.extend(plus(radius * std::f64::consts::SQRT_2));
-        }
-        10 => {
-            shapes.push(circle(radius, none, Some(stroke)));
-            lines.extend(plus(radius));
-        }
-        11 => {
-            let r = triangle_radius;
-            let half_base = r * 3f64.sqrt() / 2.0;
-            let shift = r / 4.0;
-            shapes.push(polygon(
-                vec![
-                    [x, y + r - shift],
-                    [x + half_base, y - r / 2.0 - shift],
-                    [x - half_base, y - r / 2.0 - shift],
-                ],
-                none,
-                Some(stroke),
-            ));
-            shapes.push(polygon(
-                vec![
-                    [x, y - r + shift],
-                    [x + half_base, y + r / 2.0 + shift],
-                    [x - half_base, y + r / 2.0 + shift],
-                ],
-                none,
-                Some(stroke),
-            ));
-        }
-        12 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.extend(plus(radius));
-        }
-        13 => {
-            shapes.push(circle(radius, none, Some(stroke)));
-            lines.extend(cross(radius));
-        }
-        14 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.push(vec![
-                [x - radius, y - radius],
-                [x, y + radius],
-                [x + radius, y - radius],
-            ]);
-        }
-        15 => shapes.push(polygon(square(square_half), colour, None)),
-        16 => shapes.push(circle(radius, colour, None)),
-        17 => shapes.push(polygon(triangle(true), colour, None)),
-        18 => shapes.push(polygon(diamond(radius), colour, None)),
-        19 => shapes.push(circle(radius, colour, Some(stroke))),
-        20 => shapes.push(circle(radius * 2.0 / 3.0, colour, Some(stroke))),
-        21 => shapes.push(circle(radius, fill, Some(stroke))),
-        22 => shapes.push(polygon(square(square_half), fill, Some(stroke))),
-        23 => shapes.push(polygon(diamond(diamond_half), fill, Some(stroke))),
-        24 => shapes.push(polygon(triangle(true), fill, Some(stroke))),
-        25 => shapes.push(polygon(triangle(false), fill, Some(stroke))),
-        _ => {}
+    let mut gc = shape_context(device, Some(&stroke), fill);
+    let dd = device.dd;
+    let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
+    let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
+    let [x, y] = device.to_device(centre);
+    let size = size / device.unit_inches();
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
+        graphics_engine::symbol(x, y, code, size, &mut gc, dd)
     }
-    for shape in shapes {
-        push_shape(device, clip, shape)?;
-    }
-    for line in lines {
-        push_line(device, clip, line, stroke)?;
-    }
-    Ok(())
 }
 
 /// Half the character height in inches at the parameters' `cex`, the unit symbols scale by.
@@ -5341,14 +5211,18 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<bool> {
                     stroke_with(&pars, axis_colour, axis_lty, axis_lwd),
                 )?;
             }
-            // Ticks point outwards for negative `tcl`; `tck`, when set, is a fraction of the
-            // plot region's height or width instead.
+            // Ticks point outwards for negative `tcl`. `tck`, when set, is a fraction of the
+            // plot region instead: above 0.5 of its extent across the axis (a grid), otherwise
+            // of its shorter side, so ticks stay short on a wide, flat panel.
             let plot = region_rect(device, 17);
             let length = if pars.tck.is_finite() {
-                let extent = if horizontal {
-                    plot.y1 - plot.y0
+                let (width, height) = (plot.x1 - plot.x0, plot.y1 - plot.y0);
+                let extent = if pars.tck <= 0.5 {
+                    width.min(height)
+                } else if horizontal {
+                    height
                 } else {
-                    plot.x1 - plot.x0
+                    width
                 };
                 pars.tck * extent
             } else {
@@ -5781,17 +5655,34 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             }
             let line = real_at(arguments[1], index, 0.0);
             let outer = real_at(arguments[2], index, 0.0) == 1.0;
-            let adj = real_at(arguments[4], index, pars.adj);
-            let adj = if adj.is_finite() { adj } else { pars.adj };
+            let perpendicular = match side {
+                1 | 3 => pars.las == 2 || pars.las == 3,
+                _ => pars.las == 1 || pars.las == 2,
+            };
+            // A missing `adj` defaults by orientation, as GNU R's `ComputeAdjValue` does: text
+            // reading away from the plot starts at it, and parallel text centres.
+            let adj = real_at(arguments[4], index, f64::NAN);
+            let adj = if adj.is_finite() {
+                adj
+            } else {
+                match (pars.las, side) {
+                    (1, 2) | (2, 1 | 2) | (3, 1) => 1.0,
+                    (1, 4) | (2, 3 | 4) | (3, 3) => 0.0,
+                    _ => 0.5,
+                }
+            };
+            // A missing `at` follows `adj` along a side the text runs parallel to and centres
+            // on one it stands perpendicular to (`ComputeAtValue`).
             let at = real_at(arguments[3], index, f64::NAN);
+            let fraction = if perpendicular { 0.5 } else { adj };
             let along = if at.is_finite() {
                 along_side(device, side, at, outer)
             } else if outer {
                 let region = region_rect(device, 7);
                 if side % 2 == 1 {
-                    lerp([region.x0, region.x1], adj)
+                    lerp([region.x0, region.x1], fraction)
                 } else {
-                    lerp([region.y0, region.y1], adj)
+                    lerp([region.y0, region.y1], fraction)
                 }
             } else {
                 // GNU R interpolates `usr` here, so the label follows the window user
@@ -5802,11 +5693,7 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
                 } else {
                     (y_axis, [pars.usr[2], pars.usr[3]])
                 };
-                axis.origin + axis.scale * lerp(usr, adj)
-            };
-            let perpendicular = match side {
-                1 | 3 => pars.las == 2 || pars.las == 3,
-                _ => pars.las == 1 || pars.las == 2,
+                axis.origin + axis.scale * lerp(usr, fraction)
             };
             let padj = real_at(arguments[5], index, f64::NAN);
             let padj = if padj.is_finite() {

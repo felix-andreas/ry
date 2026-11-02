@@ -1997,9 +1997,11 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
     };
     naming
         .bindings
-        .values()
-        .filter(|binding| binding.kind == naming::BindingKind::TopLevel)
-        .map(|binding| binding.name)
+        .iter()
+        .filter(|(slot, binding)| {
+            binding.kind == naming::BindingKind::TopLevel || naming.loop_bound_slots.contains(*slot)
+        })
+        .map(|(_, binding)| binding.name)
         .collect()
 }
 
@@ -2778,7 +2780,7 @@ fn unlisted_frame_binder<'db>(
             .get_or_init(|| FrameBinders::of(db, item))
             .binder(name, deferred);
     }
-    frame_binder(db, item, types::Name::new(db, &name), deferred)
+    frame_binder(db, item, types::Name::new(db, name), deferred)
 }
 
 /// Each symbol an item reads from its frame, with its immediate and deferred binders.
