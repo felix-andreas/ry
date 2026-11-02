@@ -491,8 +491,9 @@ impl Inst<'_> {
 pub enum Effect {
     /// Reads and writes only its registers, and never signals a condition.
     Pure,
-    /// Runs no R code unless one of these registers holds an object or a calling handler is
-    /// established, since a warning runs the handler; in either case it is opaque.
+    /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
+    /// methods a package may write in R), or a calling handler is established, since a warning
+    /// runs the handler; in each case it is opaque.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
@@ -2699,12 +2700,18 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
-        // A library leaf never dispatches, so even an object argument cannot run R code.
+        // A library leaf never dispatches, but reading an ALTREP argument runs its class's
+        // methods, which a package may write in R, so every boxed argument is observed.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
+            let observed = self.slice(
+                args.iter()
+                    .copied()
+                    .filter(|&register| !state.registers[register].in_variables()),
+            );
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                &[],
+                observed,
                 Effect::PureUnlessObserved,
             ));
         }

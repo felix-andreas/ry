@@ -52,7 +52,9 @@ const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> Bu
 /// return or raise an error, so compiled code may call them without saving its state first. A
 /// function that takes a callback runs R code, and one that updates its first argument in place
 /// must not be handed a value compiled code still holds, so neither is a leaf; the test
-/// `leaves_are_the_functions_without_callbacks` keeps this list equal to that rule.
+/// `leaves_are_the_functions_without_callbacks` keeps this list equal to that rule. Reading an
+/// ALTREP argument can still run R code through its class's methods, so compiled code checks
+/// each boxed argument's ALTREP flag before trusting the leaf.
 const LEAVES: &[&str] = &[
     "Result.is_ok",
     "Result.is_err",

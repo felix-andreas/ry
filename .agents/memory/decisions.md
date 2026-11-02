@@ -4334,7 +4334,10 @@ check` releases its trees once, and memoized records are compact" below).
   every `Result`, `List`, `Dict` and `Set` function that takes no callback and does not update
   its first argument in place, and every `Num`, `Bool` and `Str` function except the `Str` walks.
   The JIT treats a leaf as an opaque step with `Effect::PureUnlessObserved`, so it flushes nothing
-  around it. An in-place update is excluded because compiled code may hold its argument in a
+  around it unless an argument is observed: every boxed argument's object and ALTREP flags are
+  checked at run time, because reading an ALTREP vector (`List.from_vector` materializes one)
+  runs its class's methods, which a package may write in R. A set flag flushes state exactly as
+  an opaque call does. An in-place update is excluded because compiled code may hold its argument in a
   register that no reference count sees, so the update could change a value still in use. The
   test `leaves_are_the_functions_without_callbacks` derives the rule from the stub signatures.
 - **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and

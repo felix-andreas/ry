@@ -1000,8 +1000,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 for &register in objects {
                     let value = self.load_register(register);
                     let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
-                    let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
-                    any = self.builder.ins().bor(any, object);
+                    let observed = self
+                        .builder
+                        .ins()
+                        .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
+                    any = self.builder.ins().bor(any, observed);
                 }
                 let dispatching = self.builder.create_block();
                 let join = self.builder.create_block();
