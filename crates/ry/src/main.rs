@@ -20,7 +20,72 @@ use {
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOCATOR: Allocator = Allocator;
+
+/// mimalloc, entered through its unaligned functions whenever they already give the alignment.
+/// `mimalloc::MiMalloc` calls the aligned ones for every request, and a cold check makes about
+/// twenty million allocations, each of which then pays two extra calls that `mi_malloc` inlines.
+/// Like the system allocator's own shortcut, this relies on `mi_malloc` aligning every block of
+/// at least 16 bytes to 16, so an alignment of at most 16 that is no larger than the size holds.
+#[cfg(feature = "mimalloc")]
+struct Allocator;
+
+#[cfg(feature = "mimalloc")]
+const MI_MAX_ALIGN_SIZE: usize = 16;
+
+#[cfg(feature = "mimalloc")]
+fn plain(align: usize, size: usize) -> bool {
+    align <= MI_MAX_ALIGN_SIZE && align <= size
+}
+
+// SAFETY: every block comes from mimalloc and goes back to it, and `plain` only routes a layout
+// to the unaligned functions when their blocks are aligned enough for it.
+#[cfg(feature = "mimalloc")]
+unsafe impl std::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: forwarded to mimalloc with the caller's layout.
+        unsafe {
+            match plain(layout.align(), layout.size()) {
+                true => libmimalloc_sys::mi_malloc(layout.size()).cast(),
+                false => libmimalloc_sys::mi_malloc_aligned(layout.size(), layout.align()).cast(),
+            }
+        }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: forwarded to mimalloc with the caller's layout.
+        unsafe {
+            match plain(layout.align(), layout.size()) {
+                true => libmimalloc_sys::mi_zalloc(layout.size()).cast(),
+                false => libmimalloc_sys::mi_zalloc_aligned(layout.size(), layout.align()).cast(),
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: std::alloc::Layout) {
+        // SAFETY: `pointer` came from one of the allocation functions above.
+        unsafe { libmimalloc_sys::mi_free(pointer.cast()) }
+    }
+
+    unsafe fn realloc(
+        &self,
+        pointer: *mut u8,
+        layout: std::alloc::Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        // SAFETY: `pointer` came from one of the allocation functions above, and the block
+        // keeps the caller's alignment.
+        unsafe {
+            match plain(layout.align(), new_size) {
+                true => libmimalloc_sys::mi_realloc(pointer.cast(), new_size).cast(),
+                false => {
+                    libmimalloc_sys::mi_realloc_aligned(pointer.cast(), new_size, layout.align())
+                        .cast()
+                }
+            }
+        }
+    }
+}
 
 /// `mi_option_arena_eager_commit` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does
 /// not export as a constant.

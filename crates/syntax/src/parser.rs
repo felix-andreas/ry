@@ -485,11 +485,11 @@ impl Parser<'_, '_> {
         TextRange::empty(end)
     }
 
-    fn describe_current(&self) -> String {
+    fn describe_current(&self) -> &'static str {
         match self.current() {
-            None => "end of file".to_owned(),
-            Some(NEWLINE) => "end of line".to_owned(),
-            Some(kind) => kind.display().to_owned(),
+            None => "end of file",
+            Some(NEWLINE) => "end of line",
+            Some(kind) => kind.display(),
         }
     }
 

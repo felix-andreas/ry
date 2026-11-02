@@ -673,14 +673,20 @@ fn analyze_project_with(
     }
 
     // Every item is named across cores first: a file's check names the items of other files its
-    // interface reaches, and two threads reaching the same item would block on one claim.
+    // interface reaches, and two threads reaching the same item would block on one claim. The
+    // interface edges follow for the same reason, and because the walk that finds the project's
+    // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
         if let Some(tree) = trees.get(index) {
             drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
         }
         let file = files[index];
-        for &item in semantics::item_tree(db, file) {
+        let items = semantics::item_tree(db, file);
+        for &item in items {
             semantics::item_naming(db, item);
+        }
+        for &item in items {
+            semantics::item_interface_edges(db, item);
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
