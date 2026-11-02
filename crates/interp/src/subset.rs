@@ -760,6 +760,13 @@ unsafe fn array_subset(
         } else {
             nil()
         };
+        // Unlike a vector, a dimension never stretches to a longer logical subscript.
+        if index.kind() == SexpType::Logical && length(index) > extent {
+            return Err(crate::unwind::error_in(
+                call,
+                "(subscript) logical subscript too long",
+            ));
+        }
         let (positions, _) = resolve(index, extent, names, false, call)?;
         let mut selection = Vec::with_capacity(positions.len());
         for position in positions {
@@ -1369,6 +1376,13 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
             return Ok(value);
         }
     }
+    if !object.has_gp(gp::S4_OBJECT) && symbol != symbols().dot_data {
+        let class = crate::dispatch::class_of(object)?;
+        return Err(call.error(format!(
+            "no applicable method for `@` applied to an object of class \"{}\"",
+            values::first_string(class).unwrap_or_default()
+        )));
+    }
     get_slot(object, symbol, call.call)
 }
 
@@ -1553,13 +1567,11 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
 
     // The methods package checks the assignment against the class definition.
     if let Some(check) = interp_methods_function("checkAtAssignment")? {
-        let class = values::class_attr(object);
-        if class != nil() {
-            let name = values::scalar_string_charsxp(symbol.car())?;
-            let value_class = crate::dispatch::class_of(value)?;
-            let check_call = values::call(check, &[class, name, value_class])?;
-            eval::eval(check_call, values::base_env())?;
-        }
+        let class = crate::dispatch::class_of(object)?;
+        let name = values::scalar_string_charsxp(symbol.car())?;
+        let value_class = crate::dispatch::class_of(value)?;
+        let check_call = values::call(check, &[class, name, value_class])?;
+        eval::eval(check_call, values::base_env())?;
     }
     set_slot(object, symbol, value)
 }
@@ -3047,7 +3059,9 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
 unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mut items: Vec<(String, Sexp)> = Vec::new();
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
+    // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
+    // names, which `names()` exposes but `attributes()` does not.
+    if object.kind() == SexpType::Pairlist {
         let names = values::pairlist_names(object)?;
         if names != nil() {
             items.push(("names".into(), names));

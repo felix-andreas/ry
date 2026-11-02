@@ -8,9 +8,13 @@
 | [1] 2
 | set ghi 
 | [1] 4
+| [1] "no applicable method for `@` applied to an object of class \"character\""
+| [1] "no applicable method for `@` applied to an object of class \"zz\""
+| [1] "no applicable method for `@` applied to an object of class \"matrix\""
+| [1] "‘blah’ is not a slot in class “character”"
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| 4
+character
+| "‘blah’ is not a slot in class “character”"

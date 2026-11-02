@@ -234,6 +234,10 @@ pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
     enter(|| match object.kind() {
         SexpType::ExternalPtr => Ok(Reachable(object.external_tag())),
         SexpType::Bytecode | SexpType::Environment => Ok(Reachable(runtime().nil())),
+        // In GNU R a vector's header overlaps the cell fields, so `TAG` of a vector reads a
+        // word that is never a symbol. nanonext relies on that: it checks `TAG(x) != tag`
+        // to tell its external pointers from an aio slot that already holds an integer result.
+        _ if object.kind().shape() != Shape::Triple => Ok(Reachable(runtime().nil())),
         _ => Ok(Reachable(triple(object, "TAG")?.tag())),
     })
     .0

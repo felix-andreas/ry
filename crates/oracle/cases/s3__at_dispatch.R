@@ -15,3 +15,10 @@ x@outer <- 2
 print(attr(x, "inner"))
 f <- function(o) { o@ghi <- 4; attr(o, "ghi") }
 print(f(x))
+
+# Without a method, `@` on an object that is not S4 is an error, and `@<-` checks the slot.
+print(tryCatch("foo"@blah, error = conditionMessage))
+print(tryCatch(structure(1, class = "zz", blah = 3)@blah, error = conditionMessage))
+print(tryCatch(matrix(1)@blah, error = conditionMessage))
+x <- "foo"
+print(tryCatch({ x@blah <- "bar"; "no error" }, error = conditionMessage))
