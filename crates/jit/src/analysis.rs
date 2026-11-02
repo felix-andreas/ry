@@ -689,12 +689,13 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
-    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
-    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
+    /// vectors as objects), and puts its unboxed value in `dst`. When the function fails, tier 0
+    /// runs the call instead.
     NativeCall {
         steps: &'a [(Action<'a>, StateId)],
         native: &'static Native,
-        args: &'a [usize],
+        args: &'a [Argument],
         dst: usize,
     },
     /// Runs the instruction in tier 0, then refines its destination register.
@@ -2462,32 +2463,33 @@ impl<'a> Builder<'a> {
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
         }
-        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+        // A native function takes scalars unboxed and plain vectors as their objects.
+        let types: Option<SmallVec<[Ty; 4]>> = args
             .iter()
-            .map(|argument| match *argument {
-                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
-                _ => None,
+            .map(|argument| {
+                let ty = match *argument {
+                    Argument::Unboxed { ty, .. } => ty,
+                    Argument::Slot(slot) => after.slots[slot].ty,
+                };
+                (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
             .collect();
-        if let Some(unboxed) = unboxed {
-            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
-            if let Some(native) = native::native_for(function, &types) {
-                // The native function reads nothing of this frame, so the variables stay as
-                // they are.
-                after.visible = Some(true);
-                after.registers[dst.0] = native.result;
-                *state = after;
-                self.speculations
-                    .extend(native.speculations.iter().cloned());
-                let mut registers = List::new_in(self.arena);
-                registers.extend(unboxed.iter().map(|&(register, _)| register));
-                return Some(Action::NativeCall {
-                    steps: lowering.steps.leak(),
-                    native,
-                    args: registers.leak(),
-                    dst: dst.0,
-                });
-            }
+        if let Some(types) = types
+            && let Some(native) = native::native_for(function, &types)
+        {
+            // The native function reads nothing of this frame, so the variables stay as they
+            // are.
+            after.visible = Some(true);
+            after.registers[dst.0] = native.result;
+            *state = after;
+            self.speculations
+                .extend(native.speculations.iter().cloned());
+            return Some(Action::NativeCall {
+                steps: lowering.steps.leak(),
+                native,
+                args: args.leak(),
+                dst: dst.0,
+            });
         }
         if !self.frame_safe(function) {
             return None;

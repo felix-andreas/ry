@@ -60,8 +60,8 @@ const KIND: i32 = 0;
 const FLAGS: i32 = 2;
 const REFCOUNT: i32 = 6;
 const ATTRIB: i32 = 8;
-const LENGTH: i32 = 16;
-const DATA: i32 = VECTOR_DATA_OFFSET as i32;
+pub(crate) const LENGTH: i32 = 16;
+pub(crate) const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
 /// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
 /// plain vector, whose operator and indexing rules differ.
@@ -584,8 +584,14 @@ impl<'p, 'b> Translator<'p, 'b> {
                     .ok_or(Refusal("a helper without a result"))?;
                 let mut values: SmallVec<[Value; 5]> = SmallVec::new();
                 values.push(budget);
-                for (&register, &ty) in args.iter().zip(&native.params) {
-                    values.push(self.use_register(register, ty));
+                for argument in args {
+                    values.push(match *argument {
+                        Argument::Slot(slot) => self.load_slot_cell(slot),
+                        Argument::Unboxed { register, ty } if ty.in_variables() => {
+                            self.use_register(register, ty)
+                        }
+                        Argument::Unboxed { register, .. } => self.load_register(register),
+                    });
                 }
                 let signature = self.builder.import_signature(native::signature(
                     &native.params,
@@ -2859,8 +2865,8 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.switch_to_block(deopt.label);
         self.builder.set_cold_block(deopt.label);
         let mut cell = 0;
-        let mut store = |builder: &mut FunctionBuilder<'b>, ty: Type, value: Value| {
-            builder.ins().stack_store(ty, value, scratch, 8 * cell);
+        let mut store = |builder: &mut FunctionBuilder<'b>, value: Value| {
+            builder.ins().stack_store(I64, value, scratch, 8 * cell);
             cell += 1;
         };
         for &(register, kind) in &exit.registers {
@@ -2868,39 +2874,39 @@ impl<'p, 'b> Translator<'p, 'b> {
             match kind {
                 representation::DOUBLE => {
                     let value = self.builder.use_var(self.doubles[register]);
-                    store(&mut self.builder, F64, value);
+                    store(&mut self.builder, value);
                 }
                 representation::NUM => {
                     let value = self.builder.use_var(self.doubles[register]);
-                    store(&mut self.builder, F64, value);
+                    store(&mut self.builder, value);
                     let flag = self.builder.use_var(self.integers[register]);
-                    store(&mut self.builder, I32, flag);
+                    store(&mut self.builder, flag);
                 }
                 _ => {
                     let value = self.builder.use_var(self.integers[register]);
-                    store(&mut self.builder, I32, value);
+                    store(&mut self.builder, value);
                 }
             }
         }
         for &(slot, kind) in &exit.slots {
             let slot = slot as usize;
             let status = self.builder.use_var(self.statuses[slot]);
-            store(&mut self.builder, I32, status);
+            store(&mut self.builder, status);
             match kind {
                 representation::BOXED => {}
                 representation::DOUBLE => {
                     let value = self.builder.use_var(self.slot_doubles[slot]);
-                    store(&mut self.builder, F64, value);
+                    store(&mut self.builder, value);
                 }
                 representation::NUM => {
                     let value = self.builder.use_var(self.slot_doubles[slot]);
-                    store(&mut self.builder, F64, value);
+                    store(&mut self.builder, value);
                     let flag = self.builder.use_var(self.slot_integers[slot]);
-                    store(&mut self.builder, I32, flag);
+                    store(&mut self.builder, flag);
                 }
                 _ => {
                     let value = self.builder.use_var(self.slot_integers[slot]);
-                    store(&mut self.builder, I32, value);
+                    store(&mut self.builder, value);
                 }
             }
         }

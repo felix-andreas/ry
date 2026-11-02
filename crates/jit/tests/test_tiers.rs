@@ -507,6 +507,73 @@ fn native_functions_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // Loops and vector reads: a native function takes a plain vector as its object.
+        (
+            "dot <- function(x, y) { s <- 0; for (i in seq_along(x)) s <- s + x[[i]] * y[i]; s }",
+            "p <- c(1, 2.5, -3)\nq <- c(2, 0.5, 4)\ns <- 0\nfor (i in 1:n) s <- s + dot(p, q) + i\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "el <- function(x, i) x[[i]] + 1L",
+            "p <- c(4L, NA, 6L)\ns <- 0L\nfor (i in 1:n) s <- s + el(p, if (i == 500L) 4L else 1L + i %% 3L)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "ed <- function(x, i) x[i] * 2",
+            "p <- c(0.5, 1.5)\ns <- 0\nfor (i in 1:n) s <- s + ed(p, if (i == 500L) 2.9 else 1.2)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cnt <- function(n) { k <- 0L; i <- 0L; while (TRUE) { i <- i + 1L; if (i > n) break; if (i %% 3L == 0L) next; k <- k + i }; k }",
+            "s <- 0L\nfor (i in 1:n) s <- s + cnt(i %% 40L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "rp <- function(n) { i <- 0; repeat { i <- i + 1; if (i >= n) return(i * 2) } }",
+            "s <- 0\nfor (i in 1:n) s <- s + rp(i %% 30L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cs <- function(a, b) { s <- 0L; for (j in a:b) s <- s + j; s }",
+            "s <- 0L\nfor (i in 1:n) s <- s + cs(i %% 7L, 3) + cs(4L, -i %% 5L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cd <- function(a) { s <- 0; for (j in a:3) s <- s + j; s }",
+            "s <- 0\nfor (i in 1:n) s <- s + cd(if (i == 300L) 0.5 else 1)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "sm <- function(x) { s <- 0; for (v in x) { if (v > 2) next; s <- s + v }; s }",
+            "p <- c(1, 2.5, 0.25)\ns <- 0\nfor (i in 1:n) s <- s + sm(p) + length(p)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "sl <- function(n) { s <- 0L; for (i in seq_len(n)) s <- s + i; s }",
+            "s <- 0L\nfor (i in 1:n) s <- s + sl(if (i == 450L) -1L else i %% 9L)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "sc <- function(x) { if (x > 0) { t <- x * 2; x <- t }; for (j in 1:3) { u <- j; x <- x + u }; x }\nln <- function(x) length(x) + 0.5",
+            "p <- c(TRUE, NA)\ns <- 0\nfor (i in 1:n) s <- s + sc(i - 300) + ln(p) + ln(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "spin <- function(n) { i <- 0L; while (i < n) i <- i + 1L; i }",
+            "s <- 0L\nfor (i in 1:n) s <- s + spin(if (i == 300L) NA_integer_ else i)\ns",
+            "(n = 600L)",
+            true,
+        ),
     ];
     with_interpreter(|| {
         for (case, (definitions, body, call, fails)) in cases.iter().enumerate() {
