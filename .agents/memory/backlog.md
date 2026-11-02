@@ -40,7 +40,7 @@ The quality bar is four things.
 - **Matrix and time series:** `apply` over rows 1.9x and xts `period.apply` 1.3x are both per-call interpreter cost (about 33k `mean(xt[i])` calls through `[.xts`), which the tier-0 work owns; zoo `rollmean` 1.4x.
 - **Heap-state dependence (heap work):** with 1e7 live strings already in the session, `formatC` went from 5.9 s to 7.8 s on ry while GNU R stays level, because the session-wide string table's probes miss cache. `values::StringMemo` hides this per call in `substr` and `formatC`, but every other string producer still pays it. ry's `gc.time()` returns zeros, so collector time cannot be attributed from R.
 - **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
-  - **Base `order` on several keys** still peaks about 15% above GNU R at 1e6 rows (171 MB against about 150): `radix_order` holds one `u64` per row for the current pass plus a spare, so about 24 MB of scratch. The radix order now sorts on 32-bit keys where a column fits, which halves that scratch; the peak has not been measured again since.
+  - **Base `order` on several keys** peaks about 13% above GNU R at 1e6 rows (166 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
 
 ## Open: the package loader
 
