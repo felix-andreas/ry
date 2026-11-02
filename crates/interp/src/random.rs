@@ -15,10 +15,10 @@ use {
         conditions::warning,
         eval::{define, eval, find_var_in_frame},
         interp,
-        rmath::qnorm,
+        rmath::{qnorm, qnorm_standard},
         unwind::{R, error},
         values::{
-            alloc, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
+            alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
             integer_vector, ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at,
             symbols, unbound,
         },
@@ -119,6 +119,11 @@ pub unsafe fn get_rng_state() -> R<()> {
         randomize(rng().state.kind())?;
         return Ok(());
     }
+    // A builtin that draws reads `.Random.seed` back right after the previous one wrote it, so
+    // the stored words usually are the current state already and need no rebuilding.
+    if seeds.kind() == SexpType::Integer && stores_current_state(rng(), ints(seeds)) {
+        return Ok(());
+    }
     let Some(kind) = read_kinds(seeds)? else {
         return Ok(());
     };
@@ -148,16 +153,49 @@ pub unsafe fn get_rng_state() -> R<()> {
 /// `PutRNGstate`: writes the kinds and the generator state to `.Random.seed`.
 pub unsafe fn put_rng_state() -> R<()> {
     let rng = rng();
-    let code =
-        rng.state.kind() as i32 + 100 * rng.normal_kind as i32 + 10000 * rng.sample_kind as i32;
-    let words = rng.state.words();
-    let seeds = alloc(SexpType::Integer, words.len() + 1)?;
+    let (position, words) = rng.state.words();
+    let leading = 1 + usize::from(position.is_some());
+    let seeds = alloc_uninit(SexpType::Integer, leading + words.len())?;
     let slots = seeds.slice_mut::<i32>();
-    slots[0] = code;
-    for (slot, word) in slots[1..].iter_mut().zip(words) {
+    slots[0] = kinds_code(rng);
+    if let Some(position) = position {
+        slots[1] = position as i32;
+    }
+    for (slot, &word) in slots[leading..].iter_mut().zip(words) {
         *slot = word as i32;
     }
     define(symbols().dot_random_seed, seeds, global_env())
+}
+
+/// The first element of `.Random.seed`, which encodes the three kinds.
+fn kinds_code(rng: &Rng) -> i32 {
+    rng.state.kind() as i32 + 100 * rng.normal_kind as i32 + 10000 * rng.sample_kind as i32
+}
+
+/// Whether loading `stored` as `.Random.seed` would leave `rng` exactly as it is. A twister
+/// whose position is out of range is excluded, because loading repairs or reseeds it.
+fn stores_current_state(rng: &Rng, stored: &[i32]) -> bool {
+    let Some((&code, stored)) = stored.split_first() else {
+        return false;
+    };
+    if code != kinds_code(rng) {
+        return false;
+    }
+    let same = |stored: &[i32], words: &[u32]| {
+        stored
+            .get(..words.len())
+            .is_some_and(|stored| stored.iter().zip(words).all(|(&a, &b)| a as u32 == b))
+    };
+    match rng.state.words() {
+        (None, words) => same(stored, words),
+        (Some(position), words) => {
+            (1..=TWISTER_WORDS as u32).contains(&position)
+                && stored
+                    .first()
+                    .is_some_and(|&stored| stored as u32 == position)
+                && stored.get(1..).is_some_and(|rest| same(rest, words))
+        }
+    }
 }
 
 /// A uniform deviate in the open interval (0, 1) from the current generator.
@@ -168,6 +206,28 @@ pub unsafe fn unif_rand() -> R<f64> {
 /// A standard normal deviate by the current normal method.
 pub unsafe fn norm_rand() -> R<f64> {
     next_normal(rng())
+}
+
+/// Fills `slots` with standard normal deviates, exactly as as many calls of [`norm_rand`] would,
+/// and returns false without drawing unless the generator is the Mersenne twister with
+/// inversion. Drawing every uniform first keeps the twister's state in registers, and the
+/// quantiles then run as one loop over the batch.
+pub unsafe fn fill_standard_normal(slots: &mut [f64]) -> bool {
+    let rng = rng();
+    let (NormalKind::Inversion, State::MersenneTwister { position, words }) =
+        (rng.normal_kind, &mut rng.state)
+    else {
+        return false;
+    };
+    for slot in slots.iter_mut() {
+        let first = fixup(mersenne_twister(position, words));
+        let second = fixup(mersenne_twister(position, words));
+        *slot = (f64::from((INVERSION_SCALE * first) as i32) + second) / INVERSION_SCALE;
+    }
+    for slot in slots.iter_mut() {
+        *slot = qnorm_standard(*slot);
+    }
+    true
 }
 
 /// A standard exponential deviate.
@@ -823,14 +883,14 @@ impl State {
         }
     }
 
-    fn words(&self) -> Vec<u32> {
+    /// The words `.Random.seed` stores after its kind code: the twister's position, if any,
+    /// then the generator's words.
+    fn words(&self) -> (Option<u32>, &[u32]) {
         match self {
-            State::WichmannHill(words) => words.to_vec(),
-            State::MarsagliaMulticarry(words) | State::SuperDuper(words) => words.to_vec(),
-            State::MersenneTwister { position, words } => std::iter::once(*position as u32)
-                .chain(words.iter().copied())
-                .collect(),
-            State::LecuyerCmrg(words) => words.to_vec(),
+            State::WichmannHill(words) => (None, words),
+            State::MarsagliaMulticarry(words) | State::SuperDuper(words) => (None, words),
+            State::MersenneTwister { position, words } => (Some(*position as u32), &words[..]),
+            State::LecuyerCmrg(words) => (None, words),
         }
     }
 }
@@ -955,40 +1015,48 @@ fn fixup(value: f64) -> f64 {
 }
 
 /// One output of MT19937 (Matsumoto and Nishimura, 1998), scaled to [0, 1) by 2^-32.
+// Inlined into the deviate loops, which draw hundreds of words per regeneration.
+#[inline]
 fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64 {
-    const UPPER: u32 = 0x8000_0000;
-    const LOWER: u32 = 0x7fff_ffff;
-    let twist = |upper: u32, lower: u32, shifted: u32| {
-        let mixed = (upper & UPPER) | (lower & LOWER);
-        shifted ^ (mixed >> 1) ^ if mixed & 1 == 1 { 0x9908_b0df } else { 0 }
-    };
-    if *position >= TWISTER_WORDS as i32 {
-        if *position == TWISTER_WORDS as i32 + 1 {
-            seed_twister(words, 4357);
-        }
-        // The three ranges are the wrap-around of `index + 1` and `index + TWISTER_SHIFT`
-        // spelled out, which keeps the modulo out of the refill.
-        let last = TWISTER_WORDS - 1;
-        for index in 0..TWISTER_WORDS - TWISTER_SHIFT {
-            words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT]);
-        }
-        for index in TWISTER_WORDS - TWISTER_SHIFT..last {
-            words[index] = twist(
-                words[index],
-                words[index + 1],
-                words[index + TWISTER_SHIFT - TWISTER_WORDS],
-            );
-        }
-        words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
-        *position = 0;
+    if !(0..TWISTER_WORDS as i32).contains(position) {
+        regenerate_twister(position, words);
     }
-    let mut value = words[*position as usize];
+    let mut value = words.get(*position as usize).copied().unwrap_or(0);
     *position += 1;
     value ^= value >> 11;
     value ^= (value << 7) & 0x9d2c_5680;
     value ^= (value << 15) & 0xefc6_0000;
     value ^= value >> 18;
     f64::from(value) * 2.3283064365386963e-10
+}
+
+/// Computes the twister's next 624 words and rewinds its position.
+#[inline(never)]
+fn regenerate_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) {
+    const UPPER: u32 = 0x8000_0000;
+    const LOWER: u32 = 0x7fff_ffff;
+    let twist = |upper: u32, lower: u32, shifted: u32| {
+        let mixed = (upper & UPPER) | (lower & LOWER);
+        shifted ^ (mixed >> 1) ^ if mixed & 1 == 1 { 0x9908_b0df } else { 0 }
+    };
+    if *position == TWISTER_WORDS as i32 + 1 {
+        seed_twister(words, 4357);
+    }
+    // The three ranges are the wrap-around of `index + 1` and `index + TWISTER_SHIFT`
+    // spelled out, which keeps the modulo out of the refill.
+    let last = TWISTER_WORDS - 1;
+    for index in 0..TWISTER_WORDS - TWISTER_SHIFT {
+        words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT]);
+    }
+    for index in TWISTER_WORDS - TWISTER_SHIFT..last {
+        words[index] = twist(
+            words[index],
+            words[index + 1],
+            words[index + TWISTER_SHIFT - TWISTER_WORDS],
+        );
+    }
+    words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
+    *position = 0;
 }
 
 /// The original MT19937 initialization from one seed (Knuth's multiplier 69069), which applies
@@ -1003,15 +1071,17 @@ fn seed_twister(words: &mut [u32; TWISTER_WORDS], seed: u32) {
     }
 }
 
+/// Inversion takes the high bits of one uniform and adds a second for the low bits, as GNU R
+/// does, because one uniform has only 32 bits and the tails need full resolution.
+const INVERSION_SCALE: f64 = 134_217_728.0;
+
 fn next_normal(rng: &mut Rng) -> R<f64> {
     match rng.normal_kind {
         NormalKind::Inversion => {
-            // One uniform has only 32 bits; GNU R adds a second for the low bits so the tails
-            // are reached with full resolution.
-            const SCALE: f64 = 134_217_728.0;
             let first = next_uniform(&mut rng.state);
-            let combined = f64::from((SCALE * first) as i32) + next_uniform(&mut rng.state);
-            Ok(qnorm(combined / SCALE, 0.0, 1.0, true, false))
+            let combined =
+                f64::from((INVERSION_SCALE * first) as i32) + next_uniform(&mut rng.state);
+            Ok(qnorm(combined / INVERSION_SCALE, 0.0, 1.0, true, false))
         }
         NormalKind::BoxMuller => {
             if rng.box_muller_saved != 0.0 {
@@ -1330,7 +1400,12 @@ mod tests {
     #[test]
     fn seed_words_match_gnu_r() {
         let rng = seeded_rng(42);
-        let words: Vec<i32> = rng.state.words().iter().map(|&word| word as i32).collect();
+        let (position, words) = rng.state.words();
+        let words: Vec<i32> = position
+            .into_iter()
+            .chain(words.iter().copied())
+            .map(|word| word as i32)
+            .collect();
         assert_eq!(
             words[..5],
             [624, 507561766, 1260545903, 1362917092, -1772566379]

@@ -2729,6 +2729,17 @@ first lines R had already read, leaving R mid-command.
   about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
   benchmarks time the same. Lower them only together with a cheaper first tier or background
   compilation.
+- **A fully typed closure compiles at its first call** (`jit.rs`, `fully_typed` and
+  `first_call`). Typed code must never run slower than the same code untyped, and before this a
+  typed body paid the argument checks and still waited for 1000 entries. The declared types of the
+  formals and of a called closure's return seed the analysis wherever feedback is empty
+  (`analysis.rs`, `load_ty`), so the compile needs no warm-up. The guards stay because inline
+  types are not sound in default mode; a failed guard deoptimizes as for any feedback. A scalar
+  type (`double`) and a vector type (`double[]`) differ in the runtime mask (`annotations.rs`,
+  `SCALAR`), so only scalars are seeded as unboxed. A refusal because an operand is still unknown
+  (`COLD`) or because nothing would run natively does not mark the body as refused: the threshold
+  path may still compile it once real feedback exists. Measured: `fib` typed 0.013 s before,
+  0.007 s after, equal to untyped; `closures` typed 0.37 s against 0.42 s untyped.
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
   (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
@@ -3991,6 +4002,19 @@ check` releases its trees once, and memoized records are compact" below).
 - **`c()` of untagged, unnamed atomic vectors copies slice by slice** into the result
   (`combine_unnamed_atomic`), because the general path records every element and its name first
   and was the largest source of Rust allocations in `sd()`.
+- **The random generators skip work GNU R repeats per call, and stay bit-identical to it.**
+  Measured on the Vasicek simulation (one `rnorm(200)` and one `m[i, ] <- ...` per step), these
+  cut ry from 142.5k to 87.3k instructions per step, against GNU R's 117.7k.
+  - `GetRNGstate` returns early when `.Random.seed` still holds the session's state (same kind
+    code, Mersenne position in range, same words), because rebuilding the generator from the
+    vector is the dominant cost of a short draw. `PutRNGstate` writes into an uninitialized vector.
+  - `rnorm` with scalar, finite `mean` and positive finite `sd` under Mersenne-Twister and
+    Inversion fills the result in two passes (all uniforms, then `qnorm` of each), so the twister
+    and the AS 241 central branch run as tight loops. The arithmetic is GNU R's exactly, with no
+    fused multiply-add, so streams match `set.seed` runs in GNU R. Every other case draws one at a
+    time through a closure that `random_vector` monomorphizes per generator.
+  - `m[i, ]` and `m[i, ] <- v` on a 2-D double, integer or logical matrix with a plain scalar row
+    copy the strided row directly instead of resolving both subscripts.
 
 ## `just ry` builds ry's runtime; ry-lang does not depend on libr
 
