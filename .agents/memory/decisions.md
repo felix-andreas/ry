@@ -4754,6 +4754,57 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
 
+## `<<-` writes flow forward, and a NULL-initialized cache reads its own first write
+
+- **Previous shape.** A `<<-` write joined the enclosing slot's type in place, so the rest of the
+  writing body read the join (`cache <<- f(); cache` read `NULL | T`), and a closure write beside
+  a reset pinned the callback's return type (memoise's `fun` lost its generic return).
+- **Target shape.** The writing body reads the value it just wrote (`write_target`, Super branch).
+  The enclosing scope still joins every write through `pending_enclosing_writes`, and an
+  undetermined write joins as a union member (`join_closure_write`). On entry to a body that
+  superassigns a slot whose enclosing type has a `NULL` member, the slot reads
+  `existing | seed`, where `seed` is a fresh variable that the body's first write binds
+  (`superassign_seeds`). That models a closure that runs many times: the lazily filled cache
+  `if (is.null(cached)) cached <<- dir("css"); cached` reads `character[]`. Only NULL-initialized
+  slots are seeded, so a counter's `count <<- count + 1L` still reads the concrete count. A seed
+  the body never binds is unified with `Unknown` so it cannot generalize.
+- **Impact.** Clears the bslib cache and memoise reports with no new fixture regressions. The
+  seed is per body and lives in the inference table, so no cross-item state is added.
+
+## The overload probe's unchecked-argument witness is a nominal no candidate declares
+
+- **Previous shape.** An overload probe stands an unchecked argument in as a `Named` type. Its
+  name counted as an undeclared nominal, and undeclared nominals are compatible with everything,
+  so `months(unknown)` picked the `Date | POSIXct` candidate and returned `character`.
+- **Target shape.** The witness has one reserved name, `UNCHECKED_WITNESS` in `infer.rs`, which no
+  source annotation can spell, and `undeclared_nominal` excludes it. Only `Any` and an
+  unconstrained variable accept it, so a call with an unchecked argument picks no class candidate
+  and stays `Unknown`.
+
+## A call on a parameter whose arity the body tests is unchecked, and a later sibling does not force
+
+- A parameter's function type inferred from a call (`handler(src)`) is no declared arity. When
+  the body reads `formals()` of that parameter, a later call with another argument count is
+  unchecked (`arity_tested_by_formals`), because such code picks the call by the callback's arity
+  (evaluate `new_source`). Without the `formals()` read an extra argument stays an error.
+- `collect_formal_uses` runs before the body's locals are typed. A bare formal passed to a local
+  whose first write comes after the call (a sibling defined further down a `local()` block) is not
+  forced (`optional_argument_targets`), because that callee decides what it reads (callr and
+  processx `format_advice(x)`). An earlier-defined local still forces, as before.
+- An inferred `integer` slot accepts a `double` (`fits_inferred_scalar`), since R's
+  integer-taking functions truncate one and a first call's `length(x)` pins the shape only
+  incidentally. A string still fails. Only an unresolved inferred scalar slot is covered: ks
+  `col.fun(n = length(abs.cont) + 1)` still errors, because `col.fun` has a default lambda that the
+  join binds, so `n` is a variable already bound to `integer`.
+- A `NULL` read is a placeholder only when no ordinary write to the slot so far gave a type other
+  than `NULL` (`valued_slots`), so a local narrowed or overwritten to `NULL` is checked. A `<<-`
+  write does not count, because sibling closures read the `NULL` until the defining frame joins
+  the write (pkgbuild's `now`), and a top-level variable read from a function has no local slot,
+  so it stays a placeholder (brew's `.extendedError`).
+- A read before a body's first `<<-` can bind the superassignment seed. A first write that then
+  fails to unify is reported, except for an occurs failure, which is the accumulator
+  `acc <<- c(acc, list(item))` reading itself inside the write.
+
 ## Native scalar functions: frameless calls with checks proven at compile time
 
 - **Previous shape.** A compiled call of a closure that could not be inlined (any body with an

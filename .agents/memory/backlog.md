@@ -150,17 +150,35 @@ Smaller gaps:
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
-reference, then rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle. A random sample of the rest is still almost entirely false reports on correct R. The
-classes, largest first:
+reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
+lifecycle, and is back down to 98. About 20 of the rest are true bugs in the packages; most of the
+others are false reports on correct R. The classes:
 
-- **Not yet sorted: reports the larger stub set exposed.** They are unanalyzed, so each needs a
-  repro before a fix. The biggest groups: kernlab calls a `character` or `double` local as a
-  function (21); Matrix, devtools and pkgdown calls leave out a required `x` or `object` (26);
-  rmgarch passes `list[Any]` where `list[named: Any]` is expected; usethis names arguments on a
-  callback with no named parameters and tests `character | logical | T | NULL` as `logical`;
-  lifecycle passes `NULL` to `character[]`; pkgdown passes `xml_node | xml_missing` to xml2.
-
+- **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
+  `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
+  `logHypDens <- function(y) log(dhyperb(t, ...))`, which reads base `t` for `y`,
+  DBI coerce calls that leave out `to` (5), ff passes `verbose` (3), rugarch reads `temph` for
+  `tmph`, mclust leaves out `k`, NlcOptim (2), processx `new_not_implemented_error` without `call`, diffobj
+  `!is.valid.width(...)` and `!is.valid.guide.fun(...)` negate a value R rejects with "invalid
+  argument type" (2).
+- **Metaprogrammed bodies read names from a frame the checker cannot see.** withr's `wrap(f, pre)`
+  substitutes `pre` into a function built at run time, so `append` there is `f`'s formal, not
+  base's `append`. R6's `generator_funs$new` reads `class` from the generator environment it is
+  copied into. openxlsx's Reference Class methods call sibling methods (`getBaseFont()`) that the
+  checker resolves to a same-named top-level function. A formal passed only to a callee parameter
+  that the callee only `substitute()`s would cover withr.
+- **A conditional library read is taken as a force.** PerformanceAnalytics passes a missing
+  `angle` to `rect(angle = angle)`, which reads it only when `density` is not `NULL`.
+- **A defaulted callback pins its slot to the first call's argument.** ks has
+  `if (missing(col.fun)) col.fun <- function(n) ...`, then calls `col.fun(n = length(levels))` and
+  `col.fun(n = length(levels) + 1)`. The join binds the lambda, so `n` is a variable bound to
+  `integer` rather than an inferred scalar slot, and the `double` fails.
+- **`Reduce` with a callback that may return `NULL`** (zoo `allsame`, sets, vctrs `reduce(.init =
+  list(0))`): unification makes the accumulator the element type, so `fn(T, T) -> T | NULL`
+  fails. The accumulator needs to start at the element type and widen to the callback's return.
+- **A parameter passed to `lapply` as `FUN` that is also compared as a string** (diffobj
+  `lapply(hunk[nm], op, n)` with `op` either `"head"` or `"tail"`): `match.fun()` takes a
+  string, but `FUN` inference makes `op` a function.
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
   caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
