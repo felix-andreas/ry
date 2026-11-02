@@ -1,0 +1,19 @@
+[package]
+name = "rdb"
+description = "Reads installed R packages (lazy-load databases and help pages) for editor navigation"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/rdb.rs"
+
+[dependencies]
+bzip2 = "0.6"
+flate2 = "1"
+lzma-rust2 = "0.24"
+stacker.workspace = true
+
+[dev-dependencies]
+syntax = { path = "../syntax" }

@@ -149,6 +149,29 @@ pub enum Command {
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
     },
+    /// Run a package's testthat tests against the package loaded from source, lazily
+    ///
+    /// The package loads as with `ry load`, and the files in `tests/testthat` run as with
+    /// `devtools::test()`. The exit status is 0 when every test passed and 1 when one failed.
+    /// With `--watch`, every edit reloads only what changed and reruns the tests it can affect
+    /// first, then the rest.
+    Test {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run only the test files whose names match this regular expression
+        #[arg(long)]
+        filter: Option<String>,
+        /// A testthat reporter by name, such as `progress`, `summary` or `junit`
+        #[arg(long)]
+        reporter: Option<String>,
+        /// Keep running, and rerun tests after every edit
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
     /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
     ///
     /// The client launches an R script, which runs on ry's runtime with breakpoints,
@@ -199,6 +222,9 @@ pub enum Debug {
     Ast { path: PathBuf },
     /// Analyze a workspace and report where time and memory go
     AnalysisStats { path: Option<PathBuf> },
+    /// Rewrite the given R files in place as the plain R program they mean, with every inline
+    /// annotation removed
+    Erase { paths: Vec<PathBuf> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

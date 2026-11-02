@@ -9,7 +9,10 @@
 use {
     crate::analysis::{Speculation, resolve_function},
     heap::{
-        object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+        object::{
+            Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
+            UNBOXED_SLOTS, gp, is_na_real,
+        },
         records::NativeKind,
     },
     interp::{
@@ -645,8 +648,79 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
     unsafe { boxed(activation, || values::scalar_real(value)) }
 }
 
+/// Boxes a [`crate::analysis::Ty::Num`]: an integer when `integer` is nonzero, else a double.
+pub unsafe extern "C" fn jit_box_num(
+    activation: *mut Activation,
+    value: f64,
+    integer: i32,
+) -> *mut Header {
+    if integer == 0 {
+        return unsafe { boxed(activation, || values::scalar_real(value)) };
+    }
+    // The double came from an integer, so it converts back exactly; `NA` became NaN.
+    let value = if value.is_nan() {
+        NA_INTEGER
+    } else {
+        value as i32
+    };
+    unsafe { boxed(activation, || values::scalar_integer(value)) }
+}
+
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// A record, tuple or tag of `layout` whose `count` slots are `(kind, bits)` pairs in the
+/// [`representation`] encoding. Numbers go into the record unboxed, without a scalar on the way.
+pub unsafe extern "C" fn jit_construct(
+    activation: *mut Activation,
+    layout: i32,
+    pairs: *const i64,
+    count: i64,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || {
+            let pairs = std::slice::from_raw_parts(pairs, 2 * count as usize);
+            let heap = heap();
+            let mut slots: SmallVec<[Slot; 4]> = SmallVec::with_capacity(count as usize);
+            // Every box made here stays rooted until the record holds it, because the next
+            // allocation may collect. Slots past the unboxed mask hold handles only.
+            let mut rooted = |value: Sexp| {
+                heap.root(value);
+                Slot::Handle(value)
+            };
+            for (index, pair) in pairs.chunks_exact(2).enumerate() {
+                let (kind, bits) = (pair[0] as i32, pair[1]);
+                let wide = index >= UNBOXED_SLOTS;
+                let slot = match kind {
+                    representation::INTEGER if wide => rooted(values::scalar_integer(bits as i32)?),
+                    representation::LOGICAL if wide => rooted(values::scalar_logical(bits as i32)?),
+                    representation::DOUBLE if wide => {
+                        rooted(values::scalar_real(f64::from_bits(bits as u64))?)
+                    }
+                    representation::INTEGER => Slot::Integer(bits as i32),
+                    representation::LOGICAL => Slot::Logical(bits as i32),
+                    representation::DOUBLE => {
+                        let number = f64::from_bits(bits as u64);
+                        let upper = (bits as u64 >> 32) as u32;
+                        // A NaN whose upper half reads as an integer's or logical's tag stays
+                        // boxed, as `slot_for` keeps it.
+                        if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                            rooted(values::scalar_real(number)?)
+                        } else {
+                            Slot::Real(number)
+                        }
+                    }
+                    _ => Slot::Handle(
+                        Sexp::from_raw(bits as *mut Header)
+                            .ok_or_else(|| error("compiled code passed a null slot"))?,
+                    ),
+                };
+                slots.push(slot);
+            }
+            Ok(heap.alloc_record_slots(layout as u32, &slots)?)
+        })
+    }
 }
 
 /// Key kinds [`jit_collection_position`] takes.

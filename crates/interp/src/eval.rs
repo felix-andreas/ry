@@ -1,7 +1,7 @@
 //! The language-object evaluator: symbols, promises, calls, closures, argument matching and the
 //! control-flow specials. It is the semantic reference the bytecode interpreter must agree with,
-//! and it runs everything the bytecode does not compile: promise code, `eval()` of constructed
-//! calls, and top-level expressions.
+//! and it runs everything the bytecode does not compile: the arguments of uncompiled code,
+//! `eval()` of constructed calls, and top-level expressions.
 
 use {
     crate::{
@@ -299,6 +299,16 @@ pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, unbound(), code, env)
 }
 
+/// A promise to run the compiled `code` in `env`, the frame of the code it was compiled with.
+/// Its expression is the code's source, as for any other promise; the code itself sits in the
+/// attribute slot, which a promise otherwise never uses (see `force_promise`).
+pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
+    heap.root(promise);
+    Ok(promise)
+}
+
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
 pub unsafe fn forced_promise(code: Sexp, value: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, value, code, nil())
@@ -315,7 +325,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     moves::forcing(promise)?;
     promise.set_gp_bits(PROMISE_SEEN, true);
-    let result = eval(promise.cdr(), promise.tag());
+    let code = promise.attrib();
+    let result = if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, promise.tag())
+    } else {
+        eval(promise.cdr(), promise.tag())
+    };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let value = result?;
     if promise.has_gp(gp::CHECKED_PROMISE) {
@@ -797,6 +812,8 @@ pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args)
             // promise's environment to tell whether it was forced.
             let value = if expression == missing_arg() {
                 expression
+            } else if expression.kind() == SexpType::Bytecode {
+                compiled_promise(expression, env)?
             } else {
                 make_promise(expression, env)?
             };
@@ -2573,7 +2590,13 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
                 return Ok(expression);
             }
             if value.kind() == SexpType::Promise {
-                return Ok(value.cdr());
+                // An argument passed on as a promise, like a replacement function's `value`,
+                // substitutes to the code of the innermost promise.
+                let mut code = value.cdr();
+                while code.kind() == SexpType::Promise {
+                    code = code.cdr();
+                }
+                return Ok(code);
             }
             if value.kind() == SexpType::Dots {
                 return Ok(expression);
@@ -2592,6 +2615,9 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
 pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
     let dots = symbols().dots;
     let mut items: Vec<(Sexp, Sexp)> = Vec::new();
+    // GNU R reuses the spliced dots cells, so a call whose head comes from `...` becomes a
+    // pairlist: `substitute(...())` is how code captures the dots unevaluated.
+    let mut kind = list.kind();
     let mut cell = list;
     while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
         let element = cell.car();
@@ -2599,6 +2625,9 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
             let value = crate::heap().frame_cell(env, dots).map(|cell| cell.cdr());
             match value {
                 Some(value) if value.kind() == SexpType::Dots => {
+                    if items.is_empty() {
+                        kind = SexpType::Pairlist;
+                    }
                     let mut dot = value;
                     while dot.kind() == SexpType::Dots {
                         let code = if dot.car().kind() == SexpType::Promise {
@@ -2619,7 +2648,7 @@ pub unsafe fn substitute_list(list: Sexp, env: Sexp) -> R<Sexp> {
         }
         cell = cell.cdr();
     }
-    let result = values::pairlist(&items, list.kind())?;
+    let result = values::pairlist(&items, kind)?;
     if result != nil() && list.attrib() != nil() {
         crate::heap().set_attrib(result, list.attrib());
     }
@@ -3011,6 +3040,10 @@ pub unsafe fn complex_assign(
         }
         levels.push(level);
     }
+    let right_hand_side = match whole.cdr().cdr().kind() {
+        SexpType::Pairlist | SexpType::Language => whole.cdr().cdr().car(),
+        _ => value,
+    };
     let mut replacement = value;
     for (depth, getter) in getters.iter().enumerate() {
         let object = levels[levels.len() - 1 - depth];
@@ -3025,8 +3058,13 @@ pub unsafe fn complex_assign(
         let object_promise = forced_promise(object_code, object)?;
         crate::heap().untrack_references(object_promise);
         // GNU R's value promise does not count either, so a replacement that updated its target
-        // in place stays uniquely referenced for the next update.
-        let value_promise = forced_promise(replacement, replacement)?;
+        // in place stays uniquely referenced for the next update. Its code is the right-hand
+        // side as written, which `substitute(value)` reports (tibble names it in errors).
+        let value_code = match depth {
+            0 => right_hand_side,
+            _ => replacement,
+        };
+        let value_promise = forced_promise(value_code, replacement)?;
         crate::heap().untrack_references(value_promise);
         let mut items = vec![(nil(), setter), (nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {

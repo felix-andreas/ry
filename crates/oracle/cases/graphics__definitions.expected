@@ -1,0 +1,21 @@
+[stdout]
+| List of 7
+|  $ patterns       : chr [1:3] "LinearGradient" "RadialGradient" "TilingPattern"
+|  $ clippingPaths  : logi TRUE
+|  $ masks          : chr [1:2] "alpha" "luminance"
+|  $ compositing    : chr [1:11] "multiply" "screen" "overlay" "darken" ...
+|  $ transformations: logi TRUE
+|  $ paths          : logi TRUE
+|  $ glyphs         : logi TRUE
+| NULL
+| pdf TRUE 
+| svg TRUE 
+| png TRUE 
+[messages]
+[warnings]
+- Compositing operator has no corresponding blend mode; defaulting to Normal (in .defineGroup(grp$src, grp$op, grp$dst))
+- Drawing not appended to path (contains text) (in grid.Call.graphics(C_rect, x$x, x$y, x$width, x$height, resolveHJust(x$just, )
+[errors]
+[value]
+integer
+| c("null device" = 1L)

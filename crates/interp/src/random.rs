@@ -10,6 +10,7 @@
 
 use {
     crate::{
+        NativeSymbol,
         builtins::{BuiltinDef, Call, internal},
         coerce::{coerce_vector, type_name},
         conditions::warning,
@@ -19,8 +20,8 @@ use {
         unwind::{R, error},
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
-            integer_vector, ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at,
-            symbols, unbound,
+            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, real_vector, reals,
+            reals_mut, string_at, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
@@ -43,6 +44,10 @@ pub struct Rng {
     /// Box-Muller makes deviates in pairs and keeps the second here. Like GNU R, the value is
     /// not part of `.Random.seed`, and reseeding or choosing Box-Muller again clears it.
     box_muller_saved: f64,
+    /// The user-supplied generator last initialized, which stays loaded after a switch to
+    /// another kind, as GNU R's `User_unif_fun` does, so a saved `.Random.seed` naming it
+    /// still restores.
+    user: Option<UserGenerator>,
 }
 
 impl Default for Rng {
@@ -57,12 +62,13 @@ impl Default for Rng {
             normal_kind: NormalKind::Inversion,
             sample_kind: SampleKind::Rejection,
             box_muller_saved: 0.0,
+            user: None,
         }
     }
 }
 
-/// A uniform generator and its state. GNU R also offers Knuth's TAOCP generators and a
-/// user-supplied one, which ry does not implement, so they have no variant.
+/// A uniform generator and its state. GNU R also offers Knuth's TAOCP generators, which ry
+/// does not implement, so they have no variant.
 enum State {
     WichmannHill([u32; 3]),
     MarsagliaMulticarry([u32; 2]),
@@ -73,6 +79,18 @@ enum State {
         words: Box<[u32; TWISTER_WORDS]>,
     },
     LecuyerCmrg([u32; 6]),
+    UserSupplied(UserGenerator),
+}
+
+/// The routines of `RNGkind("user-supplied")`, found in the loaded DLLs as GNU R finds them:
+/// `user_unif_rand` returns a pointer to the next uniform, and the optional `user_unif_nseed`
+/// and `user_unif_seedloc` expose the generator's seed words for `.Random.seed` to mirror.
+#[derive(Clone, Copy)]
+struct UserGenerator {
+    unif_rand: NativeSymbol,
+    /// The generator's own seed words, null when it exposes none.
+    seeds: *mut u32,
+    seed_count: usize,
 }
 
 /// GNU R's codes for the uniform generators, which `.Random.seed[1] %% 100` and `RNGkind` use.
@@ -127,12 +145,15 @@ pub unsafe fn get_rng_state() -> R<()> {
     let Some(kind) = read_kinds(seeds)? else {
         return Ok(());
     };
-    let count = kind.seed_count();
+    let count = match kind {
+        Kind::UserSupplied => rng().user.map_or(0, |generator| generator.seed_count),
+        kind => kind.seed_count(),
+    };
     let available = length(seeds);
     if available > 1 && available < count + 1 {
         return Err(error("'.Random.seed' has wrong length"));
     }
-    if available == 1 {
+    if available == 1 && kind != Kind::UserSupplied {
         return randomize(kind);
     }
     let words: Vec<u32> = ints(seeds)
@@ -378,11 +399,26 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
         ));
     }
     let size = size as usize;
+    // The draws go straight into the result: GNU R's working memory here is the result and one
+    // integer table, and a scratch buffer of doubles would more than double the peak for a large
+    // permutation.
+    let integer = count <= f64::from(i32::MAX);
+    let result = if integer {
+        alloc_uninit(SexpType::Integer, size)?
+    } else {
+        alloc_uninit(SexpType::Real, size)?
+    };
+    let mut store = |index: usize, value: u64| {
+        if integer {
+            ints_mut(result)[index] = value as i32;
+        } else {
+            reals_mut(result)[index] = value as f64;
+        }
+    };
     let rng = rng();
-    let mut drawn = Vec::with_capacity(size);
     if replace || size < 2 {
-        for _ in 0..size {
-            drawn.push(next_index(rng, count) + 1.0);
+        for index in 0..size {
+            store(index, next_index(rng, count) as u64 + 1);
         }
     } else {
         // Partial Fisher-Yates over `0..count`: the drawn slot takes the value of the last
@@ -390,29 +426,40 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
         // population much larger than the sample a map of those slots replaces the full table.
         let mut remaining = count as u64;
         if remaining <= (size as u64).saturating_mul(8).max(1 << 16) {
-            let mut slots: Vec<u64> = (0..remaining).collect();
-            for _ in 0..size {
-                let slot = next_index(rng, remaining as f64) as usize;
-                drawn.push(slots[slot] as f64 + 1.0);
-                remaining -= 1;
-                slots.swap_remove(slot);
+            // A 32-bit table halves the working memory whenever the population allows it.
+            if remaining <= u64::from(u32::MAX) {
+                let slots: Vec<u32> = (0..remaining as u32).collect();
+                shuffle_prefix(rng, slots, size, &mut store);
+            } else {
+                let slots: Vec<u64> = (0..remaining).collect();
+                shuffle_prefix(rng, slots, size, &mut store);
             }
         } else {
             let mut moved: FxHashMap<u64, u64> = FxHashMap::default();
-            for _ in 0..size {
+            for index in 0..size {
                 let slot = next_index(rng, remaining as f64) as u64;
-                drawn.push(moved.get(&slot).copied().unwrap_or(slot) as f64 + 1.0);
+                store(index, moved.get(&slot).copied().unwrap_or(slot) + 1);
                 remaining -= 1;
                 let last = moved.get(&remaining).copied().unwrap_or(remaining);
                 moved.insert(slot, last);
             }
         }
     }
-    if count > f64::from(i32::MAX) {
-        real_vector(&drawn)
-    } else {
-        let indices: Vec<i32> = drawn.iter().map(|&value| value as i32).collect();
-        integer_vector(&indices)
+    Ok(result)
+}
+
+/// Draws `size` values without replacement from the table `slots`, which holds the population
+/// still to draw from.
+fn shuffle_prefix<T: Copy + Into<u64>>(
+    rng: &mut Rng,
+    mut slots: Vec<T>,
+    size: usize,
+    store: &mut impl FnMut(usize, u64),
+) {
+    for index in 0..size {
+        let slot = next_index(rng, slots.len() as f64) as usize;
+        store(index, slots[slot].into() + 1);
+        slots.swap_remove(slot);
     }
 }
 
@@ -701,7 +748,7 @@ unsafe fn read_kinds(seeds: Sexp) -> R<Option<Kind>> {
                 (_, None, _) => {
                     "'.Random.seed[1]' is not a valid Normal type, so ignored".to_string()
                 }
-                (Some(Kind::UserSupplied), ..) => {
+                (Some(Kind::UserSupplied), ..) if rng().user.is_none() => {
                     "'.Random.seed[1] = 5' but no user-supplied generator, so ignored".to_string()
                 }
                 (Some(kind), Some(normal_kind), Some(sample_kind)) => {
@@ -828,6 +875,10 @@ impl State {
             for _ in 0..50 {
                 seed = lcg_step(seed);
             }
+            if kind == Kind::UserSupplied {
+                // SAFETY: the routines are the loaded package's, called as GNU R calls them.
+                return unsafe { init_user_generator(seed) }.map(State::UserSupplied);
+            }
             let mut words = vec![0u32; kind.seed_count()];
             for word in words.iter_mut() {
                 seed = lcg_step(seed);
@@ -864,7 +915,19 @@ impl State {
                 }
             }
             Kind::LecuyerCmrg => State::LecuyerCmrg(std::array::from_fn(word)),
-            Kind::KnuthTaocp | Kind::KnuthTaocp2002 | Kind::UserSupplied => {
+            Kind::UserSupplied => {
+                let generator = rng()
+                    .user
+                    .ok_or_else(|| error("'user_unif_rand' not in load table"))?;
+                if !generator.seeds.is_null() {
+                    for (index, &value) in words.iter().take(generator.seed_count).enumerate() {
+                        // SAFETY: `user_unif_nseed` vouches for `seed_count` words.
+                        unsafe { *generator.seeds.add(index) = value };
+                    }
+                }
+                State::UserSupplied(generator)
+            }
+            Kind::KnuthTaocp | Kind::KnuthTaocp2002 => {
                 return Err(error(format!(
                     "RNG kind \"{}\" is not supported by ry",
                     kind.name()
@@ -880,6 +943,7 @@ impl State {
             State::SuperDuper(_) => Kind::SuperDuper,
             State::MersenneTwister { .. } => Kind::MersenneTwister,
             State::LecuyerCmrg(_) => Kind::LecuyerCmrg,
+            State::UserSupplied(_) => Kind::UserSupplied,
         }
     }
 
@@ -891,8 +955,44 @@ impl State {
             State::MarsagliaMulticarry(words) | State::SuperDuper(words) => (None, words),
             State::MersenneTwister { position, words } => (Some(*position as u32), &words[..]),
             State::LecuyerCmrg(words) => (None, words),
+            State::UserSupplied(generator) if generator.seeds.is_null() => (None, &[]),
+            // SAFETY: `user_unif_nseed` vouches for `seed_count` words.
+            State::UserSupplied(generator) => (None, unsafe {
+                std::slice::from_raw_parts(generator.seeds, generator.seed_count)
+            }),
         }
     }
+}
+
+/// `RNG_Init` for `USER_UNIF`: finds the generator's routines, seeds it with the scrambled
+/// seed, and records where its seed words live.
+unsafe fn init_user_generator(seed: u32) -> R<UserGenerator> {
+    let find = interp().hooks.find_native_symbol;
+    let unif_rand =
+        find("user_unif_rand").ok_or_else(|| error("'user_unif_rand' not in load table"))?;
+    if let Some(init) = find("user_unif_init") {
+        let init = std::mem::transmute::<NativeSymbol, unsafe extern "C" fn(u32)>(init);
+        init(seed);
+    }
+    let mut generator = UserGenerator {
+        unif_rand,
+        seeds: std::ptr::null_mut(),
+        seed_count: 0,
+    };
+    if let Some(seed_location) = find("user_unif_seedloc") {
+        match find("user_unif_nseed") {
+            None => warning("cannot read seeds unless 'user_unif_nseed' is supplied")?,
+            Some(seed_count) => match *seed_count().cast::<i32>() {
+                count @ 0..=625 => {
+                    generator.seeds = seed_location().cast::<u32>();
+                    generator.seed_count = count as usize;
+                }
+                _ => warning("seed length must be in 0...625; ignored")?,
+            },
+        }
+    }
+    rng().user = Some(generator);
+    Ok(generator)
 }
 
 fn lcg_step(seed: u32) -> u32 {
@@ -942,6 +1042,7 @@ fn fixup_seeds(state: &mut State, initial: bool) -> bool {
             };
             valid(first, LECUYER_MODULUS_1) && valid(second, LECUYER_MODULUS_2)
         }
+        State::UserSupplied(_) => true,
     }
 }
 
@@ -999,6 +1100,9 @@ fn next_uniform(state: &mut State) -> f64 {
             };
             difference as f64 * 2.328306549295727688e-10
         }
+        // GNU R returns the user's uniform as it is, without the fix-up into (0, 1).
+        // SAFETY: `user_unif_rand` returns a pointer to its current deviate.
+        State::UserSupplied(generator) => unsafe { *(generator.unif_rand)().cast::<f64>() },
     }
 }
 
