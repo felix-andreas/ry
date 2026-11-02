@@ -2144,3 +2144,45 @@ pick_format: <T> fn([format]: T | NULL) -> Unknown
 table_of: <T, U> fn(x: T, format: U) -> character
 run: Unknown
 197..205 error[type-mismatch] this call leaves out `format`, which the function requires
+
+#---- a_flag_passed_through_dots_is_not_seen
+# A forwarded `...` is assumed not to carry the flag, so the wrapper selects the default branch.
+p_dist <- function(q, valueOnly = TRUE) {
+  prob <- q * 2
+  if (valueOnly) prob else list(value = prob, error = prob)
+}
+wrapper <- function(x, ...) p_dist(x, ...)
+use <- function(x) wrapper(x, valueOnly = FALSE)
+#++++
+p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+wrapper: <T: numeric> fn(x: T, ...: Any) -> double
+use: <T: numeric> fn(x: T) -> double
+
+#---- a_string_naming_the_reduce_function_is_accepted
+op <- "sum"
+total <- function(x) Reduce(op, x)
+#++++
+op: character
+total: <T, U> fn(x: list[T] | T[]) -> U
+
+#---- a_string_is_not_text_for_a_negated_logical_parameter
+neg <- function(x) !x
+from_text <- function() neg("TRUE")
+#++++
+neg: fn(x: logical) -> logical
+from_text: Unknown
+50..56 error[type-mismatch] expected `logical`, found `character`
+
+#---- a_substituted_formal_also_forwarded_to_an_evaluating_callee_is_checked
+helper <- function(v) if (missing(v)) 0 else v + 1
+wrap <- function(pre) {
+  s <- substitute(pre)
+  helper(pre)
+}
+use <- function() wrap("a")
+#++++
+helper: <T: numeric> fn([v]: T) -> double
+wrap: <T: numeric> fn([pre]: T) -> double
+use: Unknown
+77..78 warning[unused] `s` is assigned but never used.
+137..140 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

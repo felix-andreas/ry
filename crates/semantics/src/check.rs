@@ -2577,6 +2577,13 @@ impl<'db> Checker<'db, '_> {
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
                             .map(|parameter| Name::new(self.db, &parameter.name))
                             .collect(),
+                        condition_only: module[parameters]
+                            .iter()
+                            .filter(|parameter| {
+                                self.read_only_as_condition(*body, parameter.name) == Some(true)
+                            })
+                            .map(|parameter| Name::new(self.db, &parameter.name))
+                            .collect(),
                     }),
                 )
             }
@@ -5030,6 +5037,11 @@ impl<'db> Checker<'db, '_> {
                                 },
                             ))
                     {
+                        // The callee may still evaluate it, so the argument is not only code.
+                        if uses.tracked.contains(value_name) && !uses.assigned.contains(value_name)
+                        {
+                            uses.evaluated.insert(*value_name);
+                        }
                         continue;
                     }
                     self.collect_formal_uses(value, uses);
@@ -5046,7 +5058,7 @@ impl<'db> Checker<'db, '_> {
     /// parameter the callee may leave unread: optional without a default, or one the callee
     /// tests with `missing()`. A missing formal passed on does not take the callee's default,
     /// so a defaulted parameter that the callee reads without testing it still errors, while
-    /// knitr's `kable_format(format = NULL)` tests `missing(format)` before any read. Names match exactly, and the remaining
+    /// knitr's `kable_format(format = NULL)` tests `missing(format)`. Names match exactly, and the remaining
     /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
     /// optional targets, so its arguments stay forced. A local function the enclosing body
     /// has already bound counts as well, as callr's `format_advice(x)` hands `x` to a local
@@ -7125,6 +7137,7 @@ impl<'db> Checker<'db, '_> {
             quoted: Vec::new(),
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
+            condition_only: Vec::new(),
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -7308,9 +7321,6 @@ impl<'db> Checker<'db, '_> {
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             signature.ret = self.join_early_returns(&early_returns, trailing_ty, *body);
-            if early_returns.is_empty() {
-                signature.flag_return = self.flag_return(&module[parameters], *body);
-            }
             self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
@@ -7389,7 +7399,6 @@ impl<'db> Checker<'db, '_> {
         Ty::new(self.db, TyKind::Function(signature))
     }
 
-    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
     /// list(value = prob, error = err)`. A flag the body never reassigns decides the branch
     /// from the call alone, so its two branch types are kept beside the joined return.
@@ -7480,6 +7489,51 @@ impl<'db> Checker<'db, '_> {
             .any_child(id, |child| self.writes_name(child, name))
     }
 
+    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
+    /// `Some(true)` when every read of `name` under `id` is the whole condition of an `if` or a
+    /// `while`, `Some(false)` when some read is anything else, and `None` when there is no read.
+    /// A nested function's reads count as other reads, since it may rebind the name.
+    fn read_only_as_condition(&self, id: ExprId, name: Symbol) -> Option<bool> {
+        let module = self.module;
+        let strip = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(id) {
+                id = *inner;
+            }
+            id
+        };
+        let is_name = |id: ExprId| matches!(module.kind(strip(id)), ExpressionKind::NameRef(read) if *read == name);
+        let join = |left: Option<bool>, right: Option<bool>| match (left, right) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (None, other) | (other, None) => other,
+            (Some(true), Some(true)) => Some(true),
+        };
+        match module.kind(id) {
+            ExpressionKind::NameRef(read) if *read == name => Some(false),
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } if is_name(*condition) => {
+                let branches = join(
+                    self.read_only_as_condition(*then_branch, name),
+                    else_branch.and_then(|branch| self.read_only_as_condition(branch, name)),
+                );
+                join(Some(true), branches)
+            }
+            ExpressionKind::While { condition, body } if is_name(*condition) => {
+                join(Some(true), self.read_only_as_condition(*body, name))
+            }
+            _ => {
+                let mut verdict = None;
+                module.for_each_child(id, |child| {
+                    verdict = join(verdict, self.read_only_as_condition(child, name));
+                });
+                verdict
+            }
+        }
+    }
+
+    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
     fn collect_tail_expressions(&self, id: ExprId, into: &mut Vec<ExprId>) {
         match self.module.kind(id) {
             ExpressionKind::Block { statements } => match self.module[statements].last() {
@@ -10939,6 +10993,7 @@ impl<'db> Checker<'db, '_> {
                         quoted: Vec::new(),
                         default_reads: Vec::new(),
                         missing_tested: Vec::new(),
+                        condition_only: Vec::new(),
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -11144,6 +11199,10 @@ impl<'db> Checker<'db, '_> {
         arguments: &[CallArgument<'db>],
     ) -> Option<Ty<'db>> {
         let flag = function.flag_return?;
+        // A forwarded `...` could carry the flag under its name, but treating every forwarding
+        // call as unselected reports DistributionUtils' `pDist(densFn, q, ...) - p`, whose callers
+        // never pass `valueOnly` that way. Selecting by the visible arguments trades that rare
+        // miss for no false report.
         let formal = function
             .named
             .iter()
@@ -11334,6 +11393,31 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
                 ArgumentTarget::Named(formal) => {
+                    // A formal the body only tests with `if` or `while` reads a string through
+                    // `as.logical`, so renv's `not(Sys.getenv("CHECK", unset = "TRUE"))` passes
+                    // `not <- function(value) if (value) FALSE else TRUE`. `!` and `&&` reject a
+                    // string, so a formal they read gets no such leniency. A literal shows its
+                    // text, and only R's logical spellings pass.
+                    if let Some(parameter) = function.named.get(*formal)
+                        && function.condition_only.contains(&parameter.name)
+                        && matches!(
+                            self.table
+                                .shallow_resolve(self.db, parameter.ty)
+                                .kind(self.db),
+                            TyKind::Scalar(Atomic::Logical)
+                        )
+                        && argument.ty.is_some_and(|ty| {
+                            matches!(
+                                self.table.resolve(self.db, ty).kind(self.db),
+                                TyKind::Scalar(Atomic::Character)
+                            )
+                        })
+                        && argument
+                            .value
+                            .is_none_or(|value| self.reads_as_logical_text(value))
+                    {
+                        continue;
+                    }
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
@@ -11641,24 +11725,6 @@ impl<'db> Checker<'db, '_> {
             return Some(expected);
         }
         if inferred_signature && self.fits_inferred_scalar(expected, ty) {
-            return Some(expected);
-        }
-        // A body tests a flag with `if`, which reads a string through `as.logical`, so renv's
-        // `not(Sys.getenv("CHECK", unset = "TRUE"))` passes. A literal shows its text, and only
-        // R's logical spellings pass.
-        if inferred_signature
-            && matches!(
-                self.table.shallow_resolve(self.db, expected).kind(self.db),
-                TyKind::Scalar(Atomic::Logical)
-            )
-            && matches!(
-                self.table.resolve(self.db, ty).kind(self.db),
-                TyKind::Scalar(Atomic::Character)
-            )
-            && argument
-                .value
-                .is_none_or(|value| self.reads_as_logical_text(value))
-        {
             return Some(expected);
         }
         let ty = self.joined_list_union(expected, ty);
@@ -13493,7 +13559,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The overload set a callback passed by name stands for, unless a binding shadows it.
     /// `Reduce(f, x)` with a function that is not overloaded, named directly or picked by an
     /// `if`, such as `Reduce(if (reals) merge_reals else merge_sets, x)`. R hands `f` the
     /// accumulator and each element in turn, and the accumulator takes whatever `f` returned, so
@@ -13528,7 +13593,13 @@ impl<'db> Checker<'db, '_> {
         let first_var = self.table.next_var().0;
         let callback_ty = self.infer(function);
         let callback_ty = self.table.resolve(db, callback_ty);
-        if self.mentions_var_before(callback_ty, first_var) {
+        // R runs `match.fun(f)`, so a string naming a function is valid and keeps the stub path.
+        let callable = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Function(_));
+        let all_functions = match callback_ty.kind(db) {
+            TyKind::Union(members) => members.iter().all(|&member| callable(member)),
+            _ => callable(callback_ty),
+        };
+        if !all_functions || self.mentions_var_before(callback_ty, first_var) {
             self.errors.truncate(recorded_errors);
             self.strict_origins.truncate(recorded_origins);
             return None;
@@ -13580,8 +13651,10 @@ impl<'db> Checker<'db, '_> {
             self.errors.truncate(step_errors);
             self.strict_origins.truncate(step_origins);
             let step_errors = self.errors.len();
+            let step_origins = self.strict_origins.len();
             callback_ty = self.infer(function);
             self.errors.truncate(step_errors);
+            self.strict_origins.truncate(step_origins);
         }
         Some(accumulator)
     }
@@ -13603,6 +13676,7 @@ impl<'db> Checker<'db, '_> {
         found
     }
 
+    /// The overload set a callback passed by name stands for, unless a binding shadows it.
     fn callback(&self, function: ExprId) -> Option<Callback<'db>> {
         let ExpressionKind::NameRef(name) = self.module.kind(function) else {
             return None;

@@ -5478,13 +5478,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   captures with `substitute()` instead of evaluating, and which formals another formal's default
   forces. The checker reported `pDist(...) - p` (DistributionUtils), typed withr's `wrap(f, pre)`
   template in the caller's frame, and accepted `g()` for `function(x, y = x) y`.
-- **Shape.** `types::FunctionType` gains three inferred-only fields, empty on every declared or stub
+- **Shape.** `types::FunctionType` gains inferred-only fields, empty on every declared or stub
   signature: `flag_return` (a formal with a literal logical default, never reassigned, that the
-  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()` or
-  `missing()`, from `check::FormalUses`), and `default_reads` (an optional formal that a forced
-  formal's default forces). `map_child_types` and `for_each_child` walk the branch types, so they
+  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()`, from
+  `check::FormalUses`; a bare forward to another call counts as an evaluation), `default_reads` (an
+  optional formal that a forced formal's default forces), `missing_tested` (formals tested with
+  `missing()`) and `condition_only` (formals read only as a whole `if`/`while` condition, the only
+  ones that take logical text, since `!` and `&&` reject strings). `map_child_types` and `for_each_child` walk the branch types, so they
   instantiate and generalize with the signature. The call site reads them: `flag_selected_return`
-  returns one branch when the flag is omitted or a literal, `quoted_arguments` types a captured
+  returns one branch when the flag is omitted or a literal (a forwarded `...` is assumed not to
+  carry the flag, since the opposite reports DistributionUtils' ordinary `pDist(densFn, q, ...)`), `quoted_arguments` types a captured
   argument as `Unknown` without inferring it, and `match_arguments` reports a formal as missing when
   both it and the formal whose default reads it are left out.
 - **Why on the type, not a side query.** The facts belong to the function value, which flows through
@@ -5496,7 +5499,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   a literal and the tail to be the only return.
 - **Related leniencies, no model change.** An apply-family element gets the inferred-scalar leniency
   a direct call gives (`lapply(0:(n - 1L), Eulerian, n = n)`); a string that reads as a logical fits
-  an inferred `logical` parameter as it does an `if` condition; and at a `match.fun` caller, a bare
+  an inferred `logical` parameter listed in `condition_only`; and at a `match.fun` caller, a bare
   formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
   `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
   as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.

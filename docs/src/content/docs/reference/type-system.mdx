@@ -1226,7 +1226,11 @@ full <- function(x) p_dist(x, valueOnly = FALSE)$error
 # full: <T: numeric> fn(x: T) -> double
 ```
 
-Any other flag argument, such as a variable, returns the union. An annotation has no syntax for
+Any other flag argument, such as a variable, returns the union. A call that forwards `...` selects
+by its visible arguments, so a flag passed through `...` is not seen: in
+`wrapper <- function(x, ...) p_dist(x, ...)`, the wrapper returns `double` even when its caller
+passes `valueOnly = FALSE`. This is a deliberate limit, because treating every forwarding call as
+unselected reports ordinary wrappers that never pass the flag. An annotation has no syntax for
 the selection, so a declared signature always returns its declared type.
 
 #### Defaults
@@ -2171,10 +2175,12 @@ Arguments are checked for compatibility, not exact equality:
   `character` parameter still rejects a number. The same holds for an element that the apply family
   passes to an inferred callback, so `lapply(0:3, not)` over `not <- function(value) if (value)
   FALSE else TRUE` is `list[logical]`, and `lapply(c("a", "b"), not)` is still reported.
-- An inferred `logical` parameter accepts a `character` argument the way an `if` condition does:
-  a string literal only when it spells `TRUE` or `FALSE`, and any non-literal string. So
-  `not(Sys.getenv("CHECK", unset = "TRUE"))` and `not("TRUE")` are accepted, and `not("yes")` is
-  reported.
+- An inferred `logical` parameter that the body reads only as the whole condition of an `if` or a
+  `while` accepts a `character` argument the way that condition does: a string literal only when it
+  spells `TRUE` or `FALSE`, and any non-literal string. So `not(Sys.getenv("CHECK", unset =
+  "TRUE"))` and `not("TRUE")` are accepted, and `not("yes")` is reported. A parameter that `!`,
+  `&&` or `||` reads gets no such leniency, because R rejects any string there, so `neg("TRUE")`
+  over `neg <- function(x) !x` is reported.
 - At a base helper that calls `match.fun`, a bare unannotated formal that the body also reads as a
   value (as an operand, a condition, or an assigned value) is not inferred as a function there,
   because `match.fun` takes a function or its name and looks a bare name up as a function. So
@@ -2182,11 +2188,11 @@ Arguments are checked for compatibility, not exact equality:
   base `var` and compares the number, and `lapply(chunks, op, n)` beside `op == "tail"` accepts a
   string `op`. A formal used only as a function, as in `each <- function(f) lapply(list(1, 2), f)`,
   still infers as `fn(double) -> T`.
-- An argument bound to a formal that the callee reads only through `substitute()` (or
-  `missing()`) is code the callee captures, not a value, so it is not typed in the caller's frame.
+- An argument bound to a formal that the callee reads only through `substitute()` is code the callee captures, not a value, so it is not typed in the caller's frame.
   withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a function
   that takes `f`'s formals, so `wrap(sink_to, { if (append) "a" else "w" })` reads `sink_to`'s
-  `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual.
+  `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual,
+  and so does one that passes the formal on to another function, which may evaluate it.
 
 #### The native pipe
 
@@ -2462,8 +2468,9 @@ exceptions and additions:
   callee may leave unread does not force it either. Such a parameter is optional without a default,
   or tested with `missing()` in the callee's body. A missing formal passed on does not take the
   callee's default, so in `table_of <- function(x, format) pick_format(format)`, `format` is
-  optional when `pick_format <- function(format = NULL)` tests `missing(format)` before reading it,
-  and required when `pick_format` reads it untested.
+  optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and required when
+  `pick_format` never tests it. As for a formal's own `missing()` test, the order of the test and
+  the reads is not checked.
 - Passing the formal positionally to a function that the enclosing body defines further down,
   as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
   "advice"` in the same `local()`, does not force it either. The sibling runs only after its
