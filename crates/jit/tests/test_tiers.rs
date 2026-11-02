@@ -329,6 +329,24 @@ fn seeds_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // An integer and a double joined stay what they were: integer arithmetic on the
+        // integer side, `typeof` and `NA` all see the original value.
+        (
+            "out <- NULL\nfor (i in 1:n) { r <- if (i %% 2L == 0L) i else 0.5; out <- c(out, .Internal(typeof(r)), r + 1L, r < 3, r / 2) }\nout",
+            "(n = 300L)",
+            false,
+        ),
+        (
+            "out <- NULL\nfor (i in 1:n) { r <- if (i == 2L) NA_integer_ else if (i == 3L) NA_real_ else i; out <- c(out, r * 2, .Internal(typeof(r))) }\nout",
+            "(n = 300L)",
+            false,
+        ),
+        // A loop-carried variable that alternates between integer and double.
+        (
+            "x <- 0L\nfor (i in 1:n) x <- if (i %% 2L == 0L) x + 1L else x * 1.5\nc(x, .Internal(typeof(x)))",
+            "(n = 40L)",
+            false,
+        ),
         // A promise forced by a load whose type guard then fails keeps the visibility it set.
         (
             "wv <- function(x) .Internal(withVisible(x))\nseen <- 0L\nfor (i in 1:n) if (wv(if (i < 400L) i else y <- 2.5)$visible) seen <- seen + 1L\nseen",
@@ -701,7 +719,16 @@ fn program(rng: &mut SplitMix64) -> String {
             ),
         });
     }
-    statements.push(["s", "v", "list(s, v, total)", "c(s, total)"][rng.below(4)].to_owned());
+    statements.push(
+        [
+            "s",
+            "v",
+            "list(s, v, total)",
+            "c(s, total)",
+            "c(.Internal(typeof(s)), .Internal(typeof(total)))",
+        ][rng.below(5)]
+        .to_owned(),
+    );
     statements.join("\n")
 }
 

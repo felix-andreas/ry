@@ -1,7 +1,7 @@
 //! The language-object evaluator: symbols, promises, calls, closures, argument matching and the
 //! control-flow specials. It is the semantic reference the bytecode interpreter must agree with,
-//! and it runs everything the bytecode does not compile: promise code, `eval()` of constructed
-//! calls, and top-level expressions.
+//! and it runs everything the bytecode does not compile: the arguments of uncompiled code,
+//! `eval()` of constructed calls, and top-level expressions.
 
 use {
     crate::{
@@ -299,6 +299,16 @@ pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, unbound(), code, env)
 }
 
+/// A promise to run the compiled `code` in `env`, the frame of the code it was compiled with.
+/// Its expression is the code's source, as for any other promise; the code itself sits in the
+/// attribute slot, which a promise otherwise never uses (see `force_promise`).
+pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
+    heap.root(promise);
+    Ok(promise)
+}
+
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
 pub unsafe fn forced_promise(code: Sexp, value: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, value, code, nil())
@@ -315,7 +325,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     moves::forcing(promise)?;
     promise.set_gp_bits(PROMISE_SEEN, true);
-    let result = eval(promise.cdr(), promise.tag());
+    let code = promise.attrib();
+    let result = if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, promise.tag())
+    } else {
+        eval(promise.cdr(), promise.tag())
+    };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let value = result?;
     if promise.has_gp(gp::CHECKED_PROMISE) {
@@ -797,6 +812,8 @@ pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args)
             // promise's environment to tell whether it was forced.
             let value = if expression == missing_arg() {
                 expression
+            } else if expression.kind() == SexpType::Bytecode {
+                compiled_promise(expression, env)?
             } else {
                 make_promise(expression, env)?
             };

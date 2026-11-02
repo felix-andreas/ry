@@ -16,8 +16,14 @@ read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), 
 
 checksum <- function(answer) {
   if (!is.DataFrame(answer)) return(sum(as.numeric(answer)))
-  numeric <- Filter(is.numeric, as.list(answer))
-  sum(vapply(numeric, function(column) sum(as.numeric(column), na.rm = TRUE), numeric(1)))
+  # One column at a time: `as.list` would convert the whole answer to R vectors at once, which
+  # for q10's 1e8 groups doubles the memory the answer holds.
+  total <- 0
+  for (name in names(answer)) {
+    column <- answer[[name]]
+    if (is.numeric(column)) total <- total + sum(as.numeric(column), na.rm = TRUE)
+  }
+  total
 }
 
 report <- function(question, run, seconds, answer) {

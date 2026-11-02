@@ -3,8 +3,7 @@
 #@ param RATE float 0.02 0.2 3
 #@ param CENSOR float 0.1 0.5 2
 # Kaplan-Meier estimation and a log-rank test, written without a survival package.
-#: fn([subjects]: integer, [rate]: double, [censor]: double, [seed]: integer) -> data.frame
-simulate_survival_@ID@ <- function(subjects = @SUBJECTS@L, rate = @RATE@, censor = @CENSOR@, seed = 8L) {
+simulate_survival_@ID@ <- function(subjects: integer = @SUBJECTS@L, rate: double = @RATE@, censor: double = @CENSOR@, seed: integer = 8L) -> data.frame {
   set.seed(seed)
   event_time <- stats::rexp(subjects, rate)
   censor_time <- stats::rexp(subjects, rate * censor)
@@ -16,8 +15,7 @@ simulate_survival_@ID@ <- function(subjects = @SUBJECTS@L, rate = @RATE@, censor
   )
 }
 
-#: fn(time: double[], event: integer[]) -> data.frame
-kaplan_meier_@ID@ <- function(time, event) {
+kaplan_meier_@ID@ <- function(time: double[], event: integer[]) -> data.frame {
   ordered <- order(time)
   time <- time[ordered]
   event <- event[ordered]
@@ -26,24 +24,17 @@ kaplan_meier_@ID@ <- function(time, event) {
   data.frame(time = time, at_risk = at_risk, survival = cumprod(factor_i))
 }
 
-#: fn(curve: data.frame) -> double
-median_survival_@ID@ <- function(curve) {
-  #: @if-unknown double[]
-  time <- curve$time
-  #: @if-unknown double[]
-  survival <- curve$survival
+median_survival_@ID@ <- function(curve: data.frame) -> double {
+  time: @if-unknown double[] <- curve$time
+  survival: @if-unknown double[] <- curve$survival
   below <- time[survival <= 0.5]
   if (length(below) == 0L) NA_real_ else below[[1]]
 }
 
-#: fn(data: data.frame) -> double[]
-log_rank_@ID@ <- function(data) {
-  #: @if-unknown double[]
-  time <- data$time
-  #: @if-unknown integer[]
-  event <- data$event
-  #: @if-unknown character[]
-  arm <- data$arm
+log_rank_@ID@ <- function(data: data.frame) -> double[] {
+  time: @if-unknown double[] <- data$time
+  event: @if-unknown integer[] <- data$event
+  arm: @if-unknown character[] <- data$arm
   times <- sort(unique(time[event == 1L]))
   observed <- 0
   expected <- 0
@@ -64,14 +55,11 @@ log_rank_@ID@ <- function(data) {
 #@ test
 test_that("survival analysis @ID@ is monotone and bounded", {
   data <- simulate_survival_@ID@()
-  #: @if-unknown double[]
-  time <- data$time
-  #: @if-unknown integer[]
-  event <- data$event
+  time: @if-unknown double[] <- data$time
+  event: @if-unknown integer[] <- data$event
   curve <- kaplan_meier_@ID@(time, event)
   expect_equal(nrow(curve), @SUBJECTS@)
-  #: @if-unknown double[]
-  survival <- curve$survival
+  survival: @if-unknown double[] <- curve$survival
   expect_true(all(diff(survival) <= 1e-12))
   expect_true(all(survival >= 0 & survival <= 1))
   expect_true(is.na(median_survival_@ID@(curve)) || median_survival_@ID@(curve) > 0)

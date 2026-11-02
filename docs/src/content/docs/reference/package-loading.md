@@ -72,9 +72,10 @@ This page is the exact behavior.
   Every later load checks too: `load_all()`, a reload, and the load a console makes at start, on
   either runtime. When the check refuses one of them, the load raises
   `<package> was not loaded, because strict mode refused it` before anything runs, so the session
-  keeps the code it had. A load that changes nothing skips the check. A package that passes is remembered in ry's cache directory (`~/.cache/ry/strict` on Linux),
-  so loading it again without changing its files, configuration, stubs, data files or the ry
-  binary skips the check.
+  keeps the code it had. A load that changes nothing skips the check.
+  The check shares [`ry check`'s record](/reference/cli#the-check-cache) in `.ry_cache/`, so a
+  load after `ry check`, the editor or an earlier load reuses the findings of every file that has
+  not changed and checks only the rest.
 
 ### S4 definitions
 
