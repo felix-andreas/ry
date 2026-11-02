@@ -1,0 +1,18 @@
+[stdout]
+| [1] "##    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. "
+| [2] "##       1       2       4       4       5       8" 
+| [3] "![plot of chunk scatter](figure/scatter-1.png)"     
+| [4] "![plot of chunk grid-plot](figure/grid-plot-1.png)" 
+| [5] "![plot of chunk two-plots](figure/two-plots-1.png)" 
+| [6] "![plot of chunk two-plots](figure/two-plots-2.png)" 
+| figure/grid-plot-1.png 216 216 
+| figure/scatter-1.png 288 216 
+| figure/two-plots-1.png 144 144 
+| figure/two-plots-2.png 144 144 
+| plots.html 4 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

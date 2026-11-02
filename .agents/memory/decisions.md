@@ -2295,9 +2295,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     version they expect.
   - `GEregisterSystem` hands the caller its index (through a claim callback) before it calls the
     system on the open devices, because grid's `InitState` reads its own index on that call.
-  - Built-in devices install no-op pattern, clip-path and mask callbacks, because grid's
-    `newpage` calls `releasePattern` unconditionally; `patternFill` defaults to `R_NilValue`,
-    which ragg reads.
+  - `patternFill` defaults to `R_NilValue`, which ragg reads.
   - `fromDeviceHeight` in inches is `value * ipr` without a sign, as in GNU R; a y-down device
     (every bitmap device) otherwise gets negative string heights, which shifted rotated grid text.
   - Base text hands both adjustments to `GEText`, so an unspecified vertical adjustment centres
@@ -2311,13 +2309,32 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - Text widths are Helvetica's AFM widths plus its ASCII kerning pairs (tables generated from
     GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
     devices in GNU R measure with cairo's font instead, so their widths differ slightly.
-- **Built-in devices record pages of shapes and render them when they close.** Each built-in
-  device's callbacks append `graphics_render::Shape`s (paths, circles, text) in inches with the
-  clip in force to the current page, and each file format is one writer over the same pages: PDF,
-  SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with tiny-skia, text outlined
-  with ab_glyph from the system's Helvetica-compatible fonts. Rendering at close keeps devices free
-  of file handles and makes a multi-page bitmap device one file per page, as GNU R's `%d` names
-  expect. Vector devices create their file at open, so a bad path fails there.
+- **Built-in devices record a drawing and render it when they close.** Each built-in device's
+  callbacks append `graphics_render::Item`s (a path, text or group use, with the clip and mask in
+  force) in inches to the current page, and each file format is one writer over the same
+  `Drawing`: PDF, SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with
+  tiny-skia, text outlined with ab_glyph from the system's Helvetica-compatible fonts. Rendering at
+  close keeps devices free of file handles and makes a multi-page bitmap device one file per page,
+  as GNU R's `%d` names expect. Vector devices create their file at open, so a bad path fails
+  there.
+  - Patterns, clipping paths, masks and groups are `Definition`s in one append-only arena on the
+    `Drawing`, and the reference R receives is the arena index. A mark refers to a definition by
+    index, so pages rendered at close still find it after R released the reference (the release
+    callbacks do nothing), and nothing is copied per use. A definition's own marks are recorded
+    by running its R function with the device's target swapped to a fresh list, so nesting
+    (a pattern in a mask in a group) falls out of the same callbacks. Rendering bounds nesting at
+    32 levels, which only a malformed drawing reaches.
+  - Device versions follow GNU R's devices: pdf, svg and the bitmap devices are version 16 (paths
+    and glyphs), and PostScript is version 15, refusing every definition and reporting the
+    capabilities unchanged (`NA`), as GNU R's PostScript device does. PostScript also drops
+    semi-transparent colours with GNU R's once-per-page warning.
+  - The bitmap devices render luminance masks, where cairo ignores them with a warning, and report
+    masks as alpha and luminance; this is a deliberate improvement. `svg()` composites like
+    `pdf()` (blend modes only; other operators warn and draw as `over`) because SVG has no
+    Porter-Duff operators, where GNU R's cairo svg device rasterizes them. Both write isolated
+    groups, as cairo does.
+  - Glyph callbacks read the font file R names and draw nothing when it cannot be read, matching
+    GNU R's pdf device, which is silent there.
 - **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
   `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
   offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
