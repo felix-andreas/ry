@@ -268,6 +268,15 @@ pub unsafe fn source_body(function: Sexp) -> Sexp {
     }
 }
 
+/// The source of a closure body, compiled or not.
+pub unsafe fn source_of_body(body: Sexp) -> Sexp {
+    if body.kind() == SexpType::Bytecode {
+        source_of(body)
+    } else {
+        body
+    }
+}
+
 unsafe fn source_of(code: Sexp) -> Sexp {
     code.cdr().element(SOURCE)
 }
@@ -382,9 +391,13 @@ pub enum Op {
     /// update the parameter's value in place while a move into this frame lasts
     /// (`eval::tail_update`).
     CallTailUpdate,
+    /// `dst src name call shape`: `src$name` for the base `$`. `shape` is a constant integer
+    /// vector caching the last record layout the site saw and the field's slot in it, so a
+    /// record's field is one comparison and a slot read; anything else takes `$`'s own path.
+    Field,
 }
 
-pub const OPS: [Op; 29] = [
+pub const OPS: [Op; 30] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -414,6 +427,7 @@ pub const OPS: [Op; 29] = [
     Op::EndStatement,
     Op::CallRebinding,
     Op::CallTailUpdate,
+    Op::Field,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -898,6 +912,21 @@ impl Compiler {
         let name = symbol_name(head).into_owned();
         if let Some(primitive) = self.base_primitive(head, &name)? {
             let args = values::pairlist_items(call.cdr());
+            // Ahead of the dispatch-or-eval path `$` would otherwise take, so a record field
+            // read gets the site's shape cache.
+            if name == "$"
+                && let [(subject_tag, subject), (field_tag, field)] = args.as_slice()
+                && *subject_tag == nil()
+                && *field_tag == nil()
+                && field.kind() == SexpType::Symbol
+                && *subject != symbols().dots
+                && *subject != missing_arg()
+            {
+                return self.field(call, head, primitive, dst, *subject, *field);
+            }
+            if name == "$" {
+                return self.general_call(call, head, dst);
+            }
             if self.eager_subject(primitive, &args)? {
                 return self.subject_call(call, head, primitive, dst, &args);
             }
@@ -1068,6 +1097,7 @@ impl Compiler {
                 | "[[<-"
                 | ".Internal"
                 | "local"
+                | "$"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1572,6 +1602,43 @@ impl Compiler {
         Ok(())
     }
 
+    /// `subject$name` for the base `$`, which evaluates its subject as a value, as the special
+    /// does, and never evaluates the name.
+    unsafe fn field(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        subject: Sexp,
+        name: Sexp,
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let call_constant = self.constant(call);
+        let name_constant = self.constant(name);
+        let shape = values::alloc(SexpType::Integer, 2)?;
+        values::ints_mut(shape).copy_from_slice(&[crate::records::NO_LAYOUT, 0]);
+        let shape = self.constant(shape);
+        let cache = self.cache();
+        let mark = self.next_register;
+        let function = self.allocate();
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
+        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let object = self.allocate();
+        self.expression(subject, object)?;
+        self.emit(
+            Op::Field,
+            &[dst, object, name_constant, call_constant, shape],
+        );
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(generic);
+        self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+        self.patch(done);
+        self.release_to(mark);
+        Ok(())
+    }
+
     unsafe fn general_call(&mut self, call: Sexp, head: Sexp, dst: u32) -> R<()> {
         let rebinding = match self.rebinding {
             Some((value, target)) if value == call => {
@@ -1645,6 +1712,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
         Op::CallRebinding | Op::CallTailUpdate => 4,
+        Op::Field => 5,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -2004,6 +2072,19 @@ unsafe fn step(
             let target = constants.element(operand(3));
             let value = eval::tail_update(call, function, target, env)?;
             decoded.record(at, value);
+            set(operand(0), value);
+        }
+        Op::Field => {
+            let object = register(operand(1));
+            let name = constants.element(operand(2));
+            let call = constants.element(operand(3));
+            let shape = constants.element(operand(4));
+            let value = match crate::records::cached_field(object, name, shape)? {
+                Some(value) => value,
+                None => crate::subset::dollar_value(object, name.car(), call, env)?,
+            };
+            record_feedback(constants, at, value);
+            interp().visible = true;
             set(operand(0), value);
         }
         Op::BranchUnlessPrimitive => {

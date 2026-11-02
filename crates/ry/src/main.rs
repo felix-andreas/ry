@@ -96,13 +96,24 @@ fn main() -> ExitCode {
             min_severity,
             fix,
             unsafe_fixes,
+            no_cache,
         } => {
             let fix = match (fix, unsafe_fixes) {
                 (false, _) => cli::FixMode::Off,
                 (true, false) => cli::FixMode::Safe,
                 (true, true) => cli::FixMode::All,
             };
-            exit_code(cli::check(files.as_deref(), output, min_severity, fix))
+            let cache = match no_cache {
+                true => ry::check_cache::CacheUse::Off,
+                false => ry::check_cache::CacheUse::ReadWrite,
+            };
+            exit_code(cli::check(
+                files.as_deref(),
+                output,
+                min_severity,
+                fix,
+                cache,
+            ))
         }
         Command::Fmt {
             files,

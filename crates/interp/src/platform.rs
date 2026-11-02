@@ -31,7 +31,9 @@ pub struct SystemName {
     pub version: String,
     pub nodename: String,
     pub machine: String,
+    pub login: String,
     pub user: String,
+    pub effective_user: String,
 }
 
 /// Why a conversion step stopped before using up its input, as `iconv(3)` reports through
@@ -158,7 +160,33 @@ mod imp {
             version: field(&name.version),
             nodename: field(&name.nodename),
             machine: field(&name.machine),
-            user: std::env::var("USER").unwrap_or_else(|_| "unknown".into()),
+            // GNU R reads the login name from the terminal session and the two user names from
+            // the password database, so a process without a controlling terminal still knows
+            // its user.
+            // SAFETY: `getlogin` and `getpwuid` return null or a C string that stays valid
+            // until the next call, which is copied before then.
+            login: unsafe { c_string(libc::getlogin()) },
+            user: unsafe { account(libc::getuid()) },
+            effective_user: unsafe { account(libc::geteuid()) },
+        }
+    }
+
+    unsafe fn c_string(raw: *const c_char) -> String {
+        if raw.is_null() {
+            "unknown".into()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(raw) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    unsafe fn account(uid: libc::uid_t) -> String {
+        let entry = unsafe { libc::getpwuid(uid) };
+        if entry.is_null() {
+            "unknown".into()
+        } else {
+            unsafe { c_string((*entry).pw_name) }
         }
     }
 
@@ -594,6 +622,7 @@ mod imp {
     }
 
     pub fn system_name() -> SystemName {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
         let machine = match std::env::consts::ARCH {
             "x86_64" => "x86-64",
             other => other,
@@ -604,7 +633,9 @@ mod imp {
             version: String::new(),
             nodename: std::env::var("COMPUTERNAME").unwrap_or_default(),
             machine: machine.into(),
-            user: std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into()),
+            login: user.clone(),
+            effective_user: user.clone(),
+            user,
         }
     }
 

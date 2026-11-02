@@ -316,10 +316,15 @@ impl Table {
         }
         // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
         // `sink(file(path))` is not closed as unused while output still goes to it.
-        for sink in &self.sinks {
+        for slot in self
+            .sinks
+            .iter()
+            .map(|sink| sink.slot)
+            .chain([self.message_slot])
+        {
             let id = self
                 .entries
-                .get(sink.slot)
+                .get(slot)
                 .and_then(Option::as_ref)
                 .and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
             if let Some(id) = id {
@@ -449,8 +454,12 @@ pub unsafe fn write_output(bytes: &[u8]) {
     if slot == 1 {
         return;
     }
+    // GNU R's `Rvprintf` flushes after every write, so the file a sink writes to can be read
+    // before the sink ends.
     let written = match entry(slot) {
-        Some(entry) => method_print(entry.con, bytes),
+        Some(entry) => method_print(entry.con, bytes)
+            .and_then(|()| method_fflush(entry.con))
+            .map(drop),
         None => Err(error("invalid connection")),
     };
     if let Err(unwind) = written {
@@ -465,6 +474,25 @@ pub unsafe fn write_output(bytes: &[u8]) {
         );
         write_terminal(bytes, false);
     }
+}
+
+/// Writes out what every open file connection has buffered, so that a process about to fork
+/// does not leave the same bytes in both copies of the buffer.
+pub unsafe fn flush_pending_writes() -> R<()> {
+    for entry in entries().iter().flatten() {
+        if !entry.builtin || (*entry.con).isopen == 0 {
+            continue;
+        }
+        let device = (*entry.con).private as *mut Device;
+        if let Some(Device::File(FileDevice {
+            stream: Some(Stream::Plain(plain)),
+            ..
+        })) = device.as_mut()
+        {
+            flush_writes(plain).map_err(io_error)?;
+        }
+    }
+    Ok(())
 }
 
 /// Runs `read` over the unread text of the connection `file`, which advances the position it
@@ -1020,6 +1048,9 @@ unsafe fn close(con: Sexp) -> R<Sexp> {
     let (slot, _) = resolve_con(con)?;
     if slot <= 2 {
         return Err(error("cannot close standard connections"));
+    }
+    if interp().connections.message_slot == slot {
+        return Err(error("cannot close 'message' sink connection"));
     }
     let status = close_slot(slot)?;
     if status == NA_INTEGER {

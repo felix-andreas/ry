@@ -1,0 +1,44 @@
+[stdout]
+| [[1]]
+| [1] 10
+| 
+| [[2]]
+| [1] 20
+| 
+| [[3]]
+| [1] 30
+| 
+| [[4]]
+| [1] 40
+| 
+| [[5]]
+| [1] 50
+| 
+| [1] TRUE TRUE TRUE TRUE
+| [1] TRUE TRUE TRUE TRUE
+| [1] "scheduled core 2 encountered error in user code, all values of the job will be affected"
+| [1] TRUE
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] 3
+| 
+| [1] "total"
+| [[1]]
+| [1] 5050
+| 
+| [[2]]
+| [1] 3
+| 
+| [1] 0
+| [1] FALSE
+| [1] TRUE
+| [1] 1
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
