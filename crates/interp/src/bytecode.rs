@@ -911,9 +911,9 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
 }
 
 /// Whether a `switch` call with these arguments compiles: the selector is a plain first
-/// argument, no alternative is `...` (whose alternatives are only known at run time), and at
-/// most one alternative is a default, since the special reports a second one as an error only
-/// when the selector reaches it.
+/// argument, there are alternatives (the special warns when there are none), no alternative is
+/// `...` (whose alternatives are only known at run time), and at most one alternative is a
+/// default (the special reports a second one as an error).
 unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
     let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
         return false;
@@ -925,6 +925,7 @@ unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
     *selector_tag == nil()
         && *selector != symbols().dots
         && *selector != missing_arg()
+        && !alternatives.is_empty()
         && alternatives
             .iter()
             .all(|(_, value)| *value != symbols().dots)
@@ -1756,6 +1757,7 @@ impl Compiler {
                 | ".ry_tuple"
                 | ".ry_tag"
                 | ".ry_match"
+                | "switch"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);

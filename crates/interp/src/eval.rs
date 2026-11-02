@@ -2105,12 +2105,29 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let alternatives = &alternatives[..];
-    if !values::is_string_scalar(selector) && length(selector) != 1 {
+    if length(selector) != 1 {
         return Err(call.error("EXPR must be a length 1 vector"));
+    }
+    if alternatives.is_empty() {
+        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
     }
     if selector.kind() == SexpType::String {
         let text = values::string_at(selector, 0);
         let missing = missing_arg();
+        // GNU R rejects a second default before it looks for a match.
+        let defaults: Vec<&Arg> = alternatives
+            .iter()
+            .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
+            .collect();
+        if defaults.len() > 1 {
+            return Err(call.error(
+                "duplicate 'switch' defaults: '".to_string()
+                    + &deparse::deparse_one_line(defaults[0].value)
+                    + "' and '"
+                    + &deparse::deparse_one_line(defaults[1].value)
+                    + "'",
+            ));
+        }
         if let Some(text) = text {
             for (position, arg) in alternatives.iter().enumerate() {
                 if arg.tag.kind() == SexpType::Symbol && symbol_name(arg.tag) == text.as_ref() {
@@ -2125,19 +2142,6 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                     return Ok(nil());
                 }
             }
-        }
-        let defaults: Vec<&Arg> = alternatives
-            .iter()
-            .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
-            .collect();
-        if defaults.len() > 1 {
-            return Err(call.error(
-                "duplicate 'switch' defaults: '".to_string()
-                    + &deparse::deparse_one_line(defaults[0].value)
-                    + "' and '"
-                    + &deparse::deparse_one_line(defaults[1].value)
-                    + "'",
-            ));
         }
         if let Some(default) = defaults.first() {
             if default.value == missing {
