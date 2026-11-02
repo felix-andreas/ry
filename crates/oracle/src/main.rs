@@ -4,7 +4,7 @@ use {
         Engine, EngineError, ProcessEngine,
         bench::{self, Summary},
         diff, engine_from_environment, expected_path, find_cases, gnu_r_available, install,
-        packages, parse, render,
+        packages, parse, render, runnable_cases,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -249,7 +249,11 @@ fn cases(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
         found.extend(cases);
     }
-    found
+    let (runnable, missing) = runnable_cases(found);
+    for (case, packages) in &missing {
+        println!("skip    {}: needs {}", case.display(), packages.join(", "));
+    }
+    runnable
 }
 
 fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {

@@ -488,6 +488,67 @@ fn collect_cases(path: &Path, cases: &mut Vec<PathBuf>) {
     }
 }
 
+/// Splits `cases` into those that can run here and those that cannot, each with the packages
+/// it needs and GNU R lacks. A case names its packages in a leading `# oracle: requires knitr,
+/// rmarkdown` comment, because without them it fails in an environment-specific way (a missing
+/// vignette engine reports a temporary path) rather than in a way two engines can agree on.
+/// When GNU R cannot list its packages, every case is kept.
+pub fn runnable_cases(cases: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>) {
+    let required: Vec<Vec<String>> = cases.iter().map(|case| case_requirements(case)).collect();
+    let installed = match required.iter().any(|packages| !packages.is_empty()) {
+        true => installed_packages(),
+        false => None,
+    };
+    let Some(installed) = installed else {
+        return (cases, Vec::new());
+    };
+    let mut runnable = Vec::new();
+    let mut missing = Vec::new();
+    for (case, packages) in cases.into_iter().zip(required) {
+        let absent: Vec<String> = packages
+            .into_iter()
+            .filter(|package| !installed.iter().any(|name| name == package))
+            .collect();
+        match absent.is_empty() {
+            true => runnable.push(case),
+            false => missing.push((case, absent)),
+        }
+    }
+    (runnable, missing)
+}
+
+fn case_requirements(case: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(case) else {
+        return Vec::new();
+    };
+    text.lines()
+        .take_while(|line| line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("# oracle: requires "))
+        .flat_map(|list| list.split(','))
+        .map(|package| package.trim().to_string())
+        .filter(|package| !package.is_empty())
+        .collect()
+}
+
+/// The packages GNU R can load, from its own library paths and `R_LIBS`.
+pub fn installed_packages() -> Option<Vec<String>> {
+    let output = Command::new(gnu_r_program())
+        .args([
+            "--vanilla",
+            "-s",
+            "-e",
+            "cat(rownames(installed.packages()), sep = '\\n')",
+        ])
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 pub fn expected_path(case: &Path) -> PathBuf {
     case.with_extension("expected")
 }

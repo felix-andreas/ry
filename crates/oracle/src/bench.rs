@@ -482,7 +482,10 @@ fn package_name(package_dir: &Path) -> Result<String, BenchError> {
 /// would switch their stubs off, and strict mode would then refuse to load typed code that calls
 /// them.
 fn suggest_missing_imports(package: &Path) -> Result<(), BenchError> {
-    let installed = installed_packages()?;
+    let installed: HashSet<String> = crate::installed_packages()
+        .ok_or_else(|| BenchError::Setup("GNU R could not list the installed packages".into()))?
+        .into_iter()
+        .collect();
     let path = package.join("DESCRIPTION");
     let text = std::fs::read_to_string(&path).map_err(setup_error(&path))?;
     let mut output = String::new();
@@ -580,29 +583,6 @@ fn keep_import(
             dropped.push(name.to_string());
         }
     }
-}
-
-/// Asks GNU R, because it knows its own library paths and `R_LIBS`.
-fn installed_packages() -> Result<HashSet<String>, BenchError> {
-    let output =
-        Command::new(std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_string()))
-            .args([
-                "--vanilla",
-                "-e",
-                "cat(rownames(installed.packages()), sep = '\\n')",
-            ])
-            .output()
-            .map_err(|error| BenchError::Setup(format!("Rscript: {error}")))?;
-    if !output.status.success() {
-        return Err(BenchError::Setup(format!(
-            "Rscript could not list the installed packages: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), BenchError> {
