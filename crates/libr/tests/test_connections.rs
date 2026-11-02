@@ -9,7 +9,7 @@ use {
     connection_scenarios::*,
     harness::*,
     std::{ffi::c_int, path::PathBuf, sync::OnceLock},
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 fn ryconn(r: &R) {
@@ -327,8 +327,8 @@ impl Model {
 fn random_reads_and_pushback_follow_a_byte_model() {
     let r = r_with_base();
     ryconn(&r);
-    let mut rng = SplitMix64(0x5eed_c0de);
-    for iteration in 0..fuzz_iterations(60) {
+    for_each_seed(60, |seed| {
+        let mut rng = SplitMix64(0x5eed_c0de ^ seed);
         let mark = r.protected.get();
         let length = rng.below(200);
         let bytes: Vec<u8> = (0..length)
@@ -345,14 +345,14 @@ fn random_reads_and_pushback_follow_a_byte_model() {
             unsafe { std::slice::from_raw_parts_mut((r.api().RAW)(raw), bytes.len()) }
                 .copy_from_slice(&bytes);
         }
-        let kind = iteration % 3;
+        let kind = seed % 3;
         let blocking = rng.chance(1, 2);
         let con = match kind {
             0 => r
                 .eval("rawConnection", &[(None, raw)])
                 .expect("rawConnection"),
             1 => {
-                let path = temporary_file(&format!("fuzz-{iteration}.bin"));
+                let path = temporary_file(&format!("fuzz-{seed}.bin"));
                 std::fs::write(&path, &bytes).expect("write");
                 let path_value = r.string(&path.to_string_lossy());
                 r.eval("file", &[(None, path_value), (None, r.string("rb"))])
@@ -397,13 +397,13 @@ fn random_reads_and_pushback_follow_a_byte_model() {
                     let available = model.bytes.len() - model.position;
                     assert!(
                         got.len() <= count && (!got.is_empty() || count == 0 || available == 0),
-                        "iteration {iteration}: read {} of {count} with {available} left",
+                        "seed {seed}: read {} of {count} with {available} left",
                         got.len()
                     );
                     if kind != 2 {
                         assert_eq!(got.len(), count.min(available));
                     }
-                    assert_eq!(got, model.read_bytes(got.len()), "iteration {iteration}");
+                    assert_eq!(got, model.read_bytes(got.len()), "seed {seed}");
                 }
                 1 => {
                     let got = r
@@ -414,7 +414,7 @@ fn random_reads_and_pushback_follow_a_byte_model() {
                         .into_iter()
                         .map(|line| Some(String::from_utf8(line).expect("ascii")))
                         .collect();
-                    assert_eq!(r.strings(got), want, "iteration {iteration}: line read");
+                    assert_eq!(r.strings(got), want, "seed {seed}: line read");
                 }
                 2 => {
                     let line: Vec<u8> = (0..rng.below(5))
@@ -442,10 +442,6 @@ fn random_reads_and_pushback_follow_a_byte_model() {
         }
         r.eval("close", &[(None, con)]).expect("close");
         r.release_to(mark);
-        assert_eq!(
-            connection_count(&r),
-            3,
-            "iteration {iteration}: a slot leaked"
-        );
-    }
+        assert_eq!(connection_count(&r), 3, "seed {seed}: a slot leaked");
+    });
 }

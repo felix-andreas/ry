@@ -49,7 +49,9 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check.
+behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
+but only when started by hand: the orchestrating agent starts it on main at its hourly check when
+main has new commits, so a push or a pull request gets no CI run of its own.
 
 ### Blessing expectations
 
@@ -392,7 +394,7 @@ from the first allocation, which takes about seven seconds on an empty script in
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
 uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
 invalid, requests at every stop. Every request must get exactly one response, the session must end,
-and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing session.
 
 ### The table engine
 

@@ -1,12 +1,13 @@
 //! Property and fuzz coverage of argument parsing for `ry run`, `ry R` and `ry repl`: whatever
 //! follows the script reaches it verbatim, options resolve to the documented runtime, and no
-//! argument vector panics the parser. `FUZZ_ITERS` scales the budgets; runs are deterministic.
+//! argument vector panics the parser. Each generated case is one seed of [`for_each_seed`], so
+//! `FUZZ_SEED` replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     clap::Parser,
     ry::command_line::{Cli, Keybindings, Mode, Runtime, Session},
     std::path::PathBuf,
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 /// Tokens that look like options of ry's, of R's, or of nothing, plus ordinary words.
@@ -53,8 +54,8 @@ fn session(arguments: &[String]) -> Result<Option<Session>, clap::Error> {
 
 #[test]
 fn everything_after_the_script_reaches_it_verbatim() {
-    let mut random = SplitMix64(0x5eed_0001);
-    for _ in 0..fuzz_iterations(2000) {
+    for_each_seed(2000, |seed| {
+        let mut random = SplitMix64(0x5eed_0001 ^ seed);
         let trailing: Vec<String> = (0..random.below(6)).map(|_| token(&mut random)).collect();
         for (command, runtime) in [("run", Runtime::Ry), ("R", Runtime::GnuR)] {
             let mut arguments = vec![command.to_owned(), "script.R".to_owned()];
@@ -73,7 +74,7 @@ fn everything_after_the_script_reaches_it_verbatim() {
                 "{arguments:?}"
             );
         }
-    }
+    });
 }
 
 /// The options a session accepts before its script, and what the model expects of them.
@@ -88,8 +89,8 @@ struct Options {
 
 #[test]
 fn options_before_the_script_resolve_as_documented() {
-    let mut random = SplitMix64(0x5eed_0002);
-    for _ in 0..fuzz_iterations(3000) {
+    for_each_seed(3000, |seed| {
+        let mut random = SplitMix64(0x5eed_0002 ^ seed);
         let command = ["run", "R", "repl"][random.below(3)];
         let mut options = Options::default();
         let mut arguments = vec![command.to_owned()];
@@ -149,7 +150,7 @@ fn options_before_the_script_resolve_as_documented() {
                 session(&arguments).is_err(),
                 "{arguments:?} must be refused"
             );
-            continue;
+            return;
         }
         let parsed = session(&arguments)
             .unwrap_or_else(|error| panic!("{arguments:?} must parse: {error}"))
@@ -177,7 +178,7 @@ fn options_before_the_script_resolve_as_documented() {
             },
         };
         assert_eq!(parsed, Session { runtime, mode }, "{arguments:?}");
-    }
+    });
 }
 
 #[test]
@@ -209,12 +210,12 @@ fn the_runtime_variable_yields_to_the_flag_and_never_reaches_r() {
 
 #[test]
 fn arbitrary_argument_vectors_never_panic_and_keep_the_session_invariants() {
-    let mut random = SplitMix64(0x5eed_0003);
-    for _ in 0..fuzz_iterations(5000) {
+    for_each_seed(5000, |seed| {
+        let mut random = SplitMix64(0x5eed_0003 ^ seed);
         let arguments: Vec<String> = (0..random.below(7)).map(|_| token(&mut random)).collect();
         let command = arguments.first().cloned();
         let Ok(Some(session)) = session(&arguments) else {
-            continue;
+            return;
         };
         if command.as_deref() == Some("R") {
             assert_eq!(session.runtime, Runtime::GnuR, "{arguments:?}");
@@ -238,5 +239,5 @@ fn arbitrary_argument_vectors_never_panic_and_keep_the_session_invariants() {
             }
             Mode::Console { .. } => {}
         }
-    }
+    });
 }

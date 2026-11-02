@@ -11,6 +11,7 @@ use {
         mem,
         sync::{LazyLock, Mutex},
     },
+    thin_vec::ThinVec,
 };
 
 /// A name in a type (a type name, a field, a tag, a type parameter). It is a process-wide
@@ -452,14 +453,14 @@ impl Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct TypeScheme<'db> {
-    pub binders: Vec<(Name<'db>, Constraint)>,
+    pub binders: ThinVec<(Name<'db>, Constraint)>,
     pub body: Ty<'db>,
 }
 
 impl<'db> TypeScheme<'db> {
     pub fn monomorphic(body: Ty<'db>) -> TypeScheme<'db> {
         TypeScheme {
-            binders: Vec::new(),
+            binders: ThinVec::new(),
             body,
         }
     }

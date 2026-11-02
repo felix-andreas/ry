@@ -1,10 +1,11 @@
 //! The config loader and the position conversions under their exported contracts
 //! (`ry::config::check_config_invariants`, `ry::position::check_position_invariants`), over
-//! seeds, mutations of them, and random bytes. `FUZZ_ITERS` scales the budget.
+//! seeds, mutations of them, and random bytes. Each generated case is one seed of
+//! [`for_each_seed`], so `FUZZ_SEED` replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     ry::{config::check_config_invariants, position::check_position_invariants},
-    syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes, token_soup},
+    syntax::testing::{SplitMix64, for_each_seed, mutate_seed, random_bytes, token_soup},
 };
 
 const CONFIG_SEEDS: &[&str] = &[
@@ -79,15 +80,15 @@ fn config_seeds_hold_invariants() {
 
 #[test]
 fn fuzz_config() {
-    let mut rng = SplitMix64(0xc0f1_9000);
-    for _ in 0..fuzz_iterations(2000) {
+    for_each_seed(2000, |seed| {
+        let mut rng = SplitMix64(0xc0f1_9000 ^ seed);
         let input = match rng.below(3) {
             0 => random_bytes(&mut rng),
             1 => token_soup(&mut rng, CONFIG_ALPHABET),
             _ => mutate_seed(&mut rng, CONFIG_SEEDS, 24),
         };
         check_config_invariants(&input);
-    }
+    });
 }
 
 #[test]
@@ -99,12 +100,12 @@ fn position_seeds_hold_invariants() {
 
 #[test]
 fn fuzz_positions() {
-    let mut rng = SplitMix64(0x000f_f5e7);
-    for _ in 0..fuzz_iterations(2000) {
+    for_each_seed(2000, |seed| {
+        let mut rng = SplitMix64(0x000f_f5e7 ^ seed);
         let input = match rng.below(2) {
             0 => random_bytes(&mut rng),
             _ => mutate_seed(&mut rng, POSITION_SEEDS, 8),
         };
         check_position_invariants(&input);
-    }
+    });
 }

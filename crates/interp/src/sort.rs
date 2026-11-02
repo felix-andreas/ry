@@ -2611,18 +2611,42 @@ unsafe fn attributes_identical(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped
     if left.len() != right.len() {
         return false;
     }
+    let same = |tag: Sexp, value: Sexp, other: Sexp| {
+        if tag == symbols().row_names {
+            row_names_identical(value, other, flags)
+        } else {
+            identical(value, other, flags)
+        }
+    };
     if flags.attributes_as_set {
         left.iter().all(|&(tag, value)| {
             right
                 .iter()
-                .any(|&(other_tag, other)| other_tag == tag && identical(value, other, flags))
+                .any(|&(other_tag, other)| other_tag == tag && same(tag, value, other))
         })
     } else {
         left.iter()
             .zip(&right)
-            .all(|(&(tag, value), &(other_tag, other))| {
-                tag == other_tag && identical(value, other, flags)
-            })
+            .all(|(&(tag, value), &(other_tag, other))| tag == other_tag && same(tag, value, other))
+    }
+}
+
+/// GNU R compares row names as `attr(x, "row.names")` reads them, so the compact `c(NA, n)`
+/// equals the integers `1:n` it stands for.
+unsafe fn row_names_identical(left: Sexp, right: Sexp, flags: &IdenticalFlags) -> bool {
+    let compact = crate::stats_models::compact_row_count;
+    let counts_up = |row_names: Sexp, count: usize| {
+        row_names.kind() == SexpType::Integer
+            && values::ints(row_names)
+                .iter()
+                .copied()
+                .eq((1..=count).map(|row| row as i32))
+    };
+    match (compact(left), compact(right)) {
+        (Some(left), Some(right)) => left == right,
+        (Some(count), None) => counts_up(right, count),
+        (None, Some(count)) => counts_up(left, count),
+        (None, None) => identical(left, right, flags),
     }
 }
 

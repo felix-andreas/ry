@@ -63,12 +63,16 @@ pub fn try_splice(
     }
 
     // An unterminated string in the prefix ends at its line break only because no closing quote
-    // follows it; a quote anywhere after it would extend it across the edit.
-    if old
-        .errors()
-        .iter()
-        .any(|error| error.range.start() < prefix_len && error.message.starts_with("unterminated"))
-    {
+    // follows it; a quote anywhere after it would extend it across the edit. An unclosed
+    // delimiter in the prefix is the same: recovery ended its group early, and a closer the edit
+    // adds anywhere after it would close it there instead. A `[[` closed by a single `]`
+    // reports its missing closer without the word "unclosed", so the closer phrase counts too.
+    if old.errors().iter().any(|error| {
+        error.range.start() < prefix_len
+            && (error.message.starts_with("unterminated")
+                || error.message.starts_with("unclosed")
+                || error.message.contains("to close"))
+    }) {
         return None;
     }
     let middle_text = &new_text[usize::from(prefix_len)..new_suffix_start];
@@ -134,26 +138,34 @@ pub fn try_splice(
         ],
     );
 
+    let shift = |range: TextRange, by: i64| {
+        let start = (i64::from(u32::from(range.start())) + by) as u32;
+        let end = (i64::from(u32::from(range.end())) + by) as u32;
+        TextRange::new(TextSize::from(start), TextSize::from(end))
+    };
     let mut errors = Vec::new();
     for error in old.errors() {
         if error.range.end() <= prefix_len {
+            // The token the parser stood on can lie past the error, in the replaced region,
+            // where a reparse might stand on a different one.
+            if error.found.is_some_and(|found| found.end() > prefix_len) {
+                return None;
+            }
             errors.push(error.clone());
         } else if suffix_start < children.len() && error.range.start() >= old_suffix_start {
             // The non-empty-suffix guard drops a zero-width end-of-file error:
             // it belongs to the replaced region, whose parse re-derives it.
-            let start = (i64::from(u32::from(error.range.start())) + delta) as u32;
-            let end = (i64::from(u32::from(error.range.end())) + delta) as u32;
             let mut rebased = error.clone();
-            rebased.range = TextRange::new(TextSize::from(start), TextSize::from(end));
+            rebased.range = shift(error.range, delta);
+            rebased.found = error.found.map(|found| shift(found, delta));
             errors.push(rebased);
         }
     }
+    let prefix = i64::from(u32::from(prefix_len));
     for error in middle.errors() {
         let mut rebased = error.clone();
-        rebased.range = TextRange::new(
-            error.range.start() + prefix_len,
-            error.range.end() + prefix_len,
-        );
+        rebased.range = shift(error.range, prefix);
+        rebased.found = error.found.map(|found| shift(found, prefix));
         errors.push(rebased);
     }
 

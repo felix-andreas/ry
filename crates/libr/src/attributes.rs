@@ -41,6 +41,17 @@ pub unsafe fn get_attrib(object: Sexp, name: Sexp) -> ApiResult<Sexp> {
     {
         return pairlist_names(object);
     }
+    // A one-dimensional array keeps its names as its only dimnames, as GNU R's
+    // `getAttrib` reports them; `tapply` results are such arrays.
+    if name == R_NamesSymbol.get() {
+        let dim = raw_attribute(object, R_DimSymbol.get());
+        if dim.kind() == SexpType::Integer && dim.length() == 1 {
+            let dimnames = raw_attribute(object, R_DimNamesSymbol.get());
+            if dimnames.kind() == SexpType::List && dimnames.length() >= 1 {
+                return crate::vectors::sexp_elt(dimnames, 0);
+            }
+        }
+    }
     let value = raw_attribute(object, name);
     if name == R_RowNamesSymbol.get()
         && value.kind() == SexpType::Integer
