@@ -940,6 +940,29 @@ signature: fn([first]: Unknown, [second]: Unknown, [third]: Unknown) -> NULL
 parameters: [first]: Unknown | [second]: Unknown | [[third]: Unknown]
 completion (128+): second = , third = , helpers, function, NULL, list, break, else
 
+#---- signature_after_a_placeholder_pipe_counts_commas
+f <- function(first = 1L, second = 2L, third = 3L) first
+2L |> f(1L, second = _, $0)
+#++++
+hover 57..82: integer
+definition: none
+references: none
+rename: none
+signature: fn(first: integer = 1L, second: integer = 2L, third: integer = 3L) -> integer
+parameters: first: integer = 1L | second: integer = 2L | [third: integer = 3L]
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T, U, V>"
+  edit 19..19 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
+completion (128+): third = , f, function, break, else, FALSE, for, if
+hint @13<T, U, V>
+hint @19: T
+hint @32: U
+hint @44: V
+hint @50 -> T
+
 #---- completion_after_a_namespace_reads_the_installed_exports
 rows <- fakepkg::fe$0
 #++++

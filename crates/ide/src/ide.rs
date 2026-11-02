@@ -1370,8 +1370,8 @@ fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool 
 
 /// What a highlighted token is. R grammars already color R's own tokens, so plain R gets a class
 /// only where the grammar cannot know it: a function parameter wherever it is read, a called or
-/// defined function, a namespace, and member names. ry's own syntax is classified in full: annotation and
-/// type-definition bodies, tags, `match` and its arms.
+/// defined function, a namespace, and member names. ry's own syntax is classified in full:
+/// annotation and type-definition bodies, tags, `match` and its arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticClass {
     Type,
@@ -1821,8 +1821,9 @@ pub fn signature_help_with(
 }
 
 /// The index of the argument the cursor is in. An empty argument (`f(a, , b)`) has no position
-/// in the HIR, so the syntax tree counts the commas before the cursor, and a piped value, which
-/// the HIR adds as the first argument, comes before the argument list. `call` is relative to
+/// in the HIR, so the syntax tree counts the commas before the cursor. A piped value the HIR
+/// adds as the first argument lies before the argument list and shifts the count by one; a
+/// value piped into a `_` placeholder already holds that argument's place. `call` is relative to
 /// the item, `offset` to the file.
 fn argument_index_at(
     db: &dyn Db,
@@ -1853,11 +1854,12 @@ fn argument_index_at(
     else {
         return 0;
     };
-    let piped = arguments
-        .iter()
-        .filter_map(|argument| argument.value)
-        .filter(|&value| hir.range(value).end() + item_offset <= list.text_range().start())
-        .count();
+    let piped = usize::from(
+        arguments
+            .first()
+            .and_then(|argument| argument.value)
+            .is_some_and(|value| hir.range(value).end() + item_offset <= list.text_range().start()),
+    );
     let commas = list
         .children_with_tokens()
         .filter(|element| element.kind() == COMMA && element.text_range().end() <= offset)
@@ -3667,20 +3669,42 @@ fn classify_symbol_call(call: &SyntaxNode) -> Option<SymbolCall> {
 /// The named slots of `setClass`'s `representation(...)` or `slots = c(...)`. An unnamed
 /// `representation` argument is a superclass, not a slot.
 fn s4_slots(arguments: &SyntaxNode) -> Vec<DocumentSymbol> {
-    let representation = s4_argument(arguments, "representation", 1).filter(|call| {
-        call.kind() == CALL_EXPR && s4_callee_name(call).as_deref() == Some("representation")
-    });
-    let slots = arguments
-        .children()
-        .filter(|argument| argument.kind() == ARGUMENT)
-        .find(|argument| child_node(argument, NAME).is_some_and(|name| name.text() == "slots"))
-        .and_then(|argument| argument.children().find(|child| child.kind() != NAME))
-        .filter(|call| call.kind() == CALL_EXPR);
+    let is_named = |argument: &SyntaxNode| {
+        argument
+            .children_with_tokens()
+            .any(|element| element.kind() == EQ)
+    };
+    let argument_nodes = || {
+        arguments
+            .children()
+            .filter(|child| child.kind() == ARGUMENT)
+    };
+    let named_value = |name: &str| {
+        argument_nodes()
+            .filter(|argument| is_named(argument))
+            .find(|argument| child_node(argument, NAME).is_some_and(|tag| tag.text() == name))
+            .and_then(|argument| argument.children().find(|child| child.kind() != NAME))
+    };
+    // R matches named arguments first and fills the rest in order, so `representation` is the
+    // unnamed argument after `Class` whatever named arguments come between.
+    let representation = named_value("representation")
+        .or_else(|| {
+            let skipped = usize::from(named_value("Class").is_none());
+            argument_nodes()
+                .filter(|argument| !is_named(argument))
+                .nth(skipped)
+                .and_then(|argument| argument.children().next())
+        })
+        .filter(|call| {
+            call.kind() == CALL_EXPR && s4_callee_name(call).as_deref() == Some("representation")
+        });
+    let slots = named_value("slots").filter(|call| call.kind() == CALL_EXPR);
     representation
         .into_iter()
         .chain(slots)
         .filter_map(|call| child_node(&call, ARGUMENT_LIST))
         .flat_map(|list| list.children().filter(|child| child.kind() == ARGUMENT))
+        .filter(|slot| is_named(slot))
         .filter_map(|slot| {
             let name = child_node(&slot, NAME)?;
             Some(DocumentSymbol {

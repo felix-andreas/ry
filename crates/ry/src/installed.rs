@@ -185,6 +185,9 @@ fn read_exports(package: &str, directory: &Path) -> Option<Vec<String>> {
             Ok(names) => exports.extend(
                 names
                     .into_iter()
+                    // R keeps its own metadata (`.__C__Class`, `.packageName`) out of a
+                    // pattern's exports.
+                    .filter(|name| !name.starts_with(".__") && name != ".packageName")
                     .filter(|name| patterns.iter().any(|pattern| pattern.is_match(name))),
             ),
             Err(error) => {

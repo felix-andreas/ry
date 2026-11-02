@@ -86,7 +86,7 @@ Person <- R6::R6Class("Person",
     upper = function() toupper(self$name)
   )
 )
-setClass("Account", representation("VIRTUAL", owner = "character"), slots = c(balance = "numeric"))
+setClass("Account", contains = "Base", representation("VIRTUAL", Base, owner = "character"), slots = c(balance = "numeric"))
 deposit <- function(account, amount) account@balance + amount
 alias Shape =
   | :Circle(radius: double)
