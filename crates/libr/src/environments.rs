@@ -344,7 +344,12 @@ pub unsafe extern "C" fn R_removeVarFromFrame(symbol: Sexp, env: Sexp) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_NewEnv(enclosure: Sexp, hash: c_int, size: c_int) -> Sexp {
     enter(|| {
-        let enclosure = environment(enclosure, "R_NewEnv")?;
+        // GNU R stores the enclosure unchecked, and packages such as nanonext pass
+        // `R_NilValue` for a bare container. The empty environment ends lookup the same way.
+        let enclosure = match enclosure.kind() {
+            SexpType::Nil => runtime().heap.known().empty_env,
+            _ => environment(enclosure, "R_NewEnv")?,
+        };
         let env = runtime().heap.alloc_environment(enclosure)?;
         if hash != 0 {
             runtime().heap.set_frame_hashed(env, size);
