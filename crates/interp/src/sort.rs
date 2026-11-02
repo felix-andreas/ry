@@ -432,10 +432,16 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                 .and_then(|column| sort_keys(column, decreasing, nas_last))
         })
         .collect();
-    let (order, ends) = match radix_keys {
+    // The order is computed 0-based in the result vector itself, which saves a copy of the
+    // largest buffer: `u32` and `i32` share a layout, and every row index fits in both.
+    let permutation = alloc(SexpType::Integer, count)?;
+    let ints = values::ints_mut(permutation);
+    let order: &mut [u32] =
+        std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
+    let ends = match radix_keys {
         Some(keys) => {
-            let order = radix_order(&keys, count);
-            let ends = return_groups.then(|| {
+            radix_order(&keys, order);
+            return_groups.then(|| {
                 let mut ends = Vec::new();
                 for position in 1..=order.len() {
                     if position == order.len()
@@ -447,14 +453,13 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                     }
                 }
                 ends
-            });
-            (order, ends)
+            })
         }
         // A key the radix sort cannot read (a complex vector after the first key) is reported
         // only when rows tie on every earlier key, so it needs the comparison sort.
         None => {
             let unsupported = Cell::new(None);
-            let mut order: Vec<u32> = (0..count as u32).collect();
+            fill_identity(order);
             order.sort_by(|&left, &right| {
                 compare_rows(
                     &columns,
@@ -472,7 +477,7 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                     keys[position].kind().name()
                 )));
             }
-            let ends = return_groups.then(|| {
+            return_groups.then(|| {
                 let mut ends = Vec::new();
                 for position in 1..=order.len() {
                     if position == order.len()
@@ -489,26 +494,34 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
                     }
                 }
                 ends
-            });
-            (order, ends)
+            })
         }
     };
-    let mut result: Vec<i32> = order.iter().map(|&index| index as i32 + 1).collect();
-    if na_last == NA_LOGICAL {
-        for (slot, &index) in result.iter_mut().zip(&order) {
-            if columns
+    if na_last != NA_LOGICAL {
+        for slot in order.iter_mut() {
+            *slot += 1;
+        }
+        return with_groups(permutation, ends);
+    }
+    // `na.last = NA` drops the rows with an NA key, except that with groups they stay as 0.
+    let mut result: Vec<i32> = order
+        .iter()
+        .map(|&index| {
+            let missing = columns
                 .iter()
                 .flatten()
-                .any(|column| column.is_na(index as usize))
-            {
-                *slot = 0;
-            }
-        }
-        if ends.is_none() {
-            result.retain(|&index| index != 0);
-        }
+                .any(|column| column.is_na(index as usize));
+            if missing { 0 } else { index as i32 + 1 }
+        })
+        .collect();
+    if ends.is_none() {
+        result.retain(|&index| index != 0);
     }
-    let permutation = values::integer_vector(&result)?;
+    with_groups(values::integer_vector(&result)?, ends)
+}
+
+/// `permutation` with the `ends`, `maxgrpn` and class that `radixsort(retgrp = TRUE)` adds.
+unsafe fn with_groups(permutation: Sexp, ends: Option<Vec<i32>>) -> R<Sexp> {
     if let Some(ends) = ends {
         let largest = ends
             .iter()
@@ -659,19 +672,15 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let x = values::materialize(coerce_vector(x, kind)?)?;
     let table = values::materialize(coerce_vector(table, kind)?)?;
     let incomparables = incomparable_keys(call.arg(3), kind)?;
-    if kind == SexpType::String && incomparables.is_none() && all_ascii(table) && all_ascii(x) {
-        // Interning makes equal ASCII strings one object, `NA` included, so the pointer is the
-        // key and no text is hashed. GNU R's `match` relies on the same property.
-        let mut positions: FxHashMap<Sexp, i32> = FxHashMap::default();
-        positions.reserve(length(table));
-        for index in 0..length(table) {
-            positions
-                .entry(table.element(index))
-                .or_insert(index as i32 + 1);
+    if incomparables.is_none()
+        && let (Some(table_keys), Some(x_keys)) = (plain_keys(table), plain_keys(x))
+        && let Some(mut result) = match_positions(table_keys, x_keys)
+    {
+        if nomatch != 0 {
+            for position in result.iter_mut().filter(|position| **position == 0) {
+                *position = nomatch;
+            }
         }
-        let result: Vec<i32> = (0..count)
-            .map(|index| positions.get(&x.element(index)).copied().unwrap_or(nomatch))
-            .collect();
         return values::integer_vector(&result);
     }
     let mut positions: FxHashMap<Key<'_>, i32> = FxHashMap::default();
@@ -1170,81 +1179,278 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Vec
     }
 }
 
-/// The stable order of `count` rows by `keys`, the first key most significant: a least
-/// significant digit radix sort, one key at a time from the last, each over only the digits
-/// its range spans.
-fn radix_order(keys: &[Vec<u64>], count: usize) -> Vec<u32> {
-    const BITS: u32 = 11;
-    const BUCKETS: usize = 1 << BITS;
-    let mut order: Vec<u32> = (0..count as u32).collect();
-    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(count);
-    let mut scratch: Vec<(u64, u32)> = Vec::new();
-    let mut histogram = vec![0usize; BUCKETS];
-    for key in keys.iter().rev() {
-        let Some(&low) = key.iter().min() else {
-            continue;
-        };
-        let high = key.iter().copied().max().unwrap_or(low);
-        let span = high - low;
-        if span == 0 {
-            continue;
+/// Writes into `order` the stable 0-based order of its rows by `keys`, the first key most
+/// significant. The first key sorts every row, and each run of rows that tie on it then sorts
+/// by the remaining keys, so a later key is only ever sorted within a run, whose keys stay in
+/// cache. Within a run the rows are still in their original order, which is what lets a run
+/// sort `(key, row)` pairs with an unstable algorithm.
+fn radix_order(keys: &[Vec<u64>], order: &mut [u32]) {
+    sort_runs(keys, order, true);
+}
+
+/// Sorts `order` by `keys`, most significant first, where rows that tie on every key are in
+/// increasing order already. With `identity` the rows are `0..order.len()` and `order` holds
+/// nothing yet.
+fn sort_runs(keys: &[Vec<u64>], order: &mut [u32], identity: bool) {
+    // A run this short sorts by comparing rows, which costs less than gathering its keys.
+    const SHORT_RUN: usize = 32;
+    let Some((key, rest)) = keys.split_first() else {
+        if identity {
+            fill_identity(order);
         }
-        // A dense key (such as a permutation or small-range integers) sorts in one counting
-        // pass, which beats two or more digit passes over (key, index) pairs.
-        if span < count.max(1 << 16) as u64 {
-            histogram.clear();
-            histogram.resize(span as usize + 2, 0);
-            for &index in &order {
-                histogram[(key[index as usize] - low) as usize + 1] += 1;
-            }
-            for bucket in 1..histogram.len() {
-                histogram[bucket] += histogram[bucket - 1];
-            }
-            let mut sorted = vec![0u32; count];
-            for &index in &order {
-                let bucket = &mut histogram[(key[index as usize] - low) as usize];
-                sorted[*bucket] = index;
-                *bucket += 1;
-            }
-            order = sorted;
-            histogram.clear();
-            histogram.resize(BUCKETS, 0);
-            continue;
+        return;
+    };
+    let runs = sort_by_key(key, order, identity, !rest.is_empty());
+    for (start, end) in runs {
+        let run = &mut order[start..end];
+        if run.len() > SHORT_RUN {
+            sort_runs(rest, run, false);
+        } else {
+            run.sort_by(|&left, &right| {
+                rest.iter()
+                    .map(|key| key[left as usize].cmp(&key[right as usize]))
+                    .find(|ordering| ordering.is_ne())
+                    .unwrap_or(Ordering::Equal)
+            });
         }
-        pairs.clear();
-        pairs.extend(
-            order
-                .iter()
-                .map(|&index| (key[index as usize] - low, index)),
-        );
-        scratch.resize(count, (0, 0));
-        let digits = (u64::BITS - span.leading_zeros()).div_ceil(BITS);
-        for digit in 0..digits {
-            let shift = digit * BITS;
-            histogram.fill(0);
-            for &(value, _) in &pairs {
-                histogram[((value >> shift) as usize) & (BUCKETS - 1)] += 1;
-            }
-            if histogram.iter().any(|&bucket| bucket == count) {
-                continue;
-            }
-            let mut start = 0;
-            for bucket in histogram.iter_mut() {
-                let size = *bucket;
-                *bucket = start;
-                start += size;
-            }
-            for &pair in &pairs {
-                let bucket = &mut histogram[((pair.0 >> shift) as usize) & (BUCKETS - 1)];
-                scratch[*bucket] = pair;
-                *bucket += 1;
-            }
-            std::mem::swap(&mut pairs, &mut scratch);
-        }
-        order.clear();
-        order.extend(pairs.iter().map(|&(_, index)| index));
     }
-    order
+}
+
+fn fill_identity(order: &mut [u32]) {
+    for (position, slot) in order.iter_mut().enumerate() {
+        *slot = position as u32;
+    }
+}
+
+/// Sorts `order` by one key, as `sort_runs` describes its rows, and with `want_runs` returns
+/// the ranges of rows that tie on the key, longer than one row. Rows already in key order cost
+/// one pass, a dense key (such as a permutation or small-range integers) one counting pass, a
+/// short slice a comparison sort of `(key, row)` pairs, and anything else a most significant
+/// digit radix sort of those pairs. Every pass counts, since these sorts are bound by memory
+/// bandwidth.
+fn sort_by_key(
+    key: &[u64],
+    order: &mut [u32],
+    identity: bool,
+    want_runs: bool,
+) -> Vec<(usize, usize)> {
+    let count = order.len();
+    let rows: Option<Vec<u32>> = (!identity).then(|| order.to_vec());
+    let row = |position: usize| rows.as_ref().map_or(position as u32, |rows| rows[position]);
+    let value = |position: usize| key[row(position) as usize];
+    let mut runs = Vec::new();
+    let (mut low, mut high, mut sorted, mut previous) = (u64::MAX, 0, true, 0);
+    for position in 0..count {
+        let value = value(position);
+        sorted &= value >= previous;
+        previous = value;
+        low = low.min(value);
+        high = high.max(value);
+    }
+    if sorted {
+        if identity {
+            fill_identity(order);
+        }
+        if want_runs {
+            push_runs(&mut runs, 0, count, |position| {
+                key[order[position] as usize]
+            });
+        }
+        return runs;
+    }
+    let span = high - low;
+    if count > SHORT_SORT && span < count.max(1 << 16) as u64 {
+        let mut starts = vec![0usize; span as usize + 2];
+        for position in 0..count {
+            starts[(value(position) - low) as usize + 1] += 1;
+        }
+        for bucket in 1..starts.len() {
+            starts[bucket] += starts[bucket - 1];
+        }
+        if want_runs {
+            runs.extend(
+                starts
+                    .windows(2)
+                    .filter(|pair| pair[1] - pair[0] > 1)
+                    .map(|pair| (pair[0], pair[1])),
+            );
+        }
+        for position in 0..count {
+            let row = row(position);
+            let start = &mut starts[(key[row as usize] - low) as usize];
+            order[*start] = row;
+            *start += 1;
+        }
+        return runs;
+    }
+    let mut sink = Sink {
+        order,
+        runs: want_runs.then_some(&mut runs),
+    };
+    if count <= SHORT_SORT {
+        let mut pairs: Vec<(u64, u32)> = (0..count)
+            .map(|position| (value(position), row(position)))
+            .collect();
+        pairs.sort_unstable();
+        sink.emit(0, &pairs);
+        return runs;
+    }
+    // The first digit scatters straight from the key, so the pairs are written once before
+    // the recursion takes over.
+    let mut shift = u64::BITS - span.leading_zeros();
+    let sizes = loop {
+        shift = shift.saturating_sub(DIGIT);
+        let mut sizes = vec![0usize; BUCKETS];
+        for position in 0..count {
+            sizes[digit(value(position) - low, shift)] += 1;
+        }
+        if shift == 0 || sizes.iter().all(|&size| size < count) {
+            break sizes;
+        }
+    };
+    let mut pairs = vec![(0u64, 0u32); count];
+    let mut scratch = vec![(0u64, 0u32); count];
+    let mut cursors = bucket_starts(&sizes);
+    for position in 0..count {
+        let row = row(position);
+        let key = key[row as usize] - low;
+        let cursor = &mut cursors[digit(key, shift)];
+        pairs[*cursor] = (key, row);
+        *cursor += 1;
+    }
+    for (start, &size) in bucket_starts(&sizes).into_iter().zip(&sizes) {
+        let end = start + size;
+        if shift == 0 || size == 1 {
+            sink.emit(start, &pairs[start..end]);
+        } else if size > 1 {
+            msd_sort(
+                &mut pairs[start..end],
+                &mut scratch[start..end],
+                shift,
+                &mut sink,
+                start,
+            );
+        }
+    }
+    runs
+}
+
+/// Below this many pairs a comparison sort beats another radix pass.
+const SHORT_SORT: usize = 1024;
+
+const DIGIT: u32 = 11;
+const BUCKETS: usize = 1 << DIGIT;
+
+fn digit(key: u64, shift: u32) -> usize {
+    ((key >> shift) as usize) & (BUCKETS - 1)
+}
+
+fn bucket_starts(sizes: &[usize]) -> Vec<usize> {
+    let mut next = 0;
+    sizes
+        .iter()
+        .map(|&size| {
+            let start = next;
+            next += size;
+            start
+        })
+        .collect()
+}
+
+/// Where sorted pairs go: their rows into `order` at the pairs' positions, and with `runs` the
+/// ranges of rows whose keys tie.
+struct Sink<'a> {
+    order: &'a mut [u32],
+    runs: Option<&'a mut Vec<(usize, usize)>>,
+}
+
+impl Sink<'_> {
+    fn emit(&mut self, offset: usize, pairs: &[(u64, u32)]) {
+        for (slot, &(_, row)) in self.order[offset..].iter_mut().zip(pairs) {
+            *slot = row;
+        }
+        if let Some(runs) = self.runs.as_deref_mut() {
+            push_runs(runs, offset, pairs.len(), |position| {
+                pairs[position - offset].0
+            });
+        }
+    }
+}
+
+/// Pushes the ranges within `offset..offset + count` whose `value_at` ties, longer than one.
+fn push_runs(
+    runs: &mut Vec<(usize, usize)>,
+    offset: usize,
+    count: usize,
+    value_at: impl Fn(usize) -> u64,
+) {
+    let end_of_range = offset + count;
+    let mut start = offset;
+    while start < end_of_range {
+        let value = value_at(start);
+        let mut end = start + 1;
+        while end < end_of_range && value_at(end) == value {
+            end += 1;
+        }
+        if end - start > 1 {
+            runs.push((start, end));
+        }
+        start = end;
+    }
+}
+
+/// Sorts `pairs`, whose keys agree above bit `bits`, by a most significant digit radix sort
+/// and hands the result to `sink` at `offset`. Each digit scatters the pairs into `scratch`,
+/// and each bucket then sorts on its own with the two buffers' roles swapped, so a level costs
+/// two passes and no copy, and after the first digit or two a bucket fits in cache. A short
+/// bucket finishes with a comparison sort, and since the scatter is stable and the comparison
+/// breaks ties by row, rows that tie keep their order.
+fn msd_sort(
+    pairs: &mut [(u64, u32)],
+    scratch: &mut [(u64, u32)],
+    bits: u32,
+    sink: &mut Sink<'_>,
+    offset: usize,
+) {
+    if pairs.len() <= SHORT_SORT {
+        pairs.sort_unstable();
+        sink.emit(offset, pairs);
+        return;
+    }
+    let shift = bits.saturating_sub(DIGIT);
+    let mut sizes = [0usize; BUCKETS];
+    for &(key, _) in pairs.iter() {
+        sizes[digit(key, shift)] += 1;
+    }
+    if sizes.iter().any(|&size| size == pairs.len()) {
+        if shift == 0 {
+            sink.emit(offset, pairs);
+        } else {
+            msd_sort(pairs, scratch, shift, sink, offset);
+        }
+        return;
+    }
+    let starts = bucket_starts(&sizes);
+    let mut cursors = starts.clone();
+    for &pair in pairs.iter() {
+        let cursor = &mut cursors[digit(pair.0, shift)];
+        scratch[*cursor] = pair;
+        *cursor += 1;
+    }
+    for (&start, &size) in starts.iter().zip(&sizes) {
+        let end = start + size;
+        if shift == 0 || size == 1 {
+            sink.emit(offset + start, &scratch[start..end]);
+        } else if size > 1 {
+            msd_sort(
+                &mut scratch[start..end],
+                &mut pairs[start..end],
+                shift,
+                sink,
+                offset + start,
+            );
+        }
+    }
 }
 
 /// Compares two rows key by key. A key of a type that cannot be ordered is recorded in
@@ -1613,24 +1819,8 @@ unsafe fn duplicated_elements(
         incomparable_keys(incomparables, x.kind())?
     };
     if incomparables.is_none() {
-        // Without incomparables each type hashes its own plain key, and a character vector of
-        // ASCII strings hashes the string objects, since interning makes equal ASCII text one
-        // object (`NA` included), as `match` relies on too.
-        match x.kind() {
-            SexpType::Logical | SexpType::Integer => {
-                let values = values::ints(x);
-                return Ok(mark_duplicates(count, from_last, |index| values[index]));
-            }
-            SexpType::Real => {
-                let values = values::reals(x);
-                return Ok(mark_duplicates(count, from_last, |index| {
-                    real_key(values[index])
-                }));
-            }
-            SexpType::String if all_ascii(x) => {
-                return Ok(mark_duplicates(count, from_last, |index| x.element(index)));
-            }
-            _ => {}
+        if let Some(keys) = plain_keys(x) {
+            return Ok(duplicate_flags(keys, from_last));
         }
     }
     let mut duplicated = vec![false; count];
@@ -1669,22 +1859,261 @@ unsafe fn duplicated_elements(
     Ok(duplicated)
 }
 
-/// Flags each of `count` elements whose key an earlier element (a later one with `from_last`)
-/// already had.
-fn mark_duplicates<K: Hash + Eq>(
+/// A vector's elements as keys that hash without conversion: integers and logicals as they are,
+/// doubles through `real_key`, and character vectors of ASCII strings as their interned string
+/// objects, since interning makes equal ASCII text one object (`NA` included).
+#[derive(Clone, Copy)]
+enum PlainKeys<'a> {
+    Integer(&'a [i32]),
+    Real(&'a [f64]),
+    Interned(Sexp, usize),
+}
+
+/// `None` for other kinds, and for vectors too long for the 32-bit positions of `PositionTable`.
+unsafe fn plain_keys<'a>(vector: Sexp) -> Option<PlainKeys<'a>> {
+    if length(vector) > i32::MAX as usize {
+        return None;
+    }
+    match vector.kind() {
+        SexpType::Logical | SexpType::Integer => Some(PlainKeys::Integer(values::ints(vector))),
+        SexpType::Real => Some(PlainKeys::Real(values::reals(vector))),
+        SexpType::String if all_ascii(vector) => Some(PlainKeys::Interned(vector, length(vector))),
+        _ => None,
+    }
+}
+
+/// For each element of `x`, the 1-based position of the first equal element of `table`, or 0.
+/// `None` unless both sides have the same kind.
+unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>) -> Option<Vec<i32>> {
+    Some(match (table, x) {
+        (PlainKeys::Integer(table), PlainKeys::Integer(x)) => {
+            if let Some(range) = DenseRange::of(table, table.len().max(x.len())) {
+                let mut positions = vec![0i32; range.slots()];
+                for (index, &value) in table.iter().enumerate().rev() {
+                    positions[range.slot(value)] = index as i32 + 1;
+                }
+                return Some(
+                    x.iter()
+                        .map(|&value| range.find(value).map_or(0, |slot| positions[slot]))
+                        .collect(),
+                );
+            }
+            hashed_matches(table.len(), |index| table[index], x.len(), |index| x[index])
+        }
+        (PlainKeys::Real(table), PlainKeys::Real(x)) => hashed_matches(
+            table.len(),
+            |index| real_key(table[index]),
+            x.len(),
+            |index| real_key(x[index]),
+        ),
+        (PlainKeys::Interned(table, table_count), PlainKeys::Interned(x, x_count)) => {
+            hashed_matches(
+                table_count,
+                |index| table.element(index),
+                x_count,
+                |index| x.element(index),
+            )
+        }
+        _ => return None,
+    })
+}
+
+/// Which elements repeat an earlier one (a later one with `from_last`).
+unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Vec<bool> {
+    match keys {
+        PlainKeys::Integer(values) => {
+            if let Some(range) = DenseRange::of(values, values.len()) {
+                let mut seen = vec![false; range.slots()];
+                return visit_in_order(values.len(), from_last, |index| {
+                    let slot = range.slot(values[index]);
+                    std::mem::replace(&mut seen[slot], true)
+                });
+            }
+            hashed_duplicates(values.len(), from_last, |index| values[index])
+        }
+        PlainKeys::Real(values) => {
+            hashed_duplicates(values.len(), from_last, |index| real_key(values[index]))
+        }
+        PlainKeys::Interned(vector, count) => {
+            hashed_duplicates(count, from_last, |index| vector.element(index))
+        }
+    }
+}
+
+/// The span of a set of integer keys when it is small enough to index an array directly: at
+/// most a few slots per element. `NA` gets the slot after the span, so it does not stretch it.
+#[derive(Clone, Copy)]
+struct DenseRange {
+    min: i32,
+    span: usize,
+}
+
+impl DenseRange {
+    fn of(values: &[i32], count: usize) -> Option<Self> {
+        let (mut min, mut max) = (i32::MAX, i32::MIN);
+        for &value in values {
+            if value != NA_INTEGER {
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        if min > max {
+            return Some(Self { min: 0, span: 0 });
+        }
+        let span = (i64::from(max) - i64::from(min) + 1) as usize;
+        (span <= 4 * count + 1024).then_some(Self { min, span })
+    }
+
+    fn slots(self) -> usize {
+        self.span + 1
+    }
+
+    /// The slot of a key known to lie in the range, or to be `NA`.
+    fn slot(self, value: i32) -> usize {
+        if value == NA_INTEGER {
+            self.span
+        } else {
+            (i64::from(value) - i64::from(self.min)) as usize
+        }
+    }
+
+    /// The slot of any key, or `None` outside the range.
+    fn find(self, value: i32) -> Option<usize> {
+        if value == NA_INTEGER {
+            return Some(self.span);
+        }
+        let offset = i64::from(value) - i64::from(self.min);
+        (offset >= 0 && (offset as usize) < self.span).then_some(offset as usize)
+    }
+}
+
+fn hashed_matches<K: TableKey>(
+    table_count: usize,
+    table_key: impl Fn(usize) -> K,
+    x_count: usize,
+    x_key: impl Fn(usize) -> K,
+) -> Vec<i32> {
+    let mut positions = PositionTable::new(table_count);
+    for index in 0..table_count {
+        positions.find_or_insert(table_key(index), index, &table_key);
+    }
+    (0..x_count)
+        .map(|index| {
+            positions
+                .find(x_key(index), &table_key)
+                .map_or(0, |position| position as i32 + 1)
+        })
+        .collect()
+}
+
+fn hashed_duplicates<K: TableKey>(
     count: usize,
     from_last: bool,
     key: impl Fn(usize) -> K,
 ) -> Vec<bool> {
-    let mut duplicated = vec![false; count];
-    let mut seen: FxHashSet<K> = FxHashSet::default();
-    let mut visit = |index: usize| duplicated[index] = !seen.insert(key(index));
+    let mut positions = PositionTable::new(count);
+    visit_in_order(count, from_last, |index| {
+        positions.find_or_insert(key(index), index, &key).is_some()
+    })
+}
+
+/// `flag(index)` for each of `count` indices, visited first to last or, with `from_last`, last
+/// to first.
+fn visit_in_order(count: usize, from_last: bool, mut flag: impl FnMut(usize) -> bool) -> Vec<bool> {
+    let mut flags = vec![false; count];
     if from_last {
-        (0..count).rev().for_each(&mut visit);
+        for index in (0..count).rev() {
+            flags[index] = flag(index);
+        }
     } else {
-        (0..count).for_each(&mut visit);
+        for (index, slot) in flags.iter_mut().enumerate() {
+            *slot = flag(index);
+        }
     }
-    duplicated
+    flags
+}
+
+/// A key that `PositionTable` can hash. The hash must spread every input bit into the high bits,
+/// which pick the slot.
+trait TableKey: Copy + Eq {
+    fn table_hash(self) -> u64;
+}
+
+/// A multiply after folding the high half in, so that keys differing only in their high bits,
+/// such as whole-number doubles, still land in different slots.
+fn mix(bits: u64) -> u64 {
+    (bits ^ (bits >> 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+impl TableKey for i32 {
+    fn table_hash(self) -> u64 {
+        mix(u64::from(self as u32))
+    }
+}
+
+impl TableKey for u64 {
+    fn table_hash(self) -> u64 {
+        mix(self)
+    }
+}
+
+impl TableKey for Sexp {
+    fn table_hash(self) -> u64 {
+        mix(self.as_ptr() as usize as u64 >> 3)
+    }
+}
+
+/// An open-addressing hash table from keys to the first position that holds them. Slots store
+/// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes and
+/// a table over `n` keys is at most `16 n` bytes. Probing is linear over a power-of-two array at
+/// most half full, and the slot comes from the hash's high bits.
+struct PositionTable {
+    slots: Vec<u32>,
+    shift: u32,
+}
+
+impl PositionTable {
+    fn new(count: usize) -> Self {
+        let bits = (2 * count.max(8)).next_power_of_two().trailing_zeros();
+        Self {
+            slots: vec![0; 1 << bits],
+            shift: 64 - bits,
+        }
+    }
+
+    /// The position of the first key equal to `key`, or `None` after recording `position` for
+    /// it.
+    fn find_or_insert<K: TableKey>(
+        &mut self,
+        key: K,
+        position: usize,
+        key_at: impl Fn(usize) -> K,
+    ) -> Option<usize> {
+        let mask = self.slots.len() - 1;
+        let mut slot = (key.table_hash() >> self.shift) as usize;
+        loop {
+            match self.slots[slot] {
+                0 => {
+                    self.slots[slot] = position as u32 + 1;
+                    return None;
+                }
+                stored if key_at(stored as usize - 1) == key => return Some(stored as usize - 1),
+                _ => slot = (slot + 1) & mask,
+            }
+        }
+    }
+
+    fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
+        let mask = self.slots.len() - 1;
+        let mut slot = (key.table_hash() >> self.shift) as usize;
+        loop {
+            match self.slots[slot] {
+                0 => return None,
+                stored if key_at(stored as usize - 1) == key => return Some(stored as usize - 1),
+                _ => slot = (slot + 1) & mask,
+            }
+        }
+    }
 }
 
 /// A hash consistent with `identical()` under its default flags: identical objects hash alike.
