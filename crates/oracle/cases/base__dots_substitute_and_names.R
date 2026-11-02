@@ -43,3 +43,10 @@ print(swap_ints(c(5L, 6L)))
 swapped_list <- list(1, 2)
 swapped_list[2:1] <- swapped_list
 str(swapped_list)
+
+# A default forced inside a method that `[` dispatched to still sees its own call.
+frame_data <- data.frame(a = 1:3)
+by_count <- function(x, i, drop = (nargs() >= 3L)) frame_data[, 1, drop = drop]
+print(by_count(1, 2))
+by_call <- function(x, i, drop = sys.call()) frame_data[, 1, drop = { print(drop); FALSE }]
+invisible(by_call(1, 2))
