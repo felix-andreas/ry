@@ -321,7 +321,6 @@ pub unsafe fn minimize(
                 d[i] = z[i] - x[i];
             }
 
-            // lnsrlb
             let dtd = ddot(&d, &d);
             let norm = dtd.sqrt();
             let mut step_max = BIG_STEP;
