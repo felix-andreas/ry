@@ -48,11 +48,9 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
-- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
-  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
-  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
-  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
-  with a block cache and linear topic ordering").
+- **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
+  on finbench is `readRDS` of the 29 MB compressed cache. Splitting it per file, or a faster
+  format, would cut it (`decisions.md`, "`ry document` is roxygen2 with block and topic caches").
 - **Tarballs built on ry's runtime record owner 0/0** where GNU R's record `root/root`: ry's
   `file.info` has no `uname`/`grname` columns, so `utils::tar` falls back to ids. Harmless for
   installing, but `ry build` output is not byte-identical to GNU R's.

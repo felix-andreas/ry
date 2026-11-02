@@ -206,13 +206,21 @@ loaded namespace, as `devtools::document()` does, writing the same `man/*.Rd` fi
 byte for byte. roxygen2 must be installed. `--roclet NAME` (repeatable) runs only the named
 roclets, such as `rd` or `namespace`; by default the package's own roxygen options decide.
 
-Two things make it faster than roxygen2 alone, without changing what it writes. The parsed
-documentation blocks of each file are cached in ry's cache directory, so a run
-parses again only the files whose content changed, and the steps of roxygen2 that take time
-quadratic in the number of topics (collecting them, ordering them for `@inherit`, and finding
-them by name) run in linear time. A cached block keeps the markdown links it
-resolved when it was parsed, so after you install or remove a package a link points at, edit the
-file or delete the cache.
+Three things make it faster than roxygen2 alone, without changing what it writes. The parsed
+documentation blocks of each file are cached in ry's cache directory, so a run parses again only
+the files whose content changed. The finished Rd text of every topic is cached too, so after an
+edit only the topics that can have changed are rebuilt: those with a block in an edited file, those
+that inherit from them (`@inheritParams` and the other `@inherit` tags) or share a `@family` with
+them, and, every time, the package topic and any topic built from a block ry cannot track (one that
+documents data or an S4 or R6 object, or uses `@eval`, `@template`, `@example`, `@describeIn` or
+`@includeRmd`). Every other topic is written from the cache. Finally, the steps of roxygen2 that
+take time quadratic in the number of topics (collecting them, ordering them for `@inherit`, and
+finding them by name) run in linear time.
+
+The caches keep two things roxygen2 would recompute: the markdown links a block resolved against
+installed packages, and documentation inherited from another package. After you install or remove
+a package a link or an `@inherit` points at, edit the file or delete the cache, which lives in
+`~/.cache/ry/roxygen/` (or under `$XDG_CACHE_HOME`).
 
 ## build and install
 

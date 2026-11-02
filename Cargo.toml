@@ -86,6 +86,15 @@ heap.opt-level = 2
 strip = true
 lto = true
 
+# `cargo test --release` and `cargo bench` build with this profile. Fat LTO of a test binary that
+# links polars or libr needs more memory than a 16 GB machine has, so tests use thin local LTO
+# and parallel codegen. Shipped binaries and the benchmark numbers in the docs come from
+# `cargo build --release`, which keeps fat LTO.
+[profile.bench]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 # Release performance with symbols kept for profilers: `cargo build --profile profiling`.
 [profile.profiling]
 inherits = "release"
