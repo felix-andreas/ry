@@ -131,6 +131,9 @@ Arith.matrix : fn(e1: matrix, e2: double) -> matrix
 Arith.matrix : fn(e1: double, e2: matrix) -> matrix
 Arith.matrix : fn(e1: matrix, e2: double[]) -> matrix
 Arith.matrix : fn(e1: double[], e2: matrix) -> matrix
+# Arithmetic with `NULL` is a zero-length result, as for any vector.
+Arith.matrix : fn(e1: matrix, e2: NULL) -> double[]
+Arith.matrix : fn(e1: NULL, e2: matrix) -> double[]
 Compare.matrix : fn(e1: matrix, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical

@@ -1834,3 +1834,58 @@ unpack <- function(file) {
 #++++
 unpack: Unknown
 71..75 error[type-mismatch] expected `character`, found `character[]`
+
+#---- matrix_arithmetic_with_a_value_that_may_be_null_is_accepted
+reparam <- function(m, deriv) {
+  if (deriv > 1) det2 <- matrix(0, m, m) else det2 <- NULL
+  list(det2 = det2)
+}
+fit <- function(m, deriv, d2, a) {
+  if (a) rp <- reparam(m, deriv) else rp <- list(det2 = rep(0, 0))
+  matrix(d2, m, m) - rp$det2
+}
+#++++
+reparam: <T, U> fn([m]: T, deriv: U) -> list{det2: matrix | NULL}
+fit: <T, U, V> fn(m: T, [deriv]: U, d2: V, a: logical) -> matrix | double[]
+
+#---- matrix_arithmetic_with_a_string_is_still_an_error
+shift <- function(m) matrix(0, m, m) - "a"
+#++++
+shift: Unknown
+21..42 error[type-mismatch] `-` is not defined between `matrix` and `character`
+
+#---- lapply_over_lists_that_differ_by_path_takes_either_element
+parts <- function(f) {
+  if (is.null(f)) return(list(NULL, NULL))
+  list(matrix(1), 2)
+}
+each <- function(f) lapply(parts(f), function(part) part)
+mixed <- function(a) {
+  x <- if (a) list(1) else list("s")
+  lapply(x, nchar)
+}
+#++++
+parts: <T> fn(f: T | NULL) -> list{NULL, NULL} | list{matrix, double}
+each: <T> fn(f: T) -> list[matrix | double | NULL]
+mixed: fn(a: logical) -> list[integer]
+
+#---- lapply_over_lists_that_differ_by_path_still_checks_the_callback
+mixed <- function(a) {
+  x <- if (a) list(1) else list("s")
+  lapply(x, function(item) item + 1)
+}
+#++++
+mixed: Unknown
+72..95 error[type-mismatch] this function is passed `double | character`, but its parameter `item` is used as a numeric value (`integer` or `double`)
+
+#---- lapply_over_an_empty_list_on_one_path_is_not_null
+items <- function(a, idx) {
+  if (a) return(list())
+  lapply(idx, function(i) c(1, i))
+}
+use <- function(a) {
+  lapply(items(a, 1:3), function(x) x[[1]] + 1)
+}
+#++++
+items: fn(a: logical, [idx]: Unknown) -> Unknown
+use: <T> fn(a: logical) -> list[named: T]

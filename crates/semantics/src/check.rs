@@ -11069,6 +11069,7 @@ impl<'db> Checker<'db, '_> {
         if inferred_signature && self.fits_inferred_scalar(expected, ty) {
             return Some(expected);
         }
+        let ty = self.joined_list_union(expected, ty);
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
                 let ty = self.without_inferred_null(expected, ty);
@@ -11076,6 +11077,34 @@ impl<'db> Checker<'db, '_> {
             }
             _ => Some(ty),
         }
+    }
+
+    /// A list that is `list(1)` on one path and `list("a")` on another is a list of either,
+    /// so a generic parameter such as `lapply`'s `X: list[T]` sees `list[double | character]`
+    /// rather than two lists that bind `T` differently.
+    fn joined_list_union(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+        let resolved = self.table.resolve(self.db, ty);
+        let TyKind::Union(members) = resolved.kind(self.db) else {
+            return ty;
+        };
+        // `list()` on one path joins its element as `NULL`, which no path ever yields.
+        let Some(elements) = members
+            .iter()
+            .filter(|&&member| !is_empty_list(self.db, member))
+            .map(|&member| self.list_element_type(member))
+            .collect::<Option<Vec<Ty<'db>>>>()
+        else {
+            return ty;
+        };
+        if elements.len() < 2 || elements.windows(2).all(|pair| pair[0] == pair[1]) {
+            return ty;
+        }
+        let mut generic = FxHashSet::default();
+        collect_vars(self.db, self.table.resolve(self.db, expected), &mut generic);
+        if generic.is_empty() {
+            return ty;
+        }
+        Ty::new(self.db, TyKind::List(union_of(self.db, elements)))
     }
 
     /// Arithmetic on a value whose type is still open types as `double`, but it gives a
