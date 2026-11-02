@@ -44,4 +44,5 @@ for (file in sort(list.files("figure", full.names = TRUE))) {
 }
 html <- rmarkdown::render("plots.Rmd", output_dir = directory, quiet = TRUE)
 cat(basename(html), lengths(regmatches(readLines(html), gregexpr("data:image/png;base64", readLines(html)))) |> sum(), "\n")
-invisible(setwd(owd))
+setwd(owd)
+unlink(directory, recursive = TRUE)

@@ -14,5 +14,5 @@
 [warnings]
 [errors]
 [value]
-character
-| "/tmp/RtmpdL20iy/file6458f3a504c"
+integer
+| 0L
