@@ -148,7 +148,8 @@ objects.
 
 **`unreachable-code`** (warning): statements after `return()`, `stop()`, `break` or `next` in the
 same block, which never run. The range covers every statement from the first unreachable one to
-the end of the block. A file that defines its own `return` or `stop` gets no finding for it.
+the end of the block. A file that defines its own `return` or `stop` gets no finding for it, and
+neither does a block inside `quote()`, `bquote()`, `substitute()` or `expression()`.
 
 **`sprintf-arguments`** (warning): a `sprintf()` or `gettextf()` call whose literal format wants a
 different number of values than the call passes. Too few values stop R with "too few arguments",

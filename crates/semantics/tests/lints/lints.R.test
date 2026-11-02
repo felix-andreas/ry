@@ -267,6 +267,14 @@ f <- function() {
 #++++
 clean
 
+#---- quoted_blocks_are_clean
+q <- quote({
+  return(1)
+  2
+})
+#++++
+clean
+
 #==== sprintf-arguments
 #---- a_mismatched_count_warns
 sprintf("%d of %d", 1)

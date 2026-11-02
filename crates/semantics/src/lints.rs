@@ -933,8 +933,15 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             fixed_regex_lint(call, &callee, &arguments, config, diagnostics);
         }
         "which" if all_positional && positional.len() == 1 => {
+            // grep() puts `value` fifth where grepl() has `fixed`, so a fifth positional
+            // argument would change meaning in the rewritten call.
             if positional[0].kind() != SyntaxKind::CALL_EXPR
                 || bare_callee(positional[0]).as_deref() != Some("grepl")
+                || call_arguments(positional[0])
+                    .iter()
+                    .filter(|argument| argument.name.is_none())
+                    .count()
+                    > 4
             {
                 return;
             }
@@ -1040,6 +1047,9 @@ fn unreachable_code_lint(
     config: &LintConfig,
     unless_redefined: &mut Vec<(String, Diagnostic)>,
 ) {
+    if is_quoted(block) {
+        return;
+    }
     let statements: Vec<SyntaxNode> = block.children().collect();
     let Some((index, exit)) = statements
         .iter()
@@ -1285,7 +1295,13 @@ fn literal_coercion_lint(
     };
     let text = token.text();
     let replacement = match (callee, token.kind()) {
-        ("as.integer", SyntaxKind::DOUBLE) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
+        // Beyond `.Machine$integer.max`, `as.integer()` gives NA where `L` keeps a double.
+        ("as.integer", SyntaxKind::DOUBLE)
+            if text.bytes().all(|byte| byte.is_ascii_digit())
+                && text
+                    .parse::<u64>()
+                    .is_ok_and(|value| value <= 2_147_483_647) =>
+        {
             format!("{text}L")
         }
         ("as.integer", SyntaxKind::INTEGER) => text.to_owned(),
@@ -1332,7 +1348,11 @@ fn redundant_equals_lint(
         "redundant-equals",
         significant_range(comparison),
         format!("Comparing with {literal} is redundant for a logical value. Write `{replacement}`"),
-        Some((Applicability::Unsafe, "Drop the comparison", replacement)),
+        Some((
+            Applicability::Unsafe,
+            "Drop the comparison",
+            in_place_of(comparison, replacement),
+        )),
     );
 }
 
@@ -1565,7 +1585,9 @@ fn outer_negation_lint(
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let Some(operand) = negated_operand(value) else {
+    // `!!x` is rlang's injection operator, not a double negation.
+    let Some(operand) = negated_operand(value).filter(|operand| negated_operand(operand).is_none())
+    else {
         return;
     };
     let other = if callee == "all" { "any" } else { "all" };
@@ -1593,7 +1615,10 @@ fn comparison_negation_lint(
     let Some(parenthesized) = negated_operand(node) else {
         return;
     };
-    if parenthesized.kind() != SyntaxKind::PAREN_EXPR {
+    // In `!!(x == y)` the outer `!` makes rlang's injection operator, which must keep its operand.
+    if parenthesized.kind() != SyntaxKind::PAREN_EXPR
+        || node.parent().as_ref().and_then(negated_operand).as_ref() == Some(node)
+    {
         return;
     }
     let Some(comparison) = parenthesized.first_child().and_then(BinaryExpr::cast) else {

@@ -278,6 +278,11 @@ e <- as.character(1)
 #++++
 clean
 
+#---- values_beyond_the_integer_range_are_clean
+as.integer(3000000000)
+#++++
+clean
+
 #==== redundant-equals
 #---- comparing_with_a_boolean_warns
 if (ok == TRUE) 1
@@ -296,6 +301,12 @@ if (x == 1) 1
 if (TRUE == FALSE) 2
 #++++
 clean
+
+#---- a_negation_inside_a_looser_operator_gets_parentheses
+a <- x == FALSE & y
+#++++
+5..15 warning[redundant-equals] Comparing with FALSE is redundant for a logical value. Write `!x`
+  unsafe fix 5..15 "(!x)"
 
 #==== single-quotes
 #---- single_quoted_strings_warn
@@ -405,6 +416,11 @@ if (!(x %in% y)) 1
 #++++
 clean
 
+#---- rlang_injection_is_clean
+filter(z, !!(x == y))
+#++++
+clean
+
 #==== outer-negation
 #---- negated_elements_warn
 all(!x)
@@ -421,6 +437,11 @@ all(!x) + 1
 #---- outer_negations_are_clean
 !any(x)
 all(!x, na.rm = TRUE)
+#++++
+clean
+
+#---- rlang_injection_is_clean
+any(!!x)
 #++++
 clean
 
@@ -461,6 +482,11 @@ which(grepl("a", x, fixed = TRUE))
 #---- which_of_others_is_clean
 which(x > 1)
 which(grepl("^a", x), arr.ind = TRUE)
+#++++
+clean
+
+#---- five_positional_grepl_arguments_are_clean
+which(grepl("^a", z, FALSE, FALSE, TRUE))
 #++++
 clean
 

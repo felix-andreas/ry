@@ -125,8 +125,8 @@ Four more catch code that reads right but does something else: `x == NA` is alwa
 an `if` condition evaluates both sides, `1:length(x)` counts down to zero when `x` is empty, and
 `class(x) == "data.frame"` misses a tibble. Each fix changes what the code does, which is the point,
 so it is unsafe and runs only with `--unsafe-fixes`. The last two, `unreachable-code` and
-`sprintf-arguments`, flag code after a `return()` and a `sprintf()` format that wants more values
-than it gets. Style lints, such as `redundant-return`, `single-quotes` and `paste-sep`, are off until
+`sprintf-arguments`, flag code after a `return()` and a `sprintf()` format that wants more or fewer
+values than it gets. Style lints, such as `redundant-return`, `single-quotes` and `paste-sep`, are off until
 you turn them on. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
 reason, and [configuration](/reference/configuration) shows how to turn each one on or off.
 
