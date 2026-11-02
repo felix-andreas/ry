@@ -249,6 +249,42 @@ f <- function(x) {
 #++++
 f: <T: numeric> fn(x: T | NULL) -> T
 
+#---- a_length_test_rules_out_null
+#: fn(flag: logical) -> integer[] | NULL
+pick <- function(flag) if (flag) c(1L, 5L) else NULL
+span <- function(flag) {
+  range <- pick(flag)
+  if (length(range) != 2) {
+    return(0L)
+  }
+  range[1]:range[2]
+}
+guarded <- function(flag) {
+  range <- pick(flag)
+  if (length(range)) range[1]:range[2] else 0L
+}
+compared <- function(flag) {
+  range <- pick(flag)
+  if (0 < length(range)) range[1]:range[2] else 0L
+}
+#++++
+pick: fn(flag: logical) -> integer[] | NULL
+span: fn(flag: logical) -> integer | integer[]
+guarded: fn(flag: logical) -> integer[] | integer
+compared: fn(flag: logical) -> integer[] | integer
+
+#---- a_length_test_that_admits_zero_keeps_null
+#: fn(flag: logical) -> integer[] | NULL
+pick <- function(flag) if (flag) c(1L, 5L) else NULL
+span <- function(flag) {
+  range <- pick(flag)
+  if (length(range) < 3) range[1]:range[2] else 0L
+}
+#++++
+pick: fn(flag: logical) -> integer[] | NULL
+span: Unknown
+166..174 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer | NULL`
+
 #==== loops
 #---- accumulator_is_stable
 f <- function() {

@@ -626,6 +626,7 @@ pub fn check_item_with_annotation<'db>(
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
+        unseen_frames: 0,
         column_scopes: Vec::new(),
         column_misses: FxHashMap::default(),
         query_depth: 0,
@@ -1066,6 +1067,8 @@ struct Checker<'db, 'a> {
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
+    /// How many enclosing `[` index a value that may be a data.table of unknown columns.
+    unseen_frames: u32,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
     column_scopes: Vec<ColumnScope<'db>>,
     column_misses: FxHashMap<ExprId, ColumnMiss>,
@@ -1449,6 +1452,40 @@ fn guard_kind(name: &str) -> Option<GuardKind> {
         "is.list" => GuardKind::Family(GuardFamily::List),
         _ => return None,
     })
+}
+
+/// The callee and `x` of a call `length(x)`.
+fn length_operand(module: &Module, id: ExprId) -> Option<(ExprId, ExprId)> {
+    let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+        return None;
+    };
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "length") {
+        return None;
+    }
+    match &module[arguments][..] {
+        [argument] if argument.name.is_none() => Some((*callee, argument.value?)),
+        _ => None,
+    }
+}
+
+fn numeric_literal(module: &Module, id: ExprId) -> Option<f64> {
+    match module.kind(id) {
+        ExpressionKind::Literal(LiteralKind::Integer(text) | LiteralKind::Double(text)) => {
+            module[text].trim_end_matches('L').parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// The operator that keeps `a op b` true with its operands swapped.
+fn mirrored(operator: BinaryOperator) -> BinaryOperator {
+    match operator {
+        BinaryOperator::Less => BinaryOperator::Greater,
+        BinaryOperator::Greater => BinaryOperator::Less,
+        BinaryOperator::LessEq => BinaryOperator::GreaterEq,
+        BinaryOperator::GreaterEq => BinaryOperator::LessEq,
+        other => other,
+    }
 }
 
 fn guard_members<'db>(db: &'db dyn Db, resolved: Ty<'db>) -> Vec<Ty<'db>> {
@@ -2961,7 +2998,13 @@ impl<'db> Checker<'db, '_> {
         let Some(&slot) = self.naming.resolutions.get(&id) else {
             return self.read_non_local(id);
         };
-        self.read_slot(id, slot)
+        let ty = self.read_slot(id, slot);
+        if self.unseen_frames > 0
+            && matches!(self.table.resolve(self.db, ty).kind(self.db), TyKind::Null)
+        {
+            return unknown(self.db);
+        }
+        ty
     }
 
     fn read_non_local(&mut self, id: ExprId) -> Ty<'db> {
@@ -3165,7 +3208,18 @@ impl<'db> Checker<'db, '_> {
                 None => all_known = false,
             }
         }
-        if resolved.is_some() {
+        if let Some(slot) = resolved {
+            // `col <- NULL` before a query is the idiom that silences R CMD check's "no
+            // visible binding" note, so when the columns are unknown a `NULL` local is the
+            // column, not the value data.table would read.
+            if !all_known {
+                let ty = self.read_slot(id, slot);
+                if matches!(self.table.resolve(self.db, ty).kind(self.db), TyKind::Null) {
+                    self.masked_reads.insert(id);
+                    return Some(unknown(self.db));
+                }
+                return Some(ty);
+            }
             return None;
         }
         // A prefixed name outside a join ry can see is data.table syntax ry cannot check.
@@ -5296,6 +5350,54 @@ impl<'db> Checker<'db, '_> {
                 })
             }
             ExpressionKind::Paren(inner) => self.recognize_guard(*inner),
+            // `length(x) != 2` compares a length with a literal, and whichever edge a length of
+            // zero cannot reach holds a value that is not `NULL`.
+            ExpressionKind::Binary {
+                operator:
+                    operator @ (BinaryOperator::Less
+                    | BinaryOperator::Greater
+                    | BinaryOperator::LessEq
+                    | BinaryOperator::GreaterEq
+                    | BinaryOperator::Equal
+                    | BinaryOperator::NotEqual),
+                lhs,
+                rhs,
+                ..
+            } => {
+                let module = self.module;
+                let (operator, (callee, value), bound) =
+                    match (length_operand(module, *lhs), length_operand(module, *rhs)) {
+                        (Some(call), None) => (*operator, call, numeric_literal(module, *rhs)?),
+                        (None, Some(call)) => {
+                            (mirrored(*operator), call, numeric_literal(module, *lhs)?)
+                        }
+                        _ => return None,
+                    };
+                if self.naming.resolutions.contains_key(&callee) {
+                    return None;
+                }
+                let slot = self.guard_slot(value)?;
+                let edge = self.non_null_edge(slot)?;
+                let empty_passes = match operator {
+                    BinaryOperator::Less => 0.0 < bound,
+                    BinaryOperator::Greater => 0.0 > bound,
+                    BinaryOperator::LessEq => 0.0 <= bound,
+                    BinaryOperator::GreaterEq => 0.0 >= bound,
+                    BinaryOperator::Equal => bound == 0.0,
+                    _ => bound != 0.0,
+                };
+                Some(if empty_passes {
+                    GuardRefinement {
+                        true_edge: Vec::new(),
+                        false_edge: edge,
+                    }
+                } else {
+                    GuardRefinement {
+                        true_edge: edge,
+                        false_edge: Vec::new(),
+                    }
+                })
+            }
             // The right operand runs only on the left's true edge (`&&`) or false edge (`||`),
             // so it is recognized under that edge and the two compose.
             ExpressionKind::Binary {
@@ -5361,21 +5463,14 @@ impl<'db> Checker<'db, '_> {
                     let field = self.module.name(*field);
                     return self.field_null_guard(*target, &field);
                 }
-                if !matches!(self.module.kind(value), ExpressionKind::NameRef(_)) {
-                    return None;
+                let slot = self.guard_slot(value)?;
+                // A value of nonzero length is not `NULL`, so `if (length(x))` guards it.
+                if name == "length" {
+                    return Some(GuardRefinement {
+                        true_edge: self.non_null_edge(slot)?,
+                        false_edge: Vec::new(),
+                    });
                 }
-                let slot = match self.naming.resolutions.get(&value) {
-                    Some(&slot) => slot,
-                    // A non-local narrows like a local (guard and branches evaluate in order), except
-                    // inside a closure, which runs later and sees a value the test says nothing about.
-                    None => {
-                        if self.naming.deferred_non_locals.contains(&value) {
-                            return None;
-                        }
-                        let observed = self.infer(value);
-                        self.non_local_guard_slot(value, observed)?
-                    }
-                };
                 if name == "missing" {
                     return self
                         .no_default_formals
@@ -5394,6 +5489,45 @@ impl<'db> Checker<'db, '_> {
             }
             _ => None,
         }
+    }
+
+    /// The slot a guard on the bare name `value` narrows.
+    fn guard_slot(&mut self, value: ExprId) -> Option<BindingId> {
+        if !matches!(self.module.kind(value), ExpressionKind::NameRef(_)) {
+            return None;
+        }
+        match self.naming.resolutions.get(&value) {
+            Some(&slot) => Some(slot),
+            // A non-local narrows like a local (guard and branches evaluate in order), except
+            // inside a closure, which runs later and sees a value the test says nothing about.
+            None => {
+                if self.naming.deferred_non_locals.contains(&value) {
+                    return None;
+                }
+                let observed = self.infer(value);
+                self.non_local_guard_slot(value, observed)
+            }
+        }
+    }
+
+    /// The refinement that drops `NULL` from a slot whose union holds it. A value of no known
+    /// shape is left alone, since a length test says nothing else about it.
+    fn non_null_edge(&mut self, slot: BindingId) -> Option<Vec<SlotRefinement<'db>>> {
+        let EnvEntry::Mono(current) = self.environment.get(slot)? else {
+            return None;
+        };
+        let resolved = self.table.resolve(self.db, current);
+        let TyKind::Union(members) = resolved.kind(self.db) else {
+            return None;
+        };
+        if !members
+            .iter()
+            .any(|member| matches!(member.kind(self.db), TyKind::Null))
+        {
+            return None;
+        }
+        let edges = self.guard_edges(GuardKind::Null, slot, resolved)?;
+        (!edges.false_edge.is_empty()).then_some(edges.false_edge)
     }
 
     /// `is.null(x$field)` on a local `x`. A value that passes the test has the field, so the
@@ -12382,11 +12516,27 @@ impl<'db> Checker<'db, '_> {
         subject: Ty<'db>,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // A subject that may be a data.table of unknown columns (a declared one, data.table
+        // syntax, or a value of no known shape) evaluates its indexes in a frame ry cannot
+        // see, where a `NULL` placeholder local names a column.
+        let unseen_frame = !double
+            && (self.naming.masked_subsets.contains(&id)
+                || match self.table.resolve(self.db, subject).kind(self.db) {
+                    TyKind::Unknown | TyKind::Any | TyKind::Var(_) => true,
+                    TyKind::Named(name, _) => name.text(self.db) == "data.table",
+                    _ => false,
+                });
+        if unseen_frame {
+            self.unseen_frames += 1;
+        }
         let mut index_types = Vec::with_capacity(arguments.len());
         for argument in arguments {
             if let Some(value) = argument.value {
                 index_types.push(self.infer(value));
             }
+        }
+        if unseen_frame {
+            self.unseen_frames -= 1;
         }
         // A declared `data.table` subject makes `[` a query: index arguments evaluate in
         // the data's frame (masked column reads), and the `j` syntax decides the result class.

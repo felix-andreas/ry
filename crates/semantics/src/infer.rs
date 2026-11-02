@@ -638,7 +638,8 @@ impl<'db> InferenceTable<'db> {
     /// same shape (`f(1L, 0.5)` for `function(a, b) a * b`): R's arithmetic promotes, so
     /// the variable widens to the wider type. Earlier arguments still fit, because
     /// `integer` is compatible with `double`. Logicals never widen a binding, since a
-    /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type.
+    /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type. A `matrix`
+    /// absorbs any numeric shape the same way.
     fn widen_numeric_binding(
         &mut self,
         db: &'db dyn Db,
@@ -657,6 +658,56 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
+        // Arithmetic between a matrix and a plain number or vector gives a matrix, so a
+        // variable tied by `a * H` takes `f(2, m)` and `f(m, 2)` alike and binds the matrix.
+        let is_matrix = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Named(name, _) if name.text(db) == "matrix");
+        // An open argument meeting a variable a literal bound (`f(2, x)` inside a function of
+        // `x`) takes the variable over instead of pinning `x` to the literal's type, so the
+        // caller's parameter stays numeric-generic.
+        if let TyKind::Var(actual_var) = actual.kind(db)
+            && numeric_rank(db, bound).is_some_and(|(_, rank)| rank > 0)
+        {
+            let actual_representative = self.find(*actual_var);
+            if actual_representative != representative
+                && let Entry::Unbound {
+                    constraint: Constraint::Unconstrained | Constraint::Numeric,
+                    ..
+                } = *self.entry(actual_representative)
+                && self
+                    .constrain(db, actual_representative, Constraint::Numeric)
+                    .is_ok()
+            {
+                self.set(representative, Entry::Redirect(actual_representative));
+                return true;
+            }
+        }
+        // A declared numeric type parameter takes it over the same way.
+        if let TyKind::Rigid(name) = actual.kind(db)
+            && self.rigid_constraints.get(name) == Some(&Constraint::Numeric)
+            && numeric_rank(db, bound).is_some_and(|(_, rank)| rank > 0)
+        {
+            self.set(
+                representative,
+                Entry::Bound {
+                    ty: actual,
+                    numeric: true,
+                },
+            );
+            return true;
+        }
+        if is_matrix(bound) && numeric_rank(db, actual).is_some() {
+            return true;
+        }
+        if is_matrix(actual) && numeric_rank(db, bound).is_some() {
+            self.set(
+                representative,
+                Entry::Bound {
+                    ty: actual,
+                    numeric: true,
+                },
+            );
+            return true;
+        }
         match (numeric_rank(db, bound), numeric_rank(db, actual)) {
             (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
                 if actual_rank > bound_rank

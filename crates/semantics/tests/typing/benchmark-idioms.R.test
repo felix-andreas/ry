@@ -60,3 +60,23 @@ scale: <T: numeric> fn(a: T, b: T) -> T
 x: double[]
 y: double[]
 v: <T> fn(flags: T) -> Unknown
+
+#---- a_matrix_meets_a_number_through_tied_operands
+weigh <- function(a, H) a * H + 1
+direct <- weigh(2, matrix(1, 2, 2))
+flipped <- weigh(matrix(1, 2, 2), 2)
+#++++
+weigh: <T: numeric> fn(a: T, H: T) -> double
+direct: double
+flipped: double
+
+#---- a_literal_argument_does_not_pin_the_callers_parameter
+weigh <- function(a, H) a * H + 1
+outer <- function(H) weigh(2, H)
+by_vector <- outer(c(1, 2))
+by_matrix <- outer(matrix(1, 2, 2))
+#++++
+weigh: <T: numeric> fn(a: T, H: T) -> double
+outer: <T: numeric> fn(H: T) -> double
+by_vector: double
+by_matrix: double

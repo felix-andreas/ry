@@ -5627,3 +5627,33 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   manifest-only package could not mask, and `pivot_longer(d, cols = c(a, b))` reported its columns.
   Reshaping verbs return `Any` because their columns depend on the data; row-preserving ones
   (`drop_na`, `fill`, `complete`) keep `<T>`. tidyr re-exports `tibble`, so it declares it too.
+
+## A `NULL` local inside a query of unknown columns is the column
+
+- **Before.** `time <- NULL` (the R CMD check "no visible binding" idiom) followed by
+  `dt[...][order(-time)]` read the lexical `NULL` whenever the columns were unknown, and `-time`
+  was reported (data.table's own test runner).
+- **Shape.** `read_column` types a resolved `NULL` local as an `Unknown` masked column when the
+  scope's columns are unknown. A plain `[` on a subject that may be a data.table (declared, with
+  data.table syntax, or `Unknown`/`Any`/an open variable) counts `unseen_frames`, and `infer_read`
+  turns a `NULL` local read into `Unknown` there. A column scope was not pushed for the plain case
+  because it masks every read, which hid a true unresolved name in `m[not_a_column]`.
+
+## `length(x)` guards drop `NULL`
+
+- `recognize_guard` treats `length(x)` as a condition and `length(x) <op> literal` (either side) as a
+  test whose edge a zero length cannot reach is non-`NULL` (`non_null_edge`). It only drops `NULL`
+  from a union, never shapes an open variable, because a length test says nothing else about the
+  value. usethis `if (length(r) != 2) return(...)` then `r[1]:r[2]`.
+
+## A numeric binding yields to a matrix or a generic argument
+
+- **Before.** Arithmetic ties its operands to one variable (`a * H` gives `fn(a: T, H: T)`), and the
+  first argument bound it, so `weigh(2, m)` reported `expected double, found matrix`, and
+  `outer <- function(H) weigh(2, H)` pinned `H` to `double` (ks `mise.mixt`, the shape pins
+  through call chains).
+- **Shape.** `widen_numeric_binding` extends the existing `f(1L, 0.5)` rebind: a `matrix` absorbs a
+  numeric binding (and is absorbed by one already bound to a matrix), and an open variable or a
+  numeric rigid argument takes over a variable a literal bound, so the caller's parameter stays
+  `<T: numeric>`. The cost is precision on integers: `outer(1L)` claims `integer` though R gives
+  `double`, which is compatible everywhere `double` is expected except an `integer`-only parameter.
