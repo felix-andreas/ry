@@ -1776,22 +1776,31 @@ which do not bind the name costs one AND per frame instead of a scan. Removing a
 bit set, which only costs a scan. The filter took one inline binding slot (eight, not nine) to keep
 the frame in the 192-byte size class; it halved `frame_cell`'s cost per `sd(x)`.
 
-**A promise keeps its expression and carries its bytecode in the attribute slot.** When the
-bytecode compiler compiles a call to a closure, each argument that is a plain call (no `function`,
-loop, `break`, `next` or `return` inside it, `compiles_as_promise`) is compiled into its own
-`BCODESXP` for the caller's frame, and the call site stores a pairlist of those arguments in the
-constant after the call (`Op::CallGeneric`). `compiled_promise` then makes an ordinary promise
-over the source expression and puts the code object in the promise's attribute slot, which GNU R
-never uses for a promise; `force_promise` runs it with `bytecode::run_promise` instead of the AST
-evaluator. GNU R instead puts the code object in `PRCODE` and reads the expression back through
-`R_PromiseExpr`, which would have sent every reader of promise code (`substitute`, `match.call`,
-`sys.call`, deparse, the C API's `PRCODE`) through an accessor. Keeping the expression in place
-means none of them changes. The C API hides the slot: `ATTRIB` of a promise is `NULL`,
-`SET_PRCODE` clears it, and serialization writes no attributes for a promise. `run_promise` skips
-the entry profile, the loop states and the optimizing tier, since promise code has no loops and no
-closure of its own. Measured with the JIT off: a loop passing `i * 2 + 1` and `sqrt(i) - i / 3`
-to a closure runs about 1.6x faster, while `sd(x)`, whose closure arguments are mostly bare
-symbols (a symbol argument stays an ordinary promise), costs within about 1% of before.
+**A promise keeps its expression and carries its bytecode in the attribute slot.** A call site
+that may call a closure records, in the constant after its call (`Op::CallGeneric`), whether an
+argument is worth compiling: a call with no `function`, loop, `break`, `next` or `return` in it
+(`compiles_as_promise`). The first time the site calls a closure, `compile_promise_arguments`
+compiles each such argument into its own `BCODESXP` for the running closure's frame and stores
+the argument list in that constant. Compiling at the first closure call rather than with the
+body matters twice over: a site whose callee is a builtin never pays for promise code, and
+eager compilation doubled the work at every nesting level (the builtin path compiles each
+argument inline as well), so `f(g(h(...)))` cost time exponential in its depth. Promise code
+itself has no closure to compile against, so a closure call inside it makes ordinary promises.
+`compiled_promise` makes an ordinary promise over the source expression and puts the code
+object in the promise's attribute slot, which GNU R never uses for a promise; `force_promise`
+runs it with `bytecode::run_promise` instead of the AST evaluator. GNU R instead puts the code
+object in `PRCODE` and reads the expression back through `R_PromiseExpr`, which would have sent
+every reader of promise code (`substitute`, `match.call`, `sys.call`, deparse, the C API's
+`PRCODE`) through an accessor. Keeping the expression in place means none of them changes. The C
+API hides the slot: `ATTRIB`, `ANY_ATTRIB` and `DUPLICATE_ATTRIB` see no attributes on a
+promise, `SET_PRCODE` and `SET_PRENV` drop the code (it was compiled for that expression and
+that frame), and serialization writes no attributes for a promise. `run_promise` skips the entry
+profile, the loop states and the optimizing tier, since promise code has no loops and no
+closure of its own, and restores the srcref current when forcing began, as the AST evaluator's
+`{` does.
+Measured with the JIT off: a loop passing `i * 2 + 1` and `sqrt(i) - i / 3` to a closure runs
+about 1.6x faster, and `sd(x)`, whose closure arguments are mostly bare symbols (a symbol stays
+an ordinary promise), went from about 115.4k to 114.8k instructions.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the

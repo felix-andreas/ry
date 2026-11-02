@@ -313,6 +313,60 @@ unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
     false
 }
 
+/// The arguments a closure called from `function`'s code makes its promises from: each one
+/// worth compiling replaced by a code object for `function`'s frame, or `NULL` when there is no
+/// function to compile against (the call is in promise code, whose frame is not known here).
+unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> {
+    if function == nil() {
+        return Ok(nil());
+    }
+    let mut formals = FxHashSet::default();
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        formals.insert(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut compiler = Compiler {
+        local_symbols: local_symbols(source_of_body(function.cdr()), function.car()),
+        formals,
+        code: Vec::new(),
+        constants: Vec::new(),
+        caches: 0,
+        loops: Vec::new(),
+        open_loops: Vec::new(),
+        registers: 0,
+        next_register: 0,
+        enclosure: function.tag(),
+        // `run_promise` restores the srcref that was current when forcing began, so the code
+        // never needs one of its own to return to.
+        srcref: nil(),
+        rebinding: None,
+        tail_update: None,
+    };
+    let heap = crate::heap();
+    let mut list = nil();
+    for (tag, value) in values::pairlist_items(arguments).iter().rev() {
+        let value = if compiles_as_promise(*value) {
+            compiler.code.clear();
+            compiler.constants.clear();
+            compiler.caches = 0;
+            compiler.loops.clear();
+            compiler.open_loops.clear();
+            compiler.registers = 0;
+            compiler.next_register = 0;
+            // An argument the compiler rejects still runs, as a promise of its expression.
+            compiler.assemble(*value).unwrap_or(*value)
+        } else {
+            *value
+        };
+        heap.root(value);
+        list = values::cons(value, list)?;
+        heap.set_tag(list, *tag);
+        heap.root(list);
+    }
+    Ok(list)
+}
+
 /// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
 /// constant, whose evaluation needs nothing of the code that made it. `break`, `next` and
 /// `return` act on the activation that evaluates them, which for a promise is not the one that
@@ -868,55 +922,16 @@ impl Compiler {
     }
 
     /// The constant for a call that may call a closure, followed by the arguments its promises
-    /// are made from: the call's arguments with each one worth compiling replaced by its code
-    /// object, or `NULL` when none is. [`Op::CallGeneric`] reads the second at the next index.
-    unsafe fn call_site(&mut self, call: Sexp) -> R<u32> {
+    /// are made from: the unbound marker when an argument is worth compiling, which
+    /// [`Op::CallGeneric`] replaces with the compiled arguments the first time it calls a
+    /// closure here, or `NULL` when none is.
+    unsafe fn call_site(&mut self, call: Sexp) -> u32 {
         let index = self.constant(call);
-        let arguments = self.promise_arguments(call.cdr())?;
-        self.constant(arguments);
-        Ok(index)
-    }
-
-    /// A promise runs in the frame of the code that made it, so its code compiles with this
-    /// compiler's view of that frame: the same local symbols, formals and enclosure.
-    unsafe fn promise_arguments(&mut self, arguments: Sexp) -> R<Sexp> {
-        let items = values::pairlist_items(arguments);
-        if !items.iter().any(|(_, value)| compiles_as_promise(*value)) {
-            return Ok(nil());
-        }
-        let heap = crate::heap();
-        let mut list = nil();
-        for (tag, value) in items.iter().rev() {
-            let value = if compiles_as_promise(*value) {
-                let mut promise = Compiler {
-                    local_symbols: self.local_symbols.take(),
-                    formals: std::mem::take(&mut self.formals),
-                    code: Vec::new(),
-                    constants: Vec::new(),
-                    caches: 0,
-                    loops: Vec::new(),
-                    open_loops: Vec::new(),
-                    registers: 0,
-                    next_register: 0,
-                    enclosure: self.enclosure,
-                    srcref: self.srcref,
-                    rebinding: None,
-                    tail_update: None,
-                };
-                let code = promise.assemble(*value);
-                self.local_symbols = promise.local_symbols;
-                self.formals = promise.formals;
-                // An argument the compiler rejects still runs, as a promise of its expression.
-                code.unwrap_or(*value)
-            } else {
-                *value
-            };
-            heap.root(value);
-            list = values::cons(value, list)?;
-            heap.set_tag(list, *tag);
-            heap.root(list);
-        }
-        Ok(list)
+        let worth_compiling = values::pairlist_items(call.cdr())
+            .iter()
+            .any(|(_, value)| compiles_as_promise(*value));
+        self.constant(if worth_compiling { unbound() } else { nil() });
+        index
     }
 
     unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
@@ -1520,7 +1535,7 @@ impl Compiler {
                 let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
-                let call_constant = self.call_site(immediate_call)?;
+                let call_constant = self.call_site(immediate_call);
                 self.emit(Op::CallGeneric, &[dst, function, call_constant]);
                 self.release_to(mark);
             }
@@ -1663,7 +1678,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.call_site(call)?;
+        let call_constant = self.call_site(call);
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -1712,7 +1727,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call);
         let name_constant = self.constant(name);
         let shape = values::alloc(SexpType::Integer, 2)?;
         values::ints_mut(shape).copy_from_slice(&[crate::records::NO_LAYOUT, 0]);
@@ -1745,7 +1760,7 @@ impl Compiler {
             _ => None,
         };
         let symbol = self.constant(head);
-        let call_constant = self.call_site(call)?;
+        let call_constant = self.call_site(call);
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -1904,6 +1919,7 @@ pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     reserve_registers(base + register_count)?;
     let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
     env.set_gp_bits(gp::COMPILED_FRAME, true);
+    let srcref = interp().srcref;
     let mut machine = Machine {
         function: nil(),
         code,
@@ -1913,6 +1929,7 @@ pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
         loops: &mut [],
     };
     let result = execute_code(&mut machine, 0);
+    interp().srcref = srcref;
     interp().bytecode.registers.truncate(base);
     env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
     match result {
@@ -2180,10 +2197,18 @@ unsafe fn step(
         Op::CallGeneric => {
             let function = register(operand(1));
             let call = constants.element(operand(2));
-            let compiled = constants.element(operand(2) + 1);
             // Only a closure's arguments become promises; a special reads them as expressions.
-            let arguments = if compiled != nil() && function.kind() == SexpType::Closure {
-                compiled
+            let arguments = if function.kind() == SexpType::Closure {
+                let mut compiled = constants.element(operand(2) + 1);
+                if compiled == unbound() {
+                    compiled = compile_promise_arguments(machine.function, call.cdr())?;
+                    crate::heap().set_element(constants, operand(2) as usize + 1, compiled);
+                }
+                if compiled == nil() {
+                    call.cdr()
+                } else {
+                    compiled
+                }
             } else {
                 call.cdr()
             };

@@ -490,7 +490,12 @@ pub unsafe extern "C" fn Rf_inherits(object: Sexp, class: *const c_char) -> Rboo
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ATTRIB(object: Sexp) -> Sexp {
-    // A promise's attribute slot holds its compiled code, which GNU R keeps in `PRCODE` instead.
+    visible_attributes(object)
+}
+
+/// The attribute pairlist native code sees. A promise's attribute slot holds its compiled code,
+/// which GNU R keeps in `PRCODE` instead, so a promise has none.
+pub unsafe fn visible_attributes(object: Sexp) -> Sexp {
     if object.kind() == SexpType::Promise {
         return runtime().heap.known().nil;
     }
@@ -514,7 +519,7 @@ pub unsafe extern "C" fn SET_ATTRIB(object: Sexp, value: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ANY_ATTRIB(object: Sexp) -> c_int {
-    (object.attrib() != runtime().nil()) as c_int
+    (visible_attributes(object) != runtime().nil()) as c_int
 }
 
 #[unsafe(no_mangle)]
