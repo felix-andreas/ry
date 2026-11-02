@@ -1186,10 +1186,23 @@ fn normalize_relative_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// The item a sourced file binds `name` with. Per name, so a sourced file's edit re-checks only
-/// the reads whose definition changes; the last sourced file to bind it wins, as at run time.
-#[salsa::tracked]
+/// The item a sourced file binds `name` with; the last sourced file to bind it wins, as at
+/// run time. Most files source nothing, and asking `sourced_files` first keeps them from
+/// minting one memo per name they read.
 pub fn sourced_definition<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    name: Symbol,
+) -> Option<Item<'db>> {
+    if sourced_files(db, file).is_empty() {
+        return None;
+    }
+    *sourced_definition_by_name(db, file, name)
+}
+
+/// Per name, so a sourced file's edit re-checks only the reads whose definition changes.
+#[salsa::tracked]
+fn sourced_definition_by_name<'db>(
     db: &'db dyn Db,
     file: SourceFile,
     name: Symbol,

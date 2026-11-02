@@ -4866,7 +4866,7 @@ impl<'db> Checker<'db, '_> {
                 .find(|(_, info)| info.range == variable_range)
                 .map(|(id, _)| *id)
         });
-        self.check_loop_body(
+        let variable_written = self.check_loop_body(
             loop_expression,
             None,
             body,
@@ -4875,6 +4875,7 @@ impl<'db> Checker<'db, '_> {
         );
         // R leaves the variable at the last element, or sets it to `NULL` when the sequence
         // is empty, whatever it held before the loop. A `from:to` range always has an element.
+        // A body that assigns the variable leaves its state at the end of the body instead.
         if let Some(slot) = loop_slot {
             let mut range = sequence;
             while let ExpressionKind::Paren(inner) = self.module.kind(range) {
@@ -4887,9 +4888,11 @@ impl<'db> Checker<'db, '_> {
                     ..
                 }
             );
+            let last =
+                variable_written.map_or(element, |written| union_of(self.db, [element, written]));
             let after = match never_empty {
-                true => element,
-                false => union_of(self.db, [element, null(self.db)]),
+                true => last,
+                false => union_of(self.db, [last, null(self.db)]),
             };
             self.environment.set(slot, EnvEntry::Mono(after));
         }
@@ -4929,7 +4932,8 @@ impl<'db> Checker<'db, '_> {
 
     /// Iterates to a fixed point from the join of the pre-loop state and the previous
     /// pass's exit writes; diagnostics count only on the final pass, and a slot still
-    /// changing at the cap widens to `Unknown`.
+    /// changing at the cap widens to `Unknown`. Returns the loop variable's type at the end
+    /// of the body when the body assigns it.
     fn check_loop_body(
         &mut self,
         loop_expression: ExprId,
@@ -4937,7 +4941,7 @@ impl<'db> Checker<'db, '_> {
         body: ExprId,
         runs_at_least_once: bool,
         loop_variable: Option<(BindingId, Ty<'db>)>,
-    ) {
+    ) -> Option<Ty<'db>> {
         const LOOP_PASS_CAP: usize = 3;
         let mut passes = 0;
         loop {
@@ -4952,11 +4956,22 @@ impl<'db> Checker<'db, '_> {
                 self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
             }
             self.infer(body);
+            let mut variable_written = None;
             let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
                 .environment
                 .writes_since(mark)
                 .into_iter()
-                .filter(|(slot, _)| loop_variable.is_none_or(|(loop_slot, _)| *slot != loop_slot))
+                .filter(|(slot, entry)| {
+                    let is_variable =
+                        loop_variable.is_some_and(|(loop_slot, _)| *slot == loop_slot);
+                    if is_variable {
+                        variable_written = Some(match entry {
+                            Some(EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty)) => *ty,
+                            Some(EnvEntry::Scheme(_)) | None => unknown(self.db),
+                        });
+                    }
+                    !is_variable
+                })
                 .collect();
             self.environment.rollback(mark);
             // A read this pass discovered the slot's pre-loop state through the cross-item
@@ -4975,7 +4990,7 @@ impl<'db> Checker<'db, '_> {
                         }
                     }
                 }
-                return;
+                return variable_written;
             }
             if passes >= LOOP_PASS_CAP {
                 for slot in changed {
@@ -4987,7 +5002,7 @@ impl<'db> Checker<'db, '_> {
                         );
                     }
                 }
-                return;
+                return variable_written;
             }
             // Not yet stable: this pass ran under a stale entry state, so its diagnostics are
             // discarded.
