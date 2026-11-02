@@ -11,6 +11,7 @@
 //! any other change checks everything.
 
 use {
+    crate::config::{self, Config},
     rustc_hash::{FxHashMap, FxHasher},
     semantics::{
         SourceFile,
@@ -19,6 +20,7 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         collections::BTreeSet,
+        fmt::Debug,
         fs,
         hash::{DefaultHasher, Hasher},
         io,
@@ -187,6 +189,47 @@ pub fn surface(text: &str, root: &SyntaxNode, shares: &[String]) -> Fingerprint 
     fingerprinter.finish()
 }
 
+/// Whether `root` gets a record: a directory with no `ry.toml` or `DESCRIPTION`, such as one
+/// holding a downloaded script, is no project.
+pub fn is_project(root: &Path) -> bool {
+    config::CONFIG_FILE_NAMES
+        .iter()
+        .chain(["DESCRIPTION"].iter())
+        .any(|name| root.join(name).is_file())
+}
+
+/// The fingerprint of everything a run's findings depend on besides the files' text: the ry
+/// binary at `executable`, the settings, the root, the data files, `NAMESPACE`, `DESCRIPTION`
+/// and the project stubs. `ry check` and the language server compute it the same way, so the
+/// server trusts a record only when it would have computed the same findings.
+pub fn key<'a>(
+    executable: &Path,
+    config: &Config,
+    root: &Path,
+    data_files: &impl Debug,
+    namespace: Option<&str>,
+    description: Option<&str>,
+    stubs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Fingerprint {
+    let mut fingerprinter = Fingerprinter::new();
+    fingerprinter
+        .text(env!("CARGO_PKG_VERSION"))
+        .text(&build_identity(executable))
+        .text(&format!("{config:?}"))
+        .text(&root.to_string_lossy())
+        .text(&format!("{data_files:?}"));
+    for source in [namespace, description] {
+        match source {
+            Some(text) => fingerprinter.bytes(&[1]).text(text),
+            None => fingerprinter.bytes(&[0]),
+        };
+    }
+    for (stem, text) in stubs {
+        fingerprinter.text(stem).text(text);
+    }
+    fingerprinter.finish()
+}
+
 /// Reads the record a previous run left at `root`. A missing, unreadable or outdated record is
 /// no record: the run checks every file and writes a new one.
 pub fn load(root: &Path) -> Option<Record> {
@@ -245,13 +288,22 @@ pub fn plan(
 
 impl Record {
     /// The recorded findings of the file at `index`, against this run's files.
-    pub fn diagnostics(&self, index: usize, files: &[SourceFile]) -> Option<Vec<Diagnostic>> {
+    pub fn diagnostics(
+        &self,
+        index: usize,
+        file_at: impl Fn(usize) -> Option<SourceFile>,
+    ) -> Option<Vec<Diagnostic>> {
         let recorded = self.files.get(index)?;
         recorded
             .diagnostics
             .iter()
-            .map(|diagnostic| restore(diagnostic, files))
+            .map(|diagnostic| restore(diagnostic, &file_at))
             .collect()
+    }
+
+    /// The recorded files, in the recorded run's order.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.files.iter().map(|recorded| recorded.path.as_path())
     }
 
     pub fn dependencies(&self, index: usize) -> Option<&[u32]> {
@@ -274,12 +326,15 @@ impl Record {
         self.attached.iter().cloned().collect()
     }
 
-    pub fn namespace(&self, files: &[SourceFile]) -> Option<Option<Vec<Diagnostic>>> {
+    pub fn namespace(
+        &self,
+        file_at: impl Fn(usize) -> Option<SourceFile>,
+    ) -> Option<Option<Vec<Diagnostic>>> {
         match &self.namespace {
             None => Some(None),
             Some(diagnostics) => diagnostics
                 .iter()
-                .map(|diagnostic| restore(diagnostic, files))
+                .map(|diagnostic| restore(diagnostic, &file_at))
                 .collect::<Option<Vec<_>>>()
                 .map(Some),
         }
@@ -408,7 +463,10 @@ fn recorded(
     })
 }
 
-fn restore(diagnostic: &RecordedDiagnostic, files: &[SourceFile]) -> Option<Diagnostic> {
+fn restore(
+    diagnostic: &RecordedDiagnostic,
+    file_at: &impl Fn(usize) -> Option<SourceFile>,
+) -> Option<Diagnostic> {
     let range =
         |start: u32, end: u32| (start <= end).then(|| TextRange::new(start.into(), end.into()));
     let related = diagnostic
@@ -416,7 +474,7 @@ fn restore(diagnostic: &RecordedDiagnostic, files: &[SourceFile]) -> Option<Diag
         .iter()
         .map(|related| {
             Some(RelatedLocation {
-                file: *files.get(related.file as usize)?,
+                file: file_at(related.file as usize)?,
                 range: range(related.start, related.end)?,
                 message: static_text(&related.message),
             })
@@ -445,6 +503,20 @@ fn restore(diagnostic: &RecordedDiagnostic, files: &[SourceFile]) -> Option<Diag
         related,
         fix,
     })
+}
+
+/// Identifies a ry binary by its bytes, so a record written by another build is never read
+/// back, even one with the same size and modification time. Hashing the binary takes a few
+/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
+fn build_identity(executable: &Path) -> String {
+    match fs::read(executable) {
+        Ok(bytes) => {
+            let mut hasher = FxHasher::default();
+            hasher.write(&bytes);
+            format!("{} {:x}", bytes.len(), hasher.finish())
+        }
+        Err(_) => format!("unreadable {}", std::process::id()),
+    }
 }
 
 /// Diagnostic codes and related-location labels are static text in a finding, and a run reads

@@ -1,6 +1,6 @@
 use {
     crate::{
-        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Fingerprinter, Plan},
+        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Plan},
         config::{self, ExperimentalFeatures},
         diagnostics::{apply_suppressions, document_diagnostics},
         namespace,
@@ -12,7 +12,7 @@ use {
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
-    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -34,7 +34,6 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
-        hash::Hasher,
         io::Read,
         iter, mem,
         num::NonZero,
@@ -326,12 +325,10 @@ pub(crate) fn analyze_project(
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<ProjectAnalysis, CommandError> {
-    // A directory that is no project, such as one holding a downloaded script, gets no record.
-    let is_project = config::CONFIG_FILE_NAMES
-        .iter()
-        .chain(["DESCRIPTION"].iter())
-        .any(|name| root.join(name).is_file());
-    let cache = if is_project { cache } else { CacheUse::Off };
+    let cache = match check_cache::is_project(root) {
+        true => cache,
+        false => CacheUse::Off,
+    };
     let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
@@ -509,25 +506,18 @@ fn analyze_project_with(
         .durability(Durability::HIGH)
         .new(&db);
     let data_files = scan_data_files(root);
-    let key = {
-        let mut fingerprinter = Fingerprinter::new();
-        fingerprinter
-            .text(env!("CARGO_PKG_VERSION"))
-            .text(&build_identity())
-            .text(&format!("{config:?}"))
-            .text(&root.to_string_lossy())
-            .text(&format!("{data_files:?}"));
-        for source in [&namespace_source, &description_source] {
-            match source {
-                Some(text) => fingerprinter.bytes(&[1]).text(text),
-                None => fingerprinter.bytes(&[0]),
-            };
-        }
-        for stub in &project_stubs {
-            fingerprinter.text(&stub.stem).text(&stub.text);
-        }
-        fingerprinter.finish()
-    };
+    let executable = env::current_exe().unwrap_or_default();
+    let key = check_cache::key(
+        &executable,
+        &config,
+        root,
+        &data_files,
+        namespace_source.as_deref(),
+        description_source.as_deref(),
+        project_stubs
+            .iter()
+            .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+    );
     let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
@@ -551,9 +541,9 @@ fn analyze_project_with(
     };
     if let Plan::Replay(record) = &plan {
         let per_file: Option<Vec<Vec<Diagnostic>>> = (0..files.len())
-            .map(|index| record.diagnostics(index, &files))
+            .map(|index| record.diagnostics(index, |index| files.get(index).copied()))
             .collect();
-        let namespace = record.namespace(&files);
+        let namespace = record.namespace(|index| files.get(index).copied());
         if let (Some(per_file), Some(namespace)) = (per_file, namespace) {
             let namespace = match (namespace, &namespace_source) {
                 (Some(problems), Some(source)) => Some((namespace_path, source.clone(), problems)),
@@ -576,7 +566,7 @@ fn analyze_project_with(
     if let Plan::Partial { previous, stale } = &mut plan {
         for (index, stale) in stale.iter_mut().enumerate() {
             if !*stale {
-                recorded[index] = previous.diagnostics(index, &files);
+                recorded[index] = previous.diagnostics(index, |index| files.get(index).copied());
                 *stale = recorded[index].is_none();
             }
         }
@@ -714,7 +704,7 @@ fn analyze_project_with(
                 .collect();
             recorded == used_tokens
         })
-        .and_then(|previous| previous.namespace(&files));
+        .and_then(|previous| previous.namespace(|index| files.get(index).copied()));
     if let (Some(namespace_source), Some(problems)) = (&namespace_source, recorded_namespace) {
         namespace = problems.map(|problems| (namespace_path, namespace_source.clone(), problems));
     } else if let Some(namespace_source) = &namespace_source {
@@ -821,20 +811,6 @@ fn analyzed_files(
             diagnostics,
         })
         .collect()
-}
-
-/// Identifies the running ry binary by its bytes, so a record written by another build is never
-/// read back, even one with the same size and modification time. Hashing the binary takes a few
-/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
-fn build_identity() -> String {
-    match env::current_exe().and_then(fs::read) {
-        Ok(bytes) => {
-            let mut hasher = FxHasher::default();
-            hasher.write(&bytes);
-            format!("{} {:x}", bytes.len(), hasher.finish())
-        }
-        Err(_) => format!("unreadable {}", std::process::id()),
-    }
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
