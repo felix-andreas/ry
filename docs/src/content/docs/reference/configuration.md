@@ -24,8 +24,17 @@ equals-na = "warn"            # x == NA, which is always NA
 vector-logic = "warn"         # & or | in an if or while condition
 length-sequence = "warn"      # 1:length(x), which counts down when x is empty
 class-equals = "warn"         # class(x) == "name" instead of inherits()
+unreachable-code = "warn"     # statements after return(), stop(), break or next
+sprintf-arguments = "warn"    # a sprintf() format that wants more or fewer values
 redundant-return = "off"      # return() as a function's last expression
 commented-code = "off"        # a comment that is commented-out code
+duplicate-argument = "off"    # the same argument name twice in one call
+any-is-na = "off"             # any(is.na(x)) instead of anyNA(x)
+paste-sep = "off"             # paste(..., sep = "") instead of paste0(...)
+lengths = "off"               # sapply(x, length) instead of lengths(x)
+literal-coercion = "off"      # as.integer(1) instead of 1L
+redundant-equals = "off"      # x == TRUE instead of x
+single-quotes = "off"         # 'text' instead of "text"
 unused-parameter = "off"      # a parameter the body never reads
 unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function

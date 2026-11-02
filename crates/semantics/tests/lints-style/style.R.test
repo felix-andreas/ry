@@ -204,3 +204,125 @@ y <- 3L # ry: allow(assignment-operator)
 f <- function(x) x
 #++++
 clean
+
+#==== any-is-na
+#---- any_of_is_na_warns
+if (any(is.na(x))) stop("missing")
+#++++
+4..17 warning[any-is-na] Use anyNA(x), which stops at the first NA instead of building a vector for any()
+  safe fix 4..17 "anyNA(x)"
+
+#---- na_rm_and_other_reductions_are_clean
+any(is.na(x), na.rm = TRUE)
+all(is.na(x))
+#++++
+clean
+
+#==== paste-sep
+#---- empty_separator_warns
+paste("a", x, sep = "")
+paste(sep = '', "id_", n, collapse = ",")
+paste("a", # why
+  x, sep = "")
+#++++
+0..23 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 0..23 "paste0(\"a\", x)"
+24..65 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 24..65 "paste0(\"id_\", n, collapse = \",\")"
+36..38 warning[single-quotes] Use double quotes for strings
+  safe fix 36..38 "\"\""
+66..97 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+
+#---- other_separators_are_clean
+paste("a", x)
+paste("a", x, sep = "-")
+#++++
+clean
+
+#==== lengths
+#---- applying_length_warns
+n <- sapply(parts, length)
+m <- vapply(parts, length, integer(1))
+#++++
+5..26 warning[lengths] Use lengths(x), which counts every element's length without calling length() through sapply()
+  unsafe fix 5..26 "lengths(parts)"
+32..65 warning[lengths] Use lengths(x), which counts every element's length without calling length() through vapply()
+  unsafe fix 32..65 "lengths(parts)"
+
+#---- other_functions_are_clean
+n <- sapply(parts, nchar)
+m <- vapply(parts, length, integer(1), USE.NAMES = FALSE)
+#++++
+clean
+
+#==== literal-coercion
+#---- coerced_literals_warn
+a <- as.integer(1)
+b <- as.numeric(2L)
+e <- as.character("x")
+d <- as.logical(TRUE)
+#++++
+5..18 warning[literal-coercion] Write the literal `1L` instead of coercing it with as.integer()
+  safe fix 5..18 "1L"
+24..38 warning[literal-coercion] Write the literal `2` instead of coercing it with as.numeric()
+  safe fix 24..38 "2"
+44..61 warning[literal-coercion] Write the literal `"x"` instead of coercing it with as.character()
+  safe fix 44..61 "\"x\""
+67..83 warning[literal-coercion] Write the literal `TRUE` instead of coercing it with as.logical()
+  safe fix 67..83 "TRUE"
+
+#---- non_literals_and_lossy_coercions_are_clean
+a <- as.integer(1.5)
+b <- as.integer(x)
+e <- as.character(1)
+#++++
+clean
+
+#==== redundant-equals
+#---- comparing_with_a_boolean_warns
+if (ok == TRUE) 1
+if (done != TRUE) 2
+y <- FALSE == flag
+#++++
+4..14 warning[redundant-equals] Comparing with TRUE is redundant for a logical value. Write `ok`
+  unsafe fix 4..14 "ok"
+22..34 warning[redundant-equals] Comparing with TRUE is redundant for a logical value. Write `!done`
+  unsafe fix 22..34 "!done"
+43..56 warning[redundant-equals] Comparing with FALSE is redundant for a logical value. Write `!flag`
+  unsafe fix 43..56 "!flag"
+
+#---- other_comparisons_are_clean
+if (x == 1) 1
+if (TRUE == FALSE) 2
+#++++
+clean
+
+#==== single-quotes
+#---- single_quoted_strings_warn
+x <- 'abc'
+y <- 'say "hi"'
+#++++
+5..10 warning[single-quotes] Use double quotes for strings
+  safe fix 5..10 "\"abc\""
+16..26 warning[single-quotes] Use double quotes for strings
+
+#---- double_quotes_are_clean
+x <- "abc"
+y <- "it's"
+#++++
+clean
+
+#==== duplicate-argument
+#---- a_name_given_twice_warns
+f(a = 1, b = 2, a = 3)
+x <- list(`key` = 1, "key" = 2)
+#++++
+16..17 warning[duplicate-argument] `a` is passed twice in this call. A function stops with "matched by multiple actual arguments", and c() or list() keeps both values under one name
+44..49 warning[duplicate-argument] `key` is passed twice in this call. A function stops with "matched by multiple actual arguments", and c() or list() keeps both values under one name
+
+#---- distinct_names_and_sequential_verbs_are_clean
+f(a = 1, b = 2)
+df |> mutate(x = x + 1, x = x * 2)
+g(1, 1, 1)
+#++++
+clean

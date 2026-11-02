@@ -215,3 +215,77 @@ y <- class(z)[1] == "lm"
 w <- class(a) == class(b)
 #++++
 clean
+
+#---- seq_of_a_length_warns
+for (i in seq(length(x))) print(i)
+k <- seq(nrow(df))
+m <- seq(2, length(x))
+#++++
+10..24 warning[length-sequence] `seq(length(...))` is `c(1, 0)` when the vector is empty. Use seq_along()
+  unsafe fix 10..24 "seq_along(x)"
+40..53 warning[length-sequence] `seq(nrow(...))` is `c(1, 0)` when the count is zero. Use seq_len()
+  unsafe fix 40..53 "seq_len(nrow(df))"
+
+#==== unreachable-code
+#---- statements_after_an_exit_warn
+f <- function(x) {
+  return(x)
+  print("never")
+  x + 1
+}
+for (i in 1:3) {
+  next
+  print(i)
+}
+g <- function() {
+  stop("no")
+  1
+}
+#++++
+33..55 warning[unreachable-code] This code never runs, because return() above it leaves the block first
+84..92 warning[unreachable-code] This code never runs, because `next` above it leaves the block first
+128..129 warning[unreachable-code] This code never runs, because stop() above it leaves the block first
+
+#---- exits_at_the_end_and_inside_branches_are_clean
+f <- function(x) {
+  if (x) return(1)
+  2
+}
+while (TRUE) {
+  if (done()) break
+  step()
+}
+#++++
+clean
+
+#---- a_redefined_stop_is_clean
+stop <- function(message) cat(message)
+f <- function() {
+  stop("log")
+  1
+}
+#++++
+clean
+
+#==== sprintf-arguments
+#---- a_mismatched_count_warns
+sprintf("%d of %d", 1)
+sprintf("%s", "a", "b")
+gettextf("%5.2f%%: %s", 1)
+sprintf(fmt = "%*d", 5)
+#++++
+8..18 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+31..35 warning[sprintf-arguments] This format wants 1 value but sprintf() gets 2 values, so R ignores the extra values with a warning
+56..69 warning[sprintf-arguments] This format wants 2 values but gettextf() gets 1 value, so R stops with "too few arguments"
+88..93 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+
+#---- matching_and_unmodelled_formats_are_clean
+sprintf("%d of %d", 1, 2)
+sprintf("100%%")
+sprintf("%*d", 5, 1)
+sprintf("%1$s %1$s", "a")
+sprintf(fmt, 1)
+sprintf("%s", ...)
+sprintf("%s", x, collapse = "")
+#++++
+clean

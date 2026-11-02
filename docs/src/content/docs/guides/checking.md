@@ -92,7 +92,7 @@ syntax-error
 
 ## Lints
 
-Eight lints are on by default. Three of them catch a habit that causes bugs, and here they are in a
+Ten lints are on by default. Three of them catch a habit that causes bugs, and here they are in a
 script, with the `unused` finding for each assignment left out:
 
 ```r
@@ -121,11 +121,13 @@ it, so it is a warning. The fourth, `object-system`, warns on each S4, R6 or
 Reference Class definition, because [records and tags](/type-checking/records-and-tags) model data
 with every field checked.
 
-The other four catch code that reads right but does something else: `x == NA` is always `NA`, `&`
-in an `if` condition evaluates both sides, `1:length(x)` counts down to zero when `x` is empty, and
+Four more catch code that reads right but does something else: `x == NA` is always `NA`, `&` in
+an `if` condition evaluates both sides, `1:length(x)` counts down to zero when `x` is empty, and
 `class(x) == "data.frame"` misses a tibble. Each fix changes what the code does, which is the point,
-so it is unsafe and runs only with `--unsafe-fixes`. Two style lints, `redundant-return` and
-`commented-code`, are off until you turn them on. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
+so it is unsafe and runs only with `--unsafe-fixes`. The last two, `unreachable-code` and
+`sprintf-arguments`, flag code after a `return()` and a `sprintf()` format that wants more values
+than it gets. Style lints, such as `redundant-return`, `single-quotes` and `paste-sep`, are off until
+you turn them on. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
 reason, and [configuration](/reference/configuration) shows how to turn each one on or off.
 
 ## Fixing findings

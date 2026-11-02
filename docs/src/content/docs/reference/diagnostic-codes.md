@@ -59,6 +59,12 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `boolean-shorthand` | `T` to `TRUE`, `F` to `FALSE` | safe |
 | `trailing-comma` | remove the comma | safe |
 | `redundant-return` | `return(x)` to `x` | safe |
+| `any-is-na` | `any(is.na(x))` to `anyNA(x)` | safe |
+| `paste-sep` | `paste(..., sep = "")` to `paste0(...)`, when no comment sits inside the call | safe |
+| `literal-coercion` | `as.integer(1)` to `1L`, and the like for other literals | safe |
+| `single-quotes` | `'text'` to `"text"`, when the text holds no `"` or `\'` | safe |
+| `lengths` | `sapply(x, length)` to `lengths(x)` | unsafe |
+| `redundant-equals` | `x == TRUE` to `x`, `x == FALSE` to `!x` | unsafe |
 | `equals-na` | `x == NA` to `is.na(x)`, `x != NA` to `!is.na(x)` | unsafe |
 | `vector-logic` | `&` to `&&`, `|` to `||` | unsafe |
 | `length-sequence` | `1:length(x)` to `seq_along(x)`, `1:nrow(x)` to `seq_len(nrow(x))` | unsafe |
@@ -122,7 +128,7 @@ is unsafe because the right-hand side may no longer run. Inside a call such as `
 operator is left alone, because there it works on vectors on purpose.
 
 **`length-sequence`** (warning): `1:length(x)`, `1:nrow(x)`, `1:ncol(x)`, `1:NROW(x)` or
-`1:NCOL(x)`. When the length is zero, `1:0` is `c(1, 0)`, so a loop over it runs twice instead of
+`1:NCOL(x)`, and the same counts in `seq(length(x))`. When the length is zero, `1:0` is `c(1, 0)`, so a loop over it runs twice instead of
 not at all. The fix to `seq_along(x)` or `seq_len(nrow(x))` is unsafe because it changes what an
 empty input does.
 
@@ -130,6 +136,20 @@ empty input does.
 vector has several entries: a tibble's class is `c("tbl_df", "tbl", "data.frame")`, so the
 comparison gives three values, and since R 4.2 an `if` on it stops with an error. The fix to `inherits(x, "name")` is unsafe because it changes the result for such
 objects.
+
+**`unreachable-code`** (warning): statements after `return()`, `stop()`, `break` or `next` in the
+same block, which never run. The range covers every statement from the first unreachable one to
+the end of the block. A file that defines its own `return` or `stop` gets no finding for it.
+
+**`sprintf-arguments`** (warning): a `sprintf()` or `gettextf()` call whose literal format wants a
+different number of values than the call passes. Too few values stop R with "too few arguments",
+and an extra value is dropped with a warning. `%%` consumes nothing and `*` in a width or precision
+consumes a value. A format with `%1$s` positions, a format that is not a literal, a `...` argument,
+or a named argument other than `fmt` turns the check off for that call.
+
+```text
+! This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+```
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
@@ -227,5 +247,17 @@ branches, loops or indexes, such as `# x <- compute(y)`. Prose rarely parses tha
 (`#'`), plumber (`#*`), Quarto (`#|`), `#!` and `#>` output comments are skipped. Delete the code
 instead: version control keeps it.
 
-These six take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
+**`duplicate-argument`** (off by default): the same argument name twice in one call, which stops a
+function with "formal argument matched by multiple actual arguments". It is off because a function
+that collects `...` keeps both values on purpose, such as cli's `c("i" = ..., "i" = ...)` bullets or
+two HTML `class` attributes, and the lint cannot see which functions do. `mutate()`, `transmute()`,
+`summarise()`, `summarize()` and `reframe()` are exempt, because there a repeated name updates a
+column.
+
+**`any-is-na`**, **`paste-sep`**, **`lengths`**, **`literal-coercion`**, **`redundant-equals`** and
+**`single-quotes`** (off by default): spellings with a shorter or faster equivalent, listed with
+their fixes under [Fixes](#fixes). `redundant-equals` and `lengths` have unsafe fixes, because
+`1 == TRUE` is `TRUE` and `sapply()` on an empty list returns a list, not an integer vector.
+
+These lints take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
 still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.

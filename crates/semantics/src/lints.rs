@@ -67,6 +67,26 @@ pub struct LintConfig {
     pub commented_code: LintLevel,
     /// Off by default: an explicit final `return()` is a style choice.
     pub redundant_return: LintLevel,
+    /// Off by default: the same argument name twice in one call. A function that collects
+    /// `...` keeps both values on purpose (cli bullets in `c()`, repeated HTML `class`
+    /// attributes), and a syntax lint cannot tell such a callee from one with a matching formal.
+    pub duplicate_argument: LintLevel,
+    /// Statements after `return()`, `stop()`, `break` or `next` in the same block.
+    pub unreachable_code: LintLevel,
+    /// A literal `sprintf()` format whose conversions do not match the values passed.
+    pub sprintf_arguments: LintLevel,
+    /// Off by default: `any(is.na(x))`, which `anyNA(x)` answers without a copy.
+    pub any_is_na: LintLevel,
+    /// Off by default: `paste(..., sep = "")`, which is `paste0(...)`.
+    pub paste_sep: LintLevel,
+    /// Off by default: `sapply(x, length)`, which is `lengths(x)`.
+    pub lengths: LintLevel,
+    /// Off by default: `as.integer(1)` and kin, which a literal spells directly.
+    pub literal_coercion: LintLevel,
+    /// Off by default: `x == TRUE` and kin.
+    pub redundant_equals: LintLevel,
+    /// Off by default: a string in single quotes.
+    pub single_quotes: LintLevel,
     /// Copied from `[check] object-systems = false` when the config loads, which turns
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
@@ -236,6 +256,10 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
+                    call_lints(&red, config, diagnostics);
+                }
+                SyntaxKind::BRACE_EXPR => {
+                    unreachable_code_lint(&red, config, &mut lints.unless_redefined);
                 }
                 SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
                     vector_logic_lint(&red, config, diagnostics);
@@ -254,6 +278,9 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
         GreenEvent::Token { kind, text, range } => {
             if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
                 commented_code_lint(text, range, config, diagnostics);
+            }
+            if kind == SyntaxKind::STRING && annotation_depth == 0 {
+                single_quotes_lint(text, range, config, diagnostics);
             }
         }
     });
@@ -362,13 +389,43 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
         }
         SyntaxKind::PARAMETER => config.naming_style.is_some(),
         SyntaxKind::NAME => matches!(node.single_token_text(), Some("T" | "F")),
-        SyntaxKind::CALL_EXPR => match node.child_nodes().next() {
-            Some(callee) if callee.kind() == SyntaxKind::NAME => callee
-                .single_token_text()
-                .is_none_or(|name| object_system_function(name).is_some()),
-            Some(callee) => callee.kind() == SyntaxKind::NAMESPACE_EXPR,
-            None => false,
-        },
+        SyntaxKind::CALL_EXPR => {
+            let mut children = node.child_nodes();
+            let callee_lints = match children.next() {
+                Some(callee) if callee.kind() == SyntaxKind::NAME => {
+                    callee.single_token_text().is_none_or(|name| {
+                        object_system_function(name).is_some() || CALL_LINT_NAMES.contains(&name)
+                    })
+                }
+                Some(callee) => callee.kind() == SyntaxKind::NAMESPACE_EXPR,
+                None => false,
+            };
+            callee_lints
+                || (is_enabled(config.duplicate_argument, None)
+                    && children
+                        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+                        .is_some_and(|arguments| {
+                            arguments
+                                .child_nodes()
+                                .filter(|argument| {
+                                    argument.child_kinds().any(|kind| kind == SyntaxKind::EQ)
+                                })
+                                .nth(1)
+                                .is_some()
+                        }))
+        }
+        SyntaxKind::BRACE_EXPR => {
+            is_enabled(config.unreachable_code, Some(Severity::Warning)) && {
+                let mut statements = node.child_nodes();
+                statements.by_ref().any(|statement| match statement.kind() {
+                    SyntaxKind::BREAK_EXPR | SyntaxKind::NEXT_EXPR => true,
+                    SyntaxKind::CALL_EXPR => statement.child_nodes().next().is_some_and(|callee| {
+                        matches!(callee.single_token_text(), Some("return" | "stop"))
+                    }),
+                    _ => false,
+                }) && statements.next().is_some()
+            }
+        }
         _ => false,
     }
 }
@@ -397,11 +454,16 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
         && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
     {
         comparison_lints(node, operator.kind(), &lhs, &rhs, config, diagnostics);
+        redundant_equals_lint(node, operator.kind(), &lhs, &rhs, config, diagnostics);
     }
     if operator.kind() == SyntaxKind::COLON
         && let (Some(lhs), Some(rhs)) = (binary.lhs(), binary.rhs())
+        && lhs.kind() == SyntaxKind::LITERAL
+        && lhs
+            .first_token()
+            .is_some_and(|token| matches!(token.text(), "1" | "1L"))
     {
-        length_sequence_lint(node, &lhs, &rhs, config, diagnostics);
+        length_sequence_lint(node, &rhs, false, config, diagnostics);
     }
     if let Some(style) = config.naming_style
         && matches!(operator.kind(), SyntaxKind::LESS_MINUS | SyntaxKind::EQ)
@@ -625,35 +687,34 @@ fn comparison_lints(
 /// `1:length(x)` is `c(1, 0)` for an empty `x`, so a loop over it runs twice instead of never.
 /// The fix makes the empty case run zero times, which is what the loop meant but not what it
 /// did, so it is unsafe.
+/// `1:n` or `seq(n)` where `n` is a length or a count, written as `seq(...)` when `seq_call`.
 fn length_sequence_lint(
     sequence: &SyntaxNode,
-    lhs: &SyntaxNode,
-    rhs: &SyntaxNode,
+    count: &SyntaxNode,
+    seq_call: bool,
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let starts_at_one = lhs.kind() == SyntaxKind::LITERAL
-        && lhs
-            .first_token()
-            .is_some_and(|token| matches!(token.text(), "1" | "1L"));
-    if !starts_at_one {
-        return;
-    }
     let Some((function, argument)) =
-        single_argument_of(rhs, &["length", "nrow", "ncol", "NROW", "NCOL"])
+        single_argument_of(count, &["length", "nrow", "ncol", "NROW", "NCOL"])
     else {
         return;
     };
     let argument = significant_text(&argument);
+    let written = if seq_call {
+        format!("seq({function}(...))")
+    } else {
+        format!("1:{function}(...)")
+    };
     let (message, title, replacement) = if function == "length" {
         (
-            "`1:length(...)` is `c(1, 0)` when the vector is empty. Use seq_along()".to_owned(),
+            format!("`{written}` is `c(1, 0)` when the vector is empty. Use seq_along()"),
             "Change to `seq_along()`",
             format!("seq_along({argument})"),
         )
     } else {
         (
-            format!("`1:{function}(...)` is `c(1, 0)` when the count is zero. Use seq_len()"),
+            format!("`{written}` is `c(1, 0)` when the count is zero. Use seq_len()"),
             "Change to `seq_len()`",
             format!("seq_len({function}({argument}))"),
         )
@@ -666,6 +727,536 @@ fn length_sequence_lint(
         significant_range(sequence),
         message,
         Some((Applicability::Unsafe, title, replacement)),
+    );
+}
+
+/// Bare callees some call lint looks at, so the green pre-check can skip every other call.
+const CALL_LINT_NAMES: &[&str] = &[
+    "seq",
+    "sprintf",
+    "gettextf",
+    "any",
+    "paste",
+    "sapply",
+    "vapply",
+    "as.integer",
+    "as.numeric",
+    "as.double",
+    "as.logical",
+    "as.character",
+];
+
+/// Functions that evaluate their arguments in order, so naming a column twice is how they
+/// update it (`mutate(x = x + 1, x = x * 2)`).
+const SEQUENTIAL_ARGUMENT_FUNCTIONS: &[&str] =
+    &["mutate", "transmute", "summarise", "summarize", "reframe"];
+
+/// An argument of a call: its name without quotes or backticks, and its value.
+struct CallArgument {
+    node: SyntaxNode,
+    name: Option<(String, TextRange)>,
+    value: Option<SyntaxNode>,
+}
+
+fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
+    let Some(list) = call
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+    else {
+        return Vec::new();
+    };
+    list.children()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+        .map(|node| {
+            let named = node
+                .children_with_tokens()
+                .any(|element| element.kind() == SyntaxKind::EQ);
+            let mut children = node.children();
+            let name = if named {
+                children.next().map(|name| {
+                    let text = name.text().to_string();
+                    let unquoted = text
+                        .strip_prefix(['`', '"', '\''])
+                        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
+                        .unwrap_or(&text)
+                        .to_owned();
+                    (unquoted, significant_range(&name))
+                })
+            } else {
+                None
+            };
+            let value = children.next();
+            CallArgument { node, name, value }
+        })
+        .collect()
+}
+
+/// The name of a bare callee, such as `sprintf` in `sprintf(...)` but not in `base::sprintf(...)`.
+fn bare_callee(call: &SyntaxNode) -> Option<String> {
+    call.first_child()
+        .filter(|callee| callee.kind() == SyntaxKind::NAME)
+        .map(|callee| callee.text().to_string())
+}
+
+fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    let callee = bare_callee(call);
+    let arguments = call_arguments(call);
+    duplicate_argument_lint(callee.as_deref(), &arguments, config, diagnostics);
+    let Some(callee) = callee else {
+        return;
+    };
+    let positional: Vec<&SyntaxNode> = arguments
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .filter_map(|argument| argument.value.as_ref())
+        .collect();
+    let all_positional = positional.len() == arguments.len();
+    match callee.as_str() {
+        "seq" if all_positional && positional.len() == 1 => {
+            length_sequence_lint(call, positional[0], true, config, diagnostics);
+        }
+        "sprintf" | "gettextf" => sprintf_arguments_lint(&callee, &arguments, config, diagnostics),
+        "any" if all_positional && positional.len() == 1 => {
+            if let Some(("is.na", value)) = single_argument_of(positional[0], &["is.na"]) {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.any_is_na),
+                    Severity::Warning,
+                    "any-is-na",
+                    significant_range(call),
+                    "Use anyNA(x), which stops at the first NA instead of building a vector for any()",
+                    Some((
+                        Applicability::Safe,
+                        "Change to `anyNA()`",
+                        format!("anyNA({})", significant_text(&value)),
+                    )),
+                );
+            }
+        }
+        "paste" => paste_sep_lint(call, &arguments, config, diagnostics),
+        "sapply" | "vapply" => {
+            let expected = if callee == "sapply" { 2 } else { 3 };
+            let counts_lengths = all_positional
+                && positional.len() == expected
+                && positional[1].kind() == SyntaxKind::NAME
+                && positional[1].text() == "length";
+            if counts_lengths {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.lengths),
+                    Severity::Warning,
+                    "lengths",
+                    significant_range(call),
+                    format!(
+                        "Use lengths(x), which counts every element's length without calling length() through {callee}()"
+                    ),
+                    Some((
+                        Applicability::Unsafe,
+                        "Change to `lengths()`",
+                        format!("lengths({})", significant_text(positional[0])),
+                    )),
+                );
+            }
+        }
+        "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character"
+            if all_positional && positional.len() == 1 =>
+        {
+            literal_coercion_lint(call, &callee, positional[0], config, diagnostics);
+        }
+        _ => {}
+    }
+}
+
+/// An opt-in lint has no default severity, so `Default` leaves it off.
+fn opt_in(level: LintLevel) -> LintLevel {
+    match level {
+        LintLevel::Default => LintLevel::Off,
+        level => level,
+    }
+}
+
+/// A closure stops with "formal argument matched by multiple actual arguments", and `c()` or
+/// `list()` keeps both values under one name, which code that reads it by name then misses.
+fn duplicate_argument_lint(
+    callee: Option<&str>,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if callee.is_some_and(|callee| SEQUENTIAL_ARGUMENT_FUNCTIONS.contains(&callee)) {
+        return;
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, range) in arguments
+        .iter()
+        .filter_map(|argument| argument.name.as_ref())
+    {
+        if name.is_empty() {
+            continue;
+        }
+        if seen.contains(&name.as_str()) {
+            push_lint(
+                diagnostics,
+                opt_in(config.duplicate_argument),
+                Severity::Warning,
+                "duplicate-argument",
+                *range,
+                format!(
+                    "`{name}` is passed twice in this call. A function stops with \"matched by multiple actual arguments\", and c() or list() keeps both values under one name"
+                ),
+                None,
+            );
+        } else {
+            seen.push(name);
+        }
+    }
+}
+
+/// Statements after `return()`, `stop()`, `break` or `next` in the same block never run.
+/// `return` and `stop` count only while the file does not define them.
+fn unreachable_code_lint(
+    block: &SyntaxNode,
+    config: &LintConfig,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+) {
+    let statements: Vec<SyntaxNode> = block.children().collect();
+    let Some((index, exit)) = statements
+        .iter()
+        .enumerate()
+        .find_map(|(index, statement)| {
+            let exit = match statement.kind() {
+                SyntaxKind::BREAK_EXPR => "break".to_owned(),
+                SyntaxKind::NEXT_EXPR => "next".to_owned(),
+                SyntaxKind::CALL_EXPR => bare_callee(statement)
+                    .filter(|callee| matches!(callee.as_str(), "return" | "stop"))?,
+                _ => return None,
+            };
+            Some((index, exit))
+        })
+    else {
+        return;
+    };
+    let (Some(first), Some(last)) = (statements.get(index + 1), statements.last()) else {
+        return;
+    };
+    let range = TextRange::new(
+        significant_range(first).start(),
+        significant_range(last).end(),
+    );
+    let written = if matches!(exit.as_str(), "break" | "next") {
+        format!("`{exit}`")
+    } else {
+        format!("{exit}()")
+    };
+    let mut diagnostics = Vec::new();
+    push_lint(
+        &mut diagnostics,
+        config.unreachable_code,
+        Severity::Warning,
+        "unreachable-code",
+        range,
+        format!("This code never runs, because {written} above it leaves the block first"),
+        None,
+    );
+    unless_redefined.extend(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| (exit.clone(), diagnostic)),
+    );
+}
+
+/// `sprintf("%d of %d", x)` stops with "too few arguments", and a value no conversion uses is
+/// dropped with a warning. Checked only when the format is a literal and every value is passed
+/// by position, since `...` or a vector format could supply any count.
+fn sprintf_arguments_lint(
+    callee: &str,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let format_index = arguments
+        .iter()
+        .position(|argument| {
+            argument
+                .name
+                .as_ref()
+                .is_some_and(|(name, _)| name == "fmt")
+        })
+        .unwrap_or(0);
+    let Some(format) = arguments.get(format_index) else {
+        return;
+    };
+    let other_named = arguments
+        .iter()
+        .enumerate()
+        .any(|(index, argument)| index != format_index && argument.name.is_some());
+    let spreads = arguments.iter().any(|argument| {
+        argument
+            .value
+            .as_ref()
+            .is_some_and(|value| value.kind() == SyntaxKind::NAME && value.text() == "...")
+    });
+    if other_named || spreads {
+        return;
+    }
+    let Some(literal) = format
+        .value
+        .as_ref()
+        .filter(|value| value.kind() == SyntaxKind::LITERAL)
+    else {
+        return;
+    };
+    let Some(token) = literal
+        .first_token()
+        .filter(|token| token.kind() == SyntaxKind::STRING)
+    else {
+        return;
+    };
+    let text = token.text();
+    let Some(inner) = text.get(1..text.len().saturating_sub(1)) else {
+        return;
+    };
+    let Some(wanted) = format_conversions(inner) else {
+        return;
+    };
+    let given = arguments.len() - 1;
+    if wanted == given {
+        return;
+    }
+    let plural = |count: usize, word: &str| {
+        if count == 1 {
+            format!("{count} {word}")
+        } else {
+            format!("{count} {word}s")
+        }
+    };
+    let consequence = if given < wanted {
+        "R stops with \"too few arguments\""
+    } else {
+        "R ignores the extra values with a warning"
+    };
+    push_lint(
+        diagnostics,
+        config.sprintf_arguments,
+        Severity::Warning,
+        "sprintf-arguments",
+        significant_range(literal),
+        format!(
+            "This format wants {} but {callee}() gets {}, so {consequence}",
+            plural(wanted, "value"),
+            plural(given, "value"),
+        ),
+        None,
+    );
+}
+
+/// How many values a C-style format consumes, or `None` for a format this does not model
+/// (`%1$s` positions, an unknown conversion, a trailing `%`).
+fn format_conversions(format: &str) -> Option<usize> {
+    let bytes = format.as_bytes();
+    let mut count = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if bytes.get(index) == Some(&b'%') {
+            index += 1;
+            continue;
+        }
+        while bytes
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b'-' | b'+' | b' ' | b'#' | b'0'))
+        {
+            index += 1;
+        }
+        for part in 0..2 {
+            if part == 1 {
+                if bytes.get(index) != Some(&b'.') {
+                    break;
+                }
+                index += 1;
+            }
+            if bytes.get(index) == Some(&b'*') {
+                count += 1;
+                index += 1;
+            } else {
+                while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+            }
+        }
+        match bytes.get(index) {
+            Some(
+                b'a' | b'A' | b'd' | b'i' | b'f' | b'e' | b'E' | b'g' | b'G' | b'o' | b's' | b'x'
+                | b'X',
+            ) => {
+                count += 1;
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(count)
+}
+
+/// `paste(..., sep = "")` is `paste0(...)`. The fix rebuilds the call from its other arguments,
+/// so it is offered only when no comment sits inside the call.
+fn paste_sep_lint(
+    call: &SyntaxNode,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(separator) = arguments.iter().find(|argument| {
+        argument
+            .name
+            .as_ref()
+            .is_some_and(|(name, _)| name == "sep")
+            && argument
+                .value
+                .as_ref()
+                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''"))
+    }) else {
+        return;
+    };
+    let has_comment = call
+        .descendants_with_tokens()
+        .any(|element| element.kind() == SyntaxKind::COMMENT);
+    let fix = (!has_comment).then(|| {
+        let rest: Vec<String> = arguments
+            .iter()
+            .filter(|argument| argument.node != separator.node)
+            .map(|argument| significant_text(&argument.node))
+            .collect();
+        (
+            Applicability::Safe,
+            "Change to `paste0()`",
+            format!("paste0({})", rest.join(", ")),
+        )
+    });
+    push_lint(
+        diagnostics,
+        opt_in(config.paste_sep),
+        Severity::Warning,
+        "paste-sep",
+        significant_range(call),
+        "Use paste0(...) instead of paste(..., sep = \"\")",
+        fix,
+    );
+}
+
+/// `as.integer(1)` is `1L`: the literal says the type directly.
+fn literal_coercion_lint(
+    call: &SyntaxNode,
+    callee: &str,
+    value: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if value.kind() != SyntaxKind::LITERAL {
+        return;
+    }
+    let Some(token) = value.first_token() else {
+        return;
+    };
+    let text = token.text();
+    let replacement = match (callee, token.kind()) {
+        ("as.integer", SyntaxKind::DOUBLE) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
+            format!("{text}L")
+        }
+        ("as.integer", SyntaxKind::INTEGER) => text.to_owned(),
+        ("as.numeric" | "as.double", SyntaxKind::DOUBLE) => text.to_owned(),
+        ("as.numeric" | "as.double", SyntaxKind::INTEGER) => text.trim_end_matches('L').to_owned(),
+        ("as.logical", SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW) => text.to_owned(),
+        ("as.character", SyntaxKind::STRING) => text.to_owned(),
+        _ => return,
+    };
+    push_lint(
+        diagnostics,
+        opt_in(config.literal_coercion),
+        Severity::Warning,
+        "literal-coercion",
+        significant_range(call),
+        format!("Write the literal `{replacement}` instead of coercing it with {callee}()"),
+        Some((Applicability::Safe, "Use the literal", replacement)),
+    );
+}
+
+/// `x == TRUE` is `x` and `x == FALSE` is `!x` for a logical `x`. The fix is unsafe because
+/// `==` coerces: `1 == TRUE` and `"TRUE" == TRUE` are both `TRUE`.
+fn redundant_equals_lint(
+    comparison: &SyntaxNode,
+    operator: SyntaxKind,
+    lhs: &SyntaxNode,
+    rhs: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let boolean = |node: &SyntaxNode| {
+        (node.kind() == SyntaxKind::LITERAL)
+            .then(|| node.first_token())
+            .flatten()
+            .and_then(|token| match token.kind() {
+                SyntaxKind::TRUE_KW => Some(true),
+                SyntaxKind::FALSE_KW => Some(false),
+                _ => None,
+            })
+    };
+    let (value, other) = match (boolean(lhs), boolean(rhs)) {
+        (None, Some(value)) => (value, lhs),
+        (Some(value), None) => (value, rhs),
+        _ => return,
+    };
+    let keeps = value == (operator == SyntaxKind::EQ2);
+    let other = significant_text(other);
+    let replacement = if keeps { other } else { format!("!{other}") };
+    let literal = if value { "TRUE" } else { "FALSE" };
+    push_lint(
+        diagnostics,
+        opt_in(config.redundant_equals),
+        Severity::Warning,
+        "redundant-equals",
+        significant_range(comparison),
+        format!("Comparing with {literal} is redundant for a logical value. Write `{replacement}`"),
+        Some((Applicability::Unsafe, "Drop the comparison", replacement)),
+    );
+}
+
+/// The tidyverse style and lintr prefer double quotes. The fix swaps the delimiters only when
+/// the text holds no double quote and no escaped single quote, so it never needs new escapes.
+fn single_quotes_lint(
+    text: &str,
+    range: TextRange,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !is_enabled(config.single_quotes, None) {
+        return;
+    }
+    let Some(inner) = text
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    else {
+        return;
+    };
+    let fix = (!inner.contains('"') && !inner.contains("\\'")).then(|| {
+        (
+            Applicability::Safe,
+            "Change to double quotes",
+            format!("\"{inner}\""),
+        )
+    });
+    push_lint(
+        diagnostics,
+        config.single_quotes,
+        Severity::Warning,
+        "single-quotes",
+        range,
+        "Use double quotes for strings",
+        fix,
     );
 }
 
