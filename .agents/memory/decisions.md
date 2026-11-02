@@ -4845,15 +4845,7 @@ check` releases its trees once, and memoized records are compact" below).
 - **Impact.** Typed `ry check` on finbench went from 2.43 s / 831 MiB to about 1.9 s / 644 MiB
   (untyped 1.65 s / 533 MiB). The per-name projection also means an edit to one type definition
   re-verifies only the readers of that name.
-- **`ry load` remembers a clean strict verdict** (`preflight::check_package`). The pre-check cannot
-  share a database with the runtime's loader, which lives in `libR.so`, so instead a clean result is
-  stored in `<cache dir>/ry/strict/<hash of the package root>`, holding a 128-bit fingerprint (two
-  differently seeded SipHashes) of the ry binary's path, size and mtime, the configuration's `Debug`
-  form, every R file the project analysis walks, the override stubs, `DESCRIPTION`, `NAMESPACE` and the
-  data-file layouts. One record per package keeps the cache from growing with edits, and a refusal is
-  never stored, so its errors print every time. A first load still pays the check; running the check
-  inside the runtime loader's own analysis would remove that and was not done, because that loader
-  analyses only what purity needs.
+- **`ry load` reuses `ry check`'s record for its strict verdict**: see "The strict load check shares the check record".
 
 # Decision record: matching GNU R's own tests where its behavior is an artifact
 
@@ -5192,7 +5184,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - An eager item is effect-free (`EagerItem.effect_free`, `load_index.rs`) when it binds a function literal, or when `item_effect_free` (`top_level.rs`) holds: a strict constant, or a definition whose declaring calls' arguments have no effect. Strict mode's `Definition` alone is not enough, because it leaves a declaring call's arguments to R, so `setRefClass(..., methods = list(m = { cat(1); function() 1 }))` passes strict mode yet prints. Loading an imported package (NAMESPACE imports, `library()` with effect-free arguments) is allowed before the verdict; this package's own code with an effect never is.
 - `.ry_await_verdict()` sits before `sysdata.rda` and `data/*.R`, because a data file is ordinary code.
 - A constant may call a user `@pure` function before the verdict. That purity is trusted, not checked, which is the documented contract of `@pure`.
-- The check walks only `R/` and computes diagnostics only for requested files (`analyze_project`'s `walk` and `requested`): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. That cut the check's CPU from 6.3 to 4.3 s on typed finbench.
+- The check computes diagnostics only for the `R/` files (`analyze_project`'s requested paths): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. It walks the whole root so it can share the check record ("The strict load check shares the check record").
 - `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
 - The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
 
@@ -5546,6 +5538,52 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
 
+## The item check's working maps live in a pooled bump arena
+
+- **Previous shape.** Every `Checker` built a dozen `FxHashMap`s and `FxHashSet`s on the global
+  heap (expression annotations, binding types, superassign seeds, read slots and the rest), so
+  each item check paid their growth and their frees. Call arguments carried names as `String`,
+  S3 method names were built with `format!`, `substitute_rigid` took a hash map and memoized every
+  type it visited, and several hot syntax queries (top-level definitions, annotation token scans,
+  the duplicate-argument lint) built red nodes and owned strings to answer a yes-or-no question.
+- **Weakness.** All of it is per-item or per-call allocation whose lifetime is one item check or
+  one query, which is exactly what the data-oriented rule says should come from an arena.
+- **Target shape.**
+  - The checker's maps are `hashbrown` maps allocated in a `bumpalo::Bump` (`ArenaMap`,
+    `ArenaSet` in `crates/semantics/src/check.rs`), through an `Arena` adapter that implements
+    std's `Allocator`. Bumpalo's `allocator-api2` impl does not work here, because the JIT turns
+    on hashbrown's `nightly` feature and that switches every hashbrown map in a workspace build
+    to std's trait; bumpalo's own `allocator_api` feature is no way out either, since it breaks
+    Cranelift's register allocator. The arenas live in a per-thread pool; it is a
+    stack, not one arena, because an item check can start a nested check (a callee's interface)
+    while its own arena is live. An arena is reset, not freed, when its check returns, so a
+    thread reuses the same chunks for every item.
+  - Call argument names are `Symbol`, overload and namespace lookups take `Symbol`, and S3
+    method names are spelled in a per-thread buffer before interning (`method_symbol`).
+  - `substitute_rigid` takes a slice of bindings and memoizes only types larger than 64 nodes,
+    where sharing actually repeats work.
+  - `top_level_definition`, the annotation token scans and the duplicate-argument prescan read
+    the green tree directly; the full argument list is built only when a name repeats.
+- **Impact.** On the whole finance bench (`ry check --no-cache`), callgrind went from 23.59 G to
+  22.68 G instructions and mimalloc calls from 19.78 M to 15.82 M, with byte-identical findings.
+  Interleaved wall time on 4 cores moved within noise (median 1.35 s against 1.34 s). Committed
+  memory rose about 24 MiB from the pooled arenas and pre-sized resolution caches. The remaining
+  allocations are rowan's red and green nodes, salsa's memo bookkeeping and scattered `Vec`
+  growth (`backlog.md`, "Check cache follow-ups").
+
+## The strict load check shares the check record
+
+- **Previous shape.** `preflight::check_package` stored a clean verdict in `<cache dir>/ry/strict/<hash of the root>` under one fingerprint of every input, beside `ry check`'s own record in `.ry_cache/check.json`. Two mechanisms recorded the same fact, any edit invalidated the whole verdict, and a package that `ry check` or the editor had just checked still paid a full check on load.
+- **Target shape.** The load check is `ry check`'s analysis (`cli::analyze_project`, walking the whole root) asked about `R/` alone, reading and writing the same record. A recorded file's `diagnostics` is `None` when the run that wrote it did not check that file, and `check_cache::plan` treats such a file as stale, so a later `ry check` still checks the tests a load skipped. Kind isolation makes the sharing sound: a name only a test file defines stays unresolved in `R/`, and a test's `library()` does not attach in `R/`, so the `R/` verdict is the same as from an `R/`-only walk.
+- **A verdict-only pass was measured and rejected.** A lint may be configured as an error, and `is_strict_error` counts it, so lints cannot be skipped. What a verdict could skip (rendering, annotation agreement) is about 0.3 of 5.3 CPU-s on typed finbench.
+- **Impact.** On typed finbench (4 cores, release) a load after `ry check` takes 0.55 to 0.64 s, the same as an untyped load, and an edit inside one body rechecks one file. A verdict-cold load costs 2.5 to 2.7 s, about 0.15 s more than the old `R/`-only walk because the record needs the whole root walked; the rest is analysis CPU (parse about 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), which belongs to the type checker's own speed.
+
+## The bench templates are inline-typed
+
+- **Previous shape.** The templates carried `#:` comment annotations, and `generate.py` stripped them with a regex for untyped runs. Comment annotations never reach ry's runtime, so the typed benches could not show what types buy at run time, and records and tags (which have no R spelling) could not appear at all.
+- **Target shape.** The templates use inline syntax. An untyped run erases each generated file with `ry debug erase` (`syntax::erase_inline_annotations`, the same erasure `ry R` runs) and then drops the `#: @type` lines the erasure leaves, so there is one source of truth for the program and the erasure is exercised on 180,000 lines per run. Where typed code models data better with a record or a tag union than with S4, R6 or a named list, the template keeps both versions in `#@ typed` / `#@ untyped` / `#@ end` blocks; the untyped version stays the plain R the dependency set expects, and `generate.py` counts lines on it so both runs instantiate the same templates.
+- **Impact.** The typed and untyped programs differ only where a record or tag replaces an R object system; everything else is the same program. `return()` had to accept native values (it passes its argument through, like `invisible()`).
+
 ## `$` fields resolve through the values that built the receiver
 
 - Before, a `$` field was no navigation target at all: goto, references and rename found nothing.
@@ -5682,6 +5720,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
 - **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.
 
+## A primitive's S4 cache lookup matches arguments by name first
+
+- **Previous shape:** `s4_dispatch` (`crates/interp/src/dispatch.rs`) built the dispatch label from the primitive's supplied arguments in order, as GNU R's `R_quick_dispatch` does. `x[i, drop = FALSE]` then took the class of `drop` for `j`, keyed as `x#logical#logical#missing`, and ran the method cached for `x[i, j]`. Matrix's `indexing.R` hit this: after `D[TRUE, TRUE]`, `D[L, drop = FALSE]` failed with "logical subscript too long".
+- **Why GNU R gets away with it:** the quick table GNU R consults for a primitive is often a stale environment that lacks the inherited entries (as for Matrix), so the lookup misses and full dispatch, which matches by name, runs. A small class defined at top level does show the quirk in GNU R (`a[TRUE, TRUE]` then `a[TRUE, drop = FALSE]` both run the `j = "logical"` method).
+- **Chosen shape:** `methods::signature_arguments` matches the supplied arguments to the generic's formals (exact names, then positions up to `...`) and orders them by `.SigArgs` before the cache lookup. A partial or unknown name skips the cache and leaves matching to the generic. ry deliberately differs from GNU R's quirk here; an oracle case cannot pin it, the Matrix test suite does.
+
+## Package-test compatibility details that look optional but are not
+
+- **Warnings always go through `.signalSimpleWarning`.** GNU R's `vsignalWarning` calls `.signalSimpleWarning(msg, base::quote(call))` whenever that function is bound, even with no handler established, and rlang reads the frames it leaves. ry used to call it only when a handler existed (`crates/interp/src/conditions.rs`, `warning_call`).
+- **Compiled closure calls pass constant arguments as values.** GNU R's byte code pushes a constant argument with `PUSHCONSTARG`, without a promise, and rlang's `env_dot_type` tells the two apart. `compiler::cmpfun` compiles at once, as GNU R's does (`crates/interp/src/bytecode.rs`, `bcClose`; `eval::compiled_args_into`).
+- **Base binds the missing argument in the C API.** `R_MissingArg` is a symbol whose base value is itself, so `R_existsVarInFrame`, `R_GetBindingType`, `R_BindingIsActive` and `R_BindingIsLocked` answer for it in the base frames instead of erroring (`crates/libr/src/environments.rs`, `base_binds_missing_arg`).
+- **A compiled `local(expr)` is `(function() expr)()` with a four-element `function` call**, whose srcref slot is NULL, as GNU R's compiler writes it. rlang's `trace_back` writes into that slot of every frame call.
+- **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
+
 ## Records, tuples and tags compile natively
 
 - **Previous shape.** `Op::Construct` was an opaque step in the JIT (a helper call that re-read registers through the activation), a guarded `match` fell back to the `match` special for the whole expression, and `l[[i]]` on a plain list returned a boxed element, so arithmetic on it ran in tier 0.
@@ -5690,7 +5742,30 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`MatchFail`** always signals an error, so the JIT treats it as `PureUnlessObserved` and leaves every register `Bottom` after it. As an opaque step that fell through with its registers' stale types, it widened the join after each `match` (a reused temporary still typed as the scrutinee's record) and left the loop's arithmetic in tier 0.
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
-- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger`, data-science `readings` and biostatistics `followup` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances. The replacement is line for line, so the untyped form must have exactly as many lines as the `#:=` run.
+- **Benchmark.** In `tools/bench`, `#@ typed` / `#@ untyped` variant blocks ("The bench templates are inline-typed") let the finance `ledger`, data-science `readings` and biostatistics `followup` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+
+## A strict reload re-checks through a persistent salsa database
+
+- **Previous shape.** Every strict check of a changed package ran `analyze_project` from scratch over all of `R/`, about 2 s on the 326,000-line bench package, and `package_index` re-joined every file's names on each reload (about 28 ms) before a 10 ms diff.
+- **Shape.** `preflight::PACKAGE_CHECKS` keeps one `cli::PackageCheck` (a salsa database plus its file inputs) per canonical package root for the life of the process, and `check_package_code` updates only the inputs whose text changed, so salsa re-derives what the edit affects. The database lives in the ry binary, not the loader, because the loader runs inside libR on ry's runtime and cannot link the analysis.
+- **Loader side.** `namespace_spec` is a tracked query in `load_index.rs`, the spec is shared as `Arc<NamespaceSpec>`, and the reload fingerprint is taken from the read stamps the plan already holds, so a one-file reload plans in about 3 ms and prepares in 4 to 5 ms.
+- **With the shared check record.** The first check of a package in a process still goes through `analyze_project` with `CacheUse::ReadWrite` ("The strict load check shares the check record"), so a cold load reuses `ry check`'s findings. That database replays findings it never derived, so it is not kept (`PACKAGE_CHECKS` holds `None`). The first reload builds the kept database, and every reload after it is incremental.
+- **Impact.** Measured on the typed finance bench package in a debug build, a one-file reload with only the record takes about 22 s. With the kept database, the first reload takes about 20 s and later ones under 1 s, load included. The remaining costs are listed in `backlog.md`, "Open: the package loader".
+
+## Compiled code under `ry load` builds with ry's own R home
+
+- **Previous shape.** `src/` was compiled by pkgbuild through `callr`, so `R CMD SHLIB` ran GNU R's `bin/R` and linked GNU R's `libR`; the result loaded only because ry's `libR.so` shares the soname, and a package without pkgbuild installed could not load at all.
+- **Shape.** On ry's runtime, `.ry_compile` calls `.Internal(ryLoaderCompile(root, .libPaths()))`, which runs `rcmd::compile` in process against an R home from `rcmd::cached_home`. That home lives under the user cache (`ry/home/<hash>`), keyed by ry's version, libR's and `ry-rcmd`'s stamps and GNU R's home, and is built from headers embedded in `rcmd` at build time (`crates/ry/build.rs`, `embed_headers`), so an installed ry needs no source tree. libR is hard-linked into the home (copied only across file systems), and a new home prunes older homes made from the same libR. `ry-rcmd` must sit beside libR, which is why the release archives and the Nix package ship it there.
+- **Unload.** `dyn.unload` is real on ry's runtime (`libr::dynload::unload_library`): it calls `R_unload_<pkg>` and moves the library to `unloaded_dlls`, which keeps it mapped, because R objects may still hold pointers into it. Since `dlopen` returns the existing mapping for a path already open, a reload copies the rebuilt library into a fresh temp directory under its own file name (which names `R_init_<pkg>`) before loading it.
+- **Symbols.** A registered routine whose R name is already bound in the namespace is skipped with GNU R's `loadNamespace` warning, and on reload only the symbols the previous load bound (and that are still `identical`) are removed, so a user function with a routine's name survives.
+- **GNU R runtime** keeps pkgbuild, matching `load_all()`.
+
+## `if` in NAMESPACE is evaluated by the host, then resolved in text
+
+- **Previous shape.** The loader's `NamespaceSpec` put every `if` directive in `unsupported`, and the load warned and ignored it; the checker's `namespace_directives` skipped it too.
+- **Shape.** R evaluates conditions, Rust parses directives. `.ry_namespace_conditions` (runtime.R) walks each `if` at top level or inside a top-level `{` as `parseNamespaceFile` does (global environment, only the taken branch, depth first) and encodes the values; every transport carries them as one string (`loader::parse_namespace_conditions`), because the embedded `.Call` routines take only strings. `Loader::read` replaces each `if` with the directives on its taken branches (`metadata::resolve_namespace_conditionals`) before anything parses `NAMESPACE`, so the spec, the diff, the index cache key and the analysis all see the NAMESPACE R would build, with directive order kept.
+- **Unknown directives.** Values are keyed by the directive's source text. A directive without values fails the read with `LoadError::Conditionals` before any stamp is taken (a stamp taken for a discarded read would hide the edit from the next one), the host returns `list(unresolved = TRUE, namespace_conditionals =)`, and R evaluates and plans again, repeating while the plan names new directives. The first request of every load sends no values, because evaluating the conditions the last load had would run conditions the file may no longer hold, which GNU R never does; a package with an `if` in NAMESPACE therefore plans twice per load.
+- **Checker.** Analysis cannot evaluate R, so it reads both branches, which avoids false unresolved reports for platform-conditional imports.
 
 ## An integer and a double joined stay unboxed
 

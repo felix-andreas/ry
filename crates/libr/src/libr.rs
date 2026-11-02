@@ -126,6 +126,10 @@ pub struct Runtime {
     /// The last error message, as `R_curErrorBuf` returns it.
     pub error_buffer: Vec<u8>,
     pub dlls: Vec<Box<Dll>>,
+    /// Libraries `dyn.unload` removed from `dlls`. They stay mapped, unlike in GNU R, which
+    /// closes them, because external pointers and finalizers in the heap may still point into
+    /// their code, and a `DLLInfo` object still points at its entry.
+    pub unloaded_dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
     /// `TRUELENGTH` values set on vectors to a value other than their capacity, which their
     /// storage has no field for. Each key is preserved while it has an
@@ -211,6 +215,7 @@ impl Runtime {
             parked: FxHashMap::default(),
             error_buffer: Vec::new(),
             dlls: Vec::new(),
+            unloaded_dlls: Vec::new(),
             c_callables: FxHashMap::default(),
             truelengths: FxHashMap::default(),
             console: Box::new(boundary::default_console),

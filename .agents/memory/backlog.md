@@ -47,36 +47,18 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
-  `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
-  GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
-  loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
-  on ry, would make the build ry's own.
-- **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
-  326,000-line bench package, shared by both runtimes; the last item of this list is the fix.
 - **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
   and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
   or `src/` does not trigger a rerun.
-- **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
-  new name.
-- **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
-  would fix it.
-- **A strict package's reload checks the whole package**: every load that changes something runs
-  `preflight::check_package`, a fresh analysis of all of `R/` (the clean verdict is cached by
-  fingerprint, so an unchanged package costs a hash). Checking only the files the plan changed, in
-  the loader's own salsa database, would make a reload of a large strict package cheap.
-- **A reload that runs statements refuses a missing S3 method late**: `.ry_refuse_missing_s3`
-  checks before anything changes only when the reload runs no statement and keeps
-  `sysdata.rda`, since either could define the function; otherwise `.ry_register_s3` refuses
-  after the namespace already holds the new code. Knowing every name a statement may bind would
-  close it.
-- **On GNU R, a srcref after a non-ASCII character on its line has its column off** by the
-  character's extra UTF-8 bytes (`gnur.R`, `.ry_parse` pads by bytes so byte offsets and
-  printing are right); ry's runtime is exact. Documented under Source references.
+- **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
+  3 ms and preparing 4 to 5 ms. One `stat` per file (about 2 ms) finds the edit, and the diff still
+  walks every eager statement. The first reload after a load that read the cached index pays for
+  building the salsa inputs once. A strict reload spends about 100 ms of its 0.1 s re-verifying
+  diagnostics, plus a fingerprint of about 16 ms taken twice (before and after the check).
+- **Compiled code under `ry load --runtime gnu-r`** still needs pkgbuild; only ry's runtime
+  compiles with `rcmd`. A non-gcc platform inherits `rcmd`'s gaps (see "Platforms").
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
-- **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
-  files' names. A per-file name summary could make that O(changed).
 
 ## Open: false reports and gaps found by the documentation review
 
@@ -440,6 +422,8 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
+- **A call returning a record inside `expect_error` is an error.** With `g <- function(n: integer) -> Record{x: integer}`, `expect_error(g(-1L), "neg")` reports "`expect_error` is an R function, and this value is a ry record, not an R object", although `expect_error` only evaluates the expression and never keeps its value. The typed bench tests work around it with `expect_error({ g(-1L); NULL })`. The fix is to let a parameter the callee only evaluates or quotes accept native values (testthat's `expect_error`, `expect_warning`, `expect_message`, `expect_silent`).
+
 - **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
   ```r
   #: fn() -> double
@@ -627,8 +611,7 @@ effectively a two-core number.
 
 ### A first strict `ry load` costs the strict check's wall time
 
-- On typed finbench (4 cores), a load with a cold verdict takes 2.2 to 2.6 s, against 0.6 to 1.0 s untyped and 0.55 s for either once warm. The load overlaps the check (`decisions.md`, "The strict load check overlaps the runtime start"), so the gap is the check alone: about 1.9 s wall and 4.3 CPU-s for 380,000 lines, half of it type checking and a quarter rendering diagnostics and lints that the verdict never shows.
-- Levers, largest first: a verdict-only pass that stops rendering and linting and only asks whether any strict error exists; reusing a `ry check` record (`.ry_cache/check.json`) when it covers the `R/` files under the same configuration, which needs the record to tell an `R/`-only resolution from a whole-project one; and the type checker's own per-item cost.
+- On typed finbench (4 cores), a load with no usable check record takes 2.5 to 2.7 s, against about 0.6 s untyped, and 0.55 to 0.64 s after `ry check` or a previous load (`decisions.md`, "The strict load check shares the check record"). The gap is analysis CPU: about 5.3 CPU-s for 380,000 lines of `R/` (parse 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), so the lever left is the analysis core's own speed.
 
 ### Corpus reports that more precise types now reach
 
@@ -2257,13 +2240,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
-    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
-  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
-    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
-    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
-    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
-    directory).
+    the timeout, though a lone `callr::r_session` works.
+  - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
+    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
+    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
+    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
+    group, order, runs, split, expand and slice-chop files also fail; run them with
+    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -3015,6 +3000,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: findings from the records, library and frame round
 
+- **A record prints a classed field as its bare data.** `print((first = as.Date("2024-01-01"),))` shows `(first = 19723,)`, because the record printer deparses each field without its class. Print a classed field through `format()`, as `print.default` does for a list element.
 - **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
   as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
   which makes a diagnostic differ from the user's own definition. Show the declaration order.
@@ -3097,3 +3083,18 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
   mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
   (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
+- The checker's working maps now live in a pooled bump arena and its names are interned
+  (`decisions.md`, "The item check's working maps live in a pooled bump arena"), which took the
+  finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
+  with wall time unchanged within noise (median about 1.34 s). The
+  1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
+  self cost. What is left is structural:
+  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
+    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
+    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
+    node array per file, children as index ranges) would remove both.
+  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
+    queries remove.
+  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
+    times on the slice), which a small-buffer type would absorb.
