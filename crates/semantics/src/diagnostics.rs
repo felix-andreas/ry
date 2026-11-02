@@ -2509,7 +2509,8 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_)
                 | StrictOriginKind::RecursiveUnknown(_)
-                | StrictOriginKind::UntypedParameter(_) => None,
+                | StrictOriginKind::UntypedParameter(_)
+                | StrictOriginKind::UnknownColumns { .. } => None,
                 _ => assignment_targets.get(&origin.expression),
             };
             let message = if let Some(name) = assignment_target {
@@ -2530,6 +2531,18 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     ),
                     StrictOriginKind::RecursiveUnknown(name) => format!(
                         "strict mode: could not determine the full type of `{name}`, because it is defined recursively. Add a type annotation"
+                    ),
+                    StrictOriginKind::UnknownColumns {
+                        frame: Some(frame),
+                        column,
+                    } => format!(
+                        "strict mode: the columns of `{frame}` are unknown, so the column names and types this query uses are not checked. Give `{frame}` a type that lists its columns, as in `{frame}: DataFrame{{{column}: TYPE}}`"
+                    ),
+                    StrictOriginKind::UnknownColumns {
+                        frame: None,
+                        column,
+                    } => format!(
+                        "strict mode: the columns of this frame are unknown, so the column names and types this query uses are not checked. Annotate it with a type that lists its columns, as in `DataFrame{{{column}: TYPE}}`"
                     ),
                     StrictOriginKind::UntypedParameter(name) => format!(
                         "strict mode: parameter `{}` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",

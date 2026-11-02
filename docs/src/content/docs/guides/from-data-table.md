@@ -244,6 +244,26 @@ table that is still a data.table converts it first, as in `as.DataFrame(sales) |
 The whole-file rewrite leaves the conversion out for a name like `sales` above, whose every
 assignment it rewrites into a DataFrame; a function parameter typed `data.table` keeps it.
 
+The whole-file rewrite never hands a DataFrame to code that still expects a data.table. A
+rewritten table may flow only into other rewritten code, into `$`, `[[` or a shape function such
+as `nrow()` or `names()`, or out of a function as its return value. A query in that last place
+runs on the DataFrame and converts the result back, so the function's callers still receive a
+data.table:
+
+```r
+top <- function(sales) {
+  return(sales[units > 2L])
+}
+# becomes
+top <- function(sales) {
+  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
+}
+```
+
+Any other form whose table would reach other code is left as it is, such as `fread()` whose result
+goes to `saveRDS()`, a `data.table()` a function returns, or a table some later `:=` still updates
+in place. The editor still offers each of those as a single code action.
+
 Delete `library(data.table)` once nothing in the file needs it, and run `ry fmt` to break the long
 chains over several lines.
 

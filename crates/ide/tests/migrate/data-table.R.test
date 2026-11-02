@@ -156,6 +156,8 @@ first_two <- sales[1:2]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- vector_index_is_left_alone
@@ -241,6 +243,8 @@ mixed <- sales[, .(region, total = sum(units))]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- select_single_column_vector_is_left_alone
@@ -251,6 +255,8 @@ total <- sales[, sum(units)]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- group_by_name
@@ -340,6 +346,8 @@ distinct <- sales[, .(n = uniqueN(units)), by = region]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- group_unaggregated_column_is_left_alone
@@ -349,6 +357,8 @@ rows <- sales[, .(units), by = region]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- filter_then_group
@@ -464,6 +474,8 @@ sales[, units := NULL]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- update_rows_new_column
@@ -498,6 +510,8 @@ sales[units > 2L, flag := TRUE]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- join_on
@@ -518,9 +532,13 @@ joined <- regions[sales, on = "region"]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- query_on_a_parameter_keeps_its_conversion
@@ -533,6 +551,8 @@ Rewrite `fread()` as `DataFrame.read_csv()`
 + DataFrame.read_csv("sales.csv")
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units))]
++ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.select(units = col("units") |> Expr.sum()))
+applied alone:
 + as.DataFrame(sales) |> DataFrame.select(units = col("units") |> Expr.sum())
 
 #---- join_with_clashing_columns_is_left_alone
@@ -552,9 +572,13 @@ joined <- regions[sales]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 Rewrite `data.table()` as `DataFrame()`
 - data.table
+left alone by the whole-file migration
+applied alone:
 + DataFrame
 
 #---- setorder_mixed_directions
@@ -628,3 +652,60 @@ Rewrite the query with DataFrame verbs
 + sales |> DataFrame.filter(col("units") > 2L)
 applied alone:
 + as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
+
+#---- constructor_returned_from_a_function_is_left_alone
+library(data.table)
+make_sales <- function(n) data.table(id = seq_len(n), units = n)
+#++++
+Rewrite `data.table()` as `DataFrame()`
+- data.table
+left alone by the whole-file migration
+applied alone:
++ DataFrame
+
+#---- query_reaching_return_through_a_name_is_left_alone
+library(data.table)
+top <- function(sales: data.table) {
+  big <- sales[units > 2L]
+  return(big)
+}
+#++++
+Rewrite the query with DataFrame verbs
+- sales[units > 2L]
+left alone by the whole-file migration
+applied alone:
++ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
+
+#---- query_returned_with_return_converts_back
+library(data.table)
+top <- function(sales: data.table) {
+  return(sales[units > 2L])
+}
+#++++
+Rewrite the query with DataFrame verbs
+- sales[units > 2L]
++ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L))
+applied alone:
++ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
+
+#---- table_passed_to_another_function_is_left_alone
+library(data.table)
+sales <- fread("sales.csv")
+saveRDS(sales, "sales.rds")
+#++++
+Rewrite `fread()` as `DataFrame.read_csv()`
+- fread("sales.csv")
+left alone by the whole-file migration
+applied alone:
++ DataFrame.read_csv("sales.csv")
+
+#---- column_reads_accept_a_data_frame
+library(data.table)
+sales <- fread("sales.csv")
+n <- nrow(sales)
+units <- sales$units
+first <- sales[["region"]]
+#++++
+Rewrite `fread()` as `DataFrame.read_csv()`
+- fread("sales.csv")
++ DataFrame.read_csv("sales.csv")
