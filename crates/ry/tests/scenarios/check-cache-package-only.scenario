@@ -1,0 +1,79 @@
+# `ry load` checks only `R/` and leaves the tests unparsed, because they read the package but add
+# nothing to it. It still shares `ry check`'s record, so a test helper edited between a load and a
+# full check must change the tests' findings exactly as a fresh check would.
+
+file ry.toml
+| [check]
+| strict = true
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) width * height
+file tests/testthat/helper-values.R
+| expected_area <- 6
+file tests/testthat/test-area.R
+| stopifnot(area(2, 3) == expected_area)
+
+run ry check R
+expect exit 0
+
+run ry check
+expect exit 0
+
+# A helper loses a name the tests read. A package-only check is unaffected, and the full check
+# after it reports the test.
+file tests/testthat/helper-values.R
+| expected_total <- 6
+
+run ry check R
+expect exit 0
+
+run ry check
+expect exit 1
+expect stderr "expected_area"
+
+run ry check --no-cache
+expect exit 1
+expect stderr "expected_area"
+
+# The helper gets the name back while only package checks run, and the full check sees it.
+file tests/testthat/helper-values.R
+| expected_area <- 6
+
+run ry check R
+expect exit 0
+
+run ry check
+expect exit 0
+
+# NAMESPACE is judged by the files a run analyses: an import only the tests use is unused to a
+# package-only check and used to a full one, whichever of them wrote the record the other replays.
+file ry.toml
+| [check]
+| strict = true
+| [lint]
+| unused-import = "warn"
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+| Imports: stats
+file NAMESPACE
+| export(area)
+| importFrom(stats, median)
+file tests/testthat/test-area.R
+| stopifnot(median(c(area(2, 3), expected_area)) > 0)
+
+run ry check
+expect exit 0
+
+run ry check R
+expect stderr "median"
+
+run ry check
+expect exit 0
+expect stderr "no problems"
+
+run ry check R
+expect stderr "median"

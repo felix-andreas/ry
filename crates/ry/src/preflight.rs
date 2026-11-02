@@ -213,6 +213,14 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             &resolve_note,
         );
     }
+    // Freeing every memo of a large package takes longer than any phase of its check, and the
+    // loader is waiting for this verdict, so the memos are freed beside it.
+    if let Err(error) = thread::Builder::new()
+        .name("ry-strict-check-free".to_owned())
+        .spawn(move || drop(analysis))
+    {
+        panic!("the thread that frees the strict check should spawn: {error}");
+    }
     if problems == 0 {
         return Ok(Verdict::Run);
     }
