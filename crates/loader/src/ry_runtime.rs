@@ -12,9 +12,8 @@
 use {
     crate::{
         Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
-        parse_namespace_conditions,
+        package_cache_path, parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
-        s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
     interp::{
@@ -37,6 +36,7 @@ use {
             atomic::{AtomicBool, Ordering},
         },
         thread,
+        time::Duration,
     },
     syntax::{SyntaxNode, TextRange, TextSize},
 };
@@ -54,6 +54,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
     internal("ryLoaderChanged", 0, do_changed),
     internal("ryLoaderCallers", 2, do_callers),
+    internal("ryLoaderWaitEdits", 2, do_wait_edits),
     internal("ryLoaderCompile", 2, do_compile).invisible(),
 ];
 
@@ -487,6 +488,30 @@ unsafe fn do_callers(call: &Call<'_>) -> R<Sexp> {
     values::string_vector(&callers)
 }
 
+/// `.Internal(ryLoaderWaitEdits(root, timeout))`: the paths edited under the package, relative
+/// to its root, after waiting up to `timeout` seconds for one; `NA` stands for lost
+/// notifications.
+unsafe fn do_wait_edits(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let timeout = values::as_real_scalar(call.arg(1));
+    let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
+    let timeout = Duration::try_from_secs_f64(timeout)
+        .map_err(|_| error(format!("{timeout} is not a timeout in seconds")))?;
+    let edits = session()
+        .loader
+        .wait_edits(&root, timeout)
+        .map_err(|failure| error(failure.to_string()))?;
+    let mut paths: Vec<Option<String>> = edits
+        .paths
+        .iter()
+        .map(|path| Some(path.to_string_lossy().into_owned()))
+        .collect();
+    if edits.lost {
+        paths.push(None);
+    }
+    values::string_vector_na(&paths)
+}
+
 /// `.Internal(ryLoaderCompile(root, libraries))`: builds the compiled code of the package at
 /// `root` with ry's own toolchain, against ry's R home, so the shared object links ry's `libR`
 /// and its `Makevars` runs ry's `bin/R`. `libraries` are the session's library paths, searched
@@ -563,7 +588,7 @@ unsafe fn do_deferred(call: &Call<'_>) -> R<Sexp> {
         ),
         (
             "cache".into(),
-            s4_cache_path(Path::new(&root)).map_or(RValue::Null, |path| {
+            package_cache_path(Path::new(&root), "s4").map_or(RValue::Null, |path| {
                 RValue::Character(vec![path.to_string_lossy().into_owned()])
             }),
         ),

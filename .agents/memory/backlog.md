@@ -46,11 +46,18 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
-  and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
-  or `src/` does not trigger a rerun.
+- **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
+  the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
+- **`ry document` after an edit still redoes roxygen2's per-topic work** (`block_find_object`,
+  `block_to_rd`, `format` of every Rd): about 2 minutes on finbench's 22,000 topics. A per-topic
+  cache keyed by the block, its object and the topics it inherits from would cut it to the edited
+  topics, but must keep the output byte-identical (`decisions.md`, "`ry document` is roxygen2
+  with a block cache and linear topic ordering").
+- **`ry install` and `ry build` do not exist yet**: thin front ends over `crates/rcmd`'s
+  `R CMD INSTALL` (and a source tarball builder, which rcmd lacks) would finish the devtools loop
+  after `ry load`, `ry test` and `ry document`.
 - **Remaining one-file reload costs** on the 326,000-line bench package: planning takes about
-  3 ms and preparing 4 to 5 ms. One `stat` per file (about 2 ms) finds the edit, and the diff still
+  3 ms and preparing 4 to 5 ms. A file notification finds the edit (without one, a `stat` per file takes about 2 ms), and the diff still
   walks every eager statement. The first reload after a load that read the cached index pays for
   building the salsa inputs once. A strict reload spends about 100 ms of its 0.1 s re-verifying
   diagnostics, plus a fingerprint of about 16 ms taken twice (before and after the check).
