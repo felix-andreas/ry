@@ -6,7 +6,7 @@ use {
     heap::{
         Collection, GcStress, Heap, HeapError,
         arena::Arena,
-        object::{NA_REAL, Sexp, SexpType, Slot, is_na_real},
+        object::{NA_REAL, Sexp, SexpType, Slot, gp, is_na_real},
         records::{Fields, Layout},
         strings::Encoding,
     },
@@ -481,6 +481,23 @@ fn strings_are_interned_per_encoding_and_ascii_is_unmarked() {
                 text: "a\\0b".into()
             })
         );
+        for bytes in [&b"0123\0567abcdefgh"[..], b"abcdefgh01234\0"] {
+            assert!(
+                matches!(
+                    heap.mk_char(bytes, Encoding::Native),
+                    Err(HeapError::EmbeddedNul { .. })
+                ),
+                "a NUL inside a word or in the tail is found"
+            );
+        }
+        let long_ascii = heap
+            .mk_char(b"abcdefgh\x01\x7f", Encoding::Utf8)
+            .expect("mk_char");
+        assert!(long_ascii.has_gp(gp::ASCII));
+        let high = heap
+            .mk_char(b"\x80\x01\xff\x01abcdefgh", Encoding::Latin1)
+            .expect("high bytes next to 0x01 are not NUL");
+        assert_eq!(Encoding::of(high), Encoding::Latin1);
         let count = heap.string_count();
         heap.collect(Collection::Major);
         assert!(
@@ -565,6 +582,34 @@ fn environments_bind_look_up_and_remove() {
         assert!(heap.frame_cell(global, v3).is_none());
         let v4 = heap.install(b"v4").expect("install");
         assert_eq!(heap.frame_cell(global, v4).expect("bound").cdr(), values[4]);
+
+        // Removing most bindings compacts the frame; the survivors keep their insertion order
+        // and stay reachable through a collection.
+        let symbol = |heap: &mut Heap, index: usize| {
+            heap.install(format!("v{index}").as_bytes())
+                .expect("install")
+        };
+        for index in (5..20).filter(|index| index % 4 != 0) {
+            let removed = symbol(&mut heap, index);
+            assert_eq!(heap.remove_binding(global, removed), Ok(true));
+            assert_eq!(heap.remove_binding(global, removed), Ok(false));
+        }
+        heap.collect(Collection::Major);
+        let survivors = [0, 1, 2, 4, 8, 12, 16];
+        let expected: Vec<Sexp> = survivors
+            .iter()
+            .map(|&index| symbol(&mut heap, index))
+            .collect();
+        assert_eq!(heap.bound_symbols(global), expected);
+        for &index in &survivors {
+            let bound = symbol(&mut heap, index);
+            assert_eq!(
+                heap.frame_cell(global, bound).expect("bound").cdr(),
+                values[index]
+            );
+        }
+        heap.define(global, v3, values[3]).expect("define");
+        assert_eq!(heap.bound_symbols(global).last(), Some(&v3));
 
         let base = heap.known().base_env;
         let pi = heap.install(b"pi").expect("install");

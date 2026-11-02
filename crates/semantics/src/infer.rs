@@ -55,7 +55,7 @@ pub struct InferenceTable<'db> {
     undo: Vec<(InferenceVar, Entry<'db>)>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
-    pub definitions: Option<TypeDefinitions>,
+    pub definitions: Option<TypeDefinitions<'db>>,
     /// Includes project classes: operator dispatch resolves methods through the
     /// global scope, so the numeric constraint must consult the same set.
     pub arithmetic_classes: Option<&'db FxHashSet<String>>,
@@ -85,6 +85,10 @@ pub fn resolve_calls() -> u64 {
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
+
+/// The name of the type an overload probe substitutes for an unchecked argument. Only `Any`
+/// and an unconstrained type variable accept it, and no source annotation can spell it.
+pub(crate) const UNCHECKED_WITNESS: &str = " unchecked argument";
 
 impl<'db> InferenceTable<'db> {
     pub fn fresh(&mut self, constraint: Constraint) -> InferenceVar {
@@ -160,15 +164,22 @@ impl<'db> InferenceTable<'db> {
     }
 
     /// An undeclared name or a wrong type-argument count. Both already carry an
-    /// annotation diagnostic, so relations treat the type like `Unknown`.
+    /// annotation diagnostic, so relations treat the type like `Unknown`. The overload
+    /// witness is undeclared on purpose and must stay incompatible with every concrete type.
     pub(crate) fn undeclared_nominal(&self, db: &'db dyn Db, ty: Ty<'db>) -> bool {
         let TyKind::Named(name, arguments) = ty.kind(db) else {
             return false;
         };
+        if name.text(db) == UNCHECKED_WITNESS {
+            return false;
+        }
         match self.definition(db, *name) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),
-            None => !stubs(db).is_some_and(|library| library.nominals.contains(name.text(db))),
+            None => !self
+                .definitions
+                .map_or_else(|| stubs(db), TypeDefinitions::library)
+                .is_some_and(|library| library.nominals.contains(name.text(db))),
         }
     }
 
@@ -247,8 +258,7 @@ impl<'db> InferenceTable<'db> {
         // through the same interned application, so the visiting stack bounds it.
         let alias = match resolved.kind(db) {
             TyKind::Named(name, arguments) => self
-                .definitions
-                .and_then(|table| table.get(db, *name))
+                .definition(db, *name)
                 .filter(|definition| definition.alias)
                 .map(|definition| (definition, arguments)),
             _ => None,
@@ -652,19 +662,8 @@ impl<'db> InferenceTable<'db> {
                 if actual_rank > bound_rank
                     || (actual_rank == bound_rank && !bound_vector && actual_vector) =>
             {
-                // A scalar meeting a vector widens to the vector: R recycles it.
-                let element = scalar(
-                    db,
-                    match actual_rank.max(bound_rank) {
-                        2 => Atomic::Double,
-                        1 => Atomic::Integer,
-                        _ => Atomic::Logical,
-                    },
-                );
-                let widened = if bound_vector || actual_vector {
-                    Ty::new(db, TyKind::Vector(element))
-                } else {
-                    element
+                let Some(widened) = numeric_join(db, [bound, actual]) else {
+                    return false;
                 };
                 self.set(
                     representative,
@@ -869,8 +868,7 @@ impl<'db> InferenceTable<'db> {
                 && actual_arguments.len() == expected_arguments.len() =>
             {
                 let variances = self
-                    .definitions
-                    .and_then(|table| table.get(db, *actual_name))
+                    .definition(db, *actual_name)
                     .map(|definition| parameter_variances(db, definition))
                     .unwrap_or_default();
                 actual_arguments
@@ -1062,6 +1060,16 @@ impl<'db> InferenceTable<'db> {
             | (TyKind::NamedList(actual_element), TyKind::NamedList(expected_element))
             | (TyKind::List(actual_element), TyKind::List(expected_element)) => {
                 self.compatible_probe(db, *actual_element, *expected_element, depth + 1)
+            }
+            // A list whose elements are not known at all, such as `as.list(x)` on an untyped
+            // `x`, says nothing about its names, so it may be the named list the target wants.
+            (TyKind::List(actual_element), TyKind::NamedList(_))
+                if matches!(
+                    self.shallow_resolve(db, *actual_element).kind(db),
+                    TyKind::Any | TyKind::Unknown
+                ) =>
+            {
+                true
             }
             (TyKind::Function(actual_function), TyKind::Function(expected_function)) => {
                 self.function_compatible(db, actual_function, expected_function, depth)
@@ -1365,7 +1373,11 @@ fn pair_parameters<'db>(
     let mut rest = Vec::new();
     match (&actual.variadic, &expected.variadic) {
         (Some(actual_variadic), Some(expected_variadic)) => {
-            if actual_variadic.preceding_named != expected_variadic.preceding_named {
+            // `fn(...: Any) -> T` promises nothing about the parameters before `...`,
+            // so any function fits it, whatever it names ahead of its own `...`.
+            if !forwards_anything
+                && actual_variadic.preceding_named != expected_variadic.preceding_named
+            {
                 return None;
             }
             rest.push((expected_variadic.element, actual_variadic.element));
@@ -1845,6 +1857,34 @@ fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
 /// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
 /// whether it is a vector. A union of numeric types ranks as its widest member, since every
 /// member coerces to that one (`double | integer` widens a binding to `double`).
+/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
+/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
+/// it). `None` when a type is not numeric.
+pub(crate) fn numeric_join<'db>(
+    db: &'db dyn Db,
+    types: impl IntoIterator<Item = Ty<'db>>,
+) -> Option<Ty<'db>> {
+    let (vector, rank) = types
+        .into_iter()
+        .try_fold((false, 0), |(vector, rank), ty| {
+            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
+            Some((vector || ty_vector, rank.max(ty_rank)))
+        })?;
+    let element = scalar(
+        db,
+        match rank {
+            2 => Atomic::Double,
+            1 => Atomic::Integer,
+            _ => Atomic::Logical,
+        },
+    );
+    Some(if vector {
+        Ty::new(db, TyKind::Vector(element))
+    } else {
+        element
+    })
+}
+
 fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
     let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
         TyKind::Scalar(Atomic::Logical) => Some(0),

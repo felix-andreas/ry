@@ -22,6 +22,7 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
+    internal("serializeInfoFromConn", 1, do_serialize_info_from_conn),
     internal("unserialize", 2, do_unserialize),
     internal("lazyLoadDBflush", 1, |call| unsafe {
         forget_database(&values::require_string(call.arg(0), "file")?);
@@ -823,6 +824,11 @@ pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
 
 /// Reads one object from an open connection, and no further.
 pub unsafe fn unserialize_connection(con: Rconnection, hook: Sexp) -> R<Sexp> {
+    read_object(connection_reader(con, hook)?)
+}
+
+/// A reader positioned after the format code of the stream on `con`.
+unsafe fn connection_reader(con: Rconnection, hook: Sexp) -> R<Reader<'static>> {
     let mut reader = Reader {
         input: Input::Connection {
             con,
@@ -842,7 +848,7 @@ pub unsafe fn unserialize_connection(con: Rconnection, hook: Sexp) -> R<Sexp> {
     if unsafe { (*con).text } != 0 && reader.format != Format::Ascii {
         return Err(error("input format does not match specified format"));
     }
-    read_object(reader)
+    Ok(reader)
 }
 
 fn stream_format(start: Option<&[u8]>) -> Option<Format> {
@@ -856,27 +862,47 @@ fn stream_format(start: Option<&[u8]>) -> Option<Format> {
 
 /// The rest of a stream after its format line: the version header, then the object.
 unsafe fn read_object(mut reader: Reader<'_>) -> R<Sexp> {
-    let version = reader.integer()?;
-    let _writer = reader.integer()?;
-    let _reader_version = reader.integer()?;
-    match version {
-        2 => {}
-        3 => {
-            let encoding_length = reader.count()?;
-            if reader.format == Format::Ascii {
-                reader.ascii_word()?;
-            } else {
-                reader.take(encoding_length)?;
-            }
-        }
-        _ => return Err(error(format!("cannot read workspace version {version}"))),
-    }
+    read_header(&mut reader)?;
     let mark = crate::heap().handle_mark();
     let result = reader.item();
     crate::heap().release_handles(mark);
     let value = result?;
     crate::heap().root(value);
     Ok(value)
+}
+
+/// A serialization stream's header, which `serializeInfoFromConn` reports.
+struct Header {
+    version: i32,
+    /// The R versions packed as `major * 65536 + minor * 256 + patch`.
+    writer: i32,
+    min_reader: i32,
+    native_encoding: Option<String>,
+}
+
+/// Reads the header that follows the format code, leaving `reader` at the first item.
+unsafe fn read_header(reader: &mut Reader<'_>) -> R<Header> {
+    let version = reader.integer()?;
+    let writer = reader.integer()?;
+    let min_reader = reader.integer()?;
+    let native_encoding = match version {
+        2 => None,
+        3 => {
+            let encoding_length = reader.count()?;
+            Some(if reader.format == Format::Ascii {
+                reader.ascii_word()?
+            } else {
+                String::from_utf8_lossy(reader.take(encoding_length)?).into_owned()
+            })
+        }
+        _ => return Err(error(format!("cannot read workspace version {version}"))),
+    };
+    Ok(Header {
+        version,
+        writer,
+        min_reader,
+        native_encoding,
+    })
 }
 
 // Writing.
@@ -1033,6 +1059,48 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
     let hook = call.arg(1);
     crate::connections::with_binary_input(call.arg(0), |con| unserialize_connection(con, hook))
+}
+
+/// `serializeInfoFromConn(con)`: the header of the serialized stream on `con`.
+unsafe fn do_serialize_info_from_conn(call: &Call<'_>) -> R<Sexp> {
+    let (format, header) = crate::connections::with_binary_input(call.arg(0), |con| {
+        let mut reader = connection_reader(con, nil())?;
+        let header = read_header(&mut reader)?;
+        Ok((reader.format, header))
+    })?;
+    let release = |packed: i32| {
+        format!(
+            "{}.{}.{}",
+            packed / 65536,
+            (packed / 256) % 256,
+            packed % 256
+        )
+    };
+    let format = match format {
+        Format::Xdr => "xdr",
+        Format::Binary => "binary",
+        Format::Ascii => "ascii",
+    };
+    let rooted = |value: Sexp| {
+        crate::heap().root(value);
+        value
+    };
+    let mut items = vec![
+        ("version", rooted(values::scalar_integer(header.version)?)),
+        (
+            "writer_version",
+            rooted(values::scalar_string(&release(header.writer))?),
+        ),
+        (
+            "min_reader_version",
+            rooted(values::scalar_string(&release(header.min_reader))?),
+        ),
+        ("format", rooted(values::scalar_string(format)?)),
+    ];
+    if let Some(encoding) = &header.native_encoding {
+        items.push(("native_encoding", rooted(values::scalar_string(encoding)?)));
+    }
+    values::named_list(&items)
 }
 
 /// `loadFromConn2(con, envir, verbose)`: reads a `save()` file, whose single object is a

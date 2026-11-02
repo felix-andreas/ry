@@ -310,6 +310,9 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
         let object = heap
             .alloc_primitive(object_kind, index)
             .unwrap_or_else(|failure| panic!("cannot create `{}`: {failure}", definition.name));
+        // A primitive lives as long as the session, so the heap's global roots keep it instead of
+        // a trace over every builtin on each collection.
+        heap.add_global_root(object);
         let symbol = heap
             .install(definition.name.as_bytes())
             .unwrap_or_else(|failure| panic!("cannot install `{}`: {failure}", definition.name));

@@ -123,6 +123,7 @@ Compare.difftime : fn(e1: double, e2: difftime) -> logical
 
 # A matrix supports the full elementwise arithmetic and comparison R gives it,
 # against another matrix, a scalar, or a vector that R recycles down its columns.
+# A matrix of strings or logicals compares against strings and logicals too.
 # Declaring these is what makes typing `%*%` safe: without them the `matrix` the
 # product returns would reject `+ 1L`, which R accepts.
 Arith.matrix : fn(e1: matrix, e2: matrix) -> matrix
@@ -135,6 +136,8 @@ Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
 Compare.matrix : fn(e1: double[], e2: matrix) -> logical
+Compare.matrix : fn(e1: matrix, e2: character | character[] | logical | logical[]) -> logical
+Compare.matrix : fn(e1: character | character[] | logical | logical[], e2: matrix) -> logical
 
 # Arithmetic on a data frame works column by column and keeps the frame, while a
 # comparison gives a logical matrix. `[` keeps the frame unless it drops to one
@@ -171,8 +174,9 @@ seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any,
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
 seq : @pure fn(...: Any) -> Any
 seq.int : @pure Any
-rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
-rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
+# `rep` ignores the arguments it does not know, so `rep(".", n, collapse = TRUE)` runs.
+rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> T[]
+rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> Any
 rep_len : @pure fn(x: Any, length.out: Any) -> Any
 
 # Type predicates: a single logical, computed from the whole value.
@@ -560,7 +564,8 @@ apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # vector does not fit it at all and takes the general form below, which also takes
 # `NULL` (`lapply(NULL, f)` is `list()`).
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
-lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+# A formula is a call, and `lapply` walks its parts (`~`, the left side, the right side).
+lapply : <T, U> fn(X: list[T] | T[] | NULL | formula, FUN: fn(T) -> U, ...: Any) -> list[U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
@@ -590,12 +595,17 @@ sapply : Any
 # the atomic templates come first, narrowest first, because a wider template
 # would also accept a narrower one. A multi-element template makes R return a
 # matrix; the result claim stays `V[]` (scalar-claim, as elsewhere in this file).
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical, FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+# R checks the callback's result length at run time, and a length the checker
+# cannot see types as a vector (`str_c(x, collapse = " ")` is `character[]`), so
+# an atomic template accepts a callback returning that vector type.
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 # A vector-valued `FUN` gives a matrix when `FUN.VALUE` has several elements and a vector when it has
 # one, which the types cannot tell apart, and R coerces an integer or logical result to double.
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any
@@ -742,9 +752,11 @@ as.difftime : @pure fn(tim: Any, [format]: character, [units]: character) -> dif
 strftime : fn(x: Any, [format]: character, [tz]: character, [usetz]: logical, ...: Any) -> character
 strptime : fn(x: Any, format: character, [tz]: character) -> POSIXct
 weekdays : @pure fn(x: Any, [abbreviate]: logical) -> character
-# lubridate adds months.numeric, which builds a period (`months(1)`).
-months : @pure fn(x: double | integer) -> Any
-months : fn(x: Any, [abbreviate]: logical) -> character
+# `months` is an S3 generic: base gives Date and POSIXct the month name, and
+# packages add methods of their own (lubridate's months.numeric builds a period),
+# so any other argument dispatches to a method the stub cannot see.
+months : @pure fn(x: Date | POSIXct, [abbreviate]: logical) -> character
+months : fn(x: Any, ...: Any) -> Any
 julian : @pure Any
 
 # System and session.

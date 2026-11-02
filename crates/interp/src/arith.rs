@@ -382,7 +382,62 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let outer = if rows { row_count } else { col_count };
     let inner = if rows { col_count } else { row_count };
     let result = alloc(SexpType::Real, outer)?;
+    let finish = |total: LongDouble, counted: usize| {
+        if mean {
+            (total / counted).to_f64()
+        } else {
+            total.to_f64()
+        }
+    };
+    // The x87 kernels give every finite row or column; the loop below redoes the others, whose
+    // NaN and infinities follow `na.rm`.
+    let mut done = vec![false; outer];
+    if matrix.kind() == SexpType::Real && row_count.checked_mul(col_count) == Some(length(matrix)) {
+        let data = values::reals(matrix);
+        let output = values::reals_mut(result);
+        if rows {
+            let divisor = if mean { inner } else { 1 };
+            done = long_double::finite_row_means(data, row_count, divisor, output);
+            done.resize(outer, false);
+        } else if row_count > 0 {
+            for (position, column) in data.chunks_exact(row_count).enumerate() {
+                if let Some(total) = long_double::add_all(LongDouble::ZERO, column).finite() {
+                    output[position] = finish(total, inner);
+                    done[position] = true;
+                }
+            }
+        }
+    } else if matches!(matrix.kind(), SexpType::Logical | SexpType::Integer)
+        && row_count.checked_mul(col_count) == Some(length(matrix))
+    {
+        // Integer totals are exact in a 64-bit significand, which is all a long double adds.
+        let data = values::ints(matrix);
+        let output = values::reals_mut(result);
+        let mut totals = vec![0i64; outer];
+        let mut missing = vec![false; outer];
+        for (index, &value) in data.iter().enumerate() {
+            let position = if rows {
+                index % row_count.max(1)
+            } else {
+                index / row_count.max(1)
+            };
+            if value == NA_INTEGER {
+                missing[position] = true;
+            } else {
+                totals[position] += i64::from(value);
+            }
+        }
+        for position in 0..outer {
+            if !missing[position] {
+                output[position] = finish(LongDouble::from_i64(totals[position]), inner);
+                done[position] = true;
+            }
+        }
+    }
     for position in 0..outer {
+        if done[position] {
+            continue;
+        }
         let mut total = LongDouble::ZERO;
         let mut counted = 0usize;
         for along in 0..inner {
@@ -398,11 +453,7 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             total += value;
             counted += 1;
         }
-        values::reals_mut(result)[position] = if mean {
-            (total / counted).to_f64()
-        } else {
-            total.to_f64()
-        };
+        values::reals_mut(result)[position] = finish(total, counted);
     }
     Ok(result)
 }
@@ -573,15 +624,15 @@ pub fn pretty(
     if cell < smallest {
         warning = Some(format!(
             "R_pretty(): very small range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(smallest)
+            crate::format::format_g(cell),
+            crate::format::format_g(smallest)
         ));
         cell = smallest;
     } else if cell > largest {
         warning = Some(format!(
             "R_pretty(): very large range 'cell'={}, corrected to {}",
-            crate::linalg::format_g(cell),
-            crate::linalg::format_g(largest)
+            crate::format::format_g(cell),
+            crate::format::format_g(largest)
         ));
         cell = largest;
     }
@@ -2369,7 +2420,27 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "digits"])?;
     let operand = present(matched[0])
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    if let Some(digits) = present(matched[1])
+        && !matches!(
+            digits.kind(),
+            SexpType::Integer | SexpType::Logical | SexpType::Real
+        )
+    {
+        return Err(call.error("non-numeric argument to mathematical function"));
+    }
     let digits = match present(matched[1]) {
+        // `NaN` digits give `NaN` where the value is not `NA`, which only the elementwise path
+        // tells apart from `NA` digits.
+        Some(digits)
+            if (length(digits) > 1
+                || length(digits) == 1 && values::as_real_scalar(digits).is_nan())
+                && matches!(
+                    operand.kind(),
+                    SexpType::Integer | SexpType::Logical | SexpType::Real
+                ) =>
+        {
+            return round_recycled(operand, digits, significant);
+        }
         Some(digits) => {
             if length(digits) == 0 {
                 return Err(call.error("invalid second argument of length 0"));
@@ -2379,7 +2450,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             if value.is_nan() {
                 i32::MIN
             } else {
-                value.round().clamp(-1e6, 1e6) as i32
+                round_digit_count(value)
             }
         }
         None => {
@@ -2450,7 +2521,50 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     }
 }
 
-#[derive(Clone, Copy)]
+/// `round` or `signif` with several `digits`, recycled against `x` as GNU R's binary math
+/// functions recycle; the attributes come from the longer argument.
+unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Sexp> {
+    let operand = values::materialize(operand)?;
+    let digits = coerce_vector(digits, SexpType::Real)?;
+    let (operand_count, digits_count) = (length(operand), length(digits));
+    let count = if operand_count == 0 {
+        0
+    } else {
+        operand_count.max(digits_count)
+    };
+    let result = alloc(SexpType::Real, count)?;
+    for index in 0..count {
+        let x = real_at(operand, index % operand_count);
+        let digit = values::reals(digits)[index % digits_count];
+        // GNU R's `math2`: `NA` in either argument gives `NA`, and otherwise `NaN` gives `NaN`.
+        values::reals_mut(result)[index] = if is_na_real(x) || is_na_real(digit) {
+            NA_REAL
+        } else if x.is_nan() || digit.is_nan() {
+            f64::NAN
+        } else {
+            let digit = round_digit_count(digit);
+            if significant {
+                signif_digits(x, digit)
+            } else {
+                round_digits(x, digit)
+            }
+        };
+    }
+    let source = if operand_count >= digits_count {
+        operand
+    } else {
+        digits
+    };
+    values::copy_most_attributes(source, result, true)?;
+    Ok(result)
+}
+
+/// A `digits` argument as an integer count, rounded half up as GNU R's `floor(digits + 0.5)`.
+fn round_digit_count(digits: f64) -> i32 {
+    (digits + 0.5).floor().clamp(-1e6, 1e6) as i32
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Cumulative {
     Sum,
     Product,
@@ -2496,6 +2610,53 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             if overflow {
                 conditions::warning("integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))'")?;
+            }
+            result
+        }
+        (SexpType::Real, Cumulative::Sum) => {
+            let result = alloc(SexpType::Real, count)?;
+            let out = values::reals_mut(result);
+            long_double::running_sums(values::reals(operand), out);
+            // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
+            // first NA on every total is NA, whatever NaN came before it.
+            if out.last().is_some_and(|total| total.is_nan())
+                && let Some(first) = values::reals(operand)
+                    .iter()
+                    .position(|&value| is_na_real(value))
+            {
+                out[first..].fill(NA_REAL);
+            }
+            result
+        }
+        (SexpType::Real, Cumulative::Max | Cumulative::Min) => {
+            let result = alloc(SexpType::Real, count)?;
+            let data = values::reals(operand);
+            let out = values::reals_mut(result);
+            let mut accumulator = if kind == Cumulative::Max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            // From the first NaN on every result is NaN, and from the first NA on it is NA. The
+            // comparisons are GNU R's, which keep the new element on a tie, so a signed zero
+            // follows it on every target.
+            for (&value, out) in data.iter().zip(out.iter_mut()) {
+                accumulator = if is_na_real(value) || is_na_real(accumulator) {
+                    NA_REAL
+                } else if value.is_nan() || accumulator.is_nan() {
+                    f64::NAN
+                } else if kind == Cumulative::Max {
+                    if accumulator > value {
+                        accumulator
+                    } else {
+                        value
+                    }
+                } else if accumulator < value {
+                    accumulator
+                } else {
+                    value
+                };
+                *out = accumulator;
             }
             result
         }
@@ -2649,6 +2810,19 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 let mut total = LongDouble::ZERO;
                 let mut na = false;
                 for &item in &items {
+                    let finite = if item.kind() == SexpType::Real {
+                        long_double::add_all(
+                            LongDouble::ZERO,
+                            values::reals(values::materialize(item)?),
+                        )
+                        .finite()
+                    } else {
+                        None
+                    };
+                    if let Some(item_total) = finite {
+                        total += item_total.to_f64();
+                        continue;
+                    }
                     let mut item_total = LongDouble::ZERO;
                     let mut first_nan = None;
                     if item.kind() == SexpType::Real {
@@ -2948,17 +3122,21 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
     let count = length(operand);
     match operand.kind() {
         SexpType::Logical | SexpType::Integer => {
-            let mut total = 0.0;
+            // GNU R divides the long double total, so the quotient rounds once, to double.
+            let mut total: i64 = 0;
             for &value in values::ints(operand) {
                 if value == NA_INTEGER {
                     return scalar_real(NA_REAL);
                 }
-                total += value as f64;
+                total += i64::from(value);
             }
-            scalar_real(total / count as f64)
+            scalar_real((LongDouble::from_i64(total) / count).to_f64())
         }
         SexpType::Real => {
             let data = values::reals(operand);
+            if let Some(total) = long_double::add_all(LongDouble::ZERO, data).finite() {
+                return scalar_real(long_double_mean_from_total(data, total).to_f64());
+            }
             // GNU R sums in x87 long double, where NA's payload outranks a plain NaN's.
             if data.iter().any(|&value| is_na_real(value)) {
                 return scalar_real(NA_REAL);
@@ -2983,15 +3161,19 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// GNU R's mean of doubles: the `long double` sum divided by the count, refined by the mean of
-/// the deviations from it unless it overflowed.
-pub fn long_double_mean(data: &[f64]) -> LongDouble {
-    let count = data.len();
-    let mean = long_double::add_all(LongDouble::ZERO, data) / count;
+/// The mean of `data` from its long double `total`, which must be finite.
+pub fn long_double_mean_from_total(data: &[f64], total: LongDouble) -> LongDouble {
+    let mean = total / data.len();
     if !mean.is_finite() {
         return mean;
     }
-    mean + long_double::add_differences(LongDouble::ZERO, data, mean) / count
+    mean + long_double::add_differences(LongDouble::ZERO, data, mean) / data.len()
+}
+
+/// GNU R's mean of doubles: the `long double` sum divided by the count, refined by the mean of
+/// the deviations from it unless it overflowed.
+pub fn long_double_mean(data: &[f64]) -> LongDouble {
+    long_double_mean_from_total(data, long_double::add_all(LongDouble::ZERO, data))
 }
 
 // NA tests.
@@ -3403,7 +3585,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             match (from, to, by) {
                 (Some(from), Some(to), None) => {
                     if count == 1 {
-                        return values::real_vector(&[from]);
+                        return whole_sequence(&[from]);
                     }
                     let intervals = count as f64 - 1.0;
                     let by = (to - from) / intervals;

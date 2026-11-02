@@ -383,6 +383,47 @@ extension <- tools::file_ext("data.tsv")
 source R/a.R
 bind extension from R/a.R:2:13
 
+#==== r6_generators
+#---- an_edited_generator_is_rebound_lazily_outside_strict_mode
+#~~~~ before R/a.R
+Counter <- R6::R6Class("Counter", public = list(n = 0, add = function() self$n + 1))
+#~~~~ after R/a.R
+Counter <- R6::R6Class("Counter", public = list(n = 1, add = function() self$n + 1))
+#++++
+source R/a.R
+bind Counter from R/a.R:1:11
+
+#---- a_generator_whose_methods_call_a_later_function_stays_lazy
+#~~~~ before R/a.R
+Counter <- R6::R6Class("Counter", public = list(add = function() step()))
+#~~~~ after R/a.R
+Counter <- R6::R6Class("Counter", public = list(add = function() step() + 1))
+#~~~~ R/b.R
+step <- function() 1
+#++++
+source R/a.R
+bind Counter from R/a.R:1:11
+
+#---- a_generator_with_an_effect_in_its_arguments_runs_eagerly
+#~~~~ before R/a.R
+Counter <- R6::R6Class("Counter", public = list(n = 0))
+#~~~~ after R/a.R
+Counter <- R6::R6Class("Counter", public = list(n = Sys.time()))
+#++++
+source R/a.R
+run R/a.R:1 Counter <- R6::R6Class("Counter", public = list(n = Sys.time()))
+
+#---- a_generator_inheriting_from_a_later_class_runs_eagerly
+#~~~~ before R/a.R
+Child <- R6::R6Class("Child", inherit = Base, public = list(n = 0))
+#~~~~ after R/a.R
+Child <- R6::R6Class("Child", inherit = Base, public = list(n = 1))
+#~~~~ R/b.R
+Base <- R6::R6Class("Base")
+#++++
+source R/a.R
+run R/a.R:1 Child <- R6::R6Class("Child", inherit = Base, public = list(n = 1))
+
 #==== os_subdirectories
 #---- an_os_file_runs_after_the_files_of_r
 #~~~~ R/z.R

@@ -26,6 +26,7 @@ length-sequence = "warn"      # 1:length(x), which counts down when x is empty
 class-equals = "warn"         # class(x) == "name" instead of inherits()
 unreachable-code = "warn"     # statements after return(), stop(), break or next
 sprintf-arguments = "warn"    # a sprintf() format that wants more or fewer values
+length-test = "warn"          # length(x == y) instead of length(x) == y
 redundant-return = "off"      # return() as a function's last expression
 commented-code = "off"        # a comment that is commented-out code
 duplicate-argument = "off"    # the same argument name twice in one call
@@ -44,6 +45,19 @@ which-grepl = "off"           # which(grepl(...)) instead of grep(...)
 length-levels = "off"         # length(levels(x)) instead of nlevels(x)
 browser-call = "off"          # a browser() call left in the code
 numeric-leading-zero = "off"  # .5 instead of 0.5
+implicit-assignment = "off"   # an assignment inside an if or while condition
+while-true = "off"            # while (TRUE) instead of repeat
+scalar-in = "off"             # x %in% 1 instead of x == 1
+order-subset = "off"          # x[order(x)] instead of sort(x)
+matrix-apply = "off"          # apply(x, 1, sum) instead of rowSums(x)
+empty-assignment = "off"      # x <- {} instead of x <- NULL
+unnecessary-lambda = "off"    # lapply(x, function(y) f(y)) instead of lapply(x, f)
+yoda-test = "off"             # expect_equal(2, x) instead of expect_equal(x, 2)
+nzchar = "off"                # nchar(x) == 0 instead of !nzchar(x)
+sample-int = "off"            # sample(1:n, k) instead of sample.int(n, k)
+unnecessary-concatenation = "off" # c("a") or c() around a single constant
+line-length = "off"           # a line longer than max-line-length characters
+max-line-length = 80          # the limit line-length checks
 unused-parameter = "off"      # a parameter the body never reads
 unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function
@@ -74,6 +88,32 @@ The project root is a separate question: it decides which files see each other's
 the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is the directory you
 named, or the parent of `R/` for a file directly inside `R/`, or else the file's own directory. In
 the editor it is the first workspace folder.
+
+## A lintr `.lintr` file
+
+A package set up for lintr keeps its lint choices without a `ry.toml`. ry reads the `linters` field
+of the `.lintr` at the project root, the nearest directory with a `ry.toml`, a `roughly.toml` or a
+`DESCRIPTION`, and fills every lint level that `ry.toml` leaves unset:
+
+```
+linters: linters_with_defaults(
+    line_length_linter(120),
+    commented_code_linter = NULL,
+    any_is_na_linter()
+  )
+```
+
+A linter called in the field turns on the ry lints that report the same thing, so this file turns
+on `any-is-na` and `line-length` with a limit of 120. A linter set to `NULL` turns its lints off.
+`linters_with_defaults()` also turns on lintr's defaults that are off in ry: `commented-code`,
+`line-length` at 80, `naming-style` in snake_case, `redundant-return` and `single-quotes`. A setting
+that asks for the opposite of a ry lint turns it off: `return_linter(return_style = "explicit")` turns
+off `redundant-return`, and `quotes_linter("'")` turns off `single-quotes`.
+`object_name_linter(styles = "camelCase")` sets camelCase, and a list of styles that allows both
+camelCase and snake_case leaves `naming-style` unset. ry warns once for each linter it has no lint for,
+except lintr's whitespace and layout linters, which `ry format` covers, and a `.lintr` that is not
+UTF-8 text is ignored with a warning. The other fields, such as `exclusions`, are not read. The
+language server re-reads a `.lintr` in the workspace folder when it changes.
 
 ## `inline-annotations`
 

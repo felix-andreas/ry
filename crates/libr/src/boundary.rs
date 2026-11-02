@@ -461,9 +461,26 @@ pub fn format_error(prefix: &str, error: &RError) -> String {
     }
 }
 
-/// Writes to the console. The callback is taken out of the runtime while it runs, so one that
-/// prints through the API again finds the default console instead of aliasing itself.
+/// Writes R output, as `Rprintf` and `REprintf` do: through `sink()`'s diversions once the
+/// interpreter runs, so `capture.output()` sees what native code prints.
 pub fn write_console(text: &[u8], is_error: bool) {
+    if !interp::is_installed() {
+        return write_terminal(text, is_error);
+    }
+    // SAFETY: the interpreter is installed, and output runs on its thread.
+    unsafe {
+        if is_error {
+            interp::connections::write_message(text);
+        } else {
+            interp::connections::write_output(text);
+        }
+    }
+}
+
+/// Writes to the console itself, past any sink. The callback is taken out of the runtime while
+/// it runs, so one that prints through the API again finds the default console instead of
+/// aliasing itself.
+pub fn write_terminal(text: &[u8], is_error: bool) {
     let mut console = std::mem::replace(&mut runtime().console, Box::new(default_console));
     console(text, is_error);
     runtime().console = console;

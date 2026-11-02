@@ -78,7 +78,7 @@ unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
-        write_console: |text, is_error| crate::boundary::write_console(text, is_error),
+        write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
@@ -101,6 +101,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
+    interp::register_builtins(crate::inspect::BUILTINS);
     interp::register_builtins(crate::altrep::INTERNALS);
     install_evaluator(&Interpreter);
 }

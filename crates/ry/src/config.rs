@@ -2,12 +2,12 @@
 //! before walking to its parent, so a stale old-name file higher up never wins.
 
 use {
-    crate::cli::exclude_matcher,
+    crate::{cli::exclude_matcher, diagnostics::lintr_codes},
     miette::{
         Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
         SourceSpan,
     },
-    semantics::lints::{LintConfig, NameStyle},
+    semantics::lints::{LintConfig, LintLevel, NameStyle, lint_levels_mut},
     serde::{
         Deserialize,
         de::{self, DeserializeOwned, Deserializer, Visitor},
@@ -18,6 +18,7 @@ use {
         iter::once,
         path::{Component, Path, PathBuf, absolute},
     },
+    syntax::{SyntaxKind, SyntaxNode},
     thiserror::Error,
 };
 
@@ -27,6 +28,9 @@ pub const CONFIG_FILE_NAME: &str = "ry.toml";
 pub const LEGACY_CONFIG_FILE_NAME: &str = "roughly.toml";
 
 pub const CONFIG_FILE_NAMES: [&str; 2] = [CONFIG_FILE_NAME, LEGACY_CONFIG_FILE_NAME];
+
+/// lintr's per-project configuration, read for the lints it turns on or off.
+pub const LINTR_FILE_NAME: &str = ".lintr";
 
 pub const INLINE_ANNOTATIONS_OFF: &str = "inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds";
 
@@ -40,6 +44,9 @@ pub struct Config {
     /// Keys this version does not know, in file order: they warn rather than fail, for
     /// forward compatibility. Wrong types on known keys remain hard errors.
     pub unknown_keys: Vec<String>,
+    /// What ry could not read in a `.lintr` file, which never stops a check because the file
+    /// is lintr's, not ry's.
+    pub lintr_problems: Vec<String>,
 }
 
 /// Gates only what is reported; IDE features compute every class regardless.
@@ -90,6 +97,7 @@ impl Config {
                 ),
                 None => format!("ignoring unknown config key `{key}`. Check the spelling, or update ry"),
             })
+            .chain(self.lintr_problems.iter().cloned())
             .collect();
         if !self.check.inline_annotations {
             warnings.push(INLINE_ANNOTATIONS_OFF.to_owned());
@@ -97,12 +105,28 @@ impl Config {
         warnings
     }
 
-    /// Falls back to the default configuration when no config file governs `target`.
+    /// Falls back to the default configuration when no config file governs `target`. The
+    /// project root's `.lintr` file fills the lint levels the config file leaves unset.
     pub fn discover(target: impl AsRef<Path>) -> Result<Config, ConfigError> {
-        match find_config_file(target.as_ref())? {
-            Some(path) => Config::from_path(path),
-            None => Ok(Config::default()),
+        let config_path = find_config_file(target.as_ref())?;
+        let mut config = match &config_path {
+            Some(path) => Config::from_path(path)?,
+            None => Config::default(),
+        };
+        if let Some(lintr_path) = find_lintr_file(target.as_ref())? {
+            config.lintr_problems = match fs::read(&lintr_path).map(String::from_utf8) {
+                Ok(Ok(text)) => apply_lintr(&mut config.lint, &text),
+                Ok(Err(_)) => vec![format!(
+                    "ignoring {}, which is not UTF-8 text",
+                    lintr_path.display()
+                )],
+                Err(error) => vec![format!(
+                    "ignoring {}, which could not be read: {error}",
+                    lintr_path.display()
+                )],
+            };
         }
+        Ok(config)
     }
 
     /// The file the language server watches for reloads (possibly above the workspace
@@ -150,6 +174,7 @@ impl Config {
             check: toml.check,
             source_directory: None,
             unknown_keys,
+            lintr_problems: Vec::new(),
         })
     }
 }
@@ -199,21 +224,8 @@ pub fn check_config_invariants(text: &str) {
 }
 
 fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
-    // A relative path's lexical parent chain ends at the empty path, never reaching
-    // the real ancestors.
-    let target = absolute(target).map_err(|error| ConfigError::Resolve {
-        path: target.to_path_buf(),
-        source: error,
-    })?;
-    // `parent()` strips `..` lexically, so `/a/b/../c.R` would walk back into `/a/b`,
-    // which is not an ancestor.
-    let target = normalize_lexically(&target);
-
-    let mut directory = if target.is_dir() {
-        Some(target.as_path())
-    } else {
-        target.parent()
-    };
+    let start = search_start(target)?;
+    let mut directory = Some(start.as_path());
     while let Some(current) = directory {
         for name in CONFIG_FILE_NAMES {
             let candidate = current.join(name);
@@ -224,6 +236,283 @@ fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
         directory = current.parent();
     }
     Ok(None)
+}
+
+/// Only the project root's `.lintr` is read: the nearest directory above `target` with a
+/// `ry.toml`, `roughly.toml` or `DESCRIPTION`. lintr itself takes the `.lintr` nearest each
+/// file, but `ry check` reaches each file through the path it was given, and a `.lintr` below
+/// the root would then apply to `ry check R/a.R` and not to `ry check .`.
+fn find_lintr_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let start = search_start(target)?;
+    let mut directory = Some(start.as_path());
+    while let Some(current) = directory {
+        let is_root = CONFIG_FILE_NAMES
+            .iter()
+            .chain(once(&"DESCRIPTION"))
+            .any(|name| current.join(name).is_file());
+        if is_root {
+            let candidate = current.join(LINTR_FILE_NAME);
+            return Ok(candidate.is_file().then_some(candidate));
+        }
+        directory = current.parent();
+    }
+    Ok(None)
+}
+
+/// The directory whose ancestors a config search walks: `target` itself or its parent.
+fn search_start(target: &Path) -> Result<PathBuf, ConfigError> {
+    // A relative path's lexical parent chain ends at the empty path, never reaching
+    // the real ancestors.
+    let absolute_target = absolute(target).map_err(|error| ConfigError::Resolve {
+        path: target.to_path_buf(),
+        source: error,
+    })?;
+    // `parent()` strips `..` lexically, so `/a/b/../c.R` would walk back into `/a/b`,
+    // which is not an ancestor.
+    let normalized = normalize_lexically(&absolute_target);
+    if normalized.is_dir() {
+        return Ok(normalized);
+    }
+    Ok(normalized
+        .parent()
+        .map_or_else(|| normalized.clone(), Path::to_path_buf))
+}
+
+/// lintr's own defaults that ry leaves off, which `linters_with_defaults()` turns on.
+const LINTR_DEFAULTS_OFF_IN_RY: &[&str] = &[
+    "commented_code",
+    "line_length",
+    "object_name",
+    "quotes",
+    "return",
+];
+
+/// Reads the `linters` field of a `.lintr` file into `lint`, filling only the levels and
+/// settings still at their default, so `ry.toml` wins wherever both speak. A linter called in
+/// the field turns its lints on, and one set to `NULL` turns them off. `linters_with_defaults()`
+/// also turns on lintr's defaults that ry leaves off. Returns what could not be read.
+pub fn apply_lintr(lint: &mut LintConfig, text: &str) -> Vec<String> {
+    let Some(linters) = dcf_field(text, "linters") else {
+        return Vec::new();
+    };
+    let parsed = syntax::parse(&linters);
+    if !parsed.errors().is_empty() {
+        return vec![format!(
+            "ignoring the `linters` field of {LINTR_FILE_NAME}, which does not parse as R"
+        )];
+    }
+    let root = parsed.syntax_node();
+    let mut settings: Vec<(String, LintLevel)> = Vec::new();
+    let mut max_line_length = None;
+    let mut naming_style = None;
+    let with_defaults = root
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::CALL_EXPR)
+        .any(|call| callee_name(&call).as_deref() == Some("linters_with_defaults"));
+    if with_defaults {
+        settings.extend(
+            LINTR_DEFAULTS_OFF_IN_RY
+                .iter()
+                .map(|name| ((*name).to_owned(), LintLevel::Warn)),
+        );
+        naming_style = Some(NameStyle::Snake);
+        max_line_length = Some(80);
+    }
+    for argument in root
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::ARGUMENT)
+    {
+        let mut children = argument.children();
+        let named = argument
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::EQ);
+        let name = named
+            .then(|| children.next())
+            .flatten()
+            .map(|name| name.text().to_string());
+        let value = children.next();
+        let disabled = value.as_ref().is_some_and(|value| {
+            value.kind() == SyntaxKind::LITERAL
+                && value
+                    .first_token()
+                    .is_some_and(|token| token.kind() == SyntaxKind::NULL_KW)
+        });
+        let called = value.as_ref().and_then(|value| {
+            (value.kind() == SyntaxKind::CALL_EXPR)
+                .then(|| callee_name(value))
+                .flatten()
+                .filter(|callee| callee.ends_with("_linter"))
+                .map(|callee| (callee, value.clone()))
+        });
+        if let (Some(name), true) = (&name, disabled) {
+            let linter = lintr_name(name);
+            match linter.as_str() {
+                "object_name" => naming_style = None,
+                "line_length" => max_line_length = None,
+                _ => {}
+            }
+            settings.push((linter, LintLevel::Off));
+        } else if let Some((callee, call)) = called {
+            let linter = lintr_name(&callee);
+            match linter.as_str() {
+                "line_length" => {
+                    max_line_length = Some(
+                        first_argument(&call, "length")
+                            .and_then(|value| value.trim_end_matches('L').parse().ok())
+                            .unwrap_or(80),
+                    );
+                }
+                "object_name" => {
+                    // lintr defaults to snake_case. A list of styles ry cannot express as one
+                    // of its two leaves the style unchecked rather than enforcing the wrong one.
+                    naming_style = match first_argument(&call, "styles") {
+                        None => Some(NameStyle::Snake),
+                        Some(styles) => {
+                            match (styles.contains("camelCase"), styles.contains("snake_case")) {
+                                (true, false) => Some(NameStyle::Camel),
+                                (false, true) => Some(NameStyle::Snake),
+                                _ => None,
+                            }
+                        }
+                    };
+                }
+                // The explicit `return()` style and single quotes are the opposite of what
+                // ry's `redundant-return` and `single-quotes` check, so they turn those off.
+                "return" | "quotes"
+                    if call.text().to_string().contains("explicit")
+                        || call.text().to_string().contains("\"'\"") =>
+                {
+                    settings.push((linter, LintLevel::Off));
+                    continue;
+                }
+                _ => {}
+            }
+            settings.push((linter, LintLevel::Warn));
+        }
+    }
+    let mut problems = Vec::new();
+    let mut levels = lint_levels_mut(lint);
+    // The last mention of a linter wins, and a level is only filled while it is unset, so the
+    // settings apply from the last to the first.
+    for (linter, level) in settings.into_iter().rev() {
+        if linter == "object_name" {
+            continue;
+        }
+        let codes = lintr_codes(&linter);
+        for code in codes {
+            if let Some((_, current)) = levels.iter_mut().find(|(key, _)| key == code)
+                && **current == LintLevel::Default
+            {
+                **current = level;
+            }
+        }
+        if codes.is_empty()
+            && level == LintLevel::Warn
+            && !LINTR_LAYOUT_LINTERS.contains(&linter.as_str())
+        {
+            problems.push(format!(
+                "{LINTR_FILE_NAME} turns on `{linter}_linter`, which ry has no lint for"
+            ));
+        }
+    }
+    drop(levels);
+    if lint.naming_style.is_none() {
+        lint.naming_style = naming_style;
+    }
+    if lint.max_line_length.is_none() {
+        lint.max_line_length = max_line_length;
+    }
+    problems.sort();
+    problems.dedup();
+    problems
+}
+
+/// lintr's whitespace and layout linters, which `ry format` covers instead of a lint.
+const LINTR_LAYOUT_LINTERS: &[&str] = &[
+    "brace",
+    "commas",
+    "function_left_parentheses",
+    "indentation",
+    "infix_spaces",
+    "paren_body",
+    "pipe_continuation",
+    "semicolon",
+    "spaces_inside",
+    "spaces_left_parentheses",
+    "trailing_blank_lines",
+    "trailing_whitespace",
+    "whitespace",
+];
+
+/// The value of a DCF field (`name: value`, continued on indented lines), as R's `read.dcf()`
+/// reads it.
+fn dcf_field(text: &str, field: &str) -> Option<String> {
+    let mut value: Option<String> = None;
+    for line in text.lines() {
+        if line.starts_with([' ', '\t']) {
+            if let Some(value) = value.as_mut() {
+                value.push('\n');
+                value.push_str(line);
+            }
+            continue;
+        }
+        if value.is_some() {
+            break;
+        }
+        if let Some(rest) = line
+            .split_once(':')
+            .filter(|(name, _)| name.trim() == field)
+            .map(|(_, rest)| rest)
+        {
+            value = Some(rest.to_owned());
+        }
+    }
+    value
+}
+
+/// A linter's name without `lintr::` or `_linter`, as `lintr_codes` takes it.
+fn lintr_name(name: &str) -> String {
+    let name = name.trim_matches('`');
+    let name = name.strip_suffix("_linter").unwrap_or(name);
+    name.to_owned()
+}
+
+fn callee_name(call: &SyntaxNode) -> Option<String> {
+    let callee = call.first_child()?;
+    match callee.kind() {
+        SyntaxKind::NAME => Some(callee.text().to_string()),
+        SyntaxKind::NAMESPACE_EXPR => callee.children().last().map(|name| name.text().to_string()),
+        _ => None,
+    }
+}
+
+/// The text of a call's argument named `name`, or else its first positional argument.
+fn first_argument(call: &SyntaxNode, name: &str) -> Option<String> {
+    let list = call
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
+    let mut positional = None;
+    for argument in list
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+    {
+        let named = argument
+            .children_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::EQ);
+        let mut children = argument.children();
+        if named {
+            if children.next().is_some_and(|key| key.text() == name) {
+                return children
+                    .next()
+                    .map(|value| value.text().to_string().trim().to_owned());
+            }
+        } else if positional.is_none() {
+            positional = children
+                .next()
+                .map(|value| value.text().to_string().trim().to_owned());
+        }
+    }
+    positional
 }
 
 /// I/O failures render as the report's cause, not welded into the message.
@@ -653,5 +942,120 @@ mod tests {
     fn obsolete_missing_comma_key_is_still_accepted() {
         let config = parse("[lint]\nmissing-comma = \"off\"\n");
         assert_eq!(config.lint.missing_comma, LintLevel::Off);
+    }
+
+    #[test]
+    fn every_lint_level_is_settable_by_name() {
+        let mut lint = LintConfig::default();
+        let named: Vec<&str> = lint_levels_mut(&mut lint)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let expected: Vec<&str> = field_names::<LintConfig>()
+            .iter()
+            .copied()
+            .filter(|field| !matches!(*field, "naming-style" | "missing-comma" | "max-line-length"))
+            .collect();
+        assert_eq!(named, expected);
+    }
+
+    #[test]
+    fn lintr_defaults_turn_on_the_lintr_defaults_ry_leaves_off() {
+        let mut lint = LintConfig::default();
+        let problems = apply_lintr(
+            &mut lint,
+            indoc! {r#"
+                linters: linters_with_defaults(
+                    line_length_linter(120L),
+                    commented_code_linter = NULL,
+                    any_is_na_linter(),
+                    object_length_linter(40)
+                  )
+                encoding: "UTF-8"
+            "#},
+        );
+        assert_eq!(lint.max_line_length, Some(120));
+        assert_eq!(lint.line_length, LintLevel::Warn);
+        assert_eq!(lint.commented_code, LintLevel::Off);
+        assert_eq!(lint.any_is_na, LintLevel::Warn);
+        assert_eq!(lint.redundant_return, LintLevel::Warn);
+        assert_eq!(lint.single_quotes, LintLevel::Warn);
+        assert_eq!(lint.naming_style, Some(NameStyle::Snake));
+        assert_eq!(lint.assignment_operator, LintLevel::Default);
+        assert_eq!(
+            problems,
+            vec![".lintr turns on `object_length_linter`, which ry has no lint for"]
+        );
+    }
+
+    #[test]
+    fn lintr_settings_yield_to_ry_toml() {
+        let mut config = parse(indoc! {r#"
+            [lint]
+            commented-code = "error"
+            naming-style = "camelCase"
+        "#});
+        let problems = apply_lintr(
+            &mut config.lint,
+            "linters: list(lintr::commented_code_linter(), object_name_linter(), quotes_linter(\"'\"), T_and_F_symbol_linter = NULL)\n",
+        );
+        assert!(problems.is_empty());
+        assert_eq!(config.lint.commented_code, LintLevel::Error);
+        assert_eq!(config.lint.naming_style, Some(NameStyle::Camel));
+        // `quotes_linter("'")` asks for single quotes, so the double-quote lint goes off.
+        assert_eq!(config.lint.single_quotes, LintLevel::Off);
+        assert_eq!(config.lint.boolean_shorthand, LintLevel::Off);
+        assert_eq!(config.lint.line_length, LintLevel::Default);
+    }
+
+    #[test]
+    fn lintr_settings_that_ask_for_the_opposite_turn_lints_off() {
+        let mut lint = LintConfig::default();
+        let problems = apply_lintr(
+            &mut lint,
+            "linters: linters_with_defaults(return_linter(return_style = \"explicit\"), object_name_linter(styles = c(\"camelCase\", \"symbols\")))\n",
+        );
+        assert!(problems.is_empty());
+        assert_eq!(lint.redundant_return, LintLevel::Off);
+        assert_eq!(lint.naming_style, Some(NameStyle::Camel));
+
+        let mut lint = LintConfig::default();
+        apply_lintr(
+            &mut lint,
+            "linters: list(object_name_linter(styles = c(\"camelCase\", \"snake_case\")))\n",
+        );
+        assert_eq!(lint.naming_style, None);
+    }
+
+    #[test]
+    fn only_the_project_root_lintr_applies() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let project = root.path().join("project");
+        let nested = project.join("R").join("inner");
+        fs::create_dir_all(&nested).expect("create dirs");
+        fs::write(project.join("DESCRIPTION"), "Package: p\n").expect("write DESCRIPTION");
+        fs::write(
+            project.join(".lintr"),
+            "linters: list(any_is_na_linter())\n",
+        )
+        .expect("write");
+        fs::write(nested.join(".lintr"), "linters: list(paste_linter())\n").expect("write");
+        fs::write(root.path().join(".lintr"), &[0xff, 0xfe][..]).expect("write");
+        assert_eq!(
+            find_lintr_file(&nested.join("a.R")).expect("search"),
+            Some(project.join(".lintr"))
+        );
+    }
+
+    #[test]
+    fn an_unreadable_lintr_field_is_reported_not_fatal() {
+        let mut lint = LintConfig::default();
+        let problems = apply_lintr(&mut lint, "linters: linters_with_defaults(\n");
+        assert_eq!(
+            problems,
+            vec!["ignoring the `linters` field of .lintr, which does not parse as R"]
+        );
+        assert_eq!(lint, LintConfig::default());
+        assert!(apply_lintr(&mut lint, "exclusions: list(\"R/old.R\")\n").is_empty());
     }
 }
