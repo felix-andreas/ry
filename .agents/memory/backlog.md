@@ -2996,6 +2996,8 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
 - Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
 - Joins without `on =` (key joins) and `x[]`.
+- `roll = "nearest"`: at a tie data.table takes the earlier row and Polars' as-of join the later one, so the bridge declines it. Accepting it needs a tie-break toward the earlier key.
+- `.EACHI` over a non-equi join, or with a `j` that reads a join column: data.table reports `i`'s bounds there, so these decline.
 - The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round

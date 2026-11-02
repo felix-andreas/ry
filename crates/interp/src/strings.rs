@@ -250,6 +250,11 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "keepNA"])?;
+    // The empty symbol, as `lapply` hands over an empty argument taken from a call, evaluates to
+    // `R_MissingArg`, which GNU R coerces to `""` rather than reporting a missing argument.
+    if matched[0] == Some(values::missing_arg()) {
+        return values::scalar_logical(0);
+    }
     let x = require(matched[0], "x")?;
     let keep_na = matched[1].is_some_and(|value| flag(value));
     if values::inherits(x, "factor") {

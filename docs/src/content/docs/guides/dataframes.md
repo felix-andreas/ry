@@ -71,7 +71,13 @@ and warnings. Otherwise data.table answers it. These go to data.table:
 - a grouped `sum` of an integer column whose values could overflow while they add up, because
   data.table then returns doubles even when each group's total fits;
 - a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a rolling join with `roll = "nearest"`, a non-equi join whose join columns have different types
+  in the two tables, `by = .EACHI` over a non-equi join or with a `j` that reads a join column,
+  and `:=` together with `nomatch`;
 - a query that warns or fails.
+
+data.table's own test suite, `test.data.table()`, passes in full under ry, with every query either
+answered by ry or handed to data.table.
 
 Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
 `[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends

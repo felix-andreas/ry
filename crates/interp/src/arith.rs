@@ -1859,6 +1859,11 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
+    // GNU R answers a comparison of two plain scalars with its shared `TRUE`, `FALSE` or `NA`,
+    // and packages compare against those addresses (data.table's `setattr` does).
+    if count == 1 && result.attrib() == nil() {
+        return values::scalar_logical(values::ints(result)[0]);
+    }
     Ok(result)
 }
 

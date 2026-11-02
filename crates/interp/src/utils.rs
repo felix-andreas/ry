@@ -919,14 +919,14 @@ fn scan_records(
                     filled = 0;
                 }
                 if filled > 0 && rules.fill {
-                    pad_record(columns, filled);
+                    pad_record(columns, filled, settings)?;
                     records += 1;
                     filled = 0;
                 }
             }
         } else if filled > 0 {
             if rules.fill {
-                pad_record(columns, filled);
+                pad_record(columns, filled, settings)?;
                 records += 1;
                 filled = 0;
             } else if !rules.multi_line {
@@ -940,18 +940,21 @@ fn scan_records(
         }
     }
     if filled > 0 {
-        pad_record(columns, filled);
+        pad_record(columns, filled, settings)?;
         records += 1;
     }
     Ok(records)
 }
 
-fn pad_record(columns: &mut [Column], from: usize) {
-    for column in &mut columns[from..] {
-        if column.kind.is_some() {
-            column.values.push(Value::Missing);
+/// Fills the rest of a short record with empty fields, which a character
+/// column keeps as `""` and every other column reads as `NA`, as in GNU R.
+fn pad_record(columns: &mut [Column], from: usize, settings: &Conversion<'_>) -> R<()> {
+    for column in columns.iter_mut().skip(from) {
+        if let Some(kind) = column.kind {
+            column.values.push(convert_field("", kind, settings)?);
         }
     }
+    Ok(())
 }
 
 /// A field converted to `kind`, or the error `scan` reports for it.

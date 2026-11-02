@@ -45,7 +45,7 @@ use {
         ColumnType, Schema, Table,
         convert::{self, RVector},
         polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
-        query::{self, Comparison, Output, Query, Rows, Select},
+        query::{self, Comparison, Output, Query, Roll, Rows, Select},
     },
 };
 
@@ -246,6 +246,26 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     };
     // Without `on =`, data.table joins on the key, and a keyed subject declines.
     if matches!(rows, Rows::Join(_)) && parts.on.is_none() {
+        return Ok(None);
+    }
+    // A non-equi join fills `x`'s join columns with `i`'s bounds but keeps `x`'s column types,
+    // and the engine would take `i`'s.
+    if let Rows::Join(join) = &rows
+        && join.on.iter().any(|on| on.op != Comparison::Equal)
+        && {
+            let other = join.other.schema();
+            join.on
+                .iter()
+                .any(|on| schema.column(&on.x) != other.column(&on.i))
+        }
+    {
+        return Ok(None);
+    }
+    // At a tie, `roll = "nearest"` takes the earlier row in data.table and the later one in the
+    // engine's as-of join.
+    if let Rows::Join(join) = &rows
+        && join.roll == Roll::Nearest
+    {
         return Ok(None);
     }
     // data.table's `.EACHI` over a non-equi join reports the bounds of `i` in the join columns,

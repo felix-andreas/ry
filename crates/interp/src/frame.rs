@@ -1401,11 +1401,6 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
             }
         }
     }
-    Ok(parts)
-}
-
-/// Lowers the parts of a query.
-pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts, Plan)> {
     if let Some(expression) = parts.by.as_ref().and_then(Piece::expression)
         && expression.kind() == SexpType::Symbol
         && symbol_name(expression) == ".EACHI"
@@ -1413,6 +1408,11 @@ pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts
         parts.by = None;
         parts.each_i = true;
     }
+    Ok(parts)
+}
+
+/// Lowers the parts of a query.
+pub(crate) unsafe fn plan(parts: Parts, lowering: &Lowering<'_>) -> R<(Parts, Plan)> {
     let by = match &parts.by {
         Some(piece) => lowering.by(piece, parts.j.as_ref().and_then(Piece::expression))?,
         None => Some(Vec::new()),
