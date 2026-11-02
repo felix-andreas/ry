@@ -4290,6 +4290,9 @@ check` releases its trees once, and memoized records are compact" below).
   the lazy planner and the readers. That change is a factor type of its own, worth doing only once
   a real workload reads multi-million-level factors; at db-benchmark's sizes the conversion
   already beats `fread` by 3x to 6x.
+- That condition is now met: db-benchmark's join inputs at 1e8 rows carry up to 1e8 distinct
+  levels, and the Enum's roughly 135 bytes per level keep `join_x` alone from fitting next to
+  `join_big` in 15 GB (backlog, "Open: DataFrame", top item). The replacement is the next step.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 

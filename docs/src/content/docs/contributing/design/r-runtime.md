@@ -885,6 +885,17 @@ picks them), because reading q10's six key columns as R vectors would add about 
 | peak memory (GB) | 13.7 | 13.4 | 12.6 |
 <!-- /bench-table:1e8-groupby -->
 
+The join questions are measured separately (`just bench-table 2e7 --joins-only`), because their
+inputs are larger than the group-by file. At 2e7 rows ry answers the five joins in 3.7 s from R
+(3.1 s from Rust) against data.table's 22.3 s, but peaks at 11.6 GB against 5.2 GB. Nearly all of
+that memory is reading the CSVs: `join_x` alone takes 4.9 GB, because every distinct `id4`..`id6`
+string becomes a factor level and a Polars Enum spends about 135 bytes per level (it stores each
+level twice, in a string array and in a hash map). At 1e8 rows neither engine fits the inputs in
+15 GB: data.table and ry both run out of memory reading `join_x` with factors, and ry reading the
+key columns as text loads `join_x` at an 11.7 GB peak but cannot then load `join_big`. Closing that
+gap needs a factor type outside Polars (integer codes plus one level array) and a text reader that
+does not hold the parsed chunks and the final columns at once; `backlog.md` tracks both.
+
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
 same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R

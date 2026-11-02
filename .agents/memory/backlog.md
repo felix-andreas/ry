@@ -2095,6 +2095,22 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** At 2e7 rows the five
+  joins take 3.7 s against data.table's 22.3 s but peak at 11.6 GB against 5.2 GB, and nearly all
+  of it is reading the CSVs (`join_x` 4.9 GB, `join_big` 4.2 GB more). Two causes, both measured:
+  - A Polars Enum stores every level twice (a `Utf8ViewArray` plus `CategoricalMapping`'s hash
+    table and boxcar vector), about 135 bytes per level, and the read peaks at about twice its
+    resident size (2e7 `join_x` with factors: 4.87 GB peak, 2.37 GB resident, 0.64 GB of column
+    data). The fix is a factor type outside Polars: u32 codes plus one levels array beside the
+    frame (`Table.string_codes` is precedent), converted to an Enum only where a Polars plan needs
+    one. About 50 sites read the Enum: `query.rs`, `ops.rs`, `convert.rs`, `table.rs`,
+    `kernel.rs`, `io.rs`, `join.rs`, `group.rs`, interp's `data_table.rs` and `frame.rs`, libr's
+    `frame_altrep.rs`, and the lazy plans' string expressions.
+  - Reading the id columns as text (`strings_as_factors = FALSE`) holds slices and final columns
+    at once: 2.44 GB peak and 1.4 GB resident at 2e7, and an 11.7 GB peak for the 5.1 GB 1e8
+    `join_x`, after which `join_big` no longer fits.
+  At 1e8, data.table runs out of memory reading `join_x` with factors as well, so "at or below
+  data.table's memory" is met trivially there; the target is that ry completes.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
