@@ -4794,7 +4794,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   keep that table in step when a lint is ported. A `.lintr` file's `linters` field is read too
   (`apply_lintr` in `crates/ry/src/config.rs`): it fills only the levels `ry.toml` leaves at
   `Default`, so `ry.toml` always wins, and an unreadable field is a warning, never an error,
-  because the file is lintr's. `lint_levels_mut` in `lints.rs` is the one name-to-field table, and
+  because the file is lintr's. Only the `.lintr` at the project root (nearest `ry.toml`,
+  `roughly.toml` or `DESCRIPTION`) applies, so the answer never depends on how a path is spelled.
+  `lint_levels_mut` in `lints.rs` is the one name-to-field table, and
   a unit test pins it against the struct's fields.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their

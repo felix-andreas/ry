@@ -1748,10 +1748,12 @@ pub fn fmt(
     let paths_with_config = files
         .iter()
         .map(|file| {
-            let config = config::Config::discover(file).map_err(|err| {
+            let mut config = config::Config::discover(file).map_err(|err| {
                 report(&err);
                 CommandError
             })?;
+            // lintr's settings only concern lints, so formatting never warns about them.
+            config.lintr_problems.clear();
             warn_config(&config);
             // `[check] exclude` scopes analysis, not formatting. Literate documents are never
             // formatted: most of an `.Rmd` is prose.

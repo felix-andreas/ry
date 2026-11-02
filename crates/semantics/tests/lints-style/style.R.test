@@ -555,6 +555,13 @@ if (g() -> y) y
 31..52 warning[implicit-assignment] Move this assignment out of the `while` condition, where it reads like a comparison
 78..86 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
 
+#---- an_assignment_inside_a_subset_or_block_condition_warns
+if (y[x <- 1]) 1
+if ({x <- 3; x}) 1
+#++++
+6..12 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+22..28 warning[implicit-assignment] Move this assignment out of the `if` condition, where it reads like a comparison
+
 #---- a_comparison_or_a_nested_function_is_clean
 if (x < -1) print(x)
 if (any(vapply(xs, function(x) { y <- x; y > 0 }, logical(1)))) 1
@@ -586,6 +593,12 @@ while (TRUE # forever
 ) step()
 #++++
 0..23 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+
+#---- a_body_right_after_the_parenthesis_keeps_a_space
+while (TRUE)break
+#++++
+0..12 warning[while-true] Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`
+  safe fix 0..12 "repeat "
 
 #==== scalar-in
 #---- in_with_one_value_warns
@@ -645,6 +658,12 @@ apply(m, margin, sum)
 #++++
 clean
 
+#---- a_comment_in_the_call_keeps_the_lint_without_a_fix
+apply(m, 1, # by row
+  sum)
+#++++
+0..27 warning[matrix-apply] Use rowSums(), which computes in C, instead of apply() with sum()
+
 #==== empty-assignment
 #---- assigning_empty_braces_warns
 x <- {}
@@ -690,6 +709,8 @@ lapply(xs, function(x = 1) f(x))
 lapply(xs, function(x) x(x))
 lapply(xs, function(x) { f(x) })
 lapply(xs, function(x) fs[[1]](x))
+lapply(xs, function(x) quote(x))
+lapply(xs, function(x) substitute(x))
 #++++
 clean
 
@@ -713,6 +734,12 @@ expect_equal(NULL, x)
 expect_equal(2, f(x), tolerance = 1e-3)
 #++++
 clean
+
+#---- a_comment_in_the_call_keeps_the_lint_without_a_fix
+expect_equal(2, # the answer
+  f(x))
+#++++
+0..36 warning[yoda-test] Put the value under test first: testthat reports the first argument of expect_equal() as the actual value
 
 #==== nzchar
 #---- counting_characters_to_test_emptiness_warns

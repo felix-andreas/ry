@@ -92,8 +92,8 @@ the editor it is the first workspace folder.
 ## A lintr `.lintr` file
 
 A package set up for lintr keeps its lint choices without a `ry.toml`. ry reads the `linters` field
-of the nearest `.lintr`, searching up from the checked file and no higher than the directory of the
-`ry.toml` in use, and fills every lint level that `ry.toml` leaves unset:
+of the `.lintr` at the project root, the nearest directory with a `ry.toml`, a `roughly.toml` or a
+`DESCRIPTION`, and fills every lint level that `ry.toml` leaves unset:
 
 ```
 linters: linters_with_defaults(
@@ -106,11 +106,14 @@ linters: linters_with_defaults(
 A linter called in the field turns on the ry lints that report the same thing, so this file turns
 on `any-is-na` and `line-length` with a limit of 120. A linter set to `NULL` turns its lints off.
 `linters_with_defaults()` also turns on lintr's defaults that are off in ry: `commented-code`,
-`line-length` at 80, `naming-style` in snake_case, `redundant-return` and `single-quotes`.
-`object_name_linter(styles = "camelCase")` sets camelCase. ry warns once for each linter it has no
-lint for, except lintr's whitespace and layout linters, which `ry format` covers. The other fields,
-such as `exclusions`, are not read. The language server re-reads a `.lintr` in the workspace folder
-when it changes.
+`line-length` at 80, `naming-style` in snake_case, `redundant-return` and `single-quotes`. A setting
+that asks for the opposite of a ry lint turns it off: `return_linter(return_style = "explicit")` turns
+off `redundant-return`, and `quotes_linter("'")` turns off `single-quotes`.
+`object_name_linter(styles = "camelCase")` sets camelCase, and a list of styles that allows both
+camelCase and snake_case leaves `naming-style` unset. ry warns once for each linter it has no lint for,
+except lintr's whitespace and layout linters, which `ry format` covers, and a `.lintr` that is not
+UTF-8 text is ignored with a warning. The other fields, such as `exclusions`, are not read. The
+language server re-reads a `.lintr` in the workspace folder when it changes.
 
 ## `inline-annotations`
 

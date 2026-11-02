@@ -529,8 +529,8 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
         }),
         SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
             (is_enabled(config.while_true, None) && node.kind() == SyntaxKind::WHILE_EXPR)
-                || ((is_enabled(config.vector_logic, Some(Severity::Warning))
-                    || is_enabled(config.implicit_assignment, None))
+                || is_enabled(config.implicit_assignment, None)
+                || (is_enabled(config.vector_logic, Some(Severity::Warning))
                     && node.child_kinds().any(|kind| {
                         matches!(
                             kind,
@@ -1131,15 +1131,17 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     format!(
                         "Put the value under test first: testthat reports the first argument of {callee}() as the actual value"
                     ),
-                    Some((
-                        Applicability::Unsafe,
-                        "Swap the arguments",
-                        format!(
-                            "{callee}({}, {})",
-                            significant_text(actual),
-                            significant_text(expected)
-                        ),
-                    )),
+                    (!has_comment(call)).then(|| {
+                        (
+                            Applicability::Unsafe,
+                            "Swap the arguments",
+                            format!(
+                                "{callee}({}, {})",
+                                significant_text(actual),
+                                significant_text(expected)
+                            ),
+                        )
+                    }),
                 );
             }
         }
@@ -1771,6 +1773,11 @@ fn while_true_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec
         .children_with_tokens()
         .take_while(|element| element.kind() != SyntaxKind::R_PAREN)
         .any(|element| element.kind() == SyntaxKind::COMMENT);
+    // `while (TRUE)x` needs no space after the parenthesis, but `repeatx` would be a name.
+    let spaced = close
+        .next_sibling_or_token()
+        .is_none_or(|next| next.kind().is_trivia());
+    let replacement = if spaced { "repeat" } else { "repeat " };
     push_lint(
         diagnostics,
         opt_in(config.while_true),
@@ -1782,7 +1789,7 @@ fn while_true_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec
             (
                 Applicability::Safe,
                 "Change to `repeat`",
-                "repeat".to_owned(),
+                replacement.to_owned(),
             )
         }),
     );
@@ -1887,6 +1894,7 @@ fn matrix_apply_lint(
             .map(|value| format!(", na.rm = {}", significant_text(value)))
             .unwrap_or_default()
     );
+    let title = format!("Change to `{prefix}{suffix}()`");
     push_lint(
         diagnostics,
         opt_in(config.matrix_apply),
@@ -1897,11 +1905,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        Some((
-            Applicability::Unsafe,
-            &format!("Change to `{prefix}{suffix}()`"),
-            replacement,
-        )),
+        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
@@ -1963,7 +1967,20 @@ fn unnecessary_lambda_lint(
             }
             _ => false,
         };
-        if !forwards_parameter || callee.text() == name.text() {
+        // These read their argument's expression, not its value, so the wrapper is needed.
+        let quoting = matches!(
+            callee.text().to_string().as_str(),
+            "quote"
+                | "bquote"
+                | "substitute"
+                | "missing"
+                | "match.arg"
+                | "deparse"
+                | "enquo"
+                | "enexpr"
+                | "ensym"
+        );
+        if !forwards_parameter || quoting || callee.text() == name.text() {
             continue;
         }
         let callee = significant_text(&callee);
@@ -2731,6 +2748,11 @@ fn boolean_literal(node: &SyntaxNode) -> Option<bool> {
 }
 
 /// A literal number, string or logical, possibly negated, such as `2`, `"a"` or `-1`.
+fn has_comment(node: &SyntaxNode) -> bool {
+    node.descendants_with_tokens()
+        .any(|element| element.kind() == SyntaxKind::COMMENT)
+}
+
 fn is_constant(node: &SyntaxNode) -> bool {
     match node.kind() {
         SyntaxKind::LITERAL => true,

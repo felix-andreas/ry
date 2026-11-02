@@ -119,10 +119,21 @@ fn suppressions(source: &str) -> Vec<Suppression> {
     let mut last_line = 0;
     for (line_index, line) in source.lines().enumerate() {
         last_line = line_index;
-        let Some(comment_start) = line.find('#') else {
+        // Every `#` is tried, because the first may sit in a string (`"#FF0000"`) or start a
+        // comment that names the directive later, as lintr's `#[[:space:]]*nolint` also allows.
+        let directive = line.match_indices('#').find_map(|(start, _)| {
+            let comment = line[start..].trim_start_matches('#').trim();
+            let is_directive = SUPPRESSION_PREFIXES
+                .iter()
+                .any(|prefix| comment.starts_with(prefix))
+                || comment
+                    .strip_prefix("nolint")
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', ':']));
+            is_directive.then_some(comment)
+        });
+        let Some(comment) = directive else {
             continue;
         };
-        let comment = line[comment_start..].trim_start_matches('#').trim();
         if let Some(rest) = SUPPRESSION_PREFIXES
             .iter()
             .find_map(|prefix| comment.strip_prefix(prefix))
@@ -351,6 +362,20 @@ mod tests {
                 (line(3) + 4, "boolean-shorthand"),
             ]
         );
+    }
+
+    #[test]
+    fn nolint_after_a_hash_in_a_string_or_other_comment_text_applies() {
+        let source = "x = \"#FF\" # nolint\ny = 1 # TODO # nolint\n";
+        let second = source.find("y =").expect("the line exists") as u32;
+        let kept = apply_suppressions(
+            vec![
+                diagnostic(0, "assignment-operator"),
+                diagnostic(second, "assignment-operator"),
+            ],
+            source,
+        );
+        assert!(kept.is_empty());
     }
 
     #[test]

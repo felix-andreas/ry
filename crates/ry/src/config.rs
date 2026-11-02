@@ -105,22 +105,26 @@ impl Config {
         warnings
     }
 
-    /// Falls back to the default configuration when no config file governs `target`. A
-    /// `.lintr` file in the config file's directory or below it, nearest to `target`, fills the
-    /// lint levels the config file leaves unset.
+    /// Falls back to the default configuration when no config file governs `target`. The
+    /// project root's `.lintr` file fills the lint levels the config file leaves unset.
     pub fn discover(target: impl AsRef<Path>) -> Result<Config, ConfigError> {
         let config_path = find_config_file(target.as_ref())?;
         let mut config = match &config_path {
             Some(path) => Config::from_path(path)?,
             None => Config::default(),
         };
-        let boundary = config_path.as_deref().and_then(Path::parent);
-        if let Some(lintr_path) = find_lintr_file(target.as_ref(), boundary)? {
-            let text = fs::read_to_string(&lintr_path).map_err(|error| ConfigError::Io {
-                path: lintr_path.clone(),
-                source: error,
-            })?;
-            config.lintr_problems = apply_lintr(&mut config.lint, &text);
+        if let Some(lintr_path) = find_lintr_file(target.as_ref())? {
+            config.lintr_problems = match fs::read(&lintr_path).map(String::from_utf8) {
+                Ok(Ok(text)) => apply_lintr(&mut config.lint, &text),
+                Ok(Err(_)) => vec![format!(
+                    "ignoring {}, which is not UTF-8 text",
+                    lintr_path.display()
+                )],
+                Err(error) => vec![format!(
+                    "ignoring {}, which could not be read: {error}",
+                    lintr_path.display()
+                )],
+            };
         }
         Ok(config)
     }
@@ -234,18 +238,21 @@ fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
     Ok(None)
 }
 
-/// lintr looks for `.lintr` from the linted file upward, as this does, but stops at `boundary`,
-/// the directory of the governing `ry.toml`, so a `.lintr` above it does not leak in.
-fn find_lintr_file(target: &Path, boundary: Option<&Path>) -> Result<Option<PathBuf>, ConfigError> {
+/// Only the project root's `.lintr` is read: the nearest directory above `target` with a
+/// `ry.toml`, `roughly.toml` or `DESCRIPTION`. lintr itself takes the `.lintr` nearest each
+/// file, but `ry check` reaches each file through the path it was given, and a `.lintr` below
+/// the root would then apply to `ry check R/a.R` and not to `ry check .`.
+fn find_lintr_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
     let start = search_start(target)?;
     let mut directory = Some(start.as_path());
     while let Some(current) = directory {
-        let candidate = current.join(LINTR_FILE_NAME);
-        if candidate.is_file() {
-            return Ok(Some(candidate));
-        }
-        if Some(current) == boundary {
-            break;
+        let is_root = CONFIG_FILE_NAMES
+            .iter()
+            .chain(once(&"DESCRIPTION"))
+            .any(|name| current.join(name).is_file());
+        if is_root {
+            let candidate = current.join(LINTR_FILE_NAME);
+            return Ok(candidate.is_file().then_some(candidate));
         }
         directory = current.parent();
     }
@@ -356,17 +363,26 @@ pub fn apply_lintr(lint: &mut LintConfig, text: &str) -> Vec<String> {
                     );
                 }
                 "object_name" => {
-                    naming_style = match first_argument(&call, "styles").as_deref() {
-                        Some("\"camelCase\"" | "'camelCase'") => Some(NameStyle::Camel),
-                        _ => Some(NameStyle::Snake),
+                    // lintr defaults to snake_case. A list of styles ry cannot express as one
+                    // of its two leaves the style unchecked rather than enforcing the wrong one.
+                    naming_style = match first_argument(&call, "styles") {
+                        None => Some(NameStyle::Snake),
+                        Some(styles) => {
+                            match (styles.contains("camelCase"), styles.contains("snake_case")) {
+                                (true, false) => Some(NameStyle::Camel),
+                                (false, true) => Some(NameStyle::Snake),
+                                _ => None,
+                            }
+                        }
                     };
                 }
                 // The explicit `return()` style and single quotes are the opposite of what
-                // ry's `redundant-return` and `single-quotes` check, so they enable nothing.
+                // ry's `redundant-return` and `single-quotes` check, so they turn those off.
                 "return" | "quotes"
                     if call.text().to_string().contains("explicit")
                         || call.text().to_string().contains("\"'\"") =>
                 {
+                    settings.push((linter, LintLevel::Off));
                     continue;
                 }
                 _ => {}
@@ -986,9 +1002,49 @@ mod tests {
         assert!(problems.is_empty());
         assert_eq!(config.lint.commented_code, LintLevel::Error);
         assert_eq!(config.lint.naming_style, Some(NameStyle::Camel));
-        assert_eq!(config.lint.single_quotes, LintLevel::Default);
+        // `quotes_linter("'")` asks for single quotes, so the double-quote lint goes off.
+        assert_eq!(config.lint.single_quotes, LintLevel::Off);
         assert_eq!(config.lint.boolean_shorthand, LintLevel::Off);
         assert_eq!(config.lint.line_length, LintLevel::Default);
+    }
+
+    #[test]
+    fn lintr_settings_that_ask_for_the_opposite_turn_lints_off() {
+        let mut lint = LintConfig::default();
+        let problems = apply_lintr(
+            &mut lint,
+            "linters: linters_with_defaults(return_linter(return_style = \"explicit\"), object_name_linter(styles = c(\"camelCase\", \"symbols\")))\n",
+        );
+        assert!(problems.is_empty());
+        assert_eq!(lint.redundant_return, LintLevel::Off);
+        assert_eq!(lint.naming_style, Some(NameStyle::Camel));
+
+        let mut lint = LintConfig::default();
+        apply_lintr(
+            &mut lint,
+            "linters: list(object_name_linter(styles = c(\"camelCase\", \"snake_case\")))\n",
+        );
+        assert_eq!(lint.naming_style, None);
+    }
+
+    #[test]
+    fn only_the_project_root_lintr_applies() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let project = root.path().join("project");
+        let nested = project.join("R").join("inner");
+        fs::create_dir_all(&nested).expect("create dirs");
+        fs::write(project.join("DESCRIPTION"), "Package: p\n").expect("write DESCRIPTION");
+        fs::write(
+            project.join(".lintr"),
+            "linters: list(any_is_na_linter())\n",
+        )
+        .expect("write");
+        fs::write(nested.join(".lintr"), "linters: list(paste_linter())\n").expect("write");
+        fs::write(root.path().join(".lintr"), &[0xff, 0xfe][..]).expect("write");
+        assert_eq!(
+            find_lintr_file(&nested.join("a.R")).expect("search"),
+            Some(project.join(".lintr"))
+        );
     }
 
     #[test]
