@@ -157,8 +157,9 @@ Running `ry check` with typing on over the `R/` sources of the corpus packages (
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
 lifecycle, and is down to 62. Typing `system.file()` and `asNamespace()` exposed three more
-(the bare `NA` and correlated-`NULL` items above), so it is 65. About 22 of the rest are true bugs in the packages (NlcOptim calls the
-matrices `indall` and `A` as functions); the other 40
+(the bare `NA` and correlated-`NULL` items above), and after the `NULL`-placeholder, `length()`
+guard and numeric-rebind fixes it is 61. About 22 of the rest are true bugs in the packages
+(NlcOptim calls the matrices `indall` and `A` as functions); the other 39
 or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
 packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
 reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
@@ -191,8 +192,8 @@ forwarding to a `missing()`-tested parameter. The classes:
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
   caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
   `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
-  has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
-  unannotated project functions, which needs the callee's annotation provenance at the argument check.
+  has not been isolated yet for these; the ks `mise.mixt` case (arithmetic-tied operands bound by a
+  literal) is fixed by `widen_numeric_binding`. The scalar-claim returns themselves remain.
 - **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
   another tests in a condition (brew `.extendedError`, rvest `new_chromote`).
 - **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
