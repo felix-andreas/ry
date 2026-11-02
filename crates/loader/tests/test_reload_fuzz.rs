@@ -6,6 +6,7 @@ use {
         Loader,
         testing::{ReloadLoaders, check_load_index_input, check_random_reload},
     },
+    std::{path::PathBuf, time::Duration},
     syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes},
 };
 
@@ -74,4 +75,44 @@ fn changed_roots_reports_each_disk_edit_once() {
             "step {step}: reported twice"
         );
     }
+}
+
+/// An edit anywhere a load or a test run reads is reported by the watcher, tests and installed
+/// files included, while build outputs and snapshots are not; only the former reload.
+#[test]
+fn wait_edits_reports_sources_tests_and_installed_files() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path();
+    for path in ["R", "src", "tests/testthat/_snaps"] {
+        std::fs::create_dir_all(root.join(path)).expect("create dirs");
+    }
+    std::fs::write(root.join("DESCRIPTION"), "Package: demo\nVersion: 1.0\n").expect("write");
+    std::fs::write(root.join("R/a.R"), "f <- function() 1\n").expect("write");
+    let mut loader = Loader::default();
+    loader.plan(root, false).expect("plans");
+    loader.commit(root);
+    let wait = |loader: &mut Loader, milliseconds| {
+        loader
+            .wait_edits(root, Duration::from_millis(milliseconds))
+            .expect("the package is watched")
+    };
+    assert!(wait(&mut loader, 50).is_empty(), "nothing changed yet");
+    std::fs::write(root.join("tests/testthat/test-a.R"), "1\n").expect("write");
+    std::fs::write(root.join("tests/testthat/_snaps/a.md"), "1\n").expect("write");
+    std::fs::write(root.join("src/code.o"), "binary").expect("write");
+    let edits = wait(&mut loader, 5000);
+    assert_eq!(edits.paths, [PathBuf::from("tests/testthat/test-a.R")]);
+    assert!(!edits.affects_load());
+    // A directory created after the watch started is watched from the next drain on.
+    std::fs::create_dir_all(root.join("inst")).expect("create inst/");
+    assert!(wait(&mut loader, 5000).paths.contains(&"inst".into()));
+    std::fs::write(root.join("inst/table.csv"), "a\n").expect("write");
+    std::fs::write(root.join("src/code.c"), "int x;\n").expect("write");
+    let edits = wait(&mut loader, 5000);
+    assert!(edits.paths.contains(&"src/code.c".into()), "{edits:?}");
+    assert!(edits.affects_load());
+    assert!(
+        loader.changed_roots().is_empty(),
+        "the wait drained the edits"
+    );
 }

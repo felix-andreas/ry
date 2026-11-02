@@ -35,6 +35,7 @@ use {
             atomic::{AtomicBool, Ordering},
         },
         thread,
+        time::Duration,
     },
     syntax::{SyntaxNode, TextRange, TextSize},
 };
@@ -51,6 +52,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
     internal("ryLoaderCallers", 2, do_callers),
+    internal("ryLoaderWaitEdits", 2, do_wait_edits),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
@@ -369,6 +371,30 @@ unsafe fn do_callers(call: &Call<'_>) -> R<Sexp> {
     let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
     let callers = session().loader.callers(&root, &changed);
     values::string_vector(&callers)
+}
+
+/// `.Internal(ryLoaderWaitEdits(root, timeout))`: the paths edited under the package, relative
+/// to its root, after waiting up to `timeout` seconds for one; `NA` stands for lost
+/// notifications.
+unsafe fn do_wait_edits(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let timeout = values::as_real_scalar(call.arg(1));
+    let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
+    let timeout = Duration::try_from_secs_f64(timeout)
+        .map_err(|_| error(format!("{timeout} is not a timeout in seconds")))?;
+    let edits = session()
+        .loader
+        .wait_edits(&root, timeout)
+        .map_err(|failure| error(failure.to_string()))?;
+    let mut paths: Vec<Option<String>> = edits
+        .paths
+        .iter()
+        .map(|path| Some(path.to_string_lossy().into_owned()))
+        .collect();
+    if edits.lost {
+        paths.push(None);
+    }
+    values::string_vector_na(&paths)
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

@@ -18,6 +18,7 @@ bincode = { version = "2.0.1", default-features = false, features = ["serde", "s
 heap = { path = "../heap", optional = true }
 interp = { path = "../interp", optional = true }
 rustc-hash.workspace = true
+notify = { version = "8", default-features = false }
 salsa.workspace = true
 semantics = { path = "../semantics" }
 serde = { workspace = true, features = ["derive", "rc"] }
