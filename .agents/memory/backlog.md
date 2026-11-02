@@ -48,42 +48,32 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **A console does not watch a package whose first load failed**: `Loader::changed_roots` skips
-  packages with no committed state, so after `ry run` starts on a package with a syntax error,
-  fixing the file reloads nothing until `load_all()`. Fix: record the fingerprint on a failed
-  plan too, and let `.ry_autoreload()` learn the root from the loader rather than `.ry_packages`.
-
 - **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
   `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
   GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
   loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
   on ry, would make the build ry's own.
-- **Strict mode guards only `ry load`'s first load.** The package load the `ry R` console makes at startup,
-  and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
-- **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
-  name no file. The loader has the byte range of every definition, so a srcref could be built from
-  it now that the interpreter keeps srcrefs for parsed code.
 - **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
-  326,000-line bench package, shared by both runtimes; the next item is the fix.
-
-- **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
-  read bundled files at load time (`.onLoad`) fail until this exists.
-- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` (and so `ry test`)
-  sources them itself, but `load_all()` followed by interactive use of a helper does not see it.
+  326,000-line bench package, shared by both runtimes; the last item of this list is the fix.
 - **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
   and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
   or `src/` does not trigger a rerun.
-- **Importers of a development package keep stale copies** of its changed bindings; only one
-  development package reloads at a time. r-runtime.md section 6 describes the targeted update.
 - **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
-  reload that re-registers it and never removed.
-- **A declared `S3method` whose function does not exist** registers a promise that fails at
-  dispatch; R refuses the load instead.
-- **Sources must be UTF-8**; a package with `Encoding: latin1` fails to load.
+- **A strict package's reload checks the whole package**: every load that changes something runs
+  `preflight::check_package`, a fresh analysis of all of `R/` (the clean verdict is cached by
+  fingerprint, so an unchanged package costs a hash). Checking only the files the plan changed, in
+  the loader's own salsa database, would make a reload of a large strict package cheap.
+- **A reload that runs statements refuses a missing S3 method late**: `.ry_refuse_missing_s3`
+  checks before anything changes only when the reload runs no statement and keeps
+  `sysdata.rda`, since either could define the function; otherwise `.ry_register_s3` refuses
+  after the namespace already holds the new code. Knowing every name a statement may bind would
+  close it.
+- **On GNU R, a srcref after a non-ASCII character on its line has its column off** by the
+  character's extra UTF-8 bytes (`gnur.R`, `.ry_parse` pads by bytes so byte offsets and
+  printing are right); ry's runtime is exact. Documented under Source references.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 - **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
@@ -161,30 +151,14 @@ Smaller gaps:
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
 reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 75. About 22 of the rest are true bugs in the packages (NlcOptim calls the
-matrices `indall` and `A` as functions); the other 53
+lifecycle, and is down to 63. About 22 of the rest are true bugs in the packages (NlcOptim calls the
+matrices `indall` and `A` as functions); the other 41
 or so are false reports on correct R, mostly one or two per cause. The three generated benchmark
-packages (`tools/bench/generate.py`) report nothing. The classes:
-
-- **A parameter passed as `FUN` to a `match.fun` caller is inferred as a function** (kernlab
-  `apply(x, 2, var)` beside a formal `var = 1`, diffobj `lapply(hunk[nm], op, n)` with `op` one
-  of `"head"` and `"tail"`). `match.fun` takes a string, and looks a non-function binding's
-  symbol up with `mode = "function"`, so the later `var < 10^-3` or `op == "tail"` is reported.
-  Leaving the parameter open there would lose `function(xs, f) lapply(xs, f)`'s inferred
-  `f: fn(T) -> U`, so the fix needs a union-shaped inference (`fn(T) -> U | character`).
-- **A return chosen by a flag default keeps both branches** (DistributionUtils `pDist(...,
-  valueOnly = TRUE)` ends in `if (valueOnly) prob else list(value = prob, error = err)`, 3
-  reports). A call that omits the flag gets the default's branch in R, but the signature has one
-  return type; specializing needs the interface to keep the per-branch returns.
-- **An inferred callback's `logical` parameter rejects a number** (gmp `lapply(0:(n-1L),
-  Eulerian, n = n)`). A direct call passes `integer` to an inferred `logical` parameter
-  (`fits_inferred_scalar`), but the callback check in `function_compatible` has no such leniency.
-- **A string passed to an inferred condition parameter is reported** (renv `not(check)` with
-  `check <- Sys.getenv(..., unset = "TRUE")`). `if` reads `"TRUE"` through `as.logical`, but
-  `&&` and `!` reject a string, and the inferred `logical` does not record which use bound it.
-- **Free names that R6 or withr inject read as base functions** (R6 `if (class)` in
-  `generator_funs$new`, which R6 reparents onto the generator; withr's `wrap()` template reads
-  `append`). The same shape is a true bug in gmp (`if (log)` with no `log` formal).
+packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
+reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
+flag-default return, `match.fun` value-read formals, logical callback slots, logical text,
+substituted arguments, the conditional requirement of `function(x, y = x)`, the `Reduce` fold and
+forwarding to a `missing()`-tested parameter. The classes:
 
 - **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
   `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
@@ -192,25 +166,22 @@ packages (`tools/bench/generate.py`) report nothing. The classes:
   DBI coerce calls that leave out `to` (5), ff passes `verbose` (3), rugarch reads `temph` for
   `tmph`, mclust leaves out `k`, NlcOptim (2), processx `new_not_implemented_error` without `call`, diffobj
   `!is.valid.width(...)` and `!is.valid.guide.fun(...)` negate a value R rejects with "invalid
-  argument type" (2).
-- **Metaprogrammed bodies read names from a frame the checker cannot see.** withr's `wrap(f, pre)`
-  substitutes `pre` into a function built at run time, so `append` there is `f`'s formal, not
-  base's `append`. R6's `generator_funs$new` reads `class` from the generator environment it is
+  argument type" (2), gmp `if (log)` with no `log` formal, httr `revoke_oauth2.0(x)` without
+  `credentials`.
+- **Metaprogrammed bodies read names from a frame the checker cannot see.** R6's `generator_funs$new` reads `class` from the generator environment it is
   copied into. openxlsx's Reference Class methods call sibling methods (`getBaseFont()`) that the
-  checker resolves to a same-named top-level function. A formal passed only to a callee parameter
-  that the callee only `substitute()`s would cover withr.
+  checker resolves to a same-named top-level function.
 - **A conditional library read is taken as a force.** PerformanceAnalytics passes a missing
   `angle` to `rect(angle = angle)`, which reads it only when `density` is not `NULL`.
 - **A defaulted callback pins its slot to the first call's argument.** ks has
   `if (missing(col.fun)) col.fun <- function(n) ...`, then calls `col.fun(n = length(levels))` and
   `col.fun(n = length(levels) + 1)`. The join binds the lambda, so `n` is a variable bound to
   `integer` rather than an inferred scalar slot, and the `double` fails.
-- **`Reduce` with a callback that may return `NULL`** (zoo `allsame`, sets, vctrs `reduce(.init =
-  list(0))`): unification makes the accumulator the element type, so `fn(T, T) -> T | NULL`
-  fails. The accumulator needs to start at the element type and widen to the callback's return.
-- **A parameter passed to `lapply` as `FUN` that is also compared as a string** (diffobj
-  `lapply(hunk[nm], op, n)` with `op` either `"head"` or `"tail"`): `match.fun()` takes a
-  string, but `FUN` inference makes `op` a function.
+- **`Reduce` through a wrapper that closes over its own formal** (vctrs' standalone purrr
+  `reduce(.x, .f, ..., .init)` calls `Reduce(function(x, y) .f(x, y, ...), .x, init = .init)`).
+  The fold path (`infer_reduce_fold`) skips a function that mentions the enclosing function's type
+  variables, so `.f` keeps the stub's `fn(U, T) -> U` and `c(output, list(...))` widening
+  `list{double}` to `list[Unknown]` is reported.
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
   caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
@@ -278,7 +249,9 @@ packages (`tools/bench/generate.py`) report nothing. The classes:
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
   and no such function exists.
-- Singletons: an infinite-type error in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
+- Singletons: an infinite-type error in pkgdown `news_search_index`, gmp `lapply(n, B1)` over a
+  recursive `B1` (no small repro yet), knitr `read.csv(inst_dir(...))`, PerformanceAnalytics
+  `VAR$VaR` on a tuple, codetools `new.env(parent = .EmptyEnv)` with a `NULL` fallback.
 
 To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
 default) and run `ry check --output json R` inside it.
@@ -416,6 +389,9 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- `List.from_vector` is a leaf but materializes an ALTREP vector, and a package's ALTREP class
+  could run R code in its materialize method. No such class is known among the benchmark
+  dependencies; if one appears, check `is_altrep` in the compiled call or drop it from `LEAVES`.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
@@ -426,9 +402,10 @@ protects construction but nothing after it.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
-  saves its state around each call. Adding them is safe (none runs R code) once the JIT's
-  intrinsic table is settled.
+- A function that takes a callback (`List.map`, `List.walk`, `Dict.update` and the rest) calls
+  the closure through `eval::apply` once per element, and compiled code treats the whole call as
+  opaque. Compiling such a call with a closure known at the call site into a loop over the
+  elements, with the closure inlined, is the fast path these functions still lack.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
@@ -547,10 +524,6 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
   and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
   give native entry a stack-limit check, before raising the depth limit.
-- **An integer and a double joined at a merge point leave the value untyped.** A `match` whose
-  arms return `v` (integer) and `0` (double), summed into a double, runs at tier-0 speed: 0.67 s
-  per 2M iterations against 0.10 s when the arm is `0L`. Join `Int` and `Dbl` to `Dbl` with a
-  coercion at the merge instead of widening to unknown.
 - **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,

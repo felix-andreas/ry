@@ -3081,14 +3081,17 @@ first lines R had already read, leaving R mid-command.
     `Num.max_integer`, `min_integer`, `max_double`, `min_double`, plus `Num.infinity`; Roc's
     `nan_f64` is skipped because no library function takes or returns `NaN` on purpose.
   - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
-  - `Str` capacity functions: R strings are immutable.
-  - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
-    first key fixes the key type.
+  - `Str` capacity functions: R strings are immutable and interned, so there is no buffer to
+    reserve or release.
 - **Taken later:** `List.range` (`seq` returns a vector, not a `list[integer]`),
   `List.keep_if_try`, `Num.to_integer`, and `Dict.capacity`, `Set.capacity` and
   `release_excess_capacity` on `List`, `Dict` and `Set`. They were first skipped on the claim
   that the heap shrinks collections, but it never shrinks a resizable vector, so after a
-  `reserve` the room stays until the value dies.
+  `reserve` the room stays until the value dies. `Dict.with_capacity` and `Set.with_capacity`
+  came last: an empty collection has no key vector until its first key fixes the key type, so
+  its open-addressing index, sized for the requested room, carries the room
+  (`standard_library::empty_room`), and the first insert allocates the key and value vectors
+  with that capacity. `Dict.reserve` on an empty dictionary works the same way.
 - **`NaN` is never a result.** A `NaN` from an unchecked function (`Num.sin(Inf)`,
   `Num.pow(-1, 0.5)`, a `List.sum` of `Inf` and `-Inf`) is an error, and a `_checked` function
   returns `:Err(:Undefined)`, which its signature names.
@@ -4333,9 +4336,13 @@ check` releases its trees once, and memoized records are compact" below).
   argument is positional with no `...`, and emits a guard on the symbol's binding, the builtin as
   a constant and a direct `CallBuiltin`. A failed guard (someone rebound `Dict.len`) falls back to
   the general call, so redefinition still works.
-- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R
-  (`len`, `is_empty`, `get`, `contains` of `List`, `Dict` and `Set`). The JIT treats a leaf as an
-  opaque step with `Effect::PureUnlessObserved`, so it flushes nothing around it.
+- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R:
+  every `Result`, `List`, `Dict` and `Set` function that takes no callback and does not update
+  its first argument in place, and every `Num`, `Bool` and `Str` function except the `Str` walks.
+  The JIT treats a leaf as an opaque step with `Effect::PureUnlessObserved`, so it flushes nothing
+  around it. An in-place update is excluded because compiled code may hold its argument in a
+  register that no reference count sees, so the update could change a value still in use. The
+  test `leaves_are_the_functions_without_callbacks` derives the rule from the stub signatures.
 - **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and
   `Dict.get` compile to calls of small runtime helpers (`jit_collection_count`,
   `jit_collection_position`, `jit_dict_get`) that take the key unboxed and return an unboxed
@@ -5162,6 +5169,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
 - The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
 
+## Every load of a strict package is checked
+
+- Before, only `ry load`'s first load ran the strict check; `load_all()`, a console reload and the load a console makes at start ran a package strict mode would refuse.
+- The load index records whether strict mode covers any file (`PackageIndex::strict`, the same test as `prepare_purity`), and every plan carries it as `Plan::strict`, so a host decides without reading ry's configuration twice.
+- A host checks a plan that changes something (`!is_noop()`): GNU R's `.Call` routine and `ry load --emit-plan` through `load::strict_value`, ry's runtime through a host callback (`ry_runtime::set_check`, registered by every command that runs the runtime via `repl::set_package_check_on_ry_runtime`). The loader's crate cannot depend on the CLI's analysis, which is why it is a callback. A refusal turns the plan into an error before R sees it, so nothing runs and the old bindings stay.
+- Whether a package is strict is decided per package root on both runtimes, from that package's own `ry.toml` (`load::strict_config`): GNU R's routine reads it directly, and ry's runtime asks a second host callback, the strict query, before each plan. Taking it from the command's configuration instead would let a lax script `load_all()` a strict package unchecked.
+- The first plan of a session that has a verdict (`ry load` on ry's runtime) skips the callback: the concurrent check already covers that load, and checking again would serialize what the verdict overlaps.
+- The check is the whole-package `preflight::check_package` with its fingerprint-cached clean verdict, so a reload of a large strict package pays a full analysis; checking only the changed files is in `backlog.md`.
+
+## Lazy definitions keep source references
+
+- Before, a lazy definition on ry's runtime lowered its node without a srcfile, so `print(f)` deparsed and tracebacks named no file, except under the debugger, which built a whole-file srcfile per force.
+- A plan's files become per-file handles (`FileSource`) holding the source and the `keep.source` option read when the handle is made. The first force from a file that keeps source builds its `srcfile` (`srcfilecopy` semantics) and stores it in the handle, so a file costs nothing unless one of its definitions is used, and the srcfile is shared by all of them.
+- The definition is reparsed alone after as many spaces as its line has bytes before it, and its srcrefs are computed against the line's real text (bytes and character columns both match GNU R's parser), lowered with a line offset (`interp::lower::lower_node_at_line`), which gives exact line and column srcrefs without parsing or lowering the whole file. The tree in the handle is used directly when no srcref is wanted.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
@@ -5451,6 +5473,58 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
 
+## `$` fields resolve through the values that built the receiver
+
+- Before, a `$` field was no navigation target at all: goto, references and rename found nothing.
+- Now `ide::fields` follows the receiver back to its constructions: a constructor call (`list`,
+  `data.frame`, `DataFrame`, `env`...), a record, an R6 class seen from outside or through
+  `self$`/`private$` (following `inherit`), `Class$new(...)`, pass-through calls, the returns of a
+  project function, `if` branches, and `receiver$name <- value` writes. The named element is the
+  declaration. Depth is capped (`MAX_DEPTH`) to bound a request.
+- A receiver that cannot be followed (a parameter) falls back to every same-named declaration in
+  the project. That target is imprecise: references list every same-named access, and rename is
+  refused, because a guess must never edit code.
+- A precise target's references are a closed set: a read that reaches one of its declarations
+  brings in every other declaration it reaches (both `if` branches). Rename is refused while any
+  same-named read in the project is untraced, because that read might be this field; the same
+  holds for a method parameter, whose calls are the field's reads.
+- Named arguments that are a constructor's own parameters (`stringsAsFactors`, `key`,
+  `.name_repair`) are no fields (`CONSTRUCTOR_PARAMETERS`).
+- `Resolver::sources` is memoized per resolution with a cycle placeholder, so a variable
+  reassigned from itself costs one pass per assignment, not a power of them.
+- A receiver a library function returns has its fields declared by that function, so goto goes
+  to the function (stub or installed package) and the hover carries its help page.
+- A tag's payload record is not a field declaration, because patterns, not `$`, read it.
+- A named argument passed to a project function that forwards its `...` into a constructor
+  (`new_rate <- function(...) list(...)`, then `new_rate(pause = 1)`) declares that field for the
+  by-name fallback, unless it names one of the function's parameters.
+- `object$method(arg = 1)` navigates `arg` to the parameter of the function the precise field
+  holds, and references of that parameter include such calls, so rename edits them too.
+- Field spellings come from `field_index`, a tracked map built from per-file `file_fields`
+  memos, so a references request does not scan every file and an edit re-derives one file's list.
+  References on a precise field resolve every same-named access through one `Resolver`, which
+  caches each item's field writes, so a common name costs one scan per item, not per access.
+  `goto_definition` returns several locations because an `if` can build the value two ways.
+
+## Packages without stubs are read from the R library by the host, lazily
+
+- Before, a name that neither the project nor a stub declared had no definition and hovered as
+  `Unknown`.
+- Now the analysis returns `DefinitionTarget::Package` with the candidate packages, in R's lookup
+  order (`importFrom`, `import`, attached packages, then the default search path). The analysis
+  never touches the R library, so it stays pure, deterministic and independent of the machine.
+- The host (`crates/ry/src/installed.rs`) resolves the target through the `rdb` crate, which
+  reads a package's lazy-load database (`R/<pkg>.rdb`/`.rdx`) and Rd help without running R. A
+  package is read once, on first use, and its namespace is written as R source under
+  `<cache>/ry/packages/<pkg>/<version>/<pkg>.R` so the editor can open it; the server ignores
+  that file's open and change notifications so it never becomes project code.
+- Base primitives have no R code. Their argument lists come from the closures in `.ArgsEnv` and
+  `.GenericArgsEnv`, which the database stores as separate environment records (the index's
+  `references` table), and the generated source shows them as `name <- function(args)
+  .Primitive("name")`.
+- The LSP simulator runs with `installed_packages: false`, because the machine's library would
+  make it nondeterministic. No stub is generated from what is read: this is navigation only.
+
 ## One-shot checks record coarse dependencies
 
 - **Previous shape.** `ry check --no-cache` ran on the same database shape as the language server:
@@ -5487,6 +5561,47 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
 - **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.
 
+## Inferred signatures carry body facts that a call reads
+
+- **Previous shape.** An inferred `FunctionType` was its parameters, its return and the `inferred`
+  bit. A call could only see the joined return and each formal's optionality, so three things R
+  decides from the call were lost: which branch a flag's default selects, which arguments the callee
+  captures with `substitute()` instead of evaluating, and which formals another formal's default
+  forces. The checker reported `pDist(...) - p` (DistributionUtils), typed withr's `wrap(f, pre)`
+  template in the caller's frame, and accepted `g()` for `function(x, y = x) y`.
+- **Shape.** `types::FunctionType` gains inferred-only fields, empty on every declared or stub
+  signature: `flag_return` (a formal with a literal logical default, never reassigned, that the
+  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()`, from
+  `check::FormalUses`; a bare forward to another call counts as an evaluation), `default_reads` (an
+  optional formal that a forced formal's default forces), `missing_tested` (formals tested with
+  `missing()`) and `condition_only` (formals read only as a whole `if`/`while` condition, the only
+  ones that take logical text, since `!` and `&&` reject strings). `map_child_types` and `for_each_child` walk the branch types, so they
+  instantiate and generalize with the signature. The call site reads them: `flag_selected_return`
+  returns one branch when the flag is omitted or a literal (a forwarded `...` is assumed not to
+  carry the flag, since the opposite reports DistributionUtils' ordinary `pDist(densFn, q, ...)`), `quoted_arguments` types a captured
+  argument as `Unknown` without inferring it, and `match_arguments` reports a formal as missing when
+  both it and the formal whose default reads it are left out.
+- **Why on the type, not a side query.** The facts belong to the function value, which flows through
+  bindings, lists and callbacks; a per-item side table would only serve direct calls to a named
+  definition and would need its own invalidation. They are derived once from the body that inference
+  already walks, so there is no second source of truth.
+- **Limits.** An annotation has no syntax for these facts, so a written-back annotation is less
+  precise (`test_roundtrip.rs` lists the flag case). Branch selection needs the flag's default to be
+  a literal and the tail to be the only return.
+- **Related leniencies, no model change.** An apply-family element gets the inferred-scalar leniency
+  a direct call gives (`lapply(0:(n - 1L), Eulerian, n = n)`); a string that reads as a logical fits
+  an inferred `logical` parameter listed in `condition_only`; and at a `match.fun` caller, a bare
+  formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
+  `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
+  as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.
+
+## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
+
+- Previous shape: `Reduce`'s stub `fn(f: fn(U, T) -> U, ...)` pinned the accumulator to the start type, so a function whose return is wider (`T | NULL`, a union of list shapes) was reported as "must return `T`", although R simply carries the wider value forward.
+- Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
+- A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
+- `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
+
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
 - **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
@@ -5502,4 +5617,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`MatchFail`** always signals an error, so the JIT treats it as `PureUnlessObserved` and leaves every register `Bottom` after it. As an opaque step that fell through with its registers' stale types, it widened the join after each `match` (a reused temporary still typed as the scrutinee's record) and left the loop's arithmetic in tier 0.
 - **List element reads** speculate on the site's type feedback exactly like tuple items and record fields: a check on the loaded element hands off to tier 0 on a mismatch.
 - **`List.range` and `List.repeat`** stop with an error past 2,147,483,647 elements (R's longest integer-indexable vector), so a typo cannot ask for an unbounded allocation.
-- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger` and data-science `readings` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances.
+- **Benchmark.** In `tools/bench`, `#:= CODE` lines replace the lines after them in the typed program only, so the finance `ledger`, data-science `readings` and biostatistics `followup` templates use tags, tuples and records when typed and `list(kind=)` when untyped, and both draw the same instances. The replacement is line for line, so the untyped form must have exactly as many lines as the `#:=` run.
+
+## An integer and a double joined stay unboxed
+
+- **Previous shape.** `Ty::join(Int, Dbl)` was `Boxed`, so a variable that is an integer on one path and a double on another (a `match` whose arms return `v` and `0`, `x <- if (c) i else 0.5`) was boxed on every edge into the join, and arithmetic on it ran as an opaque tier-0 step: 0.67 s per 2M iterations against 0.10 s when both arms agree.
+- **Shape.** The join is `Ty::Num`: the value as an `f64` in the register's or slot's double variable and an "is integer" flag in its integer variable. An edge from `Int` or `Dbl` converts (an integer `NA` becomes the double `NA`), and boxing, write-back and deoptimization rebuild exactly the R value the flag names (`runtime::jit_box_num`, `call_flush`), so `typeof`, integer overflow and `NA` behave as in tier 0. Widening to a plain double instead would change `typeof` and integer arithmetic, which R code observes.
+- **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
+- **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.

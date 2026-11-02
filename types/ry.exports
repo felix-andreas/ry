@@ -39,6 +39,7 @@ Dict.clear
 Dict.contains
 Dict.drop_if
 Dict.empty
+Dict.with_capacity
 Dict.from_list
 Dict.get
 Dict.insert
@@ -261,6 +262,7 @@ Set.contains
 Set.difference
 Set.drop_if
 Set.empty
+Set.with_capacity
 Set.from_list
 Set.insert
 Set.intersection

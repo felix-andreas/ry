@@ -160,8 +160,13 @@ impl Preflight {
 /// nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips analysis entirely.
 pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
+    // The directive is ASCII, so the bytes answer for a file in any encoding.
     let mentions_strict = |path: &Path| {
-        fs::read_to_string(path).is_ok_and(|source| source.contains("typing: strict"))
+        fs::read(path).is_ok_and(|source| {
+            source
+                .windows(b"typing: strict".len())
+                .any(|window| window == b"typing: strict")
+        })
     };
     if !config.check.strict
         && !fs::read_dir(&sources).is_ok_and(|entries| {
@@ -202,6 +207,10 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         }
     });
     let (analysis, errors) = analysis?;
+    // A file the analysis could not read went unchecked, and it has said which.
+    if analysis.failures > 0 {
+        return Err(CommandError);
+    }
     let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
     let mut problems = 0;
     for (file, errors) in analysis.files.iter().zip(&errors) {
