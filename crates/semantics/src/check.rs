@@ -4874,9 +4874,23 @@ impl<'db> Checker<'db, '_> {
             loop_slot.map(|slot| (slot, element)),
         );
         // R leaves the variable at the last element, or sets it to `NULL` when the sequence
-        // is empty, whatever it held before the loop.
+        // is empty, whatever it held before the loop. A `from:to` range always has an element.
         if let Some(slot) = loop_slot {
-            let after = union_of(self.db, [element, null(self.db)]);
+            let mut range = sequence;
+            while let ExpressionKind::Paren(inner) = self.module.kind(range) {
+                range = *inner;
+            }
+            let never_empty = matches!(
+                self.module.kind(range),
+                ExpressionKind::Binary {
+                    operator: BinaryOperator::Sequence,
+                    ..
+                }
+            );
+            let after = match never_empty {
+                true => element,
+                false => union_of(self.db, [element, null(self.db)]),
+            };
             self.environment.set(slot, EnvEntry::Mono(after));
         }
         null(self.db)

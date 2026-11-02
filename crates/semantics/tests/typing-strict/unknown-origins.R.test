@@ -337,10 +337,16 @@ last_strict <- function(x) {
   for (value in x) {}
   value
 }
+#: fn(n: integer) -> integer
+last_index <- function(n) {
+  for (i in (1:n)) {}
+  i
+}
 #++++
 == R/main.R
 last_of: fn(x: double[]) -> double | NULL
 last_strict: fn(x: double[]) -> double
+last_index: fn(n: integer) -> integer
 175..180 error[type-mismatch] expected `double`, found `double | NULL`
 
 #==== strict_operator_values
