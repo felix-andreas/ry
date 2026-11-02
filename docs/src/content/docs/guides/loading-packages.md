@@ -96,8 +96,10 @@ definitions you changed. On a generated package of 500 files, against `devtools:
 In the `ry run` console, a command after a body edit prints its output 20 to 30 ms after you press
 Enter, reload included, the first time you edit a file, and about 10 ms on later edits of the same
 file. A command with nothing to reload takes under 2 ms. On this package, `ry run` starts its
-console with the package loaded in 0.74 s, against 1.0 s for `ry R` (medians of seven and three
-runs on the same machine), because it analyzes the package while base R loads.
+console with the package loaded in 0.35 s, against 0.84 s for `ry R` (medians of seven and three
+runs on the same machine). It analyzes the package while base R loads, reuses the analysis of an
+unchanged package from its [cache](/reference/package-loading#the-load-index-cache), and holds back
+S4 definitions until something uses them. Without the cache, the start takes 0.57 s.
 
 These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
 `devtools::load_all()` calls). The machine was shared and ry was built without link-time

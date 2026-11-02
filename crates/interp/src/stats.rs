@@ -13,13 +13,14 @@ use {
         builtin_libraries::{NativeCall, NativeFn, c_result},
         coerce::coerce_vector,
         distributions, linalg,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
         stats_optimize, stats_port, stats_spline, stats_tests,
         unwind::{R, error},
         values::{self, length, scalar_bool, scalar_integer, symbols},
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    std::borrow::Cow,
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
@@ -422,6 +423,14 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
+    if length(x_argument) == 0
+        && matches!(
+            policy,
+            MissingPolicy::AllObservations | MissingPolicy::Pairwise
+        )
+    {
+        return Err(call.error("'x' is empty"));
+    }
     let has_y = y_argument != values::nil();
     let (y, y_columns) = if has_y {
         let (y_rows, y_columns) = matrix_shape(y_argument);
@@ -454,17 +463,20 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                 let used: Vec<bool> = (0..n)
                     .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
                     .collect();
-                result[i + j * x_columns] = if !has_y && i == j && correlate {
+                let statistic = pair_statistic(
+                    &x_data[i],
+                    &y_data[j],
+                    &used,
+                    correlate,
+                    kendall,
+                    &mut zero_deviation,
+                );
+                // A column correlates with itself exactly, unless it has no spread at all.
+                result[i + j * x_columns] = if !has_y && i == j && correlate && !statistic.is_nan()
+                {
                     1.0
                 } else {
-                    pair_statistic(
-                        &x_data[i],
-                        &y_data[j],
-                        &used,
-                        correlate,
-                        kendall,
-                        &mut zero_deviation,
-                    )
+                    statistic
                 };
             }
         }
@@ -479,7 +491,9 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         } else {
             vec![true; n]
         };
-        if !used.iter().any(|&flag| flag) && policy == MissingPolicy::CompleteObservations {
+        // With no columns no row counts as complete, so GNU R reports an empty input here.
+        let none_complete = all_columns.is_empty() || !used.iter().any(|&flag| flag);
+        if none_complete && policy == MissingPolicy::CompleteObservations {
             return Err(call.error("no complete element pairs"));
         }
         let has_missing = |data: &Vec<f64>| {
@@ -512,6 +526,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     })
                     .collect()
             };
+            let observations = used.iter().filter(|&&flag| flag).count();
             let x_scale = scales(&x_data, &missing_x);
             let y_scale = if has_y {
                 scales(&y_data, &missing_y)
@@ -521,7 +536,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             for i in 0..x_columns {
                 for j in 0..y_columns {
                     let slot = &mut result[i + j * x_columns];
-                    if !has_y && i == j {
+                    if !has_y && i == j && observations > 1 {
                         *slot = 1.0;
                     } else if slot.is_nan() {
                     } else if x_scale[i] == 0.0 || y_scale[j] == 0.0 {
@@ -586,21 +601,25 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> Lo
         }
         return sum;
     }
-    let x_mean = arith::long_double_mean(used_values(x, used));
-    let y_mean = arith::long_double_mean(used_values(y, used));
-    for k in 0..x.len() {
-        if used[k] {
-            sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
-        }
-    }
-    sum / (count - 1)
+    let (x, y) = if count == x.len() {
+        (Cow::Borrowed(x), Cow::Borrowed(y))
+    } else {
+        (
+            Cow::Owned(used_values(x, used)),
+            Cow::Owned(used_values(y, used)),
+        )
+    };
+    let x_mean = arith::long_double_mean(&x);
+    let y_mean = arith::long_double_mean(&y);
+    long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
 }
 
-fn used_values<'a>(data: &'a [f64], used: &'a [bool]) -> impl Iterator<Item = f64> + Clone + 'a {
+fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {
     data.iter()
         .zip(used)
         .filter(|(_, flag)| **flag)
         .map(|(value, _)| *value)
+        .collect()
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.

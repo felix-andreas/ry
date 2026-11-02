@@ -28,7 +28,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin(".External2", -1, |call| unsafe {
         foreign_context(call.call, || foreign_call(call, None))
-    }),
+    })
+    .keep_visibility(),
     builtin(".C", -1, |call| unsafe {
         foreign_context(call.call, || foreign_call(call, Some(Interface::C)))
     }),

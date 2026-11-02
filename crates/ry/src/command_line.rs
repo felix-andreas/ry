@@ -50,6 +50,10 @@ pub enum Command {
         /// the nearest spelling of a misspelled name
         #[arg(long, default_value_t = false, requires = "fix")]
         unsafe_fixes: bool,
+        /// Check every file again instead of reusing the findings recorded in `.ry_cache/`
+        /// for files that did not change
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
     },
     /// Run the formatter on the given files or directories
     #[command(alias = "format")]
@@ -136,6 +140,12 @@ pub enum Command {
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
     },
+    /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
+    ///
+    /// The client launches an R script, which runs on ry's runtime with breakpoints,
+    /// stepping, the call stack and frame variables; `browser()` stops there too. The exit
+    /// status is the script's.
+    DebugAdapter,
     /// Run the language server
     #[command(alias = "lsp")]
     Server {

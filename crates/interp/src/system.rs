@@ -224,8 +224,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| Ok(call.arg(0))),
-    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
+    builtin("enc2native", 1, character_unchanged),
+    builtin("enc2utf8", 1, character_unchanged),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -256,9 +256,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
             balance_posixlt(call.arg(0), true, false)
         }
     }),
-    // ry has no interactive debugger, so `browser()` continues as it does in a
-    // non-interactive GNU R session.
-    special("browser", -1, |_| Ok(nil())).invisible(),
+    // Without an attached debug adapter, `browser()` continues as it does in a non-interactive
+    // GNU R session.
+    special("browser", -1, |_| unsafe {
+        crate::debugger::browser()?;
+        Ok(nil())
+    })
+    .invisible(),
     internal("inspect", -1, do_inspect).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
@@ -276,7 +280,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindtextdomain", 2, |_| Ok(nil())),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| Ok(call.arg(0))),
+    internal("enc2native", 1, character_unchanged),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -2597,16 +2601,15 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let name = crate::platform::system_name();
-    let user = name.user;
     let values_list = [
         name.sysname,
         name.release,
         name.version,
         name.nodename,
         name.machine,
-        user.clone(),
-        user.clone(),
-        user,
+        name.login,
+        name.user,
+        name.effective_user,
     ];
     let result = string_vector(&values_list)?;
     let names = string_vector(&[
@@ -2986,6 +2989,7 @@ unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
     crate::heap().collect(heap::Collection::Major);
     (interp().hooks.run_finalizers)();
+    crate::frame::release_worker_memory();
     let stats = crate::heap().stats();
     let result = values::real_vector(&[
         stats.live_objects as f64,
@@ -3094,6 +3098,16 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
     interp().visible = false;
     scalar_integer(status.code().unwrap_or(127))
+}
+
+/// `enc2utf8` and `enc2native`: every string ry holds is already UTF-8, so only the type check
+/// remains.
+unsafe fn character_unchanged(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if value.kind() != SexpType::String {
+        return Err(call.error("argument is not a character vector"));
+    }
+    Ok(value)
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {

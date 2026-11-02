@@ -55,6 +55,23 @@ guesses what you meant, such as changing a misspelled `totl` to `total`, is unsa
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
 The editor offers the same fixes as quick fixes.
 
+### The check cache
+
+`ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
+reuses them for every file whose findings cannot have changed. On a 300,000-line package, a repeat
+check of an unchanged project takes about 0.1 s instead of 1.5 s. After an edit inside a function
+body, only the edited file and the files whose check read it are checked again, which takes about
+0.45 s. Any other change checks every file again: an edit outside a function body (a new top-level
+name, a changed signature, a class definition), an added or removed file, a different `ry.toml`,
+`NAMESPACE`, `DESCRIPTION` or stub, or a different ry binary. An edit inside a body that changes
+what the rest of the project sees also checks every file, for example one that adds `UseMethod`,
+`<<-`, `assign`, `library`, `setClass` or a `#: @type` declaration. A directory with no `ry.toml`
+or `DESCRIPTION`, such as one holding a single downloaded script, gets no cache.
+
+The output is the same with or without the cache. `--no-cache` checks every file without reading or
+writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
+directory, so the record stays out of version control.
+
 ## fmt
 
 ```sh
@@ -120,6 +137,13 @@ and consoles of `ry run` and `ry R`.
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
 file.
+
+## debug-adapter
+
+`ry debug-adapter` serves one debug session over the
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
+output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
 
 ## debug
 

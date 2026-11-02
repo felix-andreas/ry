@@ -78,6 +78,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// A copy of `object` that may be modified in place.
 pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
+    // Ending a move hands the caller this same value back, which makes it shared.
+    crate::moves::modifying(object)?;
     if values::maybe_shared(object) {
         values::shallow_duplicate(object)
     } else {
@@ -332,7 +334,7 @@ unsafe fn resolve(
                 if any_positive || any_na {
                     return Err(crate::unwind::error_in(
                         call,
-                        "can't mix positive and negative subscripts",
+                        "only 0's may be mixed with negative subscripts",
                     ));
                 }
                 let mut keep = vec![true; extent];
@@ -689,9 +691,13 @@ unsafe fn array_subset(
         values::set_attr(dim, symbols().names, select_elements(dim_names, &kept)?)?;
     }
     values::set_attr(result, symbols().dim, dim)?;
-    if kept
-        .iter()
-        .any(|&dimension| new_dimnames[dimension] != nil())
+    // GNU R keeps dimnames whose components are all NULL unless a dropped dimension forces it
+    // to rebuild them.
+    let undropped = dimnames != nil() && kept.len() == new_dims.len();
+    if undropped
+        || kept
+            .iter()
+            .any(|&dimension| new_dimnames[dimension] != nil())
         || dimnames_names != nil()
     {
         let list: Vec<Sexp> = kept
@@ -1093,6 +1099,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     }
     let object = eval::eval(call.arg(0), call.env)?;
     let name = name_argument(call.arg(1))?;
+    dollar_value(object, name, call.call, call.env)
+}
+
+/// `object$name` once the subject is evaluated: an object dispatches with the name as a string.
+pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R<Sexp> {
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
         let args = [
@@ -1105,11 +1116,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
                 value: name_string,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("$", call.call, &args, call.env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin("$", call, &args, env)? {
             return Ok(value);
         }
     }
-    dollar(object, name, call.call)
+    dollar(object, name, call)
 }
 
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
@@ -1186,7 +1197,8 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
 
 /// The elements a matrix subscript selects from an array with `dims`: one row per element and one
 /// column per dimension, holding indices or (for a character matrix) dimnames. `None` when
-/// `index` is not such a matrix; a row with an `NA` selects `NA`.
+/// `index` is not such a matrix. A row with an `NA` selects `NA`, and a numeric row with a 0
+/// selects nothing.
 unsafe fn matrix_index_positions(
     object: Sexp,
     dims: &[usize],
@@ -1217,15 +1229,26 @@ unsafe fn matrix_index_positions(
         let mut offset = 0usize;
         let mut stride = 1usize;
         let mut na = false;
+        let mut dropped = false;
         for (dimension, &extent) in dims.iter().enumerate() {
             let element = row + dimension * rows;
             let position = if numeric {
-                let value = numeric_element(index, element);
+                let value = numeric_element(index, element).trunc();
                 if value.is_nan() {
                     na = true;
                     break;
                 }
-                if value < 1.0 || value as usize > extent {
+                if value < 0.0 {
+                    return Err(crate::unwind::error_in(
+                        call,
+                        "negative values are not allowed in a matrix subscript",
+                    ));
+                }
+                if value == 0.0 {
+                    dropped = true;
+                    break;
+                }
+                if value as usize > extent {
                     return Err(crate::unwind::error_in(call, "subscript out of bounds"));
                 }
                 value as usize - 1
@@ -1248,7 +1271,9 @@ unsafe fn matrix_index_positions(
             offset += position * stride;
             stride *= extent;
         }
-        positions.push((!na).then_some(offset));
+        if !dropped {
+            positions.push((!na).then_some(offset));
+        }
     }
     Ok(Some(positions))
 }
@@ -1586,14 +1611,18 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if let Some(dims) = values::dims(result)
         && let Some(positions) = matrix_index_positions(result, &dims, index, call)?
     {
+        // As with a vector subscript, a single value skips the NA rows, and a longer one
+        // cannot say which of its elements an NA row would have taken.
+        if value_count > 1 && positions.iter().any(Option::is_none) {
+            return Err(crate::unwind::error_in(
+                call,
+                "NAs are not allowed in subscripted assignments",
+            ));
+        }
         for (row, position) in positions.into_iter().enumerate() {
-            let Some(offset) = position else {
-                return Err(crate::unwind::error_in(
-                    call,
-                    "NAs are not allowed in subscripted assignments",
-                ));
-            };
-            assign_element(result, offset, value, row % value_count.max(1))?;
+            if let Some(offset) = position {
+                assign_element(result, offset, value, row % value_count.max(1))?;
+            }
         }
         return Ok(result);
     }
@@ -2610,7 +2639,7 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         }
         values::set_elt(result, dimension, component);
     }
-    let names = values::names(dimnames);
+    let mut names = values::names(dimnames);
     if names != nil() {
         let padded = alloc(SexpType::String, dims.len())?;
         for index in 0..dims.len() {
@@ -2909,8 +2938,9 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     }
     let dim = values::integer_vector(&[rows as i32, cols as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
+    // GNU R reports a bad `dimnames` against the closure that called the internal.
     if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, call.call)?;
+        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
 }
@@ -2963,8 +2993,9 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         }
     }
     values::set_attr(result, symbols().dim, dims)?;
+    // GNU R reports a bad `dimnames` against the closure that called the internal.
     if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, call.call)?;
+        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
 }

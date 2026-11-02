@@ -1,0 +1,57 @@
+# A user debugs a script from the editor: a breakpoint in a function, the frame's variables,
+# an expression evaluated in that frame, stepping out to the caller, `browser()`, and an
+# uncaught error that stops where it was raised.
+
+requires ry-runtime
+
+file analysis.R
+| square <- function(x) {
+|   y <- x * x
+|   y + 0
+| }
+| total <- 0
+| for (i in 1:3) {
+|   total <- total + square(i)
+| }
+| cat("total:", total, "\n")
+| browser()
+| message("checked")
+
+debug start analysis.R break 2
+expect stopped breakpoint at 2
+expect stack "square@2 <top level>@7"
+expect variable x "<not yet evaluated>"
+debug evaluate "x * 100"
+expect evaluated "100"
+debug next
+expect stopped step at 3
+expect variable y "1"
+debug step-out
+expect stopped step at 7
+debug continue
+expect stopped breakpoint at 2
+debug evaluate "x"
+expect evaluated "2"
+debug continue
+expect stopped breakpoint at 2
+debug continue
+expect stopped breakpoint at 10
+expect debug-output "total: 14"
+debug continue
+expect exited 0
+expect debug-output "checked"
+
+file failing.R
+| ratio <- function(a, b) {
+|   if (b == 0) stop("b must not be zero")
+|   a / b
+| }
+| ratio(1, 0)
+| print("never")
+
+debug start failing.R
+expect stopped exception at 2
+expect stack "ratio@2"
+debug continue
+expect exited 1
+expect debug-output "b must not be zero"

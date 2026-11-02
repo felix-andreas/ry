@@ -358,6 +358,12 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
 allocation, which is too slow for a debug build today.
 
+`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
+uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
+invalid, requests at every stop. Every request must get exactly one response, the session must end,
+and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
@@ -367,8 +373,9 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
-engine, each printing rows, columns and a checksum, so the answers compare line by line.
+`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
+data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
 
 ### Coverage-guided fuzzing
 

@@ -86,6 +86,9 @@ pub enum RequestKind {
     /// Asks for callers of an item placed at the position, as a client replays one it kept.
     IncomingCalls,
     OutgoingCalls,
+    CodeLens,
+    /// Resolves a reference-count lens placed at the position, as a client resolves one it kept.
+    CodeLensResolve,
 }
 
 pub const REQUEST_KINDS: &[RequestKind] = &[
@@ -108,6 +111,8 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::CallHierarchy,
     RequestKind::IncomingCalls,
     RequestKind::OutgoingCalls,
+    RequestKind::CodeLens,
+    RequestKind::CodeLensResolve,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -332,6 +337,18 @@ impl Simulation {
                     partial_result_params: partial,
                 },
             )),
+            RequestKind::CodeLens => json(self.state.code_lens(lsp_types::CodeLensParams {
+                text_document: document,
+                work_done_progress_params: work,
+                partial_result_params: partial,
+            })),
+            RequestKind::CodeLensResolve => {
+                json(self.state.code_lens_resolve(lsp_types::CodeLens {
+                    range: lsp_types::Range::new(position, position),
+                    command: None,
+                    data: Some(serde_json::Value::String(document.uri.to_string())),
+                }))
+            }
             RequestKind::Diagnostic => json(self.state.document_diagnostic(
                 lsp_types::DocumentDiagnosticParams {
                     text_document: document,

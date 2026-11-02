@@ -14,6 +14,17 @@ prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
 #++++
 prices: DataFrame{id: integer[], price: double[]}
 
+#---- an_array_column_reads_back_as_a_plain_vector
+prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
+by_name <- prices$price
+by_string <- prices[["price"]]
+checked <- as.Array(prices$price)
+#++++
+prices: DataFrame{id: integer[], price: double[]}
+by_name: double[]
+by_string: double[]
+checked: Array<double>
+
 #---- an_unnamed_variable_keeps_its_name
 id <- 1:3
 items <- DataFrame(id, price = c(1, 2, 3))

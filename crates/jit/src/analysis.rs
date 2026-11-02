@@ -510,6 +510,12 @@ pub enum Intrinsic {
     },
     /// `Dict.get()`.
     DictGet,
+    /// `x$name` on a record of this layout, whose field is slot `index`, as the site's shape
+    /// cache recorded it.
+    Field {
+        layout: u32,
+        index: u32,
+    },
 }
 
 /// Where a directly called closure's argument comes from.
@@ -1104,6 +1110,15 @@ impl<'a> Builder<'a> {
         self.slot_of[&symbol]
     }
 
+    /// The layout and slot a `$` site's shape cache holds, once tier 0 has seen a record there.
+    fn cached_field(&self, shape: Sexp) -> Option<(u32, u32)> {
+        // SAFETY: the shape constant is the two-element integer vector the compiler made.
+        let &[layout, index] = (unsafe { values::ints(shape) }) else {
+            return None;
+        };
+        Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
         from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
     }
@@ -1496,6 +1511,33 @@ impl<'a> Builder<'a> {
                 } else {
                     self.push_edge(operand(1), state);
                     Action::BranchIfObject { src: operand(0) }
+                }
+            }
+            Op::Field => {
+                let feedback = self.feedback_at(inst.pc);
+                match self.cached_field(self.constant(operand(4))) {
+                    // Only a boxed subject can be a record, and an unboxed register's window
+                    // slot may be stale, so the read could not even load its kind.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
+                        // A boxed field is loaded as it is, so only an unboxed scalar's type is
+                        // something the read itself checks.
+                        let feedback = if feedback.is_unboxed() {
+                            feedback
+                        } else {
+                            Ty::Boxed
+                        };
+                        state.registers[operand(0)] = feedback;
+                        state.visible = Some(true);
+                        Action::Intrinsic {
+                            intrinsic: Intrinsic::Field { layout, index },
+                            dst: operand(0),
+                            args: self.slice([operand(1)]),
+                            result: feedback,
+                        }
+                    }
+                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
                 }
             }
             Op::CallTailUpdate => self.opaque_step(
@@ -2781,7 +2823,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => {
+        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

@@ -3,7 +3,8 @@
 //! only, so a path on both sides is an edit, on one side an addition or a deletion, and a
 //! plain `#~~~~ <path>` file is the same on both sides. `R/` files run in the order
 //! `DESCRIPTION`'s collation field and R's file order give them, and a `data/` file is a dataset
-//! whose fingerprint is its text.
+//! whose fingerprint is its text. A case whose files are all plain renders the plan of a fresh
+//! load instead.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use {
@@ -64,6 +65,14 @@ fn render(source: &str) -> String {
     };
     let root = Path::new("/fixture");
     let mut loader = Loader::default();
+    if files.iter().all(|(path, _)| !path.contains(' ')) {
+        let inputs = side("after");
+        let texts = inputs.files.clone();
+        let plan = loader
+            .plan_inputs(root, inputs, true)
+            .expect("the fresh load plans");
+        return render_plan(&plan, &texts);
+    }
     let before = side("before");
     loader
         .plan_inputs(root, before, false)
@@ -113,7 +122,12 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
             code.column
         ));
     }
-    for code in &plan.run {
+    for (position, code) in plan.run.iter().enumerate() {
+        let held = plan
+            .deferred_s4
+            .as_ref()
+            .is_some_and(|deferred| deferred.run.contains(&position));
+        let verb = if held { "hold back" } else { "run" };
         let text = text_of(&code.path);
         let snippet: String = text
             .chars()
@@ -121,7 +135,13 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
             .take((code.end - code.start) as usize)
             .collect();
         let first_line = snippet.lines().next().unwrap_or_default();
-        output.push_str(&format!("run {}:{} {first_line}\n", code.path, code.line));
+        output.push_str(&format!(
+            "{verb} {}:{} {first_line}\n",
+            code.path, code.line
+        ));
+    }
+    if let Some(deferred) = &plan.deferred_s4 {
+        output.push_str(&format!("placeholders {}\n", deferred.names.join(" ")));
     }
     if plan.sysdata != SysdataChange::Keep {
         output.push_str(&format!("sysdata {:?}\n", plan.sysdata));

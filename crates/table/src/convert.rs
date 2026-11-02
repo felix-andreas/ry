@@ -11,7 +11,8 @@ use {
         Error, Result,
         kernel::{gather_values, pack_rows},
     },
-    foldhash::HashMap,
+    foldhash::fast::FixedState,
+    hashbrown::HashTable,
     polars::prelude::{
         BooleanChunked, DataType, Float64Chunked, FrozenCategories, Int32Chunked, IntoSeries,
         NewChunkedArray, PlSmallStr, Series, StringChunked, UInt32Chunked,
@@ -22,9 +23,10 @@ use {
         datatypes::ArrowDataType,
     },
     polars_buffer::{Buffer, SharedStorage},
-    rayon::{
-        iter::{IntoParallelRefMutIterator, ParallelIterator},
-        slice::ParallelSliceMut,
+    rayon::{current_num_threads, join, prelude::*},
+    std::{
+        hash::BuildHasher,
+        sync::atomic::{AtomicU32, Ordering},
     },
 };
 
@@ -242,52 +244,132 @@ pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
 /// A string column as a factor with its distinct values as levels, sorted in byte order, which is
 /// what `factor(x)` gives in R's C locale.
 ///
-/// The codes come from one pass that numbers each distinct string as it first appears, so the
-/// strings are hashed once and never copied; sorting then touches only the distinct values, and
-/// a final pass renumbers the codes into level order. Going through Polars' own string-to-`Enum`
-/// cast instead looks every row up again in the new categories, which costs several times more
-/// on a column with millions of distinct values.
+/// A column can hold millions of distinct strings, and then every random access into one big hash
+/// table misses the cache. So the rows are hashed in parallel and split by hash into partitions,
+/// each partition numbers its own distinct strings in a table small enough to stay warm, and no
+/// string is copied. The distinct strings sort by a 16-byte prefix key, falling back to the whole
+/// string only on a tie, and Polars builds its categories while the codes are renumbered into
+/// level order. Polars' own string-to-`Enum` cast would intern every distinct string twice and look
+/// every row up again.
 pub fn string_to_factor(series: &Series) -> Result<Series> {
-    let strings = series.cast(&DataType::String)?;
+    let strings = series.cast(&DataType::String)?.rechunk();
     let chunked = strings.str()?;
-    let mut numbering: HashMap<&str, u32> = HashMap::default();
-    let mut distinct: Vec<&str> = Vec::new();
-    let mut codes: Vec<u32> = Vec::with_capacity(chunked.len());
-    for value in chunked.iter() {
-        codes.push(match value {
-            Some(value) => *numbering.entry(value).or_insert_with(|| {
-                distinct.push(value);
-                (distinct.len() - 1) as u32
-            }),
-            None => u32::MAX,
-        });
-    }
-    drop(numbering);
-    let mut order: Vec<u32> = (0..distinct.len() as u32).collect();
-    order.par_sort_unstable_by_key(|first_seen| distinct[*first_seen as usize]);
-    let mut rank = vec![0u32; distinct.len()];
-    for (position, first_seen) in order.iter().enumerate() {
-        rank[*first_seen as usize] = position as u32;
-    }
-    codes.par_iter_mut().for_each(|code| {
-        // A missing row's code is masked by the validity bitmap, so any level stands in for it.
-        *code = rank.get(*code as usize).copied().unwrap_or(0)
+    let empty = Utf8ViewArray::new_empty(ArrowDataType::Utf8View);
+    let array = chunked.downcast_iter().next().unwrap_or(&empty);
+    let rows = array.len();
+    let valid = |row: usize| {
+        array
+            .validity()
+            .is_none_or(|validity| validity.get_bit(row))
+    };
+    let partitions = (current_num_threads() * 4).next_power_of_two().min(128);
+    let state = FixedState::default();
+    let (hashes, partition_of): (Vec<u64>, Vec<u8>) = (0..rows)
+        .into_par_iter()
+        .map(|row| {
+            if !valid(row) {
+                return (0, u8::MAX);
+            }
+            let hash = state.hash_one(array.value(row));
+            // hashbrown tags an entry with the hash's top seven bits and finds its bucket with the
+            // low bits, so the partition comes from bits that neither uses: taken from the top,
+            // every string in a partition would share most of its tag.
+            (hash, ((hash >> 40) as usize & (partitions - 1)) as u8)
+        })
+        .unzip();
+    // Each partition owns the rows whose strings hash into it, so the code of a row is written by
+    // exactly one partition.
+    let local_codes: Vec<AtomicU32> = (0..rows).map(|_| AtomicU32::new(0)).collect();
+    let locals: Vec<Vec<&str>> = (0..partitions as u8)
+        .into_par_iter()
+        .map(|partition| {
+            let mut table: HashTable<u32> = HashTable::new();
+            let mut distinct: Vec<&str> = Vec::new();
+            for (row, _) in partition_of
+                .iter()
+                .enumerate()
+                .filter(|(_, owner)| **owner == partition)
+            {
+                let value = array.value(row);
+                let hash = hashes[row];
+                let code = match table.find(hash, |index| distinct[*index as usize] == value) {
+                    Some(index) => *index,
+                    None => {
+                        let index = distinct.len() as u32;
+                        distinct.push(value);
+                        table.insert_unique(hash, index, |index| {
+                            state.hash_one(distinct[*index as usize])
+                        });
+                        index
+                    }
+                };
+                local_codes[row].store(code, Ordering::Relaxed);
+            }
+            distinct
+        })
+        .collect();
+    let offsets: Vec<u32> = locals
+        .iter()
+        .scan(0u32, |offset, local| {
+            let start = *offset;
+            *offset += local.len() as u32;
+            Some(start)
+        })
+        .collect();
+    let distinct: Vec<&str> = locals.into_iter().flatten().collect();
+    let mut order: Vec<(u128, u32)> = distinct
+        .par_iter()
+        .enumerate()
+        .map(|(index, value)| (prefix_key(value), index as u32))
+        .collect();
+    order.par_sort_unstable_by(|(a_key, a), (b_key, b)| {
+        a_key
+            .cmp(b_key)
+            .then_with(|| distinct[*a as usize].cmp(distinct[*b as usize]))
     });
-    let dtype = DataType::from_frozen_categories(FrozenCategories::new(
-        order
-            .iter()
-            .map(|first_seen| distinct[*first_seen as usize]),
-    )?);
-    let validity =
-        (chunked.null_count() > 0).then(|| chunked.iter().map(|value| value.is_some()).collect());
+    let mut rank = vec![0u32; distinct.len()];
+    for (position, (_, index)) in order.iter().enumerate() {
+        rank[*index as usize] = position as u32;
+    }
+    let (categories, codes) = join(
+        || FrozenCategories::new(order.iter().map(|(_, index)| distinct[*index as usize])),
+        || -> Vec<u32> {
+            (0..rows)
+                .into_par_iter()
+                .map(|row| match partition_of[row] {
+                    // A missing row's code is masked by the validity bitmap, so any level stands
+                    // in for it.
+                    u8::MAX => 0,
+                    partition => {
+                        let local = local_codes[row].load(Ordering::Relaxed);
+                        rank[(offsets[partition as usize] + local) as usize]
+                    }
+                })
+                .collect()
+        },
+    );
+    let dtype = DataType::from_frozen_categories(categories?);
     let physical = UInt32Chunked::with_chunk(
         series.name().clone(),
-        PrimitiveArray::new(ArrowDataType::UInt32, codes.into(), validity),
+        PrimitiveArray::new(
+            ArrowDataType::UInt32,
+            codes.into(),
+            array.validity().cloned(),
+        ),
     )
     .into_series()
     .cast(&dtype.to_physical())?;
     // SAFETY: every code is the position of its string among the dtype's categories.
     Ok(unsafe { physical.from_physical_unchecked(&dtype) }?)
+}
+
+/// The first 16 bytes of `value`, big-endian and padded with zeros, so comparing keys orders
+/// strings as comparing their bytes does, up to a tie between strings that share those bytes.
+fn prefix_key(value: &str) -> u128 {
+    let mut bytes = [0u8; 16];
+    let prefix = &value.as_bytes()[..value.len().min(16)];
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    u128::from_be_bytes(bytes)
 }
 
 fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {
