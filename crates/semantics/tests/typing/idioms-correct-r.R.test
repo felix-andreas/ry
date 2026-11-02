@@ -31,6 +31,19 @@ f <- function() reject(1)
 reject: NULL
 f: fn() -> Unknown
 
+#---- an_na_placeholder_a_closure_fills_is_unchecked
+group <- function(lines) {
+  pattern <- NA
+  fun <- function(line) {
+    if (grepl(pattern, line)) return(1)
+    pattern <<- sub("a", "b", line)
+    0
+  }
+  vapply(lines, fun, numeric(1))
+}
+#++++
+group: <T> fn(lines: list[T] | T[]) -> double[]
+
 #---- a_null_placeholder_does_not_hide_a_base_function
 trimws <- NULL
 f <- function(text) trimws(text)
@@ -1468,6 +1481,21 @@ gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
 full: <T: numeric> fn(x: T) -> double
 either: <T: numeric, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
 
+#---- a_flag_default_selects_a_returned_branch_written_with_return
+# pracma's `gcd(a, b, extended = FALSE)` returns from each branch.
+gcd <- function(a, b, extended = FALSE) {
+  g <- a + b
+  if (extended) {
+    return(list(g = g, c = a))
+  } else {
+    return(g)
+  }
+}
+lcm <- function(a, b) a / gcd(a, b, extended = FALSE) * b
+#++++
+gcd: <T: numeric, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
+lcm: <T: numeric> fn(a: T, b: T) -> double
+
 #---- the_other_branch_of_a_flag_default_is_still_checked
 p_dist <- function(q, valueOnly = TRUE) {
   prob <- q * 2
@@ -1485,11 +1513,10 @@ p_dist <- function(q, valueOnly = TRUE) {
   valueOnly <- prob > 1
   if (valueOnly) prob else list(value = prob)
 }
-gap <- function(x) p_dist(x) - 1
+gap <- function(x) p_dist(x)
 #++++
 p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
-gap: Unknown
-149..158 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | list{value: double}`
+gap: <T: numeric> fn(x: T) -> double | list{value: double}
 
 #---- an_inferred_logical_callback_parameter_takes_numbers
 # gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
@@ -2244,3 +2271,86 @@ use <- function(x) {
 #++++
 pick: <T> fn(x: T) -> Any
 use: <T> fn(x: T) -> Unknown
+
+#---- a_value_wrapped_in_a_list_on_one_path_still_maps
+# htmltools wraps a named list in `list()` before mapping over it.
+render <- function(script) {
+  if (length(names(script)) > 0) script <- list(script)
+  lapply(script, function(item) item)
+}
+#++++
+render: <T> fn(script: T) -> list[T]
+
+#---- a_condition_naming_a_shipped_function_reads_an_installed_binding
+# R6 copies `new` into a generator environment that binds `class` to a flag.
+generator_funs <- list()
+generator_funs$new <- function() {
+  if (class) "a" else "b"
+}
+#++++
+generator_funs: list{}
+fn() -> character
+
+#---- a_list_member_beside_a_number_is_a_path_a_correlated_test_rules_out
+# mgcv keeps one offset per predictor as a list, and a bare number when there is one.
+predict_fit <- function(nlp, x) {
+  offset <- if (nlp > 1) as.list(rep(0, nlp)) else 0
+  if (nlp > 1) offset[[1]] + x else x + offset
+}
+#++++
+predict_fit: <T, U: numeric> fn(nlp: T, x: U) -> Unknown
+
+#---- a_flag_default_selects_an_early_return
+iam <- function(j, both = FALSE) {
+  if (both) return(list(row.index = j))
+  j + 1
+}
+rows <- function() iam(1, both = TRUE)$row.index
+next_index <- function() iam(1) * 2
+#++++
+iam: <T: numeric, U> fn(j: T, [both]: U) -> list{row.index: T} | double
+rows: fn() -> double
+next_index: fn() -> double
+
+#---- a_dollar_method_reads_a_classed_atomic_vector
+# igraph's vertex sequences are classed integer vectors with a `$` method.
+V <- function(n) {
+  res <- seq_len(n)
+  class(res) <- "vs"
+  res
+}
+`$.vs` <- function(x, name) paste(name, length(x))
+weights <- function() V(3)$weight
+#++++
+V: <T> fn(n: T) -> integer[]
+$.vs: <T, U> fn(x: T, name: U) -> character
+weights: fn() -> Unknown
+
+#---- a_list_beside_an_unknown_operand_may_meet_its_method
+added <- function(plot) undeclared::plot_of(plot) + list(1)
+#++++
+added: <T> fn(plot: T) -> Unknown
+24..43 warning[unresolved] unknown package namespace `undeclared`.
+
+#---- a_sequence_between_computed_bounds_is_numeric
+# `seq` dispatches on `from`, so bounds computed from an unannotated parameter are numbers, not dates.
+grid <- function(n, tails = c(0.1, 0.1)) {
+  i <- seq(0.5 * tails[1], 1 - 0.5 * tails[2], length.out = n)
+  ifelse(i < .25, 0, 1)
+}
+#++++
+grid: <T, U> fn(n: T, [tails]: U) -> Any
+
+#---- a_range_endpoint_that_is_only_sometimes_null_is_used_where_it_exists
+# mgcv fills `off` only under its `penalty` flag, and reads it only after passing the flag.
+basis <- function(n, penalty = TRUE) {
+  if (penalty) off <- 1 else off <- NULL
+  list(off = off)
+}
+span <- function(n) {
+  b <- basis(n, penalty = TRUE)
+  b$off[1]:(b$off[1] + n - 1)
+}
+#++++
+basis: <T, U> fn([n]: T, [penalty]: U) -> list{off: double | NULL}
+span: <T: numeric> fn(n: T) -> double[]

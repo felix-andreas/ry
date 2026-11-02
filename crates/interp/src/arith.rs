@@ -3104,23 +3104,28 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
 }
 
 unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
-    let mut args: Vec<Arg> = Vec::new();
+    let mut items: Vec<Arg> = Vec::new();
+    let mut na_rm = None;
     let mut finite = false;
     for arg in call.args {
         if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
             finite = values::as_logical_scalar(arg.value) == 1;
-        } else if arg.value.kind() == SexpType::List && arg.tag != symbols().na_rm {
-            // GNU R's `range.default` flattens its arguments with `c(..., recursive = TRUE)`,
-            // so a list of numbers has a range where `min` and `max` refuse it.
-            let unlist = values::call(values::install("unlist")?, &[arg.value])?;
-            args.push(Arg {
-                tag: arg.tag,
-                value: crate::eval::eval(unlist, values::base_namespace())?,
-            });
+        } else if arg.tag == symbols().na_rm {
+            na_rm = Some(*arg);
         } else {
-            args.push(*arg);
+            items.push(*arg);
         }
     }
+    // `range.default` starts from `c(..., recursive = TRUE)`, so lists are flattened.
+    let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
+        vec![Arg {
+            tag: nil(),
+            value: crate::subset::combine_args(&items, &[], true, false)?,
+        }]
+    } else {
+        items
+    };
+    args.extend(na_rm);
     if finite {
         let mut filtered = Vec::new();
         for arg in &args {
@@ -3543,23 +3548,8 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
-        let increment = if start <= end { 1 } else { -1 };
-        if let Some(sequence) = compact_intseq(count, start as i32, increment)? {
-            return Ok(sequence);
-        }
-        let result = alloc(SexpType::Integer, count)?;
-        let start = start as i64;
-        let output = values::ints_mut(result);
-        if start <= end as i64 || end >= start as f64 {
-            for (index, slot) in output.iter_mut().enumerate() {
-                *slot = (start + index as i64) as i32;
-            }
-        } else {
-            for (index, slot) in output.iter_mut().enumerate() {
-                *slot = (start - index as i64) as i32;
-            }
-        }
-        return Ok(result);
+        let increment = if end >= start { 1.0 } else { -1.0 };
+        return sequence(SexpType::Integer, count, start, increment);
     }
     let result = alloc(SexpType::Real, count)?;
     let step = if start <= end { 1.0 } else { -1.0 };
@@ -3574,27 +3564,6 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
 /// vectors, which the evaluator's hot loops read without an indirection.
 const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
 
-/// A compact integer sequence when `count` reaches [`COMPACT_SEQUENCE_MIN`] and the host
-/// provides ALTREP classes.
-unsafe fn compact_intseq(count: usize, first: i32, increment: i32) -> R<Option<Sexp>> {
-    if count < COMPACT_SEQUENCE_MIN {
-        return Ok(None);
-    }
-    (interp().hooks.compact_intseq)(count, first, increment)
-}
-
-/// `1, 2, ..., count` as integers.
-unsafe fn one_to(count: usize) -> R<Sexp> {
-    if let Some(sequence) = compact_intseq(count, 1, 1)? {
-        return Ok(sequence);
-    }
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
-}
-
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3607,8 +3576,35 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     if count.is_nan() || count < 0.0 {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
-    let count = count as usize;
-    one_to(count)
+    // Past the integer range the sequence is doubles, as GNU R's is.
+    let kind = if count > i32::MAX as f64 {
+        SexpType::Real
+    } else {
+        SexpType::Integer
+    };
+    sequence(kind, count as usize, 1.0, 1.0)
+}
+
+/// The integers or doubles `first`, `first + increment`, ... of length `count`, for an
+/// increment of 1 or -1, which the caller keeps in the kind's range, compact from
+/// [`COMPACT_SEQUENCE_MIN`] elements when the host provides ALTREP classes.
+unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> R<Sexp> {
+    if count >= COMPACT_SEQUENCE_MIN
+        && let Some(sequence) = (interp().hooks.compact_sequence)(kind, count, first, increment)?
+    {
+        return Ok(sequence);
+    }
+    let result = alloc(kind, count)?;
+    if kind == SexpType::Integer {
+        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+            *slot = (first + increment * index as f64) as i32;
+        }
+    } else {
+        for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
+            *slot = first + increment * index as f64;
+        }
+    }
+    Ok(result)
 }
 
 unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
@@ -3618,7 +3614,7 @@ unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
     } else {
         length(object)
     };
-    one_to(count)
+    sequence(SexpType::Integer, count, 1.0, 1.0)
 }
 
 /// `seq.int(from, to, by, length.out, along.with, ...)`.
@@ -3844,6 +3840,23 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .filter(|&value| value != NA_INTEGER)
         .unwrap_or(1)
         .max(0) as usize;
+    if object.kind() == SexpType::Pairlist {
+        return Err(call.error("replication of pairlists is defunct"));
+    }
+    // GNU R returns an empty `x` before it checks the type, so `rep(new.env(), 2)` is the
+    // environment itself.
+    if !is_replicable(object) && object != nil() && length(object) == 0 {
+        if length_out.is_some_and(|out| out > 0.0) {
+            return Err(call.error("cannot set length of non-(vector or list)"));
+        }
+        return Ok(object);
+    }
+    if !is_replicable(object) && object != nil() {
+        return Err(call.error(format!(
+            "attempt to replicate an object of type '{}'",
+            object.kind().name()
+        )));
+    }
     let object = values::materialize(object)?;
     if !replicable(object) && object.kind() != SexpType::Pairlist {
         return Err(call.error(format!(
@@ -3976,6 +3989,12 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     keep_factor(object, crate::subset::select_elements(object, &indices)?)
 }
 
+/// GNU R's `isVector`, the objects `rep` and `rep_len` replicate.
+unsafe fn is_replicable(object: Sexp) -> bool {
+    let kind = object.kind();
+    kind.is_atomic() || matches!(kind, SexpType::List | SexpType::Expression)
+}
+
 /// The elements of a logical, integer or double `object` recycled to `total`, copied a whole
 /// run at a time; `None` for an empty object or any other type.
 unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
@@ -4003,13 +4022,19 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     if let Some(value) = rep_classed(call, "length.out", true)? {
         return Ok(value);
     }
+    if !is_replicable(call.arg(0)) && call.arg(0) != nil() {
+        return Err(error("attempt to replicate non-vector"));
+    }
     let object = values::materialize(call.arg(0))?;
     if !replicable(object) {
         return Err(call.error("attempt to replicate non-vector"));
     }
     let out = values::as_integer_scalar(call.arg(1));
     if out == NA_INTEGER || out < 0 {
-        return Err(call.error("invalid 'length.out' value"));
+        return Err(error("invalid 'length.out' value"));
+    }
+    if object == nil() && out > 0 {
+        return Err(error("cannot replicate NULL to a non-zero length"));
     }
     let count = length(object);
     if count > 0

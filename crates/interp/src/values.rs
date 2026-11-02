@@ -474,10 +474,7 @@ pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
 /// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
 /// `"NA"`, so it goes through `install` too.
 pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
-    if name != na_string()
-        && name.has_gp(gp::ASCII)
-        && name.has_gp(gp::CACHED)
-        && (1..=10_000).contains(&name.length())
+    if name != na_string() && name.has_gp(gp::ASCII) && name.has_gp(gp::CACHED) && name.length() > 0
     {
         return Ok(crate::heap().install_char(name)?);
     }
@@ -698,8 +695,19 @@ macro_rules! typed_slice {
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
                 // The accessor cannot fail, so a method's error is parked, as for elements.
-                match materialize(object) {
-                    Ok(vector) => vector.slice::<$type>(),
+                // The class's own data pointer comes first, since materializing copies the
+                // whole vector on every read.
+                let data = match (interp().hooks.altrep_dataptr)(object) {
+                    Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
+                    Ok(Some(pointer)) => Ok(std::slice::from_raw_parts(
+                        pointer.cast::<$type>(),
+                        length(object),
+                    )),
+                    Ok(None) => materialize(object).map(|vector| vector.slice::<$type>()),
+                    Err(unwind) => Err(unwind),
+                };
+                match data {
+                    Ok(slice) => slice,
                     Err(unwind) => {
                         crate::unwind::park(unwind);
                         &[]

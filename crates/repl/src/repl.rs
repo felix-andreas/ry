@@ -12,8 +12,8 @@ pub use reedline;
 use std::{
     error::Error,
     ffi::{CString, c_char, c_int, c_void},
-    fmt,
-    io::IsTerminal,
+    fmt, fs,
+    io::{self, IsTerminal},
     path::{Path, PathBuf},
 };
 
@@ -307,7 +307,7 @@ type RuntimeLibrary = libloading::os::unix::Library;
 type RuntimeLibrary = libloading::Library;
 
 fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
-    let library_path = ry_runtime_library()?;
+    let (library_path, extracted) = ry_runtime_library()?;
     // On Linux, compiled packages record `libR.so` as a needed library, and loading ry's globally
     // lets the dynamic linker satisfy them from it. On macOS, `libr`'s loader rebinds GNU R's
     // package binaries to this library's install name, and packages ry builds look R's API up in
@@ -323,8 +323,18 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
     #[cfg(not(unix))]
     let library = unsafe { RuntimeLibrary::new(&library_path) };
     let library = library.map_err(|error| {
+        let hint = if extracted {
+            format!(
+                "; ry extracted it into {}, which may be on a `noexec` mount that cannot run \
+                 code. Set XDG_CACHE_HOME to another directory, or RY_LIBR to ry's runtime \
+                 elsewhere",
+                library_path.parent().unwrap_or(&library_path).display()
+            )
+        } else {
+            String::new()
+        };
         ReplError(format!(
-            "failed to load ry's runtime at {}: {error}",
+            "failed to load ry's runtime at {}: {error}{hint}",
             library_path.display()
         ))
     })?;
@@ -370,9 +380,20 @@ fn runtime_entry<T: Copy>(library: &'static RuntimeLibrary, name: &str) -> Resul
         .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
-fn ry_runtime_library() -> Result<PathBuf, ReplError> {
+/// ry's R home, whose `bin/R` runs ry's runtime with GNU R's base packages
+/// (`rcmd::runtime_home`).
+pub fn ry_r_home() -> Result<PathBuf, ReplError> {
+    let (libr, _) = ry_runtime_library()?;
+    let gnu_r_home = libr::discover_r_home()?;
+    rcmd::runtime_home(&libr, &gnu_r_home).map_err(|error| ReplError(error.to_string()))
+}
+
+/// ry's runtime library, and whether it was extracted from this executable. `RY_LIBR` wins,
+/// then a library beside the executable, in `deps/` or in `../lib/ry/` (a development build or
+/// a distribution's package), and last the copy a release embeds ([`extract_runtime`]).
+fn ry_runtime_library() -> Result<(PathBuf, bool), ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
-        return Ok(PathBuf::from(path));
+        return Ok((PathBuf::from(path), false));
     }
     let executable = std::env::current_exe()
         .map_err(|error| ReplError(format!("cannot locate the ry executable: {error}")))?;
@@ -390,12 +411,98 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
         directory.join("../lib/ry").join(&library),
     ] {
         if candidate.exists() {
-            return Ok(candidate);
+            return Ok((candidate, false));
         }
+    }
+    if let Some(runtime) = &EMBEDDED_RUNTIME {
+        return extract_runtime(runtime).map(|path| (path, true));
     }
     Err(ReplError(format!(
         "ry's runtime ({library}) was not found beside {}; build it with `just build` or \
          `cargo build -p libr`, or set RY_LIBR to its path",
         executable.display()
     )))
+}
+
+/// A runtime built into the executable (`build.rs`, `RY_EMBED_RUNTIME`).
+pub struct EmbeddedRuntime {
+    /// A hash of the files, naming the directory they are extracted into.
+    key: &'static str,
+    /// The runtime library first, then the files that must sit beside it.
+    files: &'static [EmbeddedFile],
+}
+
+struct EmbeddedFile {
+    name: &'static str,
+    size: u64,
+    compressed: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/embedded_runtime.rs"));
+
+/// Extracts the embedded runtime into `ry/runtime/<key>/` of the user's cache, unless an
+/// earlier run did, and returns the library's path. A file is written under a name of its own
+/// and renamed into place, so a process never sees a partial file and concurrent first runs
+/// both succeed; the library is renamed last, so a complete library means a complete directory.
+fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
+    let library = runtime
+        .files
+        .first()
+        .ok_or_else(|| ReplError("the runtime embedded in ry is empty".to_owned()))?;
+    let cache = rcmd::cache_directory().ok_or_else(|| {
+        ReplError(
+            "ry extracts its runtime into a cache directory, and none of XDG_CACHE_HOME, \
+             LOCALAPPDATA or HOME is set; set one, or RY_LIBR to ry's runtime"
+                .to_owned(),
+        )
+    })?;
+    let directory = cache.join("ry").join("runtime").join(runtime.key);
+    let library_path = directory.join(library.name);
+    let complete = |path: &Path, file: &EmbeddedFile| {
+        fs::metadata(path).is_ok_and(|metadata| metadata.len() == file.size)
+    };
+    if complete(&library_path, library) {
+        return Ok(library_path);
+    }
+    let failed = |path: &Path, error: io::Error| {
+        ReplError(format!(
+            "cannot extract ry's runtime to {}: {error}; set XDG_CACHE_HOME to a writable \
+             directory, or RY_LIBR to ry's runtime",
+            path.display()
+        ))
+    };
+    fs::create_dir_all(&directory).map_err(|error| failed(&directory, error))?;
+    for file in runtime.files.iter().rev() {
+        let path = directory.join(file.name);
+        if file.name != library.name && complete(&path, file) {
+            continue;
+        }
+        let staging = directory.join(format!(".{}.{}", file.name, rcmd::staging_suffix()));
+        let bytes = zstd::decode_all(file.compressed).map_err(|error| failed(&path, error))?;
+        let written = fs::write(&staging, &bytes).and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(())
+        });
+        if let Err(error) = written {
+            // A partial file, say from a full disk, would otherwise stay in the cache for good.
+            if staging.exists() {
+                fs::remove_file(&staging).map_err(|error| failed(&staging, error))?;
+            }
+            return Err(failed(&staging, error));
+        }
+        if let Err(error) = fs::rename(&staging, &path) {
+            // Windows refuses to replace a library another process has loaded, which means a
+            // concurrent run extracted it first.
+            let removed = fs::remove_file(&staging);
+            if !complete(&path, file) {
+                return Err(failed(&path, error));
+            }
+            removed.map_err(|error| failed(&staging, error))?;
+        }
+    }
+    Ok(library_path)
 }

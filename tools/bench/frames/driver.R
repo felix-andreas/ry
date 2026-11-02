@@ -3,19 +3,33 @@
 # calls the module's functions and reads results with `$`, `[[`, `nrow` and `ncol`, which both
 # kinds of table answer, so the checksums must agree.
 #
-# Usage: driver.R <module> <module-file> <rows> <data-dir> <untyped|typed>
+# Usage: driver.R <module> <module-file> <rows> <data-dir> <untyped|typed|migrated> [instance-id]
+#
+# With an instance id, the file may be any generated package file: only the top-level definitions
+# whose names end in `_<id>` are evaluated, so the other templates in the file need not run. The
+# `migrated` variant is an untyped module after `ry migrate data-table`, whose tables are
+# DataFrames but which may still call data.table where no rewrite applied.
 args <- commandArgs(trailingOnly = TRUE)
 module <- args[[1]]
 rows <- as.integer(as.numeric(args[[3]]))
 data <- args[[4]]
-if (args[[5]] == "untyped") library(data.table)
-source(args[[2]])
+variant <- args[[5]]
+id <- if (length(args) >= 6) args[[6]] else "[0-9]+"
+if (variant != "typed") library(data.table)
+if (length(args) >= 6) {
+  for (expression in parse(args[[2]], keep.source = FALSE)) {
+    target <- if (is.call(expression) && identical(expression[[1]], as.name("<-"))) expression[[2]]
+    if (is.name(target) && endsWith(as.character(target), paste0("_", id))) eval(expression, globalenv())
+  }
+} else {
+  source(args[[2]])
+}
 
 instance <- function(prefix) {
-  name <- ls(pattern = paste0("^", prefix, "_[0-9]+$"), envir = globalenv())[[1]]
+  name <- ls(pattern = paste0("^", prefix, "_", id, "$"), envir = globalenv())[[1]]
   get(name, envir = globalenv())
 }
-make_table <- if (args[[5]] == "typed") DataFrame else data.table::data.table
+make_table <- if (variant == "untyped") data.table::data.table else DataFrame
 
 step <- function(name, run, checksum) {
   start <- proc.time()[["elapsed"]]

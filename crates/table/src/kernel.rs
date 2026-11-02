@@ -12,14 +12,12 @@
 
 use {
     crate::{
-        ColumnType, Error, Result, Schema,
-        convert::factor_levels,
+        ColumnType, Error, Result, Schema, factor,
         query::{BinaryOp, Expr, Typer, UnaryOp, comparison},
     },
     polars::prelude::{
         BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
-        Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr,
-        StringChunked, UInt8Chunked, UInt16Chunked, UInt32Chunked,
+        Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, PlSmallStr, StringChunked,
     },
     polars_arrow::{
         array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
@@ -397,7 +395,7 @@ impl Evaluator<'_> {
             return None;
         }
         let column = self.frame.column(name).ok()?;
-        let levels = factor_levels(column.dtype())?;
+        let levels = factor::levels(column.dtype())?;
         let codes = Codes::of(column)?;
         let codes = match self.rows {
             Some(rows) => codes.gather(rows),
@@ -405,13 +403,10 @@ impl Evaluator<'_> {
         };
         let len = self.len();
         let equal = op == BinaryOp::Equal;
-        let values = match levels.iter().position(|level| level == label) {
+        let values = match levels.position(label) {
             // A label the factor lacks equals no row.
             None => Bitmap::new_with_value(!equal, len),
-            Some(code) => {
-                let code = u32::try_from(code).ok()?;
-                codes.pack(len, move |value| (value == code) == equal)
-            }
+            Some(code) => codes.pack(len, move |value| (value == code) == equal),
         };
         Some(Value::Vector(Vector::Logical {
             values,
@@ -1429,30 +1424,16 @@ pub(crate) fn gather_column(
         };
         return Ok(gathered.into_column(name));
     }
-    if matches!(column.dtype(), DataType::Enum(..))
+    if factor::is_factor(column.dtype())
         && let Some(codes) = Codes::of(column)
     {
         let gathered = codes.gather(rows);
         let validity = and(gathered.validity.as_ref(), keep);
-        let physical = match gathered.values {
-            CodeValues::U8(values) => UInt8Chunked::with_chunk(
-                name,
-                PrimitiveArray::new(ArrowDataType::UInt8, values, validity),
-            )
-            .into_series(),
-            CodeValues::U16(values) => UInt16Chunked::with_chunk(
-                name,
-                PrimitiveArray::new(ArrowDataType::UInt16, values, validity),
-            )
-            .into_series(),
-            CodeValues::U32(values) => UInt32Chunked::with_chunk(
-                name,
-                PrimitiveArray::new(ArrowDataType::UInt32, values, validity),
-            )
-            .into_series(),
+        let gathered = Codes {
+            values: gathered.values,
+            validity,
         };
-        // SAFETY: the codes come from a column of this dtype, so each is one of its levels.
-        return Ok(unsafe { physical.from_physical_unchecked(column.dtype()) }?.into_column());
+        return Ok(factor::from_gathered(name, column.dtype(), gathered).into_column());
     }
     if let Ok(strings) = column.as_materialized_series().str()
         && let [chunk] = strings.chunks().as_slice()

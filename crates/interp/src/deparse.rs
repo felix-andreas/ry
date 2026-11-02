@@ -370,7 +370,7 @@ impl Deparser {
             }
             SexpType::ExternalPtr => {
                 self.incomplete = true;
-                self.print("<pointer: 0x0>")
+                self.print(&crate::print::pointer_text(object))
             }
             SexpType::WeakRef => {
                 self.incomplete = true;

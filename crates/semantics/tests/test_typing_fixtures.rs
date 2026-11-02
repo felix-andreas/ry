@@ -219,7 +219,8 @@ fn render_strict_file(db: &RootDatabase, file: SourceFile) -> String {
 
 /// A case is one script or several `#~~~~ path` files. A file whose path does not end in `.R`
 /// is a data file, sniffed exactly as the hosts sniff a project's `.csv` files, and each case
-/// gets a fresh database because the data-file and metadata inputs are singletons.
+/// gets a fresh database because the data-file and metadata inputs are singletons. A file with
+/// a `# typing: strict` comment also renders its strict-mode findings.
 fn render_with_data_files(source: &str) -> String {
     let files =
         split_files(source).unwrap_or_else(|| vec![("main.R".to_owned(), source.to_owned())]);
@@ -255,6 +256,7 @@ fn render_with_data_files(source: &str) -> String {
             output.push_str(&format!("== {path}\n"));
         }
         output.push_str(&render_file(&db, *file));
+        render_diagnostics(&mut output, &strict_diagnostics(&db, *file));
     }
     output
 }

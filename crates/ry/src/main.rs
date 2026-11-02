@@ -129,6 +129,10 @@ static ALLOCATOR_OPTIONS: extern "C" fn() = {
 };
 
 fn main() -> ExitCode {
+    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
+    if rcmd::front_end::invoked_as_front_end() {
+        return rcmd::front_end::main(env::args().skip(1).collect());
+    }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(
@@ -191,6 +195,25 @@ fn main() -> ExitCode {
     } = &cli.command
     {
         return run_document(path, roclets, *runtime);
+    }
+
+    if let Command::Build {
+        path,
+        output,
+        no_vignettes,
+        runtime,
+    } = &cli.command
+    {
+        return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
+    }
+
+    if let Command::Install {
+        path,
+        library,
+        runtime,
+    } = &cli.command
+    {
+        return run_install(path, library.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -279,6 +302,8 @@ fn main() -> ExitCode {
         | Command::Load { .. }
         | Command::Test { .. }
         | Command::Document { .. }
+        | Command::Build { .. }
+        | Command::Install { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -549,6 +574,137 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
     );
     // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
     run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+}
+
+/// `ry build`: writes the package's source tarball to `output`, or beside the package.
+fn run_build(
+    path: &Path,
+    output: Option<&Path>,
+    vignettes: bool,
+    runtime: Option<Runtime>,
+) -> ExitCode {
+    let built = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let output = match output {
+                Some(output) => std::path::absolute(output)
+                    .map_err(|error| format!("cannot resolve {}: {error}", output.display()))?,
+                None => root
+                    .parent()
+                    .ok_or_else(|| format!("{} has no parent directory", root.display()))?
+                    .to_path_buf(),
+            };
+            build_tarball(&home, &root, &output, vignettes)
+        });
+    match built {
+        Ok(tarball) => {
+            println!("{}", tarball.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `ry install`: builds the package into a private directory without rebuilding its vignettes,
+/// as `devtools::install()` does, and installs the tarball with the home's `R CMD INSTALL`.
+fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+    let installed = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
+            fs::create_dir_all(&staging)
+                .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
+            let result = build_tarball(&home, &root, &staging, false).and_then(|tarball| {
+                let mut command = std::process::Command::new(home.join("bin").join("R"));
+                command.args(["CMD", "INSTALL"]);
+                if let Some(library) = library {
+                    fs::create_dir_all(library)
+                        .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
+                    command.arg("-l").arg(library);
+                }
+                let status = command
+                    .arg(&tarball)
+                    .status()
+                    .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("installing {} failed", root.display()))
+                }
+            });
+            // The tarball is a by-product; a leftover in the temporary directory harms nothing.
+            if let Err(error) = fs::remove_dir_all(&staging) {
+                tracing::debug!("cannot remove {}: {error}", staging.display());
+            }
+            result
+        });
+    match installed {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The R home whose `bin/R` runs the chosen runtime: ry's own home, or GNU R's.
+fn r_home(runtime: Option<Runtime>) -> Result<PathBuf, String> {
+    let runtime_variable = env::var("RY_RUNTIME").ok();
+    let home = match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
+        Runtime::Ry => repl::ry_r_home(),
+        Runtime::GnuR => repl::libr::discover_r_home(),
+    };
+    home.map_err(|error| error.to_string())
+}
+
+/// Runs the home's `R CMD build` on `root` in `output` with `devtools::build()`'s options, and
+/// returns the tarball it wrote.
+fn build_tarball(
+    home: &Path,
+    root: &Path,
+    output: &Path,
+    vignettes: bool,
+) -> Result<PathBuf, String> {
+    let description_path = root.join("DESCRIPTION");
+    let description = rcmd::Description::parse(
+        &fs::read_to_string(&description_path)
+            .map_err(|error| format!("cannot read {}: {error}", description_path.display()))?,
+    );
+    let field = |name: &str| {
+        description
+            .get(name)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} has no {name} field", description_path.display()))
+    };
+    let tarball = output.join(format!(
+        "{}_{}.tar.gz",
+        field("Package")?,
+        field("Version")?
+    ));
+    fs::create_dir_all(output)
+        .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
+    let mut command = std::process::Command::new(home.join("bin").join("R"));
+    command.args(["CMD", "build", "--no-resave-data", "--no-manual"]);
+    if !vignettes {
+        command.arg("--no-build-vignettes");
+    }
+    let status = command
+        .arg(root)
+        .current_dir(output)
+        .status()
+        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+    if !status.success() {
+        return Err(format!("building {} failed", root.display()));
+    }
+    if !tarball.is_file() {
+        return Err(format!("R CMD build did not write {}", tarball.display()));
+    }
+    Ok(tarball)
 }
 
 /// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then

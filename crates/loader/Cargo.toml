@@ -23,7 +23,6 @@ notify = { version = "8", default-features = false }
 salsa.workspace = true
 semantics = { path = "../semantics" }
 serde = { workspace = true, features = ["derive", "rc"] }
-serde_json.workspace = true
 syntax = { path = "../syntax" }
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 

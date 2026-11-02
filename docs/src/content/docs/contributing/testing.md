@@ -402,7 +402,7 @@ and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing ses
 data.table behavior was read from data.table under GNU R. Its differential fuzz generates random
 tables and queries and checks the native kernels against the Polars plans
 (`query::execute_with_plans_only`), which serve as the reference. `FUZZ_ITERS` raises the
-iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
+iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test-release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
 `just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
@@ -415,6 +415,19 @@ zoo rolling operations) under `ry run` and GNU R, and prints the ratio ry / GNU 
 kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory` every kernel
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
+
+`just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
+n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
+the ratio ry / GNU R. The cases live in `tools/bench/stdlib`: `ry.R` holds ry's side and `gnu.R`
+the R alternatives in base R, purrr, stringr and stringi under the same case names, and the
+fastest alternative sets the bar. A callback function is compared with R's callback idioms
+(`vapply`, `Filter`, `Reduce`, a `for` loop, purrr), and a function on one string with R's
+vectorized string functions. Where ry's input is a vector, the case also runs it on an Array,
+ry's unboxed vector, and the faster of the two counts. Each case runs in its own process, so a case slower than
+`--timeout` shows as `timeout` without stopping the rest, and a `check` column compares
+checksums of both results. Packages load from `R_LIBS_USER`, and an alternative whose package is
+missing is skipped and named in the row. `--sort ratio` puts the slowest functions first, and
+`--write` saves the table, as in `tools/bench/stdlib/results.md`.
 
 ### Coverage-guided fuzzing
 
@@ -695,7 +708,7 @@ ignored by default, because it needs the fetched corpus and a release build, and
 the corpus:
 
 ```sh
-cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+cargo test-release -p semantics --test test_perf -- --ignored --nocapture
 ```
 
 `just perf` runs the same command. Its budgets are measured numbers plus headroom, and cover the
@@ -703,6 +716,17 @@ cold-pass wall time per line, resolve steps per line (the tripwire for a regress
 memoization), resident bytes per line, and the p50 and p95 latency from a keystroke to fresh
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
+
+Run optimized tests with `cargo test-release`, an alias for `cargo test --profile bench`, which is
+what `just perf` and `cargo bench` use. The `bench` profile keeps `opt-level = 3` but uses thin
+local LTO and 16 codegen units. Plain `cargo test --release` builds with the release profile's fat
+LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS and takes 30 minutes on
+four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and 11 minutes under
+`cargo test-release`. Shipped binaries and every benchmark number in
+the docs come from `cargo build --release`, so a budget measured under `cargo test-release` can be
+slightly slower than a release binary. Debug builds keep line tables only (`[profile.dev] debug =
+"line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
+inspect locals in a debugger.
 
 ## Guidelines
 

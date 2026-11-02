@@ -11,10 +11,10 @@ c(1L, 2L, 3L)[[1L]]
 #++++
 integer
 
-#---- named_vector_name_lookup_is_nullable
+#---- named_vector_name_lookup_is_the_element
 c(foo = 1L, bar = 2L)[["foo"]]
 #++++
-integer | NULL
+integer
 
 #==== list_indexing
 #---- tuple_literal_position_returns_element_type
@@ -98,7 +98,7 @@ integer
 c(foo = 1L)[["foo"]]
 c(foo = 1L)["foo"]
 #++++
-integer | NULL
+integer
 integer
 
 #==== boundary_cases

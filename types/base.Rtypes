@@ -174,10 +174,10 @@ length : @pure fn(x: Any) -> integer
 lengths : @pure fn(x: Any, [use.names]: logical) -> integer[]
 seq_len : @pure fn(length.out: Any) -> integer[]
 seq_along : @pure fn(along.with: Any) -> integer[]
-seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> Date
-seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
 seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
+seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> Date
+seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
 seq : @pure fn(...: Any) -> Any
 seq.int : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq.int : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
@@ -289,7 +289,7 @@ paste0 : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL, [rec
 sprintf : @pure fn(fmt: character[], ...: Any) -> character
 gettextf : @pure fn(fmt: character[], ...: Any, [domain]: Any) -> character
 format : @pure fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
-formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
+formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any, [replace.zero]: logical, [drop0trailing]: logical) -> character
 prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
@@ -320,7 +320,7 @@ regmatches : @pure fn(x: character[], m: Any, [invert]: Any) -> Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
-strsplit : @pure fn(x: Any, split: character[], [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
+strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be

@@ -2148,7 +2148,6 @@ dependencies = [
  "salsa",
  "semantics",
  "serde",
- "serde_json",
  "syntax",
  "tempfile",
  "xxhash-rust",
@@ -2643,10 +2642,12 @@ dependencies = [
  "polars-compute",
  "polars-core",
  "polars-error",
+ "polars-expr",
  "polars-io",
  "polars-lazy",
  "polars-ops",
  "polars-parquet",
+ "polars-plan",
  "polars-sql",
  "polars-time",
  "polars-utils",
@@ -3621,8 +3622,10 @@ dependencies = [
  "libloading",
  "nu-ansi-term",
  "portable-pty",
+ "rcmd",
  "reedline",
  "syntax",
+ "zstd",
 ]
 
 [[package]]

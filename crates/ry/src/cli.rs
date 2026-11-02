@@ -300,7 +300,11 @@ pub fn migrate_data_table(
             .filter(|file| file.requested && fixes_apply(file))
         {
             let rewrites = data_table_rewrites(&analysis.db, file.file);
-            if rewrites.is_empty() {
+            let applied = rewrites
+                .iter()
+                .filter(|rewrite| rewrite.replacement.is_some())
+                .count();
+            if applied == 0 {
                 continue;
             }
             let original = fs::read_to_string(&file.path).map_err(|err| {
@@ -313,7 +317,7 @@ pub fn migrate_data_table(
                 continue;
             }
             let migrated = apply_data_table_rewrites(&original, &rewrites);
-            n_rewrites += rewrites.len();
+            n_rewrites += applied;
             n_files += 1;
             if write {
                 fs::write(&file.path, migrated).map_err(|err| {
@@ -1637,12 +1641,14 @@ pub(crate) fn collect_r_files(
         .filter_map(|entry| match entry {
             Ok(entry) => {
                 let path = entry.into_path();
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension == "R" || extension == "r" || is_literate_extension(extension)
-                    })
-                    .then_some(Ok(path))
+                (is_package_source(&path)
+                    || path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extension == "R" || extension == "r" || is_literate_extension(extension)
+                        }))
+                .then_some(Ok(path))
             }
             Err(err) => {
                 error(&err.to_string());
@@ -1650,6 +1656,29 @@ pub(crate) fn collect_r_files(
             }
         })
         .collect()
+}
+
+/// R CMD INSTALL sources every `.R`, `.r`, `.S`, `.s` and `.q` file directly in a package's `R/`
+/// directory, the one beside `DESCRIPTION`, and Hmisc, VGAM and boot keep code in the S-era
+/// extensions. Elsewhere, such as in `src/` or a vendored `src/R/`, a `.s` file is assembly, so
+/// only the package's `R/` widens the set.
+pub(crate) fn is_package_source(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let Some(directory) = path
+        .parent()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "R"))
+    else {
+        return false;
+    };
+    match extension {
+        "R" | "r" => true,
+        "S" | "s" | "q" => directory
+            .parent()
+            .is_some_and(|package| package.join("DESCRIPTION").is_file()),
+        _ => false,
+    }
 }
 
 /// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).

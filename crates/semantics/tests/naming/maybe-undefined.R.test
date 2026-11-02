@@ -232,7 +232,6 @@ f <- function(cond) {
   28..32 cond -> b0
   40..41 x <- b1
   63..64 x -> non-local deferred
-  unused x 40..41
 
 #---- while_body_read_sees_write_around_back_edge
 f <- function(cond) {

@@ -569,6 +569,12 @@ pub enum StrictOriginKind {
     /// A recursive definition that checked clean yet exports `Unknown`: the reference
     /// cycle is the only possible source.
     RecursiveUnknown(String),
+    /// A query naming `column` of a frame whose columns are unknown, so nothing checks it.
+    /// `frame` is the queried variable's name, when the frame is a plain variable.
+    UnknownColumns {
+        frame: Option<String>,
+        column: String,
+    },
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
     /// `expression` is the function and `range` the parameter's name.
     UntypedParameter(Symbol),
@@ -617,6 +623,10 @@ pub trait GlobalEnv<'db> {
     /// Whether the project defines an arithmetic or `Ops` method for a class that no type
     /// declares, so a plain list operand may carry that class.
     fn has_untracked_arithmetic_class(&self) -> bool;
+
+    /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
+    /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
+    fn defines_dollar_method(&self) -> bool;
 
     /// The shipped declaration alone, which a call reaches when R's function lookup skips a
     /// project binding whose value is not a function.
@@ -1655,7 +1665,11 @@ fn guard_kind(name: &str) -> Option<GuardKind> {
     Some(match name {
         "is.null" => GuardKind::Null,
         "is.character" => GuardKind::Family(GuardFamily::Character),
-        "is.logical" => GuardKind::Family(GuardFamily::Logical),
+        // `isTRUE(x)` and `isFALSE(x)` hold only for a single logical, and code that tests
+        // `isFALSE(result)` on a `FALSE | list` result reads the list on the other edge, as car
+        // does throughout. A logical that fails the test is `TRUE`, which correct R reads as no
+        // list, so the other edge drops the logical as `is.logical` does.
+        "is.logical" | "isTRUE" | "isFALSE" => GuardKind::Family(GuardFamily::Logical),
         "is.integer" => GuardKind::Family(GuardFamily::Integer),
         "is.double" => GuardKind::Family(GuardFamily::Double),
         "is.numeric" => GuardKind::Family(GuardFamily::Numeric),
@@ -2689,6 +2703,10 @@ impl<'db> Checker<'db, '_> {
                             self.table.resolve(self.db, value_ty).kind(self.db),
                             TyKind::Null
                         )
+                        && !matches!(
+                            self.module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+                        )
                     {
                         self.valued_slots.insert(slot);
                     }
@@ -2887,11 +2905,7 @@ impl<'db> Checker<'db, '_> {
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 let default_reads = self.default_reads(&module[parameters], &uses, &named);
-                let flag_return = if early_returns.is_empty() {
-                    self.flag_return(&module[parameters], *body)
-                } else {
-                    None
-                };
+                let flag_return = self.flag_return(&module[parameters], *body, early_returns.len());
                 let null_unless =
                     self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
                 let reduces = if early_returns.is_empty() {
@@ -5907,6 +5921,16 @@ impl<'db> Checker<'db, '_> {
                     return None;
                 }
                 let value = argument.value?;
+                // `is.integer(limit <- check_limit(limit))` tests the value it just stored, so
+                // the guard narrows the assigned local.
+                let value = match self.module.kind(value) {
+                    ExpressionKind::Assign {
+                        spelling: AssignSpelling::Local | AssignSpelling::Equals,
+                        target,
+                        ..
+                    } if matches!(self.module.kind(*target), ExpressionKind::NameRef(_)) => *target,
+                    _ => value,
+                };
                 if name == "is.null"
                     && let ExpressionKind::Field {
                         at: false,
@@ -7193,6 +7217,7 @@ impl<'db> Checker<'db, '_> {
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
             || self.reads_open_defaulted_formal(condition, resolved)
             || self.reads_null_placeholder(condition, resolved)
+            || self.tests_a_shipped_function(condition, resolved)
         {
             return;
         }
@@ -7369,6 +7394,27 @@ impl<'db> Checker<'db, '_> {
         {
             return unknown(self.db);
         }
+        // An operand of unknown type may be a classed object whose method takes the other
+        // operand as it is, as ggplot2's `+` takes a list of components, so a list beside it
+        // is no evidence of an error.
+        let opaque = |ty: Ty<'db>| matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any);
+        let list_like = |ty: Ty<'db>| {
+            guard_members(self.db, ty).iter().all(|member| {
+                matches!(
+                    member.kind(self.db),
+                    TyKind::List(_)
+                        | TyKind::NamedList(_)
+                        | TyKind::Tuple(_)
+                        | TyKind::Record(_)
+                        | TyKind::Null
+                )
+            })
+        };
+        if (opaque(resolved_left) && list_like(resolved_right))
+            || (opaque(resolved_right) && list_like(resolved_left))
+        {
+            return unknown(self.db);
+        }
         let left = self.classify_numeric_operand(resolved_left);
         let right = self.classify_numeric_operand(resolved_right);
 
@@ -7528,8 +7574,34 @@ impl<'db> Checker<'db, '_> {
             let resolved = self.structural(inferred);
             // R takes a logical endpoint as a number, and a vector endpoint by its first element.
             // A vector type carries no length, so only a literal `c()` of several elements is
-            // known to be too long.
+            // known to be too long. An endpoint read from a list field that is only sometimes
+            // `NULL` is used where the code has ruled that out: mgcv's basis fills `off` only
+            // when a `penalty` flag is set, and callers read `b$off[i]:...` only after passing
+            // it. A local, an element read straight from a value, and a field of a parameter,
+            // whose `NULL` the declaration admits, stay checked.
+            let field_read = {
+                let mut expression = operand;
+                let mut through_field = false;
+                loop {
+                    match &self.module.expression(expression).kind {
+                        ExpressionKind::Field {
+                            at: false, target, ..
+                        } => {
+                            through_field = true;
+                            expression = *target;
+                        }
+                        ExpressionKind::Index { target, .. } => expression = *target,
+                        _ => break,
+                    }
+                }
+                through_field && !self.binds_parameter(expression)
+            };
             let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
+                TyKind::Union(members) if field_read => members
+                    .iter()
+                    .copied()
+                    .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+                    .collect(),
                 TyKind::Union(members) => members.clone(),
                 _ => vec![resolved],
             };
@@ -7752,9 +7824,28 @@ impl<'db> Checker<'db, '_> {
                 let mut parts = Vec::with_capacity(members.len());
                 let mut open = Vec::new();
                 let mut dispatches = false;
+                // R rejects arithmetic on an unclassed list, so beside a numeric member a list
+                // member is a path that a correlated test rules out, as in mgcv's
+                // `offset <- if (nlp > 1) as.list(...) else 0` read as a number only when
+                // `nlp == 1`.
+                let numeric_beside = members
+                    .iter()
+                    .any(|&member| numeric_operand_parts(self.db, member).is_some());
                 for &member in members {
                     if let Some(part) = numeric_operand_parts(self.db, member) {
                         parts.push(part);
+                        continue;
+                    }
+                    if numeric_beside
+                        && matches!(
+                            member.kind(self.db),
+                            TyKind::List(_)
+                                | TyKind::NamedList(_)
+                                | TyKind::Tuple(_)
+                                | TyKind::Record(_)
+                        )
+                        && !self.declares_arithmetic(member)
+                    {
                         continue;
                     }
                     match self.classify_numeric_operand(member) {
@@ -8109,8 +8200,16 @@ impl<'db> Checker<'db, '_> {
 
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
     /// list(value = prob, error = err)`. A flag the body never reassigns decides the branch
-    /// from the call alone, so its two branch types are kept beside the joined return.
-    fn flag_return(&self, parameters: &[Formal], body: ExprId) -> Option<FlagReturn<'db>> {
+    /// from the call alone, so its two branch types are kept beside the joined return. A
+    /// branch may also end in `return(value)`, as pracma's `gcd(..., extended = FALSE)` does,
+    /// or be an earlier `if (flag) return(value)` before the tail, as in Matrix's `iam(j, both =
+    /// FALSE)`, provided those are the body's only early returns.
+    fn flag_return(
+        &self,
+        parameters: &[Formal],
+        body: ExprId,
+        early_returns: usize,
+    ) -> Option<FlagReturn<'db>> {
         let module = self.module;
         let strip = |mut id: ExprId| {
             while let ExpressionKind::Paren(inner) = module.kind(id) {
@@ -8118,17 +8217,52 @@ impl<'db> Checker<'db, '_> {
             }
             id
         };
+        let mut statements: &[ExprId] = &[];
         let mut tail = strip(body);
-        while let ExpressionKind::Block { statements } = module.kind(tail) {
-            tail = strip(*module[statements].last()?);
+        while let ExpressionKind::Block { statements: block } = module.kind(tail) {
+            statements = &module[block];
+            tail = strip(*statements.last()?);
         }
-        let ExpressionKind::If {
-            condition,
-            then_branch,
-            else_branch: Some(else_branch),
-        } = module.kind(tail)
-        else {
-            return None;
+        // Either the tail branches on the flag, or a statement before it returns early on the
+        // flag (`if (both) return(list(row.index = j))`) and the tail is the other value.
+        let (condition, then_branch, else_branch) = match module.kind(tail) {
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch: Some(else_branch),
+            } => (condition, then_branch, else_branch),
+            _ => {
+                let returns_early = |branch: ExprId| {
+                    let mut value = strip(branch);
+                    if let ExpressionKind::Block { statements } = module.kind(value)
+                        && let Some(&last) = module[statements].last()
+                    {
+                        value = strip(last);
+                    }
+                    matches!(
+                        module.kind(value),
+                        ExpressionKind::Call { callee, .. }
+                            if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
+                    )
+                };
+                let guard = statements[..statements.len().saturating_sub(1)]
+                    .iter()
+                    .find_map(|&statement| match module.kind(strip(statement)) {
+                        ExpressionKind::If {
+                            condition,
+                            then_branch,
+                            else_branch: None,
+                        } if matches!(
+                            module.kind(strip(*condition)),
+                            ExpressionKind::NameRef(_)
+                        ) && returns_early(*then_branch) =>
+                        {
+                            Some((condition, then_branch))
+                        }
+                        _ => None,
+                    })?;
+                (guard.0, guard.1, statements.last()?)
+            }
         };
         let ExpressionKind::NameRef(name) = module.kind(strip(*condition)) else {
             return None;
@@ -8142,11 +8276,30 @@ impl<'db> Checker<'db, '_> {
         if self.writes_name(body, *name) {
             return None;
         }
+        let mut returns = 0;
+        let mut branch_value = |branch: ExprId| {
+            let mut value = strip(branch);
+            if let ExpressionKind::Block { statements } = module.kind(value) {
+                value = strip(*module[statements].last()?);
+            }
+            if let ExpressionKind::Call { callee, arguments } = module.kind(value)
+                && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
+            {
+                returns += 1;
+                return module[arguments].first()?.value;
+            }
+            Some(branch)
+        };
+        let then_value = branch_value(*then_branch)?;
+        let else_value = branch_value(*else_branch)?;
+        if returns != early_returns {
+            return None;
+        }
         Some(FlagReturn {
             parameter: Name::new(self.db, name),
             default: *default,
-            when_true: *self.recorded.get(then_branch)?,
-            when_false: *self.recorded.get(else_branch)?,
+            when_true: *self.recorded.get(&then_value)?,
+            when_false: *self.recorded.get(&else_value)?,
         })
     }
 
@@ -8943,15 +9096,33 @@ impl<'db> Checker<'db, '_> {
     /// a placeholder for a value written where the checker cannot see. Correct R never tests
     /// or passes on a value that is always `NULL` where `NULL` fails, so such a read is not
     /// reported there. A parameter's `NULL` is what the caller passed, and stays checked.
+    /// A local whose every visible write is a bare `NA` (`pattern.end = NA` before a closure
+    /// fills it with `<<-`) is the same placeholder, spelled as a missing value.
     fn reads_null_placeholder(&self, value: ExprId, ty: Ty<'db>) -> bool {
         let mut value = value;
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
             value = *inner;
         }
-        if !matches!(ty.kind(self.db), TyKind::Null)
-            || !matches!(self.module.kind(value), ExpressionKind::NameRef(_))
+        if !matches!(self.module.kind(value), ExpressionKind::NameRef(_))
             || self.binds_parameter(value)
         {
+            return false;
+        }
+        if matches!(ty.kind(self.db), TyKind::Scalar(Atomic::Logical)) {
+            let ExpressionKind::NameRef(name) = self.module.kind(value) else {
+                return false;
+            };
+            return self
+                .super_assigned
+                .binary_search_by_key(&name.as_str(), |written| written.as_str())
+                .is_ok()
+                && self
+                    .naming
+                    .resolutions
+                    .get(&value)
+                    .is_some_and(|slot| !self.valued_slots.contains(slot));
+        }
+        if !matches!(ty.kind(self.db), TyKind::Null) {
             return false;
         }
         // A local that a test narrowed to `NULL`, or a write replaced with `NULL`, also held a
@@ -8962,6 +9133,38 @@ impl<'db> Checker<'db, '_> {
             .resolutions
             .get(&value)
             .is_none_or(|slot| !self.valued_slots.contains(slot))
+    }
+
+    /// A function stored into a field at top level (`generator_funs$new <- function(...)`) is
+    /// a template that the package copies into another environment, the way R6 rebinds its
+    /// generator methods. A condition in it that names a shipped function, such as `if
+    /// (class)`, reads a flag that environment binds, since no R code tests a function for
+    /// truth. The same read in an ordinary function is a missing formal and stays reported,
+    /// as does a name the project defines.
+    fn tests_a_shipped_function(&self, condition: ExprId, ty: Ty<'db>) -> bool {
+        let stored_in_field = self.module.root.is_some_and(|root| {
+            matches!(
+                self.module.kind(root),
+                ExpressionKind::Assign { target, value, .. }
+                    if matches!(self.module.kind(*target), ExpressionKind::Field { .. })
+                        && matches!(self.module.kind(*value), ExpressionKind::Function { .. })
+            )
+        });
+        if !stored_in_field {
+            return false;
+        }
+        let mut condition = condition;
+        while let ExpressionKind::Paren(inner) = self.module.kind(condition) {
+            condition = *inner;
+        }
+        let Some(name) = self.naming.non_locals.get(&condition) else {
+            return false;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&condition);
+        matches!(ty.kind(self.db), TyKind::Function(_))
+            && !self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project(*name, deferred))
     }
 
     fn binds_parameter(&self, callee: ExprId) -> bool {
@@ -9360,22 +9563,19 @@ impl<'db> Checker<'db, '_> {
         let module = self.module;
         let subject = arguments.first()?.value?;
         if let DataFrameVerb::ReadCsv(kind) = verb {
-            let ty = self.fread_type(arguments);
-            return match ty.kind(db) {
-                TyKind::Frame(_, Some(columns)) => {
-                    Some(Ty::new(db, TyKind::Frame(kind, Some(columns.clone()))))
-                }
-                _ => None,
-            };
+            return self.read_csv_type(kind, arguments);
         }
         let subject_ty = *self.recorded.get(&subject)?;
-        let TyKind::Frame(subject_kind, Some(columns)) =
-            self.structural(subject_ty).kind(db).clone()
-        else {
-            return None;
+        let rest = &arguments[1..];
+        let (subject_kind, columns) = match self.structural(subject_ty).kind(db).clone() {
+            TyKind::Frame(kind, Some(columns)) => (kind, columns),
+            TyKind::Frame(_, None) => {
+                self.note_unchecked_columns(subject, rest);
+                return None;
+            }
+            _ => return None,
         };
         let frame = variable_name(module, subject);
-        let rest = &arguments[1..];
         let expressions = |checker: &mut Self, keep: &dyn Fn(&str) -> bool| {
             let mut computed = Vec::with_capacity(rest.len());
             let mut known = true;
@@ -9493,6 +9693,48 @@ impl<'db> Checker<'db, '_> {
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
         }
+    }
+
+    /// Strict mode reports a query that names columns of a frame whose columns are unknown,
+    /// because nothing checks those names and types. A chain is reported once, at its first
+    /// step that names a column.
+    fn note_unchecked_columns(&mut self, subject: ExprId, rest: &[Argument]) {
+        let module = self.module;
+        let Some(column) = first_named_column(module, rest) else {
+            return;
+        };
+        // Steps that name no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`,
+        // reported nothing, so the walk looks through them for an earlier step that did.
+        let mut inner = subject;
+        loop {
+            while let ExpressionKind::Paren(expression) = module.kind(inner) {
+                inner = *expression;
+            }
+            let ExpressionKind::Call { callee, arguments } = module.kind(inner) else {
+                break;
+            };
+            if self.dataframe_verb(*callee).is_none() {
+                break;
+            }
+            let Some((first, inner_rest)) = module[arguments].split_first() else {
+                break;
+            };
+            let Some(inner_subject) = first.value else {
+                break;
+            };
+            let Some(&ty) = self.recorded.get(&inner_subject) else {
+                break;
+            };
+            if !matches!(self.structural(ty).kind(self.db), TyKind::Frame(_, None)) {
+                break;
+            }
+            if first_named_column(module, inner_rest).is_some() {
+                return;
+            }
+            inner = inner_subject;
+        }
+        let frame = variable_name(module, subject).map(|name| name.to_string());
+        self.record_strict_origin(subject, StrictOriginKind::UnknownColumns { frame, column });
     }
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
@@ -10267,24 +10509,7 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let db = self.db;
-        let mut columns: Vec<(String, Ty<'db>)> = layout
-            .columns
-            .iter()
-            .map(|column| {
-                let atomic = match column.kind {
-                    sniff::ColumnType::Logical => Atomic::Logical,
-                    sniff::ColumnType::Integer => Atomic::Integer,
-                    sniff::ColumnType::Double => Atomic::Double,
-                    sniff::ColumnType::Character => Atomic::Character,
-                };
-                let ty = if factors && atomic == Atomic::Character {
-                    factor_type(db)
-                } else {
-                    Ty::new(db, TyKind::Vector(scalar(db, atomic)))
-                };
-                (column.name.clone(), ty)
-            })
-            .collect();
+        let mut columns = sniffed_columns(db, &layout, factors);
         if let Some(selected) = selected {
             let mut picked = Vec::with_capacity(selected.len());
             for name in selected {
@@ -10304,6 +10529,40 @@ impl<'db> Checker<'db, '_> {
             }
         }
         frame_of(db, FrameKind::DataTable, columns)
+    }
+
+    /// `DataFrame.read_csv("data/sales.csv")` and `LazyFrame.scan_csv(...)` type with the columns
+    /// the project's file has, sniffed as for `fread`; `DataFrame.read_csv`'s
+    /// `strings_as_factors = TRUE` reads its text columns as factors. A computed path, a file the project lacks, or a flag that is not a
+    /// literal keeps the declared result, a frame with unknown columns.
+    fn read_csv_type(&mut self, kind: FrameKind, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let module = self.module;
+        // `LazyFrame.scan_csv` takes only a path.
+        let formals: &[&str] = match kind {
+            FrameKind::LazyFrame => &["path"],
+            _ => &["path", "strings_as_factors"],
+        };
+        let matched = match_formals(module, arguments, formals);
+        let path = match module.kind(matched[0]?) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(&module[text])?,
+            _ => return None,
+        };
+        let factors = match matched
+            .get(1)
+            .copied()
+            .flatten()
+            .map(|value| module.kind(value))
+        {
+            None => false,
+            Some(ExpressionKind::Literal(LiteralKind::Logical(flag))) => *flag,
+            Some(_) => return None,
+        };
+        let layout = self.data_file(&path)?;
+        Some(frame_of(
+            self.db,
+            kind,
+            sniffed_columns(self.db, &layout, factors),
+        ))
     }
 
     fn data_file(&self, path: &str) -> Option<sniff::Layout> {
@@ -15349,15 +15608,17 @@ impl<'db> Checker<'db, '_> {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(*element)
             }
-            TyKind::Vector(element) | TyKind::List(element) => Ok(*element),
-            // A literal name may be absent at runtime (`T | NULL`).
-            TyKind::NamedVector(element) | TyKind::NamedList(element) => {
-                Ok(if literal_name.is_some() {
-                    union_of(self.db, [*element, null(self.db)])
-                } else {
-                    *element
-                })
+            // R stops with "subscript out of bounds" on an absent name in an atomic vector,
+            // so a read that returns has the element's type.
+            TyKind::Vector(element) | TyKind::NamedVector(element) | TyKind::List(element) => {
+                Ok(*element)
             }
+            // A literal name may be absent from a list at runtime (`T | NULL`).
+            TyKind::NamedList(element) => Ok(if literal_name.is_some() {
+                union_of(self.db, [*element, null(self.db)])
+            } else {
+                *element
+            }),
             TyKind::NativeTuple(items) => match literal_position {
                 Some(position) => match items.get(position) {
                     Some(&item) => Ok(item),
@@ -15748,6 +16009,14 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any => Ok(any(self.db)),
             // `NULL$name` is `NULL` in R, so an optional list reads its settings directly.
             TyKind::Null => Ok(subject),
+            // igraph's `V(graph)$weight` reads a classed integer vector through `$.igraph.vs`.
+            TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_)
+                if self
+                    .globals
+                    .is_some_and(|globals| globals.defines_dollar_method()) =>
+            {
+                Ok(unknown(self.db))
+            }
             TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },
@@ -16317,7 +16586,7 @@ fn column_read(module: &Module, mut id: ExprId) -> Option<String> {
     let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
         return None;
     };
-    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if &**name == "col") {
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col") {
         return None;
     }
     let first = module[arguments].first()?.value?;
@@ -16504,6 +16773,75 @@ fn decode_escapes(text: &str) -> Option<String> {
         });
     }
     Some(decoded)
+}
+
+/// The first column a verb's arguments after the subject name, as a string or a column read.
+fn first_named_column(module: &Module, rest: &[Argument]) -> Option<String> {
+    for argument in rest {
+        let Some(value) = argument.value else {
+            continue;
+        };
+        if module
+            .argument_name(argument)
+            .as_deref()
+            .is_some_and(|name| matches!(name, "how" | "suffix" | "strategy" | "descending" | "n"))
+        {
+            continue;
+        }
+        let column = match module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => Some(module[text].to_string()),
+            _ => first_column_read(module, value),
+        };
+        if column.is_some() {
+            return column;
+        }
+    }
+    None
+}
+
+/// The first column an expression reads with `col("name")`, in source order.
+fn first_column_read(module: &Module, value: ExprId) -> Option<String> {
+    if let ExpressionKind::Call { callee, arguments } = module.kind(value)
+        && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col")
+        && let Some(first) = module[arguments].first().and_then(|first| first.value)
+        && let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(first)
+    {
+        return Some(module[text].to_string());
+    }
+    let mut found = None;
+    module.for_each_child(value, |child| {
+        if found.is_none() {
+            found = first_column_read(module, child);
+        }
+    });
+    found
+}
+
+/// A sniffed file's columns, each the vector type of its sniffed kind, and text as a factor when
+/// `factors` asks for it, as the readers do.
+fn sniffed_columns<'db>(
+    db: &'db dyn Db,
+    layout: &sniff::Layout,
+    factors: bool,
+) -> Vec<(String, Ty<'db>)> {
+    layout
+        .columns
+        .iter()
+        .map(|column| {
+            let atomic = match column.kind {
+                sniff::ColumnType::Logical => Atomic::Logical,
+                sniff::ColumnType::Integer => Atomic::Integer,
+                sniff::ColumnType::Double => Atomic::Double,
+                sniff::ColumnType::Character => Atomic::Character,
+            };
+            let ty = if factors && atomic == Atomic::Character {
+                factor_type(db)
+            } else {
+                Ty::new(db, TyKind::Vector(scalar(db, atomic)))
+            };
+            (column.name.clone(), ty)
+        })
+        .collect()
 }
 
 /// A frame from named columns, or a frame with unknown columns when two share a name.
@@ -17520,18 +17858,6 @@ mod tests {
             "{:?}",
             dollar_atomic.errors
         );
-    }
-
-    #[test]
-    fn named_vector_extraction_is_nullable_by_name() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "f <- function() {\n  v <- c(a = 1L)\n  v[[\"a\"]]\n}");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let TyKind::Union(members) = scheme_ret(&db, &check).kind(&db) else {
-            panic!("expected integer | NULL");
-        };
-        assert!(members.contains(&scalar(&db, Atomic::Integer)));
-        assert!(members.contains(&null(&db)));
     }
 
     #[test]

@@ -6,10 +6,8 @@ use {
     syntax::testing::{SplitMix64, for_each_seed},
     table::{
         ColumnType, Schema, Table,
-        convert::{
-            self, NA_INTEGER, NA_REAL, RVector, is_na_real, string_to_factor, to_r, to_series,
-        },
-        ffi, io, ops,
+        convert::{self, NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        factor, ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
             Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query,
@@ -3571,8 +3569,8 @@ fn a_factor_read_parses_codes_and_matches_reading_text_then_converting() {
 #[test]
 fn a_string_column_becomes_a_factor_with_sorted_levels() {
     let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
-    let factor =
-        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    let factor = factor::from_strings(column.as_materialized_series())
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
         RVector::Factor {
@@ -3585,8 +3583,8 @@ fn a_string_column_becomes_a_factor_with_sorted_levels() {
 #[test]
 fn an_all_missing_string_column_becomes_a_factor_without_levels() {
     let column = column_of("k", strings(&["NA", "NA"]));
-    let factor =
-        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    let factor = factor::from_strings(column.as_materialized_series())
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
         RVector::Factor {

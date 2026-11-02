@@ -1,29 +1,42 @@
 [stdout]
-|    g x   y
-| 1: a 1 0.5
-| 2: a 3 2.5
+| Key: <g>
+|         g     x     y
+|    <char> <int> <num>
+| 1:      a     1   0.5
+| 2:      a     3   2.5
 | [1] "g"
-|    g first
-| 1: a   0.5
-| 2: b   1.5
-|    g   m
-| 1: a 1.5
-| 2: b 1.5
+| Key: <g>
+|         g first
+|    <char> <num>
+| 1:      a   0.5
+| 2:      b   1.5
+| Key: <g>
+|         g     m
+|    <char> <num>
+| 1:      a   1.5
+| 2:      b   1.5
 | [1] 4.5
-| [1] "j (the 2nd argument inside [...]) is a single symbol but column name 'nope' is not found. Perhaps you intended DT[, ..nope]. This difference to data.frame is deliberate and explained in FAQ 1.1."
-|    g s
-| 1: a 4
-| 2: b 2
-|    g          s
-| 1: 1 2147483648
-|    g x   y w
-| 1: a 1 0.5 1
-| 2: a 3 2.5 4
-| 3: b 2 1.5 6
-|    g x   y w
-| 1: a 1 0.5 1
-| 2: a 3 2.5 4
-| 3: b 2 1.5 6
+| [1] "j (the 2nd argument inside [...]) is a single symbol but column name 'nope' is not found. If you intended to select columns using a variable in calling scope, please try DT[, ..nope]. The .. prefix conveys one-level-up similar to a file system path."
+| Key: <g>
+|         g     s
+|    <char> <int>
+| 1:      a     4
+| 2:      b     2
+|        g          s
+|    <int>      <num>
+| 1:     1 2147483648
+| Key: <g>
+|         g     x     y     w
+|    <char> <int> <num> <int>
+| 1:      a     1   0.5     1
+| 2:      a     3   2.5     4
+| 3:      b     2   1.5     6
+| Key: <g>
+|         g     x     y     w
+|    <char> <int> <num> <int>
+| 1:      a     1   0.5     1
+| 2:      a     3   2.5     4
+| 3:      b     2   1.5     6
 [messages]
 [warnings]
 - The sum of an integer column for a group was more than type 'integer' can hold so the result has been coerced to 'numeric' automatically for convenience. (in gsum(v))

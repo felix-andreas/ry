@@ -8,10 +8,10 @@
 
 # `abort()` never returns, so like base `stop()` it is `Any`, which fits the
 # join in `x <- if (ok) v else abort("...")`.
-abort : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [call]: Any, [body]: Any, [footer]: Any, [trace]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical, [.internal]: logical, [.file]: Any, [.frame]: environment, [.trace_bottom]: Any, [.subclass]: Any) -> Any
+abort : fn([message]: character[] | fn(Any, ...: Any) -> Any | NULL, [class]: character[] | NULL, ...: Any, [call]: Any, [body]: Any, [footer]: Any, [trace]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical, [.internal]: logical, [.file]: Any, [.frame]: environment, [.trace_bottom]: Any, [.subclass]: Any) -> Any
 # `warn()` and `inform()` return their message invisibly after signalling.
-warn : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
-inform : fn([message]: character[] | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.file]: Any, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
+warn : fn([message]: character[] | fn(Any, ...: Any) -> Any | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
+inform : fn([message]: character[] | fn(Any, ...: Any) -> Any | NULL, [class]: character[] | NULL, ...: Any, [body]: Any, [footer]: Any, [parent]: Any, [use_cli_format]: logical | NULL, [.inherit]: logical | NULL, [.file]: Any, [.frequency]: character, [.frequency_id]: character | NULL, [.subclass]: Any) -> character[]
 
 # Building a condition has no effect; signalling it does.
 error_cnd : @pure fn([class]: character[] | NULL, ...: Any, [message]: character[], [call]: Any, [trace]: Any, [parent]: Any, [use_cli_format]: logical | NULL) -> rlang_error
