@@ -42,7 +42,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch,
         eval::{self, SwitchSelector, as_condition},
-        interp,
+        interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -3324,7 +3324,11 @@ unsafe fn step(
         Op::SubAssign => {
             let call = decoded.constants.element(operand(4));
             let value = register(operand(3));
-            eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            let variable = decoded.constants.element(operand(1));
+            let double = operand(5) != 0;
+            if !assign_element_in_place(env, variable, register(operand(2)), value, double)? {
+                eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            }
             set(operand(0), value);
             interp().visible = false;
         }
@@ -3350,6 +3354,76 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
     } else {
         0
     }
+}
+
+/// `x[[i]] <- value` or `x[i] <- value` done in place, without `complex_assign`'s replacement
+/// calls, when the result is certain to equal what `[[<-` or `[<-` would return: `x` is a local,
+/// unshared, classless vector, `i` a scalar position inside it, and `value` either any non-`NULL`
+/// element of a list under `[[`, or an attribute-free scalar of `x`'s own atomic type. Returns
+/// whether it did the assignment; otherwise the variable is unchanged.
+unsafe fn assign_element_in_place(
+    env: Sexp,
+    variable: Sexp,
+    index: Sexp,
+    value: Sexp,
+    double: bool,
+) -> R<bool> {
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(env, variable) else {
+        return Ok(false);
+    };
+    let target = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        || target == value
+        || target.is_object()
+        || target.is_array()
+        || target.is_altrep()
+        || index.is_altrep()
+        || values::has_attributes(index)
+        || length(index) != 1
+    {
+        return Ok(false);
+    }
+    let fits = match target.kind() {
+        SexpType::List => double && value != nil(),
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
+            value.kind() == target.kind()
+                && length(value) == 1
+                && !value.is_altrep()
+                && !values::has_attributes(value)
+        }
+        _ => false,
+    };
+    if !fits {
+        return Ok(false);
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return Ok(false),
+    };
+    // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
+    if !(position >= 1.0 && position < length(target) as f64 + 1.0) {
+        return Ok(false);
+    }
+    let position = position as usize - 1;
+    // The conditions under which `complex_assign` updates the variable's value in place.
+    moves::modifying(target)?;
+    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
+        return Ok(false);
+    }
+    match target.kind() {
+        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(target)[position] = value.slice::<i32>()[0]
+        }
+        SexpType::String => heap.set_element(target, position, value.element(0)),
+        _ => heap.set_element(target, position, value),
+    }
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(true)
 }
 
 unsafe fn call_builtin(
