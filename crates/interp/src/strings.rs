@@ -461,8 +461,10 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
         let vector = heap.alloc_vector(SexpType::String, pieces.len() as isize)?;
         heap.set_element(result, index, vector);
         for (position, &(start, end)) in pieces.iter().enumerate() {
-            let charsxp = if forced_bytes {
-                regex_result(&text[start..end], true)?
+            // With `useBytes`, the text carries a stand-in character for each byte past ASCII,
+            // which `regex_result` turns back into the byte.
+            let charsxp = if use_bytes {
+                regex_result(&text[start..end], forced_bytes)?
             } else {
                 heap.mk_char(&text.as_bytes()[start..end], Encoding::Utf8)?
             };

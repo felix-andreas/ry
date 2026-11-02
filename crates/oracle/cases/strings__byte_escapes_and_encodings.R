@@ -29,4 +29,11 @@ Encoding(c(paste0("x", a), paste0("café", "!"), paste("a", "b")))
 # Empty matrices and NA dimnames.
 matrix(character(), 0, 3)
 matrix(character(), 0, 0)
+# strsplit() with useBytes splits UTF-8 text on the pattern's bytes and keeps the other
+# characters whole.
+accented <- "«Latin-1»: èé øØ é èé"
+print(strsplit(accented, "é", useBytes = TRUE)[[1]])
+print(strsplit(accented, "é", fixed = TRUE, useBytes = TRUE)[[1]])
+print(strsplit(accented, "é", perl = TRUE, useBytes = TRUE)[[1]])
+
 print(matrix("hello", 1, 1, dimnames = list(NA, NA)), na.print = "foo")
