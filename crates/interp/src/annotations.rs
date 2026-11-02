@@ -96,6 +96,7 @@ const CHARACTER: Mask = bit(SexpType::String);
 const RAW: Mask = bit(SexpType::Raw);
 const NULL: Mask = bit(SexpType::Nil);
 const LIST: Mask = bit(SexpType::List);
+const NATIVE: Mask = bit(SexpType::Record);
 const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(SexpType::Special);
 /// `Array<T>`: the value must carry the Array bit, and its storage must be one the item type
 /// admits (any storage when the item type is not decidable from storage).
@@ -510,6 +511,17 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     if mask == 0 || admits(mask, value) {
         return Ok(());
     }
+    // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
+    // `n: integer`). Storage cannot tell a literal from a computed value, so every whole-number
+    // `double` scalar passes, which keeps the check at least as loose as the static type. The
+    // compilers decide from the argument's actual storage, so none of them assumes `integer` here.
+    if slot != RETURN_SLOT
+        && mask & ARRAY == 0
+        && mask & bit(SexpType::Integer) != 0
+        && is_whole_double_scalar(value)
+    {
+        return Ok(());
+    }
     let expected = text_at(signature, slot);
     let found = describe(value);
     let message = if slot == REST_SLOT {
@@ -545,6 +557,13 @@ unsafe fn admits(mask: Mask, value: Sexp) -> bool {
         return value.is_array() && (items == 0 || items & bit(value.kind()) != 0);
     }
     mask & bit(value.kind()) != 0
+}
+
+unsafe fn is_whole_double_scalar(value: Sexp) -> bool {
+    value.kind() == SexpType::Real
+        && !value.is_array()
+        && value.attrib() == nil()
+        && matches!(values::reals(value), [number] if number.is_finite() && number.fract() == 0.0)
 }
 
 /// A value's storage type as a reader of the annotation thinks of it.
@@ -606,6 +625,14 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             }) =>
         {
             0
+        }
+        // A ry record or tuple is its own storage kind, not an R list.
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE
+            if node
+                .first_token()
+                .is_some_and(|token| matches!(token.text(), "Record" | "Tuple")) =>
+        {
+            NATIVE
         }
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_LIST => LIST,
         SyntaxKind::TYPE_FUNCTION => FUNCTION,

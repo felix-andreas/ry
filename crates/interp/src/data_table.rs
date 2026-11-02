@@ -253,9 +253,11 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     if parts.i.is_none() && parts.j.is_none() {
         return Ok(None);
     }
-    // Picking whole columns of every row computes nothing: data.table copies the vectors, while
-    // the engine would convert each string column in and back out.
-    if query.by.is_empty() && matches!(query.rows, Rows::All) && picks_columns(&query.select) {
+    // Picking rows and whole columns computes nothing that data.table's C does not do as a
+    // gather: the engine would convert every column in and the result back out, holding both
+    // copies at once. At a million rows `x[i]`, `x[order(a, -b)]` and `x[a > 0]` ran two to
+    // three times slower on the engine and peaked four times higher.
+    if query.by.is_empty() && !matches!(query.rows, Rows::Join(_)) && picks_columns(&query.select) {
         return Ok(None);
     }
     let shape = if !query.by.is_empty() {

@@ -7,6 +7,8 @@
 //! directory holds the CSV files `tools/bench/table/datagen.R` writes. `--groupby-only` runs only
 //! the ten group-by questions.
 
+mod allocator;
+
 use {
     std::{
         env,
@@ -16,14 +18,11 @@ use {
     },
     table::{
         ColumnType, Table,
-        convert::string_to_factor,
-        polars::prelude::{
-            ChunkAgg, Column, CsvReadOptions, DataFrame, DataType, Float64Chunked, IntoColumn,
-            SerReader,
-        },
+        io::{ReadOptions, read_csv_with},
+        lazy::{How, Plan, Source, Step, Strategy, collect, output_name},
+        polars::prelude::{DataType, Float64Chunked, PlSmallStr},
         query::{
-            Aggregate, BinaryOp, Executed, Expr, Join, Mult, On, Output, Query, Roll, Rows, Select,
-            SortKey,
+            Aggregate, BinaryOp, Expr, Output, Query, Rows, Select, SortKey,
             build::{aggregate, binary, column},
             execute,
         },
@@ -66,120 +65,88 @@ fn run(dir: &Path, groupby_only: bool) -> Result<()> {
 }
 
 fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
-    let mut x = read(dir, "groupby.csv")?;
-    let sum = |name: &str| aggregate(Aggregate::Sum, column(name));
-    let mean = |name: &str| aggregate(Aggregate::Mean, column(name));
-    let by = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| named(name, column(name)))
-            .collect::<Vec<_>>()
-    };
+    let mut x = read(dir, "groupby.csv", true)?;
+    let sum = |name: &str| unnamed(aggregate(Aggregate::Sum, column(name)));
+    let mean = |name: &str| unnamed(aggregate(Aggregate::Mean, column(name)));
     let questions = [
-        (
-            "groupby q1",
-            Query {
-                select: columns([("v1", sum("v1"))]),
-                by: by(&["id1"]),
-                ..Query::default()
-            },
-        ),
-        (
-            "groupby q2",
-            Query {
-                select: columns([("v1", sum("v1"))]),
-                by: by(&["id1", "id2"]),
-                ..Query::default()
-            },
-        ),
+        ("groupby q1", grouped(&x, &["id1"], vec![sum("v1")])),
+        ("groupby q2", grouped(&x, &["id1", "id2"], vec![sum("v1")])),
         (
             "groupby q3",
-            Query {
-                select: columns([("v1", sum("v1")), ("v3", mean("v3"))]),
-                by: by(&["id3"]),
-                ..Query::default()
-            },
+            grouped(&x, &["id3"], vec![sum("v1"), mean("v3")]),
         ),
         (
             "groupby q4",
-            Query {
-                select: columns([("v1", mean("v1")), ("v2", mean("v2")), ("v3", mean("v3"))]),
-                by: by(&["id4"]),
-                ..Query::default()
-            },
+            grouped(&x, &["id4"], vec![mean("v1"), mean("v2"), mean("v3")]),
         ),
         (
             "groupby q5",
-            Query {
-                select: columns([("v1", sum("v1")), ("v2", sum("v2")), ("v3", sum("v3"))]),
-                by: by(&["id6"]),
-                ..Query::default()
-            },
+            grouped(&x, &["id6"], vec![sum("v1"), sum("v2"), sum("v3")]),
         ),
         (
             "groupby q6",
-            Query {
-                select: columns([
-                    ("median_v3", aggregate(Aggregate::Median, column("v3"))),
-                    ("sd_v3", aggregate(Aggregate::Sd, column("v3"))),
-                ]),
-                by: by(&["id4", "id5"]),
-                ..Query::default()
-            },
+            grouped(
+                &x,
+                &["id4", "id5"],
+                vec![
+                    named("median_v3", aggregate(Aggregate::Median, column("v3"))),
+                    named("sd_v3", aggregate(Aggregate::Sd, column("v3"))),
+                ],
+            ),
         ),
         (
             "groupby q7",
-            Query {
-                select: columns([(
+            grouped(
+                &x,
+                &["id3"],
+                vec![named(
                     "range_v1_v2",
                     binary(
                         BinaryOp::Subtract,
                         aggregate(Aggregate::Max, column("v1")),
                         aggregate(Aggregate::Min, column("v2")),
                     ),
-                )]),
-                by: by(&["id3"]),
-                ..Query::default()
-            },
+                )],
+            ),
         ),
         (
             "groupby q8",
-            Query {
-                rows: Rows::Order(vec![SortKey {
+            Plan::new(Source::Table(x.clone()))
+                .with(Step::Sort(vec![SortKey {
                     expr: column("v3"),
                     descending: true,
-                }]),
-                select: columns([("largest2_v3", Expr::Head(Box::new(column("v3")), 2))]),
-                by: by(&["id6"]),
-                ..Query::default()
-            },
+                }]))
+                .with(Step::Aggregate {
+                    keys: keys(&["id6"]),
+                    aggregates: vec![named("largest2_v3", Expr::Head(Box::new(column("v3")), 2))],
+                }),
         ),
         (
             "groupby q9",
-            Query {
-                select: columns([(
+            grouped(
+                &x,
+                &["id2", "id4"],
+                vec![named(
                     "r2",
                     binary(
                         BinaryOp::Power,
                         Expr::Correlation(Box::new(column("v1")), Box::new(column("v2"))),
                         Expr::Double(2.0),
                     ),
-                )]),
-                by: by(&["id2", "id4"]),
-                ..Query::default()
-            },
+                )],
+            ),
         ),
         (
             "groupby q10",
-            Query {
-                select: columns([("v3", sum("v3")), ("count", Expr::Count)]),
-                by: by(&["id1", "id2", "id3", "id4", "id5", "id6"]),
-                ..Query::default()
-            },
+            grouped(
+                &x,
+                &["id1", "id2", "id3", "id4", "id5", "id6"],
+                vec![sum("v3"), named("count", Expr::Count)],
+            ),
         ),
     ];
-    for (question, query) in questions {
-        time_question(question, || Ok(execute(&mut x, query.clone())?))?;
+    for (question, plan) in questions {
+        time_question(question, || collected(plan.clone()))?;
     }
     if groupby_only {
         return Ok(());
@@ -190,13 +157,7 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
             let update = binary(BinaryOp::Multiply, column("v3"), Expr::Double(1.000001));
             execute(&mut x, assign("v3", update))?;
         }
-        Ok(execute(
-            &mut x,
-            Query {
-                select: columns([("v3", sum("v3"))]),
-                ..Query::default()
-            },
-        )?)
+        total(&mut x, "v3")
     })?;
     time_question("update subset", || {
         for step in 1..=100 {
@@ -210,119 +171,61 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
                 },
             )?;
         }
-        Ok(execute(
-            &mut x,
-            Query {
-                select: columns([("v1", sum("v1"))]),
-                ..Query::default()
-            },
-        )?)
+        total(&mut x, "v1")
     })?;
     time_question("update add", || {
         for step in 1..=100 {
             let update = binary(BinaryOp::Multiply, column("v2"), Expr::Integer(step));
             execute(&mut x, assign(&format!("added{step}"), update))?;
         }
-        Ok(execute(
-            &mut x,
-            Query {
-                select: columns([("added100", sum("added100"))]),
-                ..Query::default()
-            },
-        )?)
+        total(&mut x, "added100")
     })
 }
 
 fn joins(dir: &Path) -> Result<()> {
-    let mut x = read(dir, "join_x.csv")?;
-    let small = read(dir, "join_small.csv")?;
-    let mut medium = read(dir, "join_medium.csv")?;
-    let big = read(dir, "join_big.csv")?;
-    let medium_frame = medium.clone();
-    let x_frame = x.clone();
-    let inner = |other: &Table, on: &str| Query {
-        rows: equi_join(other, on, true),
-        ..Query::default()
-    };
-    time_question("join q1", || Ok(execute(&mut x, inner(&small, "id1"))?))?;
-    time_question("join q2", || {
-        Ok(execute(&mut x, inner(&medium_frame, "id2"))?)
-    })?;
-    time_question("join q3", || {
-        Ok(execute(
-            &mut medium,
-            Query {
-                rows: equi_join(&x_frame, "id2", false),
-                ..Query::default()
-            },
-        )?)
-    })?;
-    time_question("join q4", || {
-        Ok(execute(&mut x, inner(&medium_frame, "id5"))?)
-    })?;
-    time_question("join q5", || Ok(execute(&mut x, inner(&big, "id3"))?))
+    let x = read(dir, "join_x.csv", true)?;
+    let small = read(dir, "join_small.csv", true)?;
+    let medium = read(dir, "join_medium.csv", true)?;
+    let big = read(dir, "join_big.csv", true)?;
+    let questions = [
+        ("join q1", joined(&x, &small, &["id1"], How::Inner)),
+        ("join q2", joined(&x, &medium, &["id2"], How::Inner)),
+        ("join q3", joined(&x, &medium, &["id2"], How::Left)),
+        ("join q4", joined(&x, &medium, &["id5"], How::Inner)),
+        ("join q5", joined(&x, &big, &["id3"], How::Inner)),
+    ];
+    for (question, plan) in questions {
+        time_question(question, || collected(plan.clone()))?;
+    }
+    Ok(())
 }
 
 fn rolling_join(dir: &Path) -> Result<()> {
-    let mut prices = read(dir, "rolljoin_prices.csv")?;
-    let trades = read(dir, "rolljoin_trades.csv")?;
-    prices.set_key(&["ticker", "time"])?;
-    time_question("rolljoin keyed", || {
-        let rows = Rows::Join(Join {
-            other: trades.clone(),
-            on: vec![On::equal("ticker", "ticker"), On::equal("time", "time")],
-            drop_unmatched: false,
-            roll: Roll::Backward(None),
-            mult: Mult::All,
-            each_i: false,
-        });
-        Ok(execute(
-            &mut prices,
-            Query {
-                rows,
-                ..Query::default()
-            },
-        )?)
-    })
+    let prices = read(dir, "rolljoin_prices.csv", false)?;
+    let trades = read(dir, "rolljoin_trades.csv", false)?;
+    let plan = joined(
+        &trades,
+        &prices,
+        &["ticker", "time"],
+        How::Asof(Strategy::Backward),
+    );
+    time_question("rolljoin keyed", || collected(plan.clone()))
 }
 
-/// Reads a CSV file the way `fread(stringsAsFactors = TRUE)` does: strings become factors, and
-/// whole numbers that fit become integers rather than doubles.
-fn read(dir: &Path, name: &str) -> Result<Table> {
-    let frame = CsvReadOptions::default()
-        .with_has_header(true)
-        .try_into_reader_with_file_path(Some(dir.join(name)))?
-        .finish()?;
-    let mut columns: Vec<Column> = Vec::with_capacity(frame.width());
-    for column in frame.columns() {
-        let series = column.as_materialized_series();
-        let series = match series.dtype() {
-            DataType::String => string_to_factor(series)?,
-            DataType::Int64 => {
-                let values = series.i64()?;
-                let fits = |value: Option<i64>| {
-                    value.is_none_or(|value| {
-                        value > i64::from(i32::MIN) && value <= i64::from(i32::MAX)
-                    })
-                };
-                if fits(values.min()) && fits(values.max()) {
-                    series.cast(&DataType::Int32)?
-                } else {
-                    series.clone()
-                }
-            }
-            _ => series.clone(),
-        };
-        columns.push(series.into_column());
-    }
-    Ok(Table::new(DataFrame::new(frame.height(), columns)?)?)
+/// Reads a CSV file as `DataFrame.read_csv(strings_as_factors = factors)` does in `ry.R`.
+fn read(dir: &Path, name: &str, factors: bool) -> Result<Table> {
+    let options = ReadOptions {
+        factors,
+        ..ReadOptions::default()
+    };
+    Ok(read_csv_with(&dir.join(name), &options)?)
 }
 
 /// Times one question. The checksum is computed after the clock stops, as `datatable.R` does.
-fn time_question(question: &str, mut run: impl FnMut() -> Result<Executed>) -> Result<()> {
+fn time_question(question: &str, mut run: impl FnMut() -> Result<Output>) -> Result<()> {
     for run_number in 1..=2 {
         let start = Instant::now();
-        let output = run()?.output;
+        let output = run()?;
         let seconds = start.elapsed().as_secs_f64();
         let answer = answer(output)?;
         println!(
@@ -384,17 +287,52 @@ fn sum_without_na(values: &Float64Chunked) -> f64 {
         .sum()
 }
 
-fn named(name: &str, expr: Expr) -> (table::polars::prelude::PlSmallStr, Expr) {
+/// The plan `DataFrame.group_by(x, keys) |> GroupBy.agg(aggregates)` builds.
+fn grouped(x: &Table, names: &[&str], aggregates: Vec<(PlSmallStr, Expr)>) -> Plan {
+    Plan::new(Source::Table(x.clone())).with(Step::Aggregate {
+        keys: keys(names),
+        aggregates,
+    })
+}
+
+/// The plan `DataFrame.join(x, other, on = names, how = how)` builds.
+fn joined(x: &Table, other: &Table, names: &[&str], how: How) -> Plan {
+    Plan::new(Source::Table(x.clone())).with(Step::Join {
+        other: Box::new(Plan::new(Source::Table(other.clone()))),
+        left_on: names.iter().map(|&name| name.into()).collect(),
+        right_on: names.iter().map(|&name| name.into()).collect(),
+        how,
+        suffix: "_right".into(),
+    })
+}
+
+fn collected(plan: Plan) -> Result<Output> {
+    Ok(Output::Table(collect(plan)?.table))
+}
+
+fn keys(names: &[&str]) -> Vec<(PlSmallStr, Expr)> {
+    names
+        .iter()
+        .map(|&name| named(name, column(name)))
+        .collect()
+}
+
+/// An aggregate named after its column, as Polars names `col("v1") |> Expr.sum()`.
+fn unnamed(expr: Expr) -> (PlSmallStr, Expr) {
+    (output_name(&expr), expr)
+}
+
+fn named(name: &str, expr: Expr) -> (PlSmallStr, Expr) {
     (name.into(), expr)
 }
 
-fn columns<const N: usize>(columns: [(&str, Expr); N]) -> Select {
-    Select::Columns(
-        columns
-            .into_iter()
-            .map(|(name, expr)| named(name, expr))
-            .collect(),
-    )
+/// `x[, .(name = sum(name))]`, the answer of a `:=` loop.
+fn total(x: &mut Table, name: &str) -> Result<Output> {
+    let query = Query {
+        select: Select::Columns(vec![named(name, aggregate(Aggregate::Sum, column(name)))]),
+        ..Query::default()
+    };
+    Ok(execute(x, query)?.output)
 }
 
 fn assign(name: &str, expr: Expr) -> Query {
@@ -402,17 +340,6 @@ fn assign(name: &str, expr: Expr) -> Query {
         select: Select::Assign(vec![(name.into(), Some(expr))]),
         ..Query::default()
     }
-}
-
-fn equi_join(other: &Table, on: &str, drop_unmatched: bool) -> Rows {
-    Rows::Join(Join {
-        other: other.clone(),
-        on: vec![On::equal(on, on)],
-        drop_unmatched,
-        roll: Roll::None,
-        mult: Mult::All,
-        each_i: false,
-    })
 }
 
 /// Polars sizes its thread pool from `POLARS_MAX_THREADS`, or else from the available cores.
