@@ -154,8 +154,10 @@ struct Device {
     /// The state the device's display list starts from, which a redraw restores before it
     /// replays the list, and which a snapshot records.
     saved: Saved,
-    /// The region `clip()` set, until the next `plot.new`.
-    clip: Option<Rect>,
+    /// The region `clip()` set and the `xpd` in force then. Like GNU R's `GClip`, which
+    /// resets the device clip only when `xpd` differs from the last value it clipped for, the
+    /// region holds until `plot.new` or until something draws under a different `xpd`.
+    clip: Option<(Rect, i32)>,
 }
 
 /// What a snapshot of base graphics holds.
@@ -4226,9 +4228,11 @@ fn device_rect(device: &Device) -> Rect {
 
 /// Where drawing is clipped: the region `clip()` set, or else the plot region, the figure or
 /// the whole device as `xpd` is `FALSE`, `TRUE` or `NA`.
-fn clip_rect(device: &Device) -> Rect {
-    if let Some(clip) = device.clip {
-        return clip;
+fn clip_rect(device: &mut Device) -> Rect {
+    match device.clip {
+        Some((clip, xpd)) if xpd == device.pars.xpd => return clip,
+        Some(_) => device.clip = None,
+        None => {}
     }
     match device.pars.xpd {
         0 => region_rect(device, 17),
@@ -6774,12 +6778,16 @@ unsafe fn do_clip(call: &NativeCall<'_>) -> R<Sexp> {
         let [x_axis, y_axis] = user_axes(device);
         let (x0, x1) = (x_axis.inches(bounds[0]), x_axis.inches(bounds[1]));
         let (y0, y1) = (y_axis.inches(bounds[2]), y_axis.inches(bounds[3]));
-        device.clip = Some(Rect {
-            x0: x0.min(x1),
-            x1: x0.max(x1),
-            y0: y0.min(y1),
-            y1: y0.max(y1),
-        });
+        let xpd = device.pars.xpd;
+        device.clip = Some((
+            Rect {
+                x0: x0.min(x1),
+                x1: x0.max(x1),
+                y0: y0.min(y1),
+                y1: y0.max(y1),
+            },
+            xpd,
+        ));
         Ok(())
     })?;
     Ok(nil())
