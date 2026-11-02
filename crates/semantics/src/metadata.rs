@@ -7,7 +7,7 @@ use {
         stubs::{META_PACKAGE_MEMBERS, stubs},
     },
     std::{collections::BTreeSet, num::NonZero, thread},
-    syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
+    syntax::{node_text, GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
 };
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
@@ -421,7 +421,7 @@ fn namespace_directives(root: &SyntaxNode) -> Vec<(String, Vec<SyntaxNode>)> {
                     .collect()
             })
             .unwrap_or_default();
-        directives.push((callee.text().to_string(), values));
+        directives.push((node_text(&callee).into_owned(), values));
     }
     directives
 }
@@ -497,7 +497,7 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
             arguments,
         }) = call_parts(&node)
         else {
-            spec.unsupported.push(node.text().to_string());
+            spec.unsupported.push(node_text(&node).into_owned());
             continue;
         };
         let positional = || {
@@ -563,7 +563,7 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
                 };
                 let flag = |wanted: &str| {
                     named(wanted).is_some_and(|value| {
-                        matches!(value.text().to_string().trim(), "TRUE" | "T")
+                        matches!(node_text(&value).trim(), "TRUE" | "T")
                     })
                 };
                 let fixes = named(".fixes")
@@ -591,7 +591,7 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
                     symbols,
                 });
             }
-            _ => spec.unsupported.push(node.text().to_string()),
+            _ => spec.unsupported.push(node_text(&node).into_owned()),
         }
     }
     spec
@@ -647,7 +647,7 @@ pub fn call_parts(node: &SyntaxNode) -> Option<Call> {
         })
         .unwrap_or_default();
     Some(Call {
-        callee: unquote(&callee.text().to_string()),
+        callee: unquote(&node_text(&callee)),
         qualified,
         arguments,
     })
@@ -812,7 +812,7 @@ fn dcf_fields(source: &str) -> Vec<(&str, String)> {
 /// R accepts a bare name or a string literal for a NAMESPACE directive argument.
 fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
     match value.kind() {
-        SyntaxKind::NAME => Some((unquote(&value.text().to_string()), value.text_range())),
+        SyntaxKind::NAME => Some((unquote(&node_text(&value)), value.text_range())),
         SyntaxKind::LITERAL => {
             let token = value
                 .children_with_tokens()
@@ -821,7 +821,7 @@ fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
             Some((string_content(token.text()), value.text_range()))
         }
         // `S3method(pkg::generic, class)` names a generic in another namespace.
-        SyntaxKind::NAMESPACE_EXPR => Some((value.text().to_string(), value.text_range())),
+        SyntaxKind::NAMESPACE_EXPR => Some((node_text(&value).into_owned(), value.text_range())),
         _ => None,
     }
 }

@@ -66,6 +66,9 @@ pub struct InferenceTable<'db> {
     /// cut are stored.
     resolve_cache: RefCell<(u64, FxHashMap<Ty<'db>, Ty<'db>>)>,
     epoch: Cell<u64>,
+    /// The variables and aliases `resolve` is expanding, kept between calls so the millions of
+    /// resolutions an item check runs do not each allocate a stack.
+    resolve_stack: RefCell<Vec<InferenceVar>>,
     /// `definitions` answers through two salsa fetches and a scan of the file's
     /// definitions, and relations ask about the same few names hundreds of times per item.
     definition_cache: RefCell<FxHashMap<Name<'db>, Option<&'db NamedDefinition<'db>>>>,
@@ -206,6 +209,9 @@ impl<'db> InferenceTable<'db> {
     /// Also expands aliases. Self-referential bindings and aliases cut to
     /// `Unknown` instead of expanding forever.
     pub fn resolve(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+        if !ty.may_resolve() {
+            return ty;
+        }
         {
             let mut cache = self.resolve_cache.borrow_mut();
             if cache.0 != self.epoch.get() {
@@ -213,8 +219,12 @@ impl<'db> InferenceTable<'db> {
                 cache.1.clear();
             }
         }
-        let mut visiting = Vec::new();
-        self.resolve_rec(db, ty, &mut visiting).0
+        // Taken rather than borrowed, so a resolution nested inside this one gets its own stack.
+        let mut visiting = mem::take(&mut *self.resolve_stack.borrow_mut());
+        let resolved = self.resolve_rec(db, ty, &mut visiting).0;
+        visiting.clear();
+        *self.resolve_stack.borrow_mut() = visiting;
+        resolved
     }
 
     /// The bool is whether the subtree is clean (no cycle cut beneath it): only

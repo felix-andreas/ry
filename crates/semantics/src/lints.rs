@@ -8,7 +8,7 @@ use {
         stubs::{declaring_namespace, stubs},
     },
     rowan::{Direction, NodeOrToken},
-    syntax::{
+    syntax::{node_text, 
         GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
         is_green_inline_annotation,
@@ -421,7 +421,7 @@ fn line_length_lint(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Ve
         return;
     };
     let limit = config.max_line_length.unwrap_or(80);
-    let text = root.text().to_string();
+    let text = node_text(root);
     let mut line_start = 0usize;
     for line in text.split_inclusive('\n') {
         let content = line.trim_end_matches(['\n', '\r']);
@@ -693,7 +693,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             .lhs()
             .filter(|target| target.kind() == SyntaxKind::NAME)
     {
-        let name = target.text().to_string();
+        let name = node_text(&target).into_owned();
         if let Some(message) = naming_style_message(&name, style, "Variable") {
             diagnostics.push(Diagnostic::new(
                 significant_range(&target),
@@ -725,11 +725,11 @@ fn object_system_lint(
             let (Some(package), Some(name)) = (names.next(), names.next()) else {
                 return;
             };
-            (Some(package.text().to_string()), name)
+            (Some(node_text(&package).into_owned()), name)
         }
         _ => return,
     };
-    let function = name.text().to_string();
+    let function = node_text(&name);
     let Some((system, defines, home)) = object_system_function(&function) else {
         return;
     };
@@ -763,7 +763,7 @@ fn object_system_lint(
         None => unless_redefined.extend(
             found
                 .into_iter()
-                .map(|diagnostic| (function.clone(), diagnostic)),
+                .map(|diagnostic| (function.to_string(), diagnostic)),
         ),
     }
 }
@@ -1016,7 +1016,7 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
             let mut children = node.children();
             let name = if named {
                 children.next().map(|name| {
-                    let text = name.text().to_string();
+                    let text = node_text(&name);
                     let unquoted = text
                         .strip_prefix(['`', '"', '\''])
                         .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
@@ -1037,7 +1037,7 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
 fn bare_callee(call: &SyntaxNode) -> Option<String> {
     call.first_child()
         .filter(|callee| callee.kind() == SyntaxKind::NAME)
-        .map(|callee| callee.text().to_string())
+        .map(|callee| node_text(&callee).into_owned())
 }
 
 fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
@@ -1502,7 +1502,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -1877,12 +1877,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match margin.text().to_string().as_str() {
+    let prefix = match &*node_text(&margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match function.text().to_string().as_str() {
+    let suffix = match &*node_text(&function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -1969,7 +1969,7 @@ fn unnecessary_lambda_lint(
         };
         // These read their argument's expression, not its value, so the wrapper is needed.
         let quoting = matches!(
-            callee.text().to_string().as_str(),
+            &*node_text(&callee),
             "quote"
                 | "bquote"
                 | "substitute"
@@ -2013,7 +2013,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(rhs.text().to_string().as_str(), "0" | "0L") {
+    if !matches!(&*node_text(&rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2057,7 +2057,7 @@ fn sample_int_lint(
         return;
     };
     if operator.kind() != SyntaxKind::COLON
-        || !matches!(lhs.text().to_string().as_str(), "1" | "1L")
+        || !matches!(&*node_text(&lhs), "1" | "1L")
     {
         return;
     }
@@ -2069,7 +2069,7 @@ fn sample_int_lint(
     };
     let list_start = list.text_range().start();
     let first_range = significant_range(value) - list_start;
-    let list_text = list.text().to_string();
+    let list_text = node_text(&list).into_owned();
     let (Some(before), Some(after)) = (
         list_text.get(..usize::from(first_range.start())),
         list_text.get(usize::from(first_range.end())..),
@@ -2476,7 +2476,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {
@@ -2854,7 +2854,7 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
 
 fn significant_text(node: &SyntaxNode) -> String {
     let range = significant_range(node) - node.text_range().start();
-    node.text().to_string()[range].to_owned()
+    node_text(node)[range].to_owned()
 }
 
 fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option<String> {

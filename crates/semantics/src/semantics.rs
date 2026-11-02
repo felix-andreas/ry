@@ -23,7 +23,7 @@ use {
         collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex},
     },
-    syntax::{
+    syntax::{node_text, 
         GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
@@ -2743,7 +2743,7 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
                     .first_token()
                     .is_some_and(|t| t.kind() == SyntaxKind::STRING))
             .then(|| {
-                let text = target.text().to_string();
+                let text = node_text(&target).into_owned();
                 text.trim_matches(['"', '\'']).to_owned()
             })
         })?;
@@ -2785,7 +2785,7 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     }
     let callee = node.children().next()?;
     let callee_name = match callee.kind() {
-        SyntaxKind::NAME => callee.text().to_string(),
+        SyntaxKind::NAME => node_text(&callee).into_owned(),
         SyntaxKind::NAMESPACE_EXPR => callee
             .children()
             .filter(|child| child.kind() == SyntaxKind::NAME)

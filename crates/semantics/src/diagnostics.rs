@@ -35,7 +35,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
-    syntax::{
+    syntax::{node_text, 
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
         paired_comment_definition,
     },
@@ -1468,7 +1468,7 @@ fn definition_agreement_candidates<'db>(
                         .children()
                         .filter(|word| word.kind() == SyntaxKind::NAME)
                         .skip(1)
-                        .map(|word| word.text().to_string())
+                        .map(|word| node_text(&word).into_owned())
                         .collect::<Vec<_>>()
                         .join(" ");
                     (spelling, binder.text_range())

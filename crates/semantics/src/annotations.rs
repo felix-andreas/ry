@@ -16,7 +16,7 @@ use {
     rowan::{Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
     std::mem::take,
-    syntax::{
+    syntax::{node_text, 
         GreenRef, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
         is_green_inline_annotation, matching_nodes,
     },
@@ -1487,7 +1487,7 @@ impl<'db> Lowering<'db> {
                     self.errors.push((
                         format!(
                             "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
-                            argument.text().to_string().trim()
+                            node_text(&argument).trim()
                         ),
                         argument.text_range(),
                     ));

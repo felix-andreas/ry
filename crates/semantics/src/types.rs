@@ -650,17 +650,39 @@ pub fn map_child_types<'db>(
         // Members can collapse once mapped, so re-normalize.
         return union_of(db, members.iter().map(|&member| map(member)));
     }
-    // Most maps leave most types alone, and re-interning an unchanged type costs a hash of
-    // the whole kind and a table lookup.
-    let mut changed = false;
-    let kind = mapped_kind(db, ty, &mut |child| {
-        let mapped = map(child);
-        changed |= mapped != child;
-        mapped
+    // Most maps leave most types alone, so the children are mapped first and the kind is
+    // rebuilt (allocating its child vectors and re-interning) only once one of them changed.
+    // `mapped` stays unallocated until the first change, when it takes the unchanged prefix.
+    let kind = ty.kind(db);
+    let mut mapped: Vec<Ty<'db>> = Vec::new();
+    let mut unchanged = 0;
+    for_each_child(kind, &mut |child| {
+        let result = map(child);
+        if mapped.is_empty() {
+            if result == child {
+                unchanged += 1;
+                return;
+            }
+            let mut count = 0;
+            for_each_child(kind, &mut |_| count += 1);
+            mapped.reserve_exact(count);
+            let mut prefix = 0;
+            for_each_child(kind, &mut |original| {
+                if prefix < unchanged {
+                    mapped.push(original);
+                    prefix += 1;
+                }
+            });
+        }
+        mapped.push(result);
     });
-    match kind {
-        Some(kind) if changed => Ty::new(db, kind),
-        _ => ty,
+    if mapped.is_empty() {
+        return ty;
+    }
+    let mut children = mapped.into_iter();
+    match mapped_kind(db, ty, &mut |child| children.next().unwrap_or(child)) {
+        Some(kind) => Ty::new(db, kind),
+        None => ty,
     }
 }
 
