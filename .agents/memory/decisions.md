@@ -3554,6 +3554,11 @@ first lines R had already read, leaving R mid-command.
   namespace, and the left side of a function assignment. Everything else stays with the editor's R
   grammar, so tokens add facts rather than replace the grammar. The server also answers range
   requests, so a large file only pays for the viewport.
+- **Member names are `property` or `method` tokens.** `x$name` and `x@name` decide from the
+  syntax alone (a called member is a method), and so do record-literal and pattern fields. R6
+  members and S4 slots are named by call arguments, so `semantic_tokens` reads them from the
+  outline's `classify_symbol_call` rather than a second classifier: one definition of what an R6
+  member or S4 slot is serves the outline and the highlighting.
 - **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
   `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
   finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
@@ -5757,6 +5762,19 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   .Primitive("name")`.
 - The LSP simulator runs with `installed_packages: false`, because the machine's library would
   make it nondeterministic. No stub is generated from what is read: this is navigation only.
+- The host answers through the `ide::Installed` trait (formals, exports), which signature help,
+  completion and the import quick fix take; `()` answers nothing, and the fixture harness answers
+  for one fake package. An installed package's exports are its `NAMESPACE` `export` names plus
+  the `.rdx` index names an `exportPattern` matches. Completion offers them after `pkg::` for a
+  package the stubs do not declare, and bare for the packages the project imports whole or
+  attaches. The import quick fix looks only in the packages the project already depends on,
+  attaches or reads with `::`, so it never scans the whole library.
+- Completion ranks a name local to the enclosing function ahead of library names at the same
+  match quality, unless a `(` follows the cursor: then it ranks with the globals by use, because
+  most locals hold data. Measured with `ry debug analysis-stats`, this raised httr2's
+  two-character variable completion from 91% to 95% with no role falling on R6, purrr, httr2 or
+  finbench; ranking locals first unconditionally cost call heads (`req |> req_url(...)` lost to
+  the local `req`).
 
 ## One-shot checks record coarse dependencies
 

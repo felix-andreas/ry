@@ -2386,6 +2386,8 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                                 lsp_types::SemanticTokenType::ENUM_MEMBER,
                                 lsp_types::SemanticTokenType::FUNCTION,
                                 lsp_types::SemanticTokenType::NAMESPACE,
+                                lsp_types::SemanticTokenType::PROPERTY,
+                                lsp_types::SemanticTokenType::METHOD,
                             ],
                             token_modifiers: vec![
                                 lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
@@ -2821,10 +2823,7 @@ impl LanguageServer for ServerState {
             let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::completion_with(&worker.db, files, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::completion_with(&worker.db, files, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             let (mut items, is_incomplete) = match result {
@@ -2900,10 +2899,7 @@ impl LanguageServer for ServerState {
             };
             let help = worker
                 .cancellable(|worker| {
-                    let installed = &mut worker.installed;
-                    ide::signature_help_with(&worker.db, file, offset, &mut |target| {
-                        installed.as_mut()?.formals(target)
-                    })
+                    ide::signature_help_with(&worker.db, file, offset, &mut worker.installed)
                 })
                 .unwrap_or_default();
             Ok(help.map(|help| {
@@ -2956,7 +2952,13 @@ impl LanguageServer for ServerState {
                     let mut actions = Vec::new();
                     if wants_quick_fixes {
                         actions.extend(ide::diagnostic_fixes(&fixable, range));
-                        actions.extend(ide::import_fixes(&worker.db, file, &fixable, range));
+                        actions.extend(ide::import_fixes(
+                            &worker.db,
+                            file,
+                            &fixable,
+                            range,
+                            &mut worker.installed,
+                        ));
                         actions.extend(ide::code_actions(&worker.db, file, range));
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
@@ -3544,7 +3546,8 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
         DocumentSymbolKind::S4Method | DocumentSymbolKind::R6Method => {
             lsp_types::SymbolKind::METHOD
         }
-        DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::R6Field | DocumentSymbolKind::S4Slot => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::Tag => lsp_types::SymbolKind::ENUM_MEMBER,
         // The kind RStudio's outline and the R language server use for sections.
         DocumentSymbolKind::Section => lsp_types::SymbolKind::STRING,
     }
@@ -3836,6 +3839,8 @@ fn semantic_class_index(class: SemanticClass) -> (u32, u32) {
         SemanticClass::Tag => 6,
         SemanticClass::Function | SemanticClass::LibraryFunction => 7,
         SemanticClass::Namespace => 8,
+        SemanticClass::Property => 9,
+        SemanticClass::Method => 10,
     };
     // Bit 0 is `defaultLibrary`, the only advertised modifier.
     let modifiers = match class {

@@ -3014,9 +3014,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- Completion misses on CRAN corpora (`ry debug analysis-stats`): names imported from packages with no stub and no export manifest (purrr's `vctrs` and `rlang` imports) are never offered, so completion should read an installed package's NAMESPACE exports; the two-character prefix ranks a local helper (`check_rate`) below library names that share it. The import quick fix reads only export manifests, not the installed library.
-- Signature help's active parameter miscounts after an argument with no value (`f(x = , a, |)`), in both the typed and the formals path (`cursor_index` in `ide.rs`).
-- Semantic tokens: coloring of `$` fields and frame columns.
+- Completion at two characters is weakest on call heads (httr2 68%, purrr 74%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them, and project-wide use counts favor testthat's `expect_*` over `exec`. A signal beyond use counts (the types the call site expects) would be needed.
+- An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
+- Semantic tokens: frame columns inside `[` queries and `col("name")` strings are not colored as properties.
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix
