@@ -260,7 +260,9 @@ instead: version control keeps it.
 **`duplicate-argument`** (off by default): the same argument name twice in one call, which stops a
 function with "formal argument matched by multiple actual arguments". It is off because a function
 that collects `...` keeps both values on purpose, such as cli's `c("i" = ..., "i" = ...)` bullets or
-two HTML `class` attributes, and the lint cannot see which functions do. `mutate()`, `transmute()`,
+two HTML `class` attributes, and the lint cannot see which functions do. With type checking on,
+a call that gives a known function's parameter twice is a `type-mismatch` anyway, such as
+`paste(sep = "", sep = "-")`. `mutate()`, `transmute()`,
 `summarise()`, `summarize()` and `reframe()` are exempt, because there a repeated name updates a
 column.
 
@@ -289,6 +291,11 @@ because R can mark the encoding of a fixed match's result differently.
 **`browser-call`** (off by default): a `browser()` call, which pauses the code whenever it runs
 interactively. A call inside `quote()`, `bquote()`, `substitute()` or `expression()` is skipped,
 because there it is code built on purpose.
+
+**`line-length`** (off by default): a line longer than `[lint] max-line-length` characters, 80
+unless you set it. The formatter keeps your line breaks and never splits a line, so this lint is
+what keeps lines short. It counts characters, not bytes, and reports from the first character past
+the limit.
 
 **`comparison-negation`**, **`outer-negation`**, **`which-grepl`**, **`length-levels`** and
 **`numeric-leading-zero`** (off by default): more spellings with a shorter equivalent, each with a

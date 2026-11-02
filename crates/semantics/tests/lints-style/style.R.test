@@ -531,3 +531,16 @@ x <- 0.5
 y <- 5.
 #++++
 clean
+
+#==== line-length
+#---- a_line_over_the_limit_warns
+x <- c("item00", "item01", "item02", "item03", "item04", "item05", "item06", "item07", "item08", "item09", "item10", "item11")
+y <- "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+#++++
+100..126 warning[line-length] This line is 126 characters long, over the limit of 100
+321..344 warning[line-length] This line is 112 characters long, over the limit of 100
+
+#---- a_line_at_the_limit_is_clean
+z <- "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#++++
+clean

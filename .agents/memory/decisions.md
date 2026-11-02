@@ -4770,13 +4770,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `unreachable-code` and `sprintf-arguments` are on by default (each is a bug; a CRAN corpus sweep
   found only true positives). `duplicate-argument` is opt-in although a repeated name is often a
   bug, because a callee that collects `...` keeps both on purpose (cli bullets in `c()`, repeated
-  HTML `class` attributes) and a syntax lint cannot see the callee's formals. Moving it to a
-  semantic lint that reads the callee's signature would let it default on.
+  HTML `class` attributes) and a syntax lint cannot see the callee's formals. The semantic
+  version already exists: with `[check] typing = true`, a call that gives a known function's
+  formal twice is a `type-mismatch` (`named_argument_mismatch` in `check.rs`), so no second
+  semantic lint is needed.
 - The other lintr ports (`any-is-na`, `paste-sep`, `lengths`, `literal-coercion`,
   `redundant-equals`, `single-quotes`, `testthat-expectation`, `condition-message`,
   `comparison-negation`, `outer-negation`, `fixed-regex`, `which-grepl`, `length-levels`,
-  `browser-call`, `numeric-leading-zero`) are opt-in taste or speed lints. lintr's whitespace and
+  `browser-call`, `numeric-leading-zero`, `line-length`) are opt-in taste or speed lints.
+  `line-length` is the only lintr layout linter ported, because the formatter never splits a
+  line, so nothing else keeps lines short. lintr's whitespace and
   layout linters are not ported, because `ry format` owns layout.
+- `trailing-comma` stays on inside rlang's dynamic dots (`mutate(d, y = 1, )`), where the comma
+  is harmless: it is a warning whose safe fix only removes the comma, and stub `@masked` cannot
+  mark dynamic dots because it also covers data.table verbs, whose `...` is not rlang's.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
   opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes

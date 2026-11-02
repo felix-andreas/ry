@@ -87,10 +87,6 @@ False reports on correct R, worst first:
   no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
   `::` loads without attaching; validating it against the shipped manifest and stub types without
   activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
-- **A trailing comma inside rlang's dynamic dots.** `mutate(d, y = 1, )` runs in dplyr, because
-  rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
-  The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
-  dplyr verbs at least). Unverified against a live R session.
 - **`with`, `subset` and `transform` are strict findings.** base declares them as bare `Any`
   values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
   `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
@@ -1093,19 +1089,6 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 A second independent review of the fuzzing and test architecture, with every claim measured rather
 than read off the code. The findings it shares with the two reviews above are written up there. These
 are the ones only it found, ranked, each stating the change and why it is worth it.
-
-### The formatter battery cannot notice the formatter deleting code
-
-`check_format_invariants` asserts determinism, idempotence, and that the output re-formats. A
-formatter that silently dropped a statement passes all three.
-
-The missing oracle is the sequence of non-trivia token kinds, excluding `{`, `}`, `;` and
-`ANNOTATION_MARKER`, because the formatter legitimately adds braces, splits `;` chains and re-lays
-out `#:` blocks. It was built and run, with no mismatch over 1,182 fixture case sources, of which
-972 formatted, and 20,000 fuzz-shaped inputs, of which 4,073 formatted. The weaker formulations do
-not hold: raw token equality fails on 50 brace and semicolon insertions, and text equality fails on
-9 normalizations of `'x'` to `"x"`. So the assertion to write is kinds with those four excluded, at
-about ten lines.
 
 ### `crates/ry` has no property coverage, and the protocol edge panics
 

@@ -105,6 +105,11 @@ pub struct LintConfig {
     pub browser_call: LintLevel,
     /// Off by default: a number such as `.5` without its leading zero.
     pub numeric_leading_zero: LintLevel,
+    /// Off by default: a line longer than `max_line_length` characters. The formatter never
+    /// splits a line, so this is the one check that keeps lines short.
+    pub line_length: LintLevel,
+    /// The limit for `line_length`, 80 when unset.
+    pub max_line_length: Option<usize>,
     /// Copied from `[check] object-systems = false` when the config loads, which turns
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
@@ -242,6 +247,7 @@ fn shadow_lints(
 
 fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints) {
     let diagnostics = &mut lints.always;
+    line_length_lint(root, config, diagnostics);
     // `#:` annotation regions and inline annotations are type syntax, not R identifiers.
     // One entry per open node, so a `Leave` knows whether its node opened a region.
     let mut opens_annotation = Vec::new();
@@ -323,6 +329,34 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
             }
         }
     });
+}
+
+/// Counts characters, not bytes, so a line of accented text is measured as it reads. The range
+/// starts at the first character past the limit, which is where an editor's ruler sits.
+fn line_length_lint(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    let Some(severity) = lint_severity(opt_in(config.line_length), None) else {
+        return;
+    };
+    let limit = config.max_line_length.unwrap_or(80);
+    let text = root.text().to_string();
+    let mut line_start = 0usize;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let length = content.chars().count();
+        if let Some((overflow, _)) = content.char_indices().nth(limit) {
+            let start = line_start + overflow;
+            let end = line_start + content.len();
+            if let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) {
+                diagnostics.push(Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    severity,
+                    "line-length",
+                    format!("This line is {length} characters long, over the limit of {limit}"),
+                ));
+            }
+        }
+        line_start += line.len();
+    }
 }
 
 /// `T` and `F` are flagged only where they are read as values: an argument name, an assignment

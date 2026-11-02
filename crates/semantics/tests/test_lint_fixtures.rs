@@ -83,6 +83,9 @@ fn lint_style_fixtures() {
         length_levels: LintLevel::Warn,
         browser_call: LintLevel::Warn,
         numeric_leading_zero: LintLevel::Warn,
+        line_length: LintLevel::Warn,
+        // Above every other case's source, so only the line-length cases reach it.
+        max_line_length: Some(100),
         redundant_equals: LintLevel::Warn,
         single_quotes: LintLevel::Warn,
         ..LintConfig::default()
