@@ -16,8 +16,9 @@ use {
 /// is checked on purpose: an inferred `NULL` default passes on as a placeholder, while the same
 /// `NULL` once declared is checked at the call, and an inferred scalar parameter takes a vector
 /// or a number that the same scalar once declared rejects, and an inferred vector parameter
-/// passes to a scalar parameter that the same vector once declared does not. A callback shape inferred from a call
-/// lets a later call name its slots, while the same shape once declared has no names to match.
+/// passes to a scalar parameter that the same vector once declared does not. A callback shape
+/// inferred from a call lets a later call name its slots, while the same shape once declared has
+/// no names to match.
 /// A callback the body calls with two arities after testing `formals()` has no single declared
 /// shape that admits both calls.
 const KNOWN_UNWRITABLE: [&str; 11] = [

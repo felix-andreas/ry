@@ -471,3 +471,11 @@ later: Unknown
 v <- function(w, mu) sum(w * mu) - qnorm(0.5)
 #++++
 v: fn(w: Unknown, mu: Unknown) -> Unknown
+
+#---- date_minus_untyped_arithmetic_is_still_a_date
+f <- function(x) {
+  d <- as.Date("2020-01-01") - 2 * x
+  d < as.Date("2021-01-01")
+}
+#++++
+f: <T: numeric> fn(x: T) -> logical

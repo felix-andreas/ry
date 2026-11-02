@@ -627,6 +627,8 @@ pub fn check_item_with_annotation<'db>(
         record_strict_origins,
         strict_origins: Vec::new(),
         overload_probe_depth: 0,
+        operator_method_depth: 0,
+        call_first_var: 0,
         return_frames: Vec::new(),
         pending_enclosing_writes: Vec::new(),
         forward_captured: FxHashSet::default(),
@@ -1066,6 +1068,12 @@ struct Checker<'db, 'a> {
     /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
     /// off so it cannot decide the winner (exact matches outrank conversions).
     overload_probe_depth: u32,
+    /// Non-zero while matching an operator method's candidates. An open operand's arithmetic
+    /// must not fit `-.Date`'s `Date` parameter there, or `day - 2 * x` would be a `difftime`.
+    operator_method_depth: u32,
+    /// The first variable the ordinary call being dispatched created. An older variable in
+    /// its callee's type belongs to an enclosing scope, as in a closure that returns one.
+    call_first_var: u32,
     /// Per enclosing function, each early `return` value with its range, so a
     /// declared-return mismatch blames the offending `return`.
     return_frames: Vec<Vec<(Ty<'db>, TextRange)>>,
@@ -3127,15 +3135,26 @@ impl<'db> Checker<'db, '_> {
     /// that did not write the slot: a name only conditional statements write has no earlier
     /// value, so that path is maybe-undefined.
     fn materialize_pre_state(&mut self, slot: BindingId, earlier: bool) -> Option<Ty<'db>> {
-        let binding = self.naming.bindings.get(&slot)?;
-        if binding.kind != BindingKind::TopLevel {
-            return None;
-        }
         let globals = self.globals?;
-        let scheme = if earlier {
-            globals.earlier_binding(&binding.name)?
-        } else {
-            globals.scheme(&binding.name, false)?
+        let scheme = match self.naming.bindings.get(&slot) {
+            Some(binding) if binding.kind != BindingKind::TopLevel => return None,
+            Some(binding) if earlier => globals.earlier_binding(&binding.name)?,
+            Some(binding) => globals.scheme(&binding.name, false)?,
+            // A `<<-` slot: the path that did not write it still reads the top-level binding,
+            // which a function body reads in its final state whatever the collation order. A
+            // top-level `NULL` is the placeholder of a lazily filled cache, and the path that
+            // skips `if (is.null(cache)) cache <<- ...` is the one that already filled it.
+            None => {
+                let (name, _) = self
+                    .non_local_slots
+                    .iter()
+                    .find(|(_, non_local)| **non_local == slot)?;
+                let scheme = globals.scheme(name.as_str(), false)?;
+                if matches!(scheme.body.kind(self.db), TyKind::Null) {
+                    return None;
+                }
+                scheme
+            }
         };
         let instantiated = self.instantiate(&scheme);
         // An `Unknown` binding adds nothing over the tolerant read, and materializing it
@@ -5834,17 +5853,18 @@ impl<'db> Checker<'db, '_> {
                 if let Some(result) = self.infer_array_operator(range, operator, left, right) {
                     return result;
                 }
-                self.operator_method_result(range, operator, lhs, rhs, left, right)
-                    .unwrap_or_else(|| match operator {
-                        Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
-                            self.infer_compare(lhs, rhs, left, right)
-                        }
-                        // `/` and `^` always produce doubles.
-                        Divide | Power => {
-                            self.infer_binary_numeric(range, lhs, rhs, left, right, true)
-                        }
-                        _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
-                    })
+                self.operator_method_depth += 1;
+                let method_result =
+                    self.operator_method_result(range, operator, lhs, rhs, left, right);
+                self.operator_method_depth -= 1;
+                method_result.unwrap_or_else(|| match operator {
+                    Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
+                        self.infer_compare(lhs, rhs, left, right)
+                    }
+                    // `/` and `^` always produce doubles.
+                    Divide | Power => self.infer_binary_numeric(range, lhs, rhs, left, right, true),
+                    _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
+                })
             }
             Sequence => self.infer_colon(lhs, rhs),
             // The right operand runs only on the left's true edge for `&&` (false for `||`), so
@@ -7527,7 +7547,9 @@ impl<'db> Checker<'db, '_> {
             true => CalleeSource::Lookup,
             false => CalleeSource::Value,
         };
+        let enclosing_call_first_var = mem::replace(&mut self.call_first_var, first_var);
         let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
+        self.call_first_var = enclosing_call_first_var;
         if callback_outputs.is_empty() {
             return result;
         }
@@ -10785,9 +10807,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Checks every argument (a failed `compatible` leaves the table untouched, so
-    /// verdicts are independent); empty means the call matches. A structural failure is
-    /// returned alone: per-argument mismatches under a mis-shaped call mislead.
     /// The return of a call to an inferred signature whose return is a union.
     ///
     /// An inferred parameter typed `list[T] | T[]` takes a list or a vector, and a body that
@@ -10804,7 +10823,10 @@ impl<'db> Checker<'db, '_> {
             return function.ret;
         };
         let targets = argument_targets(self.db, function, &argument_shapes(arguments));
-        let mut members: Vec<Ty<'db>> = returned.clone();
+        // Each argument is measured against the return as declared, so two parameters that
+        // echo the same union each contribute what they were passed.
+        let mut echoed: Vec<Ty<'db>> = Vec::new();
+        let mut passed_members: Vec<Ty<'db>> = Vec::new();
         for (argument, target) in arguments.iter().zip(&targets) {
             let expected = match target {
                 Some(ArgumentTarget::Positional(slot)) => function.positional.get(*slot).copied(),
@@ -10822,31 +10844,78 @@ impl<'db> Checker<'db, '_> {
                 continue;
             };
             if matches!(passed.kind(self.db), TyKind::Union(_) | TyKind::Var(_))
-                || !accepted.iter().all(|member| members.contains(member))
+                || !accepted.iter().all(|member| returned.contains(member))
             {
                 continue;
             }
-            members.retain(|member| !accepted.contains(member));
-            members.push(passed);
+            echoed.extend(accepted.iter().copied());
+            passed_members.push(passed);
         }
-        // A member that is a variable no argument binds is the value of a parameter the call
-        // left out, as in a getter and setter `function(key, value)` called as a getter. It
-        // stands for anything, so the union does too.
+        let mut members: Vec<Ty<'db>> = returned
+            .iter()
+            .copied()
+            .filter(|member| !echoed.contains(member))
+            .collect();
+        members.extend(passed_members);
+        // A member that is a variable no argument binds stands for anything, so the union does
+        // too: the value of a parameter the call left out, as in a getter and setter
+        // `function(key, value)` called as a getter, or a variable the callee's scheme leaves
+        // free. A variable of the enclosing scope, which a closure returns, keeps its meaning.
+        let mut supplied_positional = vec![false; function.positional.len()];
+        let mut supplied_named = vec![false; function.named.len()];
+        for target in targets.iter().flatten() {
+            match target {
+                ArgumentTarget::Positional(slot) => {
+                    if let Some(supplied) = supplied_positional.get_mut(*slot) {
+                        *supplied = true;
+                    }
+                }
+                ArgumentTarget::Named(formal) => {
+                    if let Some(supplied) = supplied_named.get_mut(*formal) {
+                        *supplied = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let omitted_types: Vec<Ty<'db>> = function
+            .positional
+            .iter()
+            .zip(&supplied_positional)
+            .filter(|(_, supplied)| !**supplied)
+            .map(|(ty, _)| *ty)
+            .chain(
+                function
+                    .named
+                    .iter()
+                    .zip(&supplied_named)
+                    .filter(|(_, supplied)| !**supplied)
+                    .map(|(parameter, _)| parameter.ty),
+            )
+            .collect();
+        let mut omitted = FxHashSet::default();
+        for ty in omitted_types {
+            collect_vars(self.db, self.table.resolve(self.db, ty), &mut omitted);
+        }
         let mut bound = FxHashSet::default();
         for argument in arguments {
             if let Some(ty) = argument.ty {
                 collect_vars(self.db, self.table.resolve(self.db, ty), &mut bound);
             }
         }
-        if members
-            .iter()
-            .any(|member| matches!(member.kind(self.db), TyKind::Var(var) if !bound.contains(var)))
-        {
+        if members.iter().any(|member| {
+            matches!(member.kind(self.db), TyKind::Var(var)
+                if (omitted.contains(var) || var.0 >= self.call_first_var)
+                    && !bound.contains(var))
+        }) {
             return unknown(self.db);
         }
         union_of(self.db, members)
     }
 
+    /// Checks every argument (a failed `compatible` leaves the table untouched, so
+    /// verdicts are independent); empty means the call matches. A structural failure is
+    /// returned alone: per-argument mismatches under a mis-shaped call mislead.
     fn match_arguments(
         &mut self,
         callee_range: TextRange,
@@ -11060,6 +11129,7 @@ impl<'db> Checker<'db, '_> {
         // An overload probe would take the leniency as a fit and pick `sum`'s `difftime`
         // candidate for `sum(w * mu)`.
         if self.overload_probe_depth == 0
+            && self.operator_method_depth == 0
             && argument
                 .value
                 .is_some_and(|value| self.arithmetic_on_open_operand_fits(expected, value))
