@@ -1151,28 +1151,78 @@ impl<'db> NameLayer<'db> {
     }
 }
 
-/// The package namespace's binding of `name`, or with `test` set, the helper files'. An
-/// incremental host reads it through the per-name projection, so a check depends only on the
-/// names it reads. A one-shot host never edits, so it reads the project-wide maps: one
-/// dependency per map instead of an interned key and a memo per name read.
+/// The package namespace's binding of `name`, or with `test` set, the helper files'. A caller
+/// that looks up many names builds one [`NameLookup`] instead.
 pub fn name_layer<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     name: Symbol,
     test: bool,
 ) -> NameLayer<'db> {
-    if db.one_shot() {
-        let layer = project_name_layer(db, files, name, test);
-        if syntax::testing::invariants_enabled() {
-            assert_eq!(
-                layer,
-                projected_name_layer(db, name, test),
-                "the one-shot lookup of `{name}` disagrees with its projection"
-            );
+    NameLookup::new(db, files, test).layer(db, name)
+}
+
+/// How one namespace layer's bindings are looked up. An incremental host reads them through
+/// the per-name projection, so a check depends only on the names it reads. A one-shot host
+/// never edits, so it reads the project-wide maps, once per lookup rather than once per name:
+/// every salsa read records a dependency edge, and an item looks up dozens of names.
+#[derive(Clone, Copy)]
+pub enum NameLookup<'db> {
+    Project {
+        winners: &'db FxHashMap<Symbol, Item<'db>>,
+        writers: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
+        test: bool,
+    },
+    Projected {
+        test: bool,
+    },
+}
+
+impl<'db> NameLookup<'db> {
+    pub fn new(db: &'db dyn Db, files: ProjectFiles, test: bool) -> NameLookup<'db> {
+        if !db.one_shot() {
+            return NameLookup::Projected { test };
         }
-        return layer;
+        let (winners, writers) = match test {
+            true => (
+                test_definitions(db, files),
+                test_conditional_slot_items(db, files),
+            ),
+            false => (
+                package_definitions(db, files),
+                conditional_slot_items(db, files),
+            ),
+        };
+        NameLookup::Project {
+            winners,
+            writers,
+            test,
+        }
     }
-    projected_name_layer(db, name, test)
+
+    pub fn layer(self, db: &'db dyn Db, name: Symbol) -> NameLayer<'db> {
+        match self {
+            NameLookup::Project {
+                winners,
+                writers,
+                test,
+            } => {
+                let layer = NameLayer {
+                    winner: winners.get(&name).copied(),
+                    conditional_writers: writers.get(&name).map_or(&[], Vec::as_slice),
+                };
+                if syntax::testing::invariants_enabled() {
+                    assert_eq!(
+                        layer,
+                        projected_name_layer(db, name, test),
+                        "the one-shot lookup of `{name}` disagrees with its projection"
+                    );
+                }
+                layer
+            }
+            NameLookup::Projected { test } => projected_name_layer(db, name, test),
+        }
+    }
 }
 
 /// [`name_layer`] for a caller that may run without a project, where nothing binds the name.
@@ -1180,28 +1230,6 @@ pub fn package_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLaye
     ProjectFiles::try_get(db).map_or_else(NameLayer::default, |files| {
         name_layer(db, files, name, test)
     })
-}
-
-fn project_name_layer<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: Symbol,
-    test: bool,
-) -> NameLayer<'db> {
-    let (winners, writers) = match test {
-        true => (
-            test_definitions(db, files),
-            test_conditional_slot_items(db, files),
-        ),
-        false => (
-            package_definitions(db, files),
-            conditional_slot_items(db, files),
-        ),
-    };
-    NameLayer {
-        winner: winners.get(&name).copied(),
-        conditional_writers: writers.get(&name).map_or(&[], Vec::as_slice),
-    }
 }
 
 fn projected_name_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'db> {
@@ -1474,6 +1502,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
     // would intern a query name per read only to turn it back into a symbol.
     let frame_binders = item_frame_binders(db, item);
+    let frame = OnceCell::new();
     let frame_definition = |name: Symbol, deferred: bool| {
         if deferred && package {
             return None;
@@ -1483,7 +1512,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
                 true => later,
                 false => immediate,
             },
-            None => frame_binder(db, item, types::Name::new(db, &name), deferred),
+            None => unlisted_frame_binder(db, item, &frame, name, deferred),
         }
     };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
@@ -1586,9 +1615,11 @@ pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'
     let Some(files) = ProjectFiles::try_get(db) else {
         return targets;
     };
+    let test_lookup = test.then(|| NameLookup::new(db, files, true));
+    let package_lookup = NameLookup::new(db, files, false);
     let layers = |name: Symbol| {
-        let test_layer = test.then(|| name_layer(db, files, name, true));
-        (test_layer, name_layer(db, files, name, false))
+        let test_layer = test_lookup.map(|lookup| lookup.layer(db, name));
+        (test_layer, package_lookup.layer(db, name))
     };
     for &name in &reads.layered {
         let (test_layer, package_layer) = layers(name);
@@ -2179,8 +2210,11 @@ struct SalsaGlobals<'db, 'a> {
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
     item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
+    frame: OnceCell<FrameBinders<'db>>,
     package_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
     test_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
+    package_lookup: OnceCell<NameLookup<'db>>,
+    test_lookup: OnceCell<NameLookup<'db>>,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -2323,6 +2357,25 @@ fn frame_binder<'db>(
     FrameBinders::of(db, item).binder(Symbol::new(name.text(db)), deferred)
 }
 
+/// [`frame_binder`] for a name [`item_frame_binders`] does not list. An incremental host goes
+/// through the per-name query, so the reader depends only on that name's binder; a one-shot
+/// host never edits, so it reads the file's binders once per reader instead of keeping a memo
+/// per item and name.
+fn unlisted_frame_binder<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    frame: &OnceCell<FrameBinders<'db>>,
+    name: Symbol,
+    deferred: bool,
+) -> Option<Item<'db>> {
+    if db.one_shot() {
+        return frame
+            .get_or_init(|| FrameBinders::of(db, item))
+            .binder(name, deferred);
+    }
+    frame_binder(db, item, types::Name::new(db, &name), deferred)
+}
+
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
 /// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
 /// which interned a key and kept a memo, and its value still changes only when a binder of
@@ -2407,8 +2460,11 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             schemes: RefCell::default(),
             item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
+            frame: OnceCell::new(),
             package_layers: RefCell::default(),
             test_layers: RefCell::default(),
+            package_lookup: OnceCell::new(),
+            test_lookup: OnceCell::new(),
         }
     }
 
@@ -2490,7 +2546,9 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             .frame_binders
             .borrow_mut()
             .entry((name, deferred))
-            .or_insert_with(|| frame_binder(self.db, self.item, name, deferred))
+            .or_insert_with(|| {
+                unlisted_frame_binder(self.db, self.item, &self.frame, Symbol::new(text), deferred)
+            })
     }
 
     /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
@@ -2504,26 +2562,34 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                     DocumentKind::Test | DocumentKind::TestHelper
                 )
             })
-            .map(|files| self.layer(&self.test_layers, files, name, true));
+            .map(|files| self.layer(&self.test_layers, &self.test_lookup, files, name, true));
         test.into_iter().chain(self.package_layer(name))
     }
 
     fn package_layer(&self, name: types::Name<'db>) -> Option<NameLayer<'db>> {
         let files = self.files?;
-        Some(self.layer(&self.package_layers, files, name, false))
+        Some(self.layer(
+            &self.package_layers,
+            &self.package_lookup,
+            files,
+            name,
+            false,
+        ))
     }
 
     fn layer(
         &self,
         layers: &RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
+        lookup: &OnceCell<NameLookup<'db>>,
         files: ProjectFiles,
         name: types::Name<'db>,
         test: bool,
     ) -> NameLayer<'db> {
-        *layers
-            .borrow_mut()
-            .entry(name)
-            .or_insert_with(|| name_layer(self.db, files, Symbol::new(name.text(self.db)), test))
+        *layers.borrow_mut().entry(name).or_insert_with(|| {
+            lookup
+                .get_or_init(|| NameLookup::new(self.db, files, test))
+                .layer(self.db, Symbol::new(name.text(self.db)))
+        })
     }
 
     fn binder_scheme(

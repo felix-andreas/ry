@@ -700,7 +700,7 @@ finalization and a shared member map. Performance: a per-module candidate scan b
 size, which is negligible. The backlog records the open remainder, which is strict attribution for
 the deliberately `Unknown` self-recursive schemes.
 
-# Decision record: the shipping stack is a hand-written parser, rowan trees, and salsa
+# Decision record: the shipping stack is a hand-written parser, a lossless tree, and salsa
 
 `docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
 record holds the reasoning behind it and the risks that come with it, so that no session
@@ -727,11 +727,10 @@ cost and tree size, and single-threadedness. The last one is a division by the c
 the first three are asymptotic or large per-operation wins. The ultimate ceiling is R's dynamic
 semantics, which is a semantics budget rather than an infrastructure one.
 
-## Why rowan rather than a hand-written tree
+## Why a lossless tree, and why ry's own
 
-The parser is hand-written either way. rowan is not a parser. It is the tree data structure the
-hand-written parser emits, and nothing about parsing is delegated to it. The green and red design
-beats a classic typed AST of structs with spans for four reasons.
+The parser is hand-written, and it emits a lossless concrete syntax tree rather than a typed AST of
+structs with spans, for four reasons.
 
 - **Losslessness.** Every byte lives in the tree, trivia included, and reprints exactly. A `#:`
   comment is type syntax here, so the formatter, the byte-exact round trip and the annotation
@@ -739,29 +738,23 @@ beats a classic typed AST of structs with spans for four reasons.
 - **Error resilience.** Every parse yields a tree whose error nodes are local to the break, and the
   typed AST layer returns `Option`, so a consumer never carries a parallel data model for broken
   code.
-- **Position independence.** A green node carries a width and no absolute offset, so an untouched
-  item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
-  per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
+- **Position independence.** An item is analyzed as its own subtree, rebased to offset zero, so an
+  untouched item stays equal after an edit elsewhere in the file. That is the property per-item
+  cutoffs are built on. An AST that carries absolute spans shifts every span after any edit, which
   kills sub-file incrementality at the root.
-- **Structural sharing.** Immutable refcounted subtrees share identical tokens through the
-  builder, and a splice reparse shares every untouched subtree with the previous tree.
+- **Cheap splicing.** A statement-splice reparse copies the untouched top-level runs of the previous
+  tree and parses only the edited middle.
 
-Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
-over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
-splicing. Hand-rolling reproduces that code without the hardening and gains no design freedom.
-rowan is small and dependency-free enough to vendor or fork if divergence is ever needed, and Biome
-forked it, which is precedent for both its maturity and the exit hatch.
+The tree was rowan's green and red design until it was replaced by ry's own flat preorder tree
+(`crates/syntax/src/tree.rs`; see "The syntax tree is ry's own flat preorder arena" below for why).
+The cost both share is that traversal is dynamically kinded, which is why inference never walks the
+tree: the checker runs on per-item HIR, and the tree serves the fidelity layers, which are the IDE,
+the formatter and refactorings.
 
-The acknowledged cost is that rowan traversal is dynamically kinded and slower than direct structs.
-That is why inference never walks it. The checker runs on per-item HIR, and rowan serves the
-fidelity layers, which are the IDE, the formatter and refactorings.
-
-Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
-pointer fast path, and ry's tree builder shares only tokens, never nodes (see "The cold check's
-per-call work" below), so a from-scratch reparse shares no subtree. rust-analyzer's barriers are likewise value equality
-on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
-compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
-correctness never depends on splicing.
+Value equality is the mechanism for cutoffs, not pointer identity. An item's subtree compares
+structurally (one slice compare per column), and rust-analyzer's barriers are likewise value
+equality on its `ItemTree` and `AstIdMap`. Parse stays a pure per-file query and correctness never
+depends on splicing.
 
 ## Why salsa rather than an in-house engine
 
@@ -775,7 +768,7 @@ split.
 Four salsa risks are recorded so they stay managed.
 
 - **Pin the version and upgrade deliberately.** The public API churns hard and often, with several
-  breaking releases a year. Vendoring or forking is the exit hatch, exactly as for rowan.
+  breaking releases a year. Vendoring or forking is the exit hatch.
 - **Fixpoint non-convergence is a hard panic at 200 iterations.** The pin-to-`Unknown` rule lives
   inside the cycle function. Reaching salsa's cap is a bug, never a fallback.
 - **Interned-value garbage collection is young.** rust-analyzer used about four times the memory on
@@ -2293,8 +2286,8 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   from the analysis, and forcing lowers the node spanning `start..end` with
   `interp::lower::lower_node`. The plan carries byte offsets (`SourceSpan::source_start/end`) so the
   node is found without text.
-- **Why a tree, not text:** the analysis already parsed every file, the rowan green tree is shared
-  and cheap to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
+- **Why a tree, not text:** the analysis already parsed every file, the tree is an `Arc` and cheap
+  to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
   the analysis already holds. The finalizer drops a tree after no promise of its file remains, at the
   collector's next finalizer point (a native call's return, `gc()`, or exit), not immediately.
 - **Why `.Internal`s and not `.Call`:** the interpreter registers Rust builtins directly, so the
@@ -3208,7 +3201,7 @@ first lines R had already read, leaving R mid-command.
 ## The cold check searches green trees and caches globals per item check
 
 - **Before.** Every whole-file tree reader (parse-stage diagnostics, annotation sites, attached namespaces, used tokens) walked the red tree with `descendants()`, building a red node per element, about 8 ns each. One item check read `frame_definition` and `package_name` through salsa for every reference, and each read interned a key tuple and verified a memo. `map_child_types` re-interned every type it visited, even when nothing changed.
-- **Shape.** `syntax::matching_nodes` filters on green nodes and builds red nodes only for matches (and, lazily, their shared ancestors); `syntax::for_each_token` reads token text with no red nodes. `testing::check_parse_invariants` pins both to the red walks. `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
+- **Shape.** `syntax::matching_nodes` filters with borrowed `NodeRef` cursors and makes owned `SyntaxNode`s only for matches; `syntax::for_each_token` reads token text with no owned cursors. `testing::check_parse_invariants` pins both to the owned-cursor walks. (With the flat tree an owned cursor is only a refcount bump, so the gap is now small.) `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
 - **Why it is safe for salsa.** The first read inside a query records the dependency edge, and repeats only dedupe, so caching a read within one query execution changes no edge set. The cache lives as long as one `item_check` execution and is never shared.
 - **Allocator.** mimalloc's eager arena commit made the kernel zero transparent huge pages the process never used. `crates/ry/src/main.rs` turns it off from an `.init_array` constructor, before the first allocation. It cut peak RSS on the benchmark code bases from about 790 MiB to about 520 MiB.
 - **Counters.** `infer::RESOLVE_CALLS` is thread-local: a shared atomic bumped on every resolve step was a contended cache line across the worker threads.
@@ -3385,9 +3378,9 @@ first lines R had already read, leaving R mid-command.
   atomics shared across cores on every type intern, and a deep verification of every syntax-pass
   memo once the attached namespaces were set.
 - **Target shape.**
-  - `file_syntax_sites` collects every per-file site in one `syntax::walk_green` pass, and
-    `lints::syntax_lints` walks the green tree, building a red node only where `may_lint` says a
-    lint can fire.
+  - `file_syntax_sites` collects every per-file site in one `syntax::walk_tree` pass, and
+    `lints::syntax_lints` walks the tree with borrowed cursors, making an owned node only where
+    `may_lint` says a lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
   - `Name` and `Ty` are never garbage-collected. That costs nothing in a one-shot check. In the
@@ -4108,8 +4101,7 @@ check` releases its trees once, and memoized records are compact" below).
   `Text` span addresses (`module[text]` is the `&str`), so every HIR kind is `Copy`. It is not a
   `Symbol`, because the interner leaks by design: interning literals would keep every
   intermediate spelling of a string literal typed in the editor for the life of the server. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
-  per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
-  plus absolute start), collects each list on a scratch stack and seals it into its side array
+  per-kind child vector. Lowering reads the tree through borrowed `syntax::NodeRef` cursors, collects each list on a scratch stack and seals it into its side array
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
   the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
   rule of the data-oriented record above.
@@ -5742,3 +5734,36 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** The join is `Ty::Num`: the value as an `f64` in the register's or slot's double variable and an "is integer" flag in its integer variable. An edge from `Int` or `Dbl` converts (an integer `NA` becomes the double `NA`), and boxing, write-back and deoptimization rebuild exactly the R value the flag names (`runtime::jit_box_num`, `call_flush`), so `typeof`, integer overflow and `NA` behave as in tier 0. Widening to a plain double instead would change `typeof` and integer arithmetic, which R code observes.
 - **Who reads it unboxed.** Only `Move`, `SetVar` and arithmetic whose result is a double whatever the flag says: a comparison, `/`, `^`, or `+ - *` with a double operand. `Builder::box_operands` retypes every other reader's `Num` operand as boxed and `Plan::boxings` tells code generation to box it first, so no other action ever sees a `Num`. An inlined body refuses a `Num` slot, and a direct call passes one boxed from its slot cell after the flush.
 - **Impact.** The mixed `match` loop runs compiled; correctness is pinned by `test_tiers` seeds that observe `typeof`, `NA` and integer arithmetic after the join, and the fuzzer's final statement can print the types.
+
+# Decision record: the syntax tree is ry's own flat preorder arena
+
+- **Previous shape.** rowan's green tree: every node a refcounted heap allocation (`GreenNode::new`
+  about 660 instructions per node, plus a per-thread node cache), and every consumer that wanted
+  parent links or offsets built red nodes, one more allocation per visited node. Metadata's
+  namespace and call scans, `item_declared_pure`, `lower_type`, `statement_annotations` and the
+  inline-annotation sites all built red nodes, and a second borrowed walker (`GreenRef`,
+  `walk_green`) existed beside the red API only to avoid that cost. Two traversal APIs over one tree
+  was the structural weakness.
+- **Target shape.** `syntax::Tree` stores one file as struct-of-arrays columns in preorder: `kinds`,
+  `starts` (absolute offsets), `ends` (the index one past the subtree) and `parents`, plus the text.
+  Indices are dense `u32`s. A node's children are the run between its index and `ends`; the next
+  sibling is `ends[i]`. The parser's builder records postorder events and `finish` scatters them
+  into preorder in one pass, so building a file is a handful of `Vec` pushes, not one allocation
+  per node.
+- **Cursors.** `SyntaxNode` and `SyntaxToken` are an `Arc<Tree>` plus an index, so making one is a
+  refcount bump; their API mirrors rowan's so the typed AST, the formatter and the IDE did not
+  change shape. `NodeRef` and `TokenRef` are borrowed `Copy` cursors for hot walks, and
+  `walk_tree` is a flat index scan. The one cursor model replaced `GreenRef` and `walk_green`.
+- **Items.** An item's syntax is `Tree::subtree`, a rebased copy of its index range with offsets
+  starting at zero. Equality is a slice compare, which keeps per-item cutoffs position independent
+  without rowan's widths-only encoding.
+- **Splice.** `tree::splice` concatenates index runs from the old tree and the reparsed middle,
+  rebasing offsets and indices; `enable_invariants()` cross-checks it against a full parse, and
+  `syntax::testing` cross-checks every navigation primitive (`token_at_offset`, sibling steps,
+  `next_token`, `child_or_token_at_range`) against a naive reference on every fuzzed tree.
+- **What was given up.** Token sharing across files and the node cache. Neither paid for itself:
+  the flat arrays are smaller than the deduplicated green nodes.
+- **Impact.** One source of truth per file instead of green plus transient red copies, no
+  per-node allocation, and contiguous columns that a walk reads sequentially. Measured numbers are
+  in `backlog.md`, "Check cache follow-ups".
+

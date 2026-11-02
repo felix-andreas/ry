@@ -13,14 +13,14 @@ Layering is enforced by the crate graph. A crate boundary is the compiler-checke
 illegal dependency unrepresentable.
 
 - **`syntax`** is a hand-written lexer and a recursive-descent parser with Pratt parsing for
-  expressions, emitting [rowan](https://github.com/rust-analyzer/rowan) green and red trees. Three
+  expressions, emitting a flat syntax tree (see [The syntax tree](#the-syntax-tree)). Three
   properties matter downstream:
   - The trees are *lossless*: every byte, trivia included, reprints exactly.
   - Parsing is *error-resilient*: every parse yields a tree, and an error stays local to the place
     where the code broke.
-  - Parsing is *position-independent*: a green node stores its width but no absolute offset, so an
-    untouched statement's subtree stays structurally equal when something elsewhere in the file
-    changes.
+  - Items are *position-independent*: an item's syntax is copied out of the file tree with offsets
+    counted from the item's start, so an untouched statement's tree stays equal when something
+    elsewhere in the file changes.
 
   A `#:` annotation is lexed as structured trivia and parsed into first-class nodes with real spans,
   so type syntax is grammar rather than comment text scraped after the fact. Inline annotations run
@@ -109,12 +109,36 @@ The analysis of a project has five inputs:
 
 The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
+### The syntax tree
+
+A file's tree is one `syntax::Tree`: its text and four parallel arrays over its elements (nodes and
+tokens alike) in preorder, holding each element's kind, start offset, the index one past its
+subtree, and its parent's index. Kinds are numbered tokens first, so a comparison tells a node from
+a token, and an element's end is where the next element after its subtree starts. A subtree is
+therefore a contiguous index range and a node's text a contiguous slice of the file text, so a
+whole-tree walk is a linear scan and reading a node's text never allocates.
+
+Cursors are indices. An owned `SyntaxNode` or `SyntaxToken` is the tree's `Arc` plus a `u32`, so
+moving one is arithmetic and a clone is one reference-count increment. A borrowed `NodeRef` is the
+tree reference plus the index and costs nothing to copy, which is what the whole-file passes and
+HIR lowering use. Lookups that a nested tree answers child by child use the layout instead: starts
+never decrease in preorder, so `node_at`, `token_at_offset` and `child_or_token_at_range` binary
+search the starts, and a previous sibling is found by climbing parents from the element before.
+
+The parser emits elements in postorder, because it only knows that a node wraps the elements after
+a checkpoint when it opens the node there. `TreeBuilder::finish` lays them out in preorder in one
+backward pass: an element's preorder index is its parent's plus one plus the size of its earlier
+siblings' subtrees, which postorder gives as a difference of first-element indices. The parse
+invariants (`syntax::testing::check_parse_invariants`) check every shortcut against the
+child-by-child definition on every parsed program, and with `enable_invariants()` every splice
+reparse is compared with a parse from scratch.
+
 ### Parsing, and why it is not where incrementality happens
 
 `parse(file)` is a per-file query with a splice cache beside it. The cache remembers the file's
 previous text and tree (shared across clones of the storage handle), works out the current edit as
 the longest common prefix and suffix, and lets `syntax::reparse` reparse only the statements the
-edit touched, sharing every untouched green subtree by pointer.
+edit touched and copying the untouched top-level runs of the old tree around them.
 
 The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
 fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
@@ -128,7 +152,7 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 
 ### Syntax trees stay resident in the server, and `ry check` releases them once
 
-The server keeps every rowan tree, because an edit reparses one file and every other tree stays
+The server keeps every syntax tree, because an edit reparses one file and every other tree stays
 valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
 has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
 off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
@@ -158,14 +182,11 @@ diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would ot
 previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
 once.
 
-Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
-red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
-takes a predicate over a green node and its parent, and builds red nodes only for the matches and
-their ancestors, while `syntax::for_each_token` visits token texts with no red nodes at all. The
-per-file site collectors share one walk, `file_syntax_sites`, and the syntax lints walk the green
-tree with `syntax::walk_green`, building a red node (`syntax::node_at`) only where a cheap green
-test says a lint may fire. The parse invariants check these against the red walks on every parsed
-program.
+Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
+(`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
+over a node and its parent and makes owned nodes only for the matches. The per-file site collectors
+share one walk, `file_syntax_sites`, and the syntax lints walk the tree with `syntax::walk_tree`,
+making an owned node (`syntax::node_at`) only where a cheap test says a lint may fire.
 
 The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
 wall time. Several of them are worth knowing:
@@ -184,10 +205,7 @@ wall time. Several of them are worth knowing:
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
 - The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
-  borrows the item's checks and the stub schemes instead of cloning them. The parser's green
-  builder shares tokens through a thread-local table but not nodes (`TreeBuilder`): hashing every
-  node to find a twin cost more time than allocating it, at the price of about 70 MiB more peak
-  memory on the finance benchmark.
+  borrows the item's checks and the stub schemes instead of cloning them.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
   only before a line that opens a call and follows a line that is exactly one complete top-level
   call, so no directive straddles a boundary.
@@ -240,7 +258,7 @@ run and panics on any difference. The seeded edit simulation in `cli.rs`
 
 ### From item to scheme
 
-An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower
+An item's subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
@@ -254,8 +272,7 @@ element type that the expression addresses with a `Span`, so every HIR kind is `
 over kinds never touches ranges. A name written at a site with its own range (an argument name, a
 field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
 holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
-no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the green tree through `syntax::GreenNodeAt` and
-builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the tree through borrowed `syntax::NodeRef` cursors. It writes into a per-thread scratch module that keeps its capacity across
 items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
 capacity and lowering allocates a handful of arrays per item. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.

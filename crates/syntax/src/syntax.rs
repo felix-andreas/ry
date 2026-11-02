@@ -13,6 +13,7 @@ mod parser;
 mod reparse;
 mod tree;
 
+use std::{borrow::Cow, sync::Arc};
 pub use {
     kind::SyntaxKind,
     lexer::{Token, is_syntactic_name, lex},
@@ -24,7 +25,6 @@ pub use {
         TokenAtOffset, TokenRef, Tree, TreeEvent, WalkEvent, is_walked_token, walk_tree,
     },
 };
-use std::{borrow::Cow, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxError {

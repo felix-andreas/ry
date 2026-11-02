@@ -651,9 +651,7 @@ unsafe fn lower_handle_code(handle: Sexp, position: Position) -> R<Sexp> {
     let mut srcfile = handle.external_protected();
     if srcfile.kind() != SexpType::Environment {
         let text = match &file.source {
-            Source::Tree(tree) => tree.syntax_node()
-                .text()
-                .to_string(),
+            Source::Tree(tree) => tree.syntax_node().text().to_string(),
             Source::Text(text) => text.to_string(),
         };
         srcfile = file_srcfile(&file.path, &text)?;

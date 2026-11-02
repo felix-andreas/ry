@@ -1729,7 +1729,7 @@ fn child_of_kind(node: NodeRef<'_>, kind: SyntaxKind) -> Option<NodeRef<'_>> {
     node.child_nodes().find(|child| child.kind() == kind)
 }
 
-/// Excludes the trailing trivia (including `#:` annotations) rowan attaches
+/// Excludes the trailing trivia (including `#:` annotations) the parser attaches
 /// inside expression nodes, so ranges cover code only.
 pub fn significant_range(node: &SyntaxNode) -> TextRange {
     significant_range_of(node.node_ref())

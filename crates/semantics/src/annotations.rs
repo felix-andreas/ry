@@ -16,8 +16,8 @@ use {
     rustc_hash::FxHashSet,
     std::mem::take,
     syntax::{
-        NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
-        is_inline_annotation_kind, matching_nodes, node_text,
+        NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation_kind,
+        matching_nodes, node_text,
     },
 };
 
@@ -1002,7 +1002,9 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
 }
 
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.node_ref().child_tokens().any(|token| token.kind == kind)
+    node.node_ref()
+        .child_tokens()
+        .any(|token| token.kind == kind)
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {

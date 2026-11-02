@@ -69,9 +69,16 @@ impl Tree {
                 .iter()
                 .map(|&start| start - offset)
                 .collect(),
-            ends: self.ends[first..end].iter().map(|&end| end - base).collect(),
+            ends: self.ends[first..end]
+                .iter()
+                .map(|&end| end - base)
+                .collect(),
             parents: iter::once(NO_PARENT)
-                .chain(self.parents[first + 1..end].iter().map(|&parent| parent - base))
+                .chain(
+                    self.parents[first + 1..end]
+                        .iter()
+                        .map(|&parent| parent - base),
+                )
                 .collect(),
         }
     }
@@ -246,7 +253,8 @@ impl Tree {
                 element <= start
             }
         });
-        let candidate = (before > 0).then(|| self.child_containing(node, first + before as u32 - 1));
+        let candidate =
+            (before > 0).then(|| self.child_containing(node, first + before as u32 - 1));
         if !range.is_empty() {
             return candidate.filter(|&child| self.range(child).contains_range(range));
         }
@@ -378,8 +386,7 @@ impl TreeBuilder {
         let mut preorder = vec![0u32; count];
         for element in (0..count - 1).rev() {
             let parent = parents[element] as usize;
-            preorder[element] =
-                preorder[parent] + 1 + (self.firsts[element] - self.firsts[parent]);
+            preorder[element] = preorder[parent] + 1 + (self.firsts[element] - self.firsts[parent]);
         }
         let mut kinds = vec![SyntaxKind::ERROR; count];
         let mut starts = vec![TextSize::new(0); count];
@@ -712,7 +719,10 @@ impl SyntaxNode {
     }
 
     pub fn last_child_or_token(&self) -> Option<SyntaxElement> {
-        Some(element(&self.tree, self.tree.last_child_or_token(self.index)?))
+        Some(element(
+            &self.tree,
+            self.tree.last_child_or_token(self.index)?,
+        ))
     }
 
     pub fn next_sibling(&self) -> Option<SyntaxNode> {
@@ -1331,7 +1341,6 @@ impl<'a> NodeRef<'a> {
             .map(move |index| token_ref(tree, index))
     }
 }
-
 
 /// One step of [`walk_tree`].
 #[derive(Clone, Copy)]

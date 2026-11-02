@@ -675,10 +675,7 @@ fn check_navigation(root: &SyntaxNode, input: &str) {
             (node.kind(), parent, node.text_range())
         })
         .collect();
-    assert_eq!(
-        visited, expected,
-        "tree walk diverged for input {input:?}"
-    );
+    assert_eq!(visited, expected, "tree walk diverged for input {input:?}");
     for node in &descendants {
         let first = descendants
             .iter()
@@ -749,10 +746,16 @@ fn check_siblings(node: &SyntaxNode, input: &str) {
     for (position, child) in children.iter().enumerate() {
         assert_eq!(
             child.prev_sibling_or_token(),
-            position.checked_sub(1).map(|previous| children[previous].clone()),
+            position
+                .checked_sub(1)
+                .map(|previous| children[previous].clone()),
             "prev_sibling_or_token diverged for input {input:?}"
         );
-        assert_eq!(child.index(), position, "index diverged for input {input:?}");
+        assert_eq!(
+            child.index(),
+            position,
+            "index diverged for input {input:?}"
+        );
         if let NodeOrToken::Token(token) = child {
             assert_eq!(
                 token.next_token(),
@@ -761,7 +764,8 @@ fn check_siblings(node: &SyntaxNode, input: &str) {
             );
         }
     }
-    let mut ranges: Vec<crate::TextRange> = children.iter().map(|child| child.text_range()).collect();
+    let mut ranges: Vec<crate::TextRange> =
+        children.iter().map(|child| child.text_range()).collect();
     ranges.extend(
         children
             .iter()
