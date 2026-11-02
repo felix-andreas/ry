@@ -8,6 +8,7 @@ pub mod r;
 #[cfg(feature = "runtime")]
 pub mod ry_runtime;
 pub mod testing;
+pub mod watch;
 
 use {
     rustc_hash::{FxHashMap, FxHashSet},
@@ -36,9 +37,10 @@ use {
         path::{Path, PathBuf},
         sync::Arc,
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     },
     syntax::Parse,
+    watch::{Edits, SourceWatcher},
     xxhash_rust::xxh3::{Xxh3, xxh3_64},
 };
 
@@ -109,6 +111,17 @@ struct LoadedPackage {
     /// The load index an earlier process saved for exactly these sources, until the sources
     /// change.
     cached: Option<CachedIndex>,
+    watch: Watch,
+}
+
+/// Whether a loaded package's sources are watched for edits. A package is watched from the
+/// first time someone asks what changed, because a one-off load never asks.
+enum Watch {
+    Unstarted,
+    Watching(SourceWatcher),
+    /// The operating system refused (a watch limit, a file system without notifications), so
+    /// changes are found by comparing fingerprints.
+    Unavailable,
 }
 
 /// A load index read from the cache, with the R text of each file whose R text is not its
@@ -428,6 +441,36 @@ impl fmt::Display for LoadError {
     }
 }
 
+/// Why [`Loader::wait_edits`] cannot watch a package.
+#[derive(Debug)]
+pub enum WatchError {
+    NotLoaded(PathBuf),
+    Notify(PathBuf, String),
+    Unavailable(PathBuf),
+}
+
+impl fmt::Display for WatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WatchError::NotLoaded(root) => {
+                write!(formatter, "the package at {} is not loaded", root.display())
+            }
+            WatchError::Notify(root, error) => {
+                write!(
+                    formatter,
+                    "cannot watch {} for edits: {error}",
+                    root.display()
+                )
+            }
+            WatchError::Unavailable(root) => write!(
+                formatter,
+                "cannot watch {} for edits: the operating system refused earlier",
+                root.display()
+            ),
+        }
+    }
+}
+
 impl std::error::Error for LoadError {}
 
 /// The directory holding `DESCRIPTION`, at or above `path`.
@@ -671,14 +714,32 @@ impl Loader {
     }
 
     /// The roots of the loaded packages whose sources changed on disk since they were loaded,
-    /// and of the packages whose load failed whose sources changed since that attempt, judged
-    /// from file names, sizes and modification times without reading a file. A root is reported
-    /// once per change: a reload that fails is not retried until the next change.
+    /// learned from operating-system notifications or, where those are unavailable, from file
+    /// names, sizes and modification times, and the roots of the packages whose load failed whose
+    /// sources changed since that attempt, judged from the same stamps. A root is reported once
+    /// per change: a reload that fails is not retried until the next change.
     pub fn changed_roots(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for package in &mut self.packages {
             if package.committed.is_none() {
                 continue;
+            }
+            match &mut package.watch {
+                Watch::Unstarted => {
+                    // Edits made before the watch started are caught by the fingerprint below.
+                    package.watch = SourceWatcher::new(&package.root)
+                        .map_or(Watch::Unavailable, Watch::Watching);
+                }
+                Watch::Watching(watcher) => match watcher.take() {
+                    Ok(edits) => {
+                        if edits.affects_load() {
+                            changed.push(package.root.clone());
+                        }
+                        continue;
+                    }
+                    Err(_) => package.watch = Watch::Unavailable,
+                },
+                Watch::Unavailable => {}
             }
             let current = source_fingerprint(&package.root);
             if current != package.committed_fingerprint {
@@ -695,6 +756,33 @@ impl Loader {
         }
         changed.sort();
         changed
+    }
+
+    /// Waits up to `timeout` for an edit under the package loaded from `root`, and returns what
+    /// changed, including tests and installed files, which [`Loader::changed_roots`] ignores.
+    pub fn wait_edits(&mut self, root: &Path, timeout: Duration) -> Result<Edits, WatchError> {
+        let package = self
+            .packages
+            .iter_mut()
+            .find(|package| package.root == root)
+            .ok_or_else(|| WatchError::NotLoaded(root.to_path_buf()))?;
+        if let Watch::Unstarted = package.watch {
+            match SourceWatcher::new(root) {
+                Ok(watcher) => package.watch = Watch::Watching(watcher),
+                Err(error) => {
+                    package.watch = Watch::Unavailable;
+                    return Err(WatchError::Notify(root.to_path_buf(), error.to_string()));
+                }
+            }
+        }
+        match &mut package.watch {
+            Watch::Watching(watcher) => watcher
+                .wait(timeout)
+                .map_err(|error| WatchError::Notify(root.to_path_buf(), error.to_string())),
+            Watch::Unstarted | Watch::Unavailable => {
+                Err(WatchError::Unavailable(root.to_path_buf()))
+            }
+        }
     }
 
     /// Every top-level name of the package loaded from `root` whose definition reaches one of
@@ -986,6 +1074,7 @@ impl Loader {
                     pending: None,
                     analyzed: false,
                     cached: None,
+                    watch: Watch::Unstarted,
                 });
                 self.packages.len() - 1
             }
@@ -2111,11 +2200,12 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
     })
 }
 
-/// Where a backend keeps the S4 metadata of the package at `root` ([`DeferredS4::cache_key`]),
-/// one file per package that each save replaces.
-pub fn s4_cache_path(root: &Path) -> Option<PathBuf> {
+/// Where one kind of per-package cache lives for the package at `root`, one `.rds` file per
+/// package that each save replaces: `s4` for the S4 metadata a backend holds back
+/// ([`DeferredS4::cache_key`]), `roxygen` for the blocks `ry document` parsed.
+pub fn package_cache_path(root: &Path, kind: &str) -> Option<PathBuf> {
     let name = format!("{:016x}.rds", xxh3_64(root.as_os_str().as_encoded_bytes()));
-    Some(cache_directory()?.join("ry").join("s4").join(name))
+    Some(cache_directory()?.join("ry").join(kind).join(name))
 }
 
 pub(crate) fn cache_directory() -> Option<PathBuf> {

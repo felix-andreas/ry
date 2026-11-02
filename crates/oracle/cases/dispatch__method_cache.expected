@@ -1,0 +1,23 @@
+[stdout]
+| [1] "default"
+| [1] "thing v1"
+| [1] "thing v2"
+| [1] "default"
+| [1] "thing v3"
+| [1] "default"
+| [1] "default"
+| [1] "default"
+| [1] "registered"
+| [1] "local"
+| [1] "registered"
+| [1] "1"               "1"               "formatted thing" "formatted thing"
+| [1] "default"
+| [1] "late table"
+| [1] "no applicable method for 'describe' applied to an object of class \"other\""
+| [1] "global other"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "global other"

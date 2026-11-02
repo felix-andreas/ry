@@ -1840,6 +1840,23 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
+calling frames to their top environment uncached, because function frames gain and lose bindings
+without moving any epoch. The rest of the walk (the top environment, the generic's registered
+methods table, the imports, the base namespace and the search path) is cached in
+`dispatch::MethodCache`, keyed by the method name, the top environment, the generic's
+registered-methods table (resolved first, since replacing an existing binding's value does not
+move the epoch) and whether the top environment's own frame is searched (it is not when the
+calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
+binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
+value is no longer a function. The whole cache is dropped when the binding epoch or the collection
+count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
+collection may free an environment whose address a later key reuses. A walk that passed a function
+frame, an active binding, or a non-function binding of the name is not cached, because a later
+change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
+to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
+case `dispatch__method_cache`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
@@ -5912,8 +5929,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Previous shape.** `load_all()` loaded a package, but running its tests meant `devtools::test()` under GNU R, which reloads the whole package (about a minute on finbench) before every run.
 - **Shape.** `ry test` is `ry load` running an R driver (`crates/ry/src/test.R`) that calls `testthat::test_dir(load_package = "none", package =)` against the namespace `load_all()` built, so testthat's own reporters print the output and helpers, setup files and the package environment behave as under `devtools::test()`. Nothing in the reporter path is reimplemented, which keeps the output identical for CI.
-- **Watch.** `--watch` polls size and mtime of the sources under `R/` and of `tests/testthat/*.R` (not other files: testthat creates and deletes `_snaps/` during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
+- **Watch.** `--watch` waits on operating-system notifications for `R/`, `data/`, `src/`, `inst/`, `tests/`, `DESCRIPTION` and `NAMESPACE` (`loader::watch`, `Loader::wait_edits`; edits under `_snaps/` are dropped because testthat writes there during a run), reloads with `load_all()`, and reads the reload's touched names from `.ry_packages[[root]]$changed` (`NULL` after a full load or one that ran code). `Loader::callers` closes those names over the index's reverse mentions and reads, and a test file is affected when it changed or its `all.names()` meet that closure. Affected files run first, then the rest; a changed helper or setup file, or a `NULL` change set, reruns everything.
 - **Why not a test index in the loader.** Test files are parsed with `all.names()` and cached by stamp; that is a few milliseconds per file and keeps the loader ignorant of testthat.
+
+## Source edits arrive by OS notification, ordered by a barrier file
+
+- **Previous shape.** The console compared a fingerprint of names, sizes and mtimes of `R/`, `data/` and the metadata before every command, and `ry test --watch` polled stamps every 0.2 s. Neither saw `src/` or `inst/`.
+- **Shape.** One `notify` watcher per loaded package (`crates/loader/src/watch.rs`) files relevant paths into an inbox. `SourceWatcher::take` writes a barrier file into a private watched directory and waits for its event; since one watcher delivers events in order, every edit made before the call is then in the inbox, so a reload depends on the order of writes and calls, not on thread timing, and the reload fuzz test stays deterministic. The fingerprint stays as the fallback when notifications are unavailable or lost.
+- **Compiled code.** A `src/` edit makes the console and `--watch` reload, and `load_all()` rebuilds. On ry's runtime `dyn.unload` retires the library record into `unloaded_dlls` (kept mapped, so a stale pointer cannot crash), and the next `dyn.load` of the same path maps a fresh copy from a temp directory, because `dlopen` returns the already open handle for a path it has seen.
+
+## `ry document` is roxygen2 with a block cache and linear topic ordering
+
+- **Previous shape.** Documentation meant `devtools::document()`, which reloads the package and reparses every block; on a 22,000-topic package roxygen2's `RoxyTopics$topo_order` (run 15 times by `@inherit` processing) and `RoxyTopics$add` are quadratic and dominate.
+- **Shape.** `crates/ry/src/document.R` calls `roxygen2::roxygenise(load_code = )` with ry's `load_all()`, so output is roxygen2's own, byte for byte. For the run it swaps `roxygen2:::parse_package` for a version that caches each file's tokenized blocks by md5 (keyed by roxygen2 version, R version and roxygen options; `package_cache_path(root, "roxygen")`), and replaces roxygen2's quadratic steps with linear equivalents (`roclet_process.roclet_rd`, whose topic list grows by copying, and `RoxyTopics$topo_apply`, `topo_order` and `drop_invalid`, which find topics by scanning names), each only when the installed function's deparsed body equals the embedded original, so another roxygen2 version runs unpatched. Everything is restored on exit. The session runs with `keep.source = TRUE` because roxygen2 reads R6 methods' srcrefs.
+- **Why not regenerate only affected Rd files.** roxygen2's `@inherit*`, `@family`, `@describeIn` and `@rdname` merging make one block's Rd depend on others, and `roclet_output` already writes only files whose content changed. Reimplementing that dependency tracking would fork roxygen2's semantics; caching the parse and fixing the quadratic steps gets the speed without that risk.
+- **Known staleness.** A cached block keeps markdown links resolved against installed packages at parse time.
 
 ## A primitive's S4 cache lookup matches arguments by name first
 
@@ -5925,8 +5955,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Warnings always go through `.signalSimpleWarning`.** GNU R's `vsignalWarning` calls `.signalSimpleWarning(msg, base::quote(call))` whenever that function is bound, even with no handler established, and rlang reads the frames it leaves. ry used to call it only when a handler existed (`crates/interp/src/conditions.rs`, `warning_call`).
 - **Compiled closure calls pass constant arguments as values.** GNU R's byte code pushes a constant argument with `PUSHCONSTARG`, without a promise, and rlang's `env_dot_type` tells the two apart. `compiler::cmpfun` compiles at once, as GNU R's does (`crates/interp/src/bytecode.rs`, `bcClose`; `eval::compiled_args_into`).
+- **`dyn.load` refuses GNU R's `tcltk.so`.** GNU R builds its base packages' shared objects with R's internals, so they read `SEXPREC` fields directly and crash on ry's heap layout; the other base packages' code is built into libR (`builtin_libraries.rs`), and tcltk is refused with "Tcl/Tk support is not available on this system", which sessioninfo's `external_info()` catches. `capabilities("tcltk")` is `FALSE` to match.
+- **Parse errors use GNU R's exact text.** testthat and other packages match on it ("unexpected symbol", the quoted line). The message names the token GNU R's LALR parser stops on (`SyntaxError::found`) with bison's token names, the location is that token's 1-based column with tabs to multiples of 8 (end of input is column 0 on the line after the last), and the context is the last 255 bytes read, split into lines, the last two quoted with a caret. `Rscript` and the console quote only the failing top-level expression, `Error: ... in "..."`, and nothing at the end of input (`lower.rs`, `grammar_error_report`; oracle case `parse__error_messages`).
+- **`list.dirs` names the directory itself only when `recursive = TRUE`.** testthat reads snapshot variants with `list.dirs(recursive = FALSE, full.names = FALSE)`, and a stray `""` entry became a phantom variant.
 - **Base binds the missing argument in the C API.** `R_MissingArg` is a symbol whose base value is itself, so `R_existsVarInFrame`, `R_GetBindingType`, `R_BindingIsActive` and `R_BindingIsLocked` answer for it in the base frames instead of erroring (`crates/libr/src/environments.rs`, `base_binds_missing_arg`).
 - **A compiled `local(expr)` is `(function() expr)()` with a four-element `function` call**, whose srcref slot is NULL, as GNU R's compiler writes it. rlang's `trace_back` writes into that slot of every frame call.
+- **`stdout()` is the current sink target.** GNU R's `stdout()` returns `R_OutputCon`, so a call inside `sink()` names the sink, while a `stdout()` kept from before writes past it to the console (connection 1 is the console itself, never redirected). vctrs' reporter tests broke on a stray `.` the reporter wrote through a saved `stdout()` (`crates/interp/src/connections.rs`, `stdout`, `device_write`, `print`).
+- **A connection's `conn_id` address is never compared.** GNU R only checks that the external pointer is not NULL (closing clears it); curl stores its own handle there, so comparing addresses made `isOpen` and `close` reject curl connections (`connections.rs`, `resolve_number`).
+- **TRE's lazy quantifiers with capture groups take the leftmost-first match.** Without groups TRE returns the shortest overall end; with groups its tagged matcher follows the leftmost-first rule (`x(.+?)(a+)` on `xaaab` is `xaaa`, `x.+?a+` is `xaa`). openssl's PEM splitting depends on it (`crates/interp/src/strings.rs`, `Matcher::find_at`). `\Q...\E` quotes a literal run.
+- **`attach(env)` attaches a copy.** GNU R copies the bindings into a fresh environment and leaves the original's enclosure alone; attaching the environment itself cut shiny's namespace off from its imports (`crates/interp/src/envir.rs`, `do_attach`).
+- **A user interrupt is signalled as a condition first.** `Rf_onintr` and `R_CheckUserInterrupt` run the handler stack for class `c("interrupt", "condition")`: calling handlers run, an exiting handler (`tryCatch(interrupt = )`) catches it, and only an unhandled interrupt unwinds to top level. later and rlang's `interrupt()` rely on it (`crates/interp/src/conditions.rs`, `signal_interrupt`).
+- **`rmultinom` carries the remaining probability as a double-double.** GNU R uses a `long double`; in plain `f64` ten probabilities of 0.1 leave a conditional probability just above 0.5, `rbinom` then draws the complement, and the counts differ from GNU R's for the same seed. RcppArmadillo compares R's draws with its own (`crates/interp/src/distributions.rs`, `rmultinom`).
+- **`[` subsets a parsed expression's `srcref` list.** plumber locates each endpoint's comment block with `attr(exprs[i], "srcref")` (`crates/interp/src/subset.rs`, `subset`).
+- **`Rf_setAttrib(R_NilValue, name, R_NilValue)` succeeds.** GNU R checks for removal before it rejects a `NULL` target, and data.table's `C_unlock` runs on a `j` result that is often `NULL` (`crates/libr/src/attributes.rs`, `set_attrib`).
+- **`row.names<-` stores a real compact form `c(NA, n)` as integers**, as GNU R's `row_names_gets` does. cpp11's `data_frame::nrow` reads only the integer form, and readr's chunked reader loops forever on the real one.
 - **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
 ## Records, tuples and tags compile natively
