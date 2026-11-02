@@ -27,3 +27,19 @@ print(paste0(structure(1, class = "bar")))
 print(sprintf("%s", structure("a", class = "bar")))
 length.qq <- function(x) 99L
 print(lengths(list(structure(1, class = "qq"), 1:3)))
+
+# A builtin called with a forwarded missing argument falls back to its default.
+forward_signif <- function(x, digits) signif(x, digits = digits)
+print(forward_signif(1.23456789))
+forward_round <- function(x, digits) round(x, digits = digits)
+print(forward_round(1.56789))
+
+# A vector assigned into itself reads the old values.
+permuted <- c(10, 20, 30)
+permuted[c(3L, 1L, 2L)] <- permuted
+print(permuted)
+swap_ints <- function(x) { x[c(2L, 1L)] <- x; x }
+print(swap_ints(c(5L, 6L)))
+swapped_list <- list(1, 2)
+swapped_list[2:1] <- swapped_list
+str(swapped_list)

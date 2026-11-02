@@ -1411,6 +1411,15 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
+    // R's `SubassignN`; Matrix reorders its results this way.
+    let value = if value == object {
+        let copy = values::shallow_duplicate(value)?;
+        crate::heap().root(copy);
+        copy
+    } else {
+        value
+    };
     // A value an Array cannot hold, such as an NA, makes the result a plain R vector.
     let object = if object.is_array() {
         match crate::arrays::subassign(object, indices, value, call)? {
