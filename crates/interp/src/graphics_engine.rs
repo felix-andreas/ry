@@ -2988,6 +2988,7 @@ pub unsafe fn copy_display_list(from: usize) -> R<()> {
     let device = engine_device(dd);
     (*device).ops = ops;
     (*device).args = args;
+    (*device).stamp = next_stamp();
     notify_systems(source, Event::CopyState, nil())?;
     play_display_list(dd)?;
     if (*dd).display_list_on == 0 {

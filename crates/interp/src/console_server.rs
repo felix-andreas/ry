@@ -688,10 +688,9 @@ mod platform {
 
     /// Sends the current plot to the subscribed editors when the command just run changed it.
     ///
-    /// The first time an editor is subscribed, the default device becomes a `pdf(NULL)` device
-    /// that keeps its display list, unless the user chose another device: it writes no file, and
-    /// the display list is what each plot is copied from onto an svg device, so the editor gets
-    /// what the engine drew. A file device such as `png()` keeps no display list and is left
+    /// Each plot is copied from the current device's display list onto an svg device, so the
+    /// editor gets what the engine drew. The default device `install_plot_device` sets up writes
+    /// no file and keeps its display list; a file device such as `png()` keeps none and is left
     /// alone.
     unsafe fn publish_plot() {
         let subscribers = subscribers();
@@ -721,16 +720,7 @@ mod platform {
 
     /// The current plot as svg text, or `None` when it is the one sent last or there is none.
     unsafe fn plot_svg() -> Result<Option<String>, String> {
-        if !PLOT_DEVICE_INSTALLED.swap(true, Ordering::Relaxed) {
-            evaluate_text(
-                "if (is.null(getOption(\"device\")) || \
-                 identical(getOption(\"device\"), grDevices::pdf)) \
-                 options(device = function(width = 7, height = 7, ...) { \
-                 grDevices::pdf(NULL, width = width, height = height); \
-                 grDevices::dev.control(\"enable\") })",
-                global_env(),
-            )?;
-        }
+        install_plot_device()?;
         if graphics_engine::no_devices() {
             return Ok(None);
         }
@@ -743,20 +733,50 @@ mod platform {
         {
             return Ok(None);
         }
-        let file = evaluate_text(
-            "local({ file <- tempfile(fileext = \".svg\"); from <- grDevices::dev.cur(); \
+        // The copy runs with warnings muffled and closes whatever device it opened on every
+        // path, because a replay that fails or warns would otherwise leave an svg device open
+        // and a warning queued for the user's next command.
+        let svg = evaluate_text(
+            "suppressWarnings(local({ file <- tempfile(fileext = \".svg\"); \
+             from <- grDevices::dev.cur(); before <- grDevices::dev.list(); \
+             on.exit({ for (opened in setdiff(grDevices::dev.list(), before)) \
+             grDevices::dev.off(opened); grDevices::dev.set(from); unlink(file) }); \
              size <- grDevices::dev.size(); \
              grDevices::dev.copy(grDevices::svg, file, width = size[1], height = size[2]); \
-             grDevices::dev.off(); grDevices::dev.set(from); file })",
+             grDevices::dev.off(); \
+             readChar(file, file.size(file), useBytes = TRUE) }))",
             global_env(),
         )?;
-        let file = values::as_string_scalar(file)
+        values::as_string_scalar(svg)
             .ok()
             .flatten()
-            .ok_or_else(|| "the svg file has no name".to_owned())?;
-        let svg = fs::read_to_string(&file).map_err(|error| format!("reading {file}: {error}"));
-        fs::remove_file(&file).map_err(|error| format!("removing {file}: {error}"))?;
-        svg.map(Some)
+            .map(Some)
+            .ok_or_else(|| "the svg export returned no text".to_owned())
+    }
+
+    /// Makes the default device a `pdf(NULL)` device that keeps its display list, once per
+    /// console, unless the user chose a device. The platform's own interactive defaults (X11,
+    /// quartz, windows) count as unchosen: they would open a window instead of the panel, and on
+    /// a machine without a display they fail.
+    unsafe fn install_plot_device() -> Result<(), String> {
+        if PLOT_DEVICE_INSTALLED.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        evaluate_text(
+            "local({ device <- getOption(\"device\"); \
+             builtin <- c(\"pdf\", \"X11\", \"x11\", \"quartz\", \"windows\"); \
+             namespace <- asNamespace(\"grDevices\"); \
+             unchosen <- is.null(device) || \
+             (is.character(device) && device %in% builtin) || \
+             any(vapply(builtin, function(name) \
+             exists(name, envir = namespace, inherits = FALSE) && \
+             identical(device, get(name, envir = namespace)), logical(1))); \
+             if (unchosen) options(device = function(width = 7, height = 7, ...) { \
+             grDevices::pdf(NULL, width = width, height = height); \
+             grDevices::dev.control(\"enable\") }) })",
+            global_env(),
+        )
+        .map(drop)
     }
 
     fn subscribers() -> Vec<u64> {
@@ -923,7 +943,17 @@ mod platform {
             if let Some(target) = lock(&CONNECTIONS).get_mut(&connection) {
                 target.subscribed = true;
             }
-            send(connection, response(&request, Ok(json!({}))));
+            // Installed now rather than at the next prompt, so the command typed next already
+            // plots on the device the panel is fed from.
+            let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
+            let mark = crate::heap().handle_mark();
+            let installed = install_plot_device();
+            crate::heap().release_handles(mark);
+            SERVING_REQUEST.store(serving, Ordering::Relaxed);
+            send(
+                connection,
+                response(&request, installed.map(|()| json!({}))),
+            );
             return;
         }
         let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);

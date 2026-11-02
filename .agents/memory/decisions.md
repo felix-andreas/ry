@@ -2557,13 +2557,16 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     `ComputeAtValue`), not to `par("adj")`; `tck` below 0.5 is a fraction of the plot region's
     shorter side, above it of its extent across the axis.
 - **The editor's plot panel is fed from the engine's display list.** A console with a
-  subscribed editor makes its default device (`options(device=)`, unless the user set another)
-  a `pdf(NULL)` device with the display list enabled. At each prompt, `publish_plot` in
+  subscribed editor makes its default device (`options(device=)`) a `pdf(NULL)` device with the
+  display list enabled, when the subscription arrives so the next command already uses it. A
+  default the user set is kept, but the platform's own (`pdf`, `X11`, `quartz`, `windows`) is
+  replaced, since an X11 default would open a window or fail without a display. At each prompt, `publish_plot` in
   `console_server.rs` compares the current device's display-list stamp
   (`graphics_engine::display_list_stamp`, drawn from one global counter, so a device that takes
   a closed one's slot never repeats a stamp) with the last one sent; when it changed, it copies
-  the display list onto an svg device with `dev.copy` and sends the file's text as a `ryPlot`
-  event, which VS Code shows in one "R Plot" panel. A device of its own (httpgd-style) would
+  the display list onto an svg device with `dev.copy` (warnings muffled, and every device it
+  opened closed on exit, so a replay that fails leaks neither a device nor a warning) and sends
+  the file's text as a `ryPlot` event, which VS Code shows in one "R Plot" panel. A device of its own (httpgd-style) would
   duplicate the engine and the devices; the display list is already the single record of what
   was drawn. File devices keep their display list off, as in GNU R (`GErecordGraphicOperation`
   records nothing while it is off), so `png()` output is never sent.

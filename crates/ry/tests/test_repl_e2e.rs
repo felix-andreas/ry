@@ -1635,11 +1635,8 @@ fn an_editor_attaches_to_a_running_console() {
     answered.sort_unstable();
     assert_eq!(answered, (10_000..10_500).collect::<Vec<u64>>());
     client.request("rySubscribe", serde_json::json!({}));
-    input.write_all(b"View(df)\n").expect("type a command");
-    let event = client.until(|message| message["event"] == "ryView");
-    assert_eq!(event["body"]["title"], "Data: df");
     // A subscribed editor gets each changed plot as svg after the command that drew it, from a
-    // default device that writes no file.
+    // default device that writes no file, starting with the first command after subscribing.
     input.write_all(b"plot(1:10)\n").expect("type a command");
     let plot = client.until(|message| message["event"] == "ryPlot");
     let svg = plot["body"]["svg"].as_str().expect("svg text");
@@ -1655,6 +1652,9 @@ fn an_editor_attaches_to_a_running_console() {
     input
         .write_all(b"cat(names(grDevices::dev.cur()), \"\\n\")\n")
         .expect("type a command");
+    input.write_all(b"View(df)\n").expect("type a command");
+    let event = client.until(|message| message["event"] == "ryView");
+    assert_eq!(event["body"]["title"], "Data: df");
 
     input
         .write_all(b"cat(\"still running\\n\")\n")
