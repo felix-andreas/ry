@@ -1471,7 +1471,7 @@ pub fn apply_definition<'db>(
     if definition.parameters.is_empty() {
         return definition.body;
     }
-    let substitution: FxHashMap<Name<'db>, Ty<'db>> = definition
+    let substitution: Vec<_> = definition
         .parameters
         .iter()
         .enumerate()

@@ -7,7 +7,9 @@ use {
         stubs::{META_PACKAGE_MEMBERS, stubs},
     },
     std::{collections::BTreeSet, num::NonZero, thread},
-    syntax::{node_text, GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
+    syntax::{
+        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, node_text,
+    },
 };
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
@@ -562,9 +564,8 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
                     continue;
                 };
                 let flag = |wanted: &str| {
-                    named(wanted).is_some_and(|value| {
-                        matches!(node_text(&value).trim(), "TRUE" | "T")
-                    })
+                    named(wanted)
+                        .is_some_and(|value| matches!(node_text(&value).trim(), "TRUE" | "T"))
                 };
                 let fixes = named(".fixes")
                     .and_then(name_argument)

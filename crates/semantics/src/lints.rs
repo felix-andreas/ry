@@ -8,12 +8,13 @@ use {
         stubs::{declaring_namespace, stubs},
     },
     rowan::{Direction, NodeOrToken},
-    syntax::{node_text, 
+    std::cell::LazyCell,
+    syntax::{
         GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
         is_green_inline_annotation,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, walk_green,
+        node_at, node_text, walk_green,
     },
 };
 
@@ -1017,12 +1018,7 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
             let name = if named {
                 children.next().map(|name| {
                     let text = node_text(&name);
-                    let unquoted = text
-                        .strip_prefix(['`', '"', '\''])
-                        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
-                        .unwrap_or(&text)
-                        .to_owned();
-                    (unquoted, significant_range(&name))
+                    (unquoted(&text).to_owned(), significant_range(&name))
                 })
             } else {
                 None
@@ -1031,6 +1027,12 @@ fn call_arguments(call: &SyntaxNode) -> Vec<CallArgument> {
             CallArgument { node, name, value }
         })
         .collect()
+}
+
+fn unquoted(name: &str) -> &str {
+    name.strip_prefix(['`', '"', '\''])
+        .and_then(|inner| inner.strip_suffix(['`', '"', '\'']))
+        .unwrap_or(name)
 }
 
 /// The name of a bare callee, such as `sprintf` in `sprintf(...)` but not in `base::sprintf(...)`.
@@ -1042,23 +1044,34 @@ fn bare_callee(call: &SyntaxNode) -> Option<String> {
 
 fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
     let callee = bare_callee(call);
-    let arguments = call_arguments(call);
-    duplicate_argument_lint(callee.as_deref(), &arguments, config, diagnostics);
+    if repeats_argument_name(call) {
+        duplicate_argument_lint(
+            callee.as_deref(),
+            &call_arguments(call),
+            config,
+            diagnostics,
+        );
+    }
     let Some(callee) = callee else {
         return;
     };
-    let positional: Vec<&SyntaxNode> = arguments
-        .iter()
-        .filter(|argument| argument.name.is_none())
-        .filter_map(|argument| argument.value.as_ref())
-        .collect();
-    let all_positional = positional.len() == arguments.len();
+    // Lazy because the arguments are red nodes, one allocation each, and most callees have
+    // no lint below.
+    let arguments = LazyCell::new(|| call_arguments(call));
+    let positional = LazyCell::new(|| {
+        arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .filter_map(|argument| argument.value.as_ref())
+            .collect::<Vec<&SyntaxNode>>()
+    });
+    let all_positional = LazyCell::new(|| positional.len() == arguments.len());
     match callee.as_str() {
-        "seq" if all_positional && positional.len() == 1 => {
+        "seq" if *all_positional && positional.len() == 1 => {
             length_sequence_lint(call, positional[0], true, config, diagnostics);
         }
         "sprintf" | "gettextf" => sprintf_arguments_lint(&callee, &arguments, config, diagnostics),
-        "any" | "all" if all_positional && positional.len() == 1 => {
+        "any" | "all" if *all_positional && positional.len() == 1 => {
             outer_negation_lint(call, &callee, positional[0], config, diagnostics);
             if callee != "any" {
                 return;
@@ -1087,7 +1100,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 return;
             }
             let expected = if callee == "sapply" { 2 } else { 3 };
-            let counts_lengths = all_positional
+            let counts_lengths = *all_positional
                 && positional.len() == expected
                 && positional[1].kind() == SyntaxKind::NAME
                 && positional[1].text() == "length";
@@ -1110,11 +1123,11 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             }
         }
         "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character"
-            if all_positional && positional.len() == 1 =>
+            if *all_positional && positional.len() == 1 =>
         {
             literal_coercion_lint(call, &callee, positional[0], config, diagnostics);
         }
-        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if all_positional => {
+        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if *all_positional => {
             testthat_expectation_lint(call, &callee, &positional, config, diagnostics);
             if let [expected, actual] = positional[..]
                 && matches!(callee.as_str(), "expect_equal" | "expect_identical")
@@ -1184,7 +1197,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
         "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
             fixed_regex_lint(call, &callee, &arguments, config, diagnostics);
         }
-        "which" if all_positional && positional.len() == 1 => {
+        "which" if *all_positional && positional.len() == 1 => {
             // grep() puts `value` fifth where grepl() has `fixed`, so a fifth positional
             // argument would change meaning in the rewritten call.
             if positional[0].kind() != SyntaxKind::CALL_EXPR
@@ -1217,7 +1230,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 )),
             );
         }
-        "length" if all_positional && positional.len() == 1 => {
+        "length" if *all_positional && positional.len() == 1 => {
             length_test_lint(call, positional[0], config, diagnostics);
             if let Some(("levels", value)) = single_argument_of(positional[0], &["levels"]) {
                 push_lint(
@@ -1254,6 +1267,43 @@ fn opt_in(level: LintLevel) -> LintLevel {
         LintLevel::Default => LintLevel::Off,
         level => level,
     }
+}
+
+/// Whether two named arguments of `call` may share a name, read off the green tree so the
+/// common call builds no red nodes. A name of several tokens answers yes and leaves the
+/// decision to [`duplicate_argument_lint`].
+fn repeats_argument_name(call: &SyntaxNode) -> bool {
+    let green = call.green();
+    let Some(list) = GreenRef::new(&green)
+        .child_nodes()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+    else {
+        return false;
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for argument in list
+        .child_nodes()
+        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+    {
+        if !argument.child_kinds().any(|kind| kind == SyntaxKind::EQ) {
+            continue;
+        }
+        let Some(name) = argument.child_nodes().next() else {
+            continue;
+        };
+        let Some(text) = name.single_token_text() else {
+            return true;
+        };
+        let name = unquoted(text);
+        if name.is_empty() {
+            continue;
+        }
+        if seen.contains(&name) {
+            return true;
+        }
+        seen.push(name);
+    }
+    false
 }
 
 /// A closure stops with "formal argument matched by multiple actual arguments", and `c()` or
@@ -2056,9 +2106,7 @@ fn sample_int_lint(
     else {
         return;
     };
-    if operator.kind() != SyntaxKind::COLON
-        || !matches!(&*node_text(&lhs), "1" | "1L")
-    {
+    if operator.kind() != SyntaxKind::COLON || !matches!(&*node_text(&lhs), "1" | "1L") {
         return;
     }
     let Some(list) = call

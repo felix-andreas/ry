@@ -35,9 +35,9 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
-    syntax::{node_text, 
+    syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
-        paired_comment_definition,
+        node_text, paired_comment_definition,
     },
 };
 
@@ -1532,7 +1532,7 @@ fn definition_agreement_candidates<'db>(
 fn positional_binders<'db>(
     db: &'db dyn Db,
     binders: &[(Name<'db>, Constraint)],
-) -> FxHashMap<Name<'db>, Ty<'db>> {
+) -> Vec<(Name<'db>, Ty<'db>)> {
     binders
         .iter()
         .enumerate()

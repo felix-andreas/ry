@@ -23,10 +23,10 @@ use {
         collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex},
     },
-    syntax::{node_text, 
-        GreenEvent, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
-        ast::{self, BinaryExpr, is_expression_kind},
-        matching_nodes, paired_comment_definition,
+    syntax::{
+        GreenEvent, GreenNodeAt, Parse, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{is_expression_kind, name_text},
+        matching_nodes, node_text, paired_comment_definition,
     },
     thin_vec::ThinVec,
 };
@@ -2725,28 +2725,40 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    let binary = BinaryExpr::cast(node.clone())?;
-    let operator = binary.operator()?;
-    let (lhs, rhs) = (binary.lhs(), binary.rhs());
+    // Read off the green tree: this runs on every top-level statement of every file, and each
+    // red child is an allocation.
+    let green = node.green();
+    let binary = GreenNodeAt::new(&green, node.text_range().start());
+    let mut operator = None;
+    let mut operands = binary
+        .child_nodes()
+        .filter(|child| is_expression_kind(child.kind()));
+    let (lhs, rhs) = (operands.next(), operands.next());
+    for child in binary.child_tokens() {
+        if !child.kind.is_trivia() {
+            operator = Some(child.kind);
+            break;
+        }
+    }
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
-    let (target, value) = match operator.kind() {
+    let (target, value) = match operator? {
         SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => (lhs, rhs),
         SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (rhs, lhs),
         _ => return None,
     };
     let target = target?;
-    let name = ast::Name::cast(target.clone())
-        .and_then(|name| name.text())
-        .or_else(|| {
-            (target.kind() == SyntaxKind::LITERAL
-                && target
-                    .first_token()
-                    .is_some_and(|t| t.kind() == SyntaxKind::STRING))
-            .then(|| {
-                let text = node_text(&target).into_owned();
-                text.trim_matches(['"', '\'']).to_owned()
-            })
-        })?;
+    let name = match target.kind() {
+        SyntaxKind::NAME => name_text(target.first_token()?.text).into_owned(),
+        SyntaxKind::LITERAL
+            if target
+                .first_token()
+                .is_some_and(|token| token.kind == SyntaxKind::STRING) =>
+        {
+            let text: String = target.child_tokens().map(|token| token.text).collect();
+            text.trim_matches(['"', '\'']).to_owned()
+        }
+        _ => return None,
+    };
     let kind = match value.map(|value| value.kind()) {
         Some(SyntaxKind::FUNCTION_DEF) => ItemKind::Function,
         _ => ItemKind::Value,
@@ -2754,7 +2766,7 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     Some(TopLevelDefinition {
         kind,
         name,
-        name_range: target.text_range(),
+        name_range: target.range(),
     })
 }
 
