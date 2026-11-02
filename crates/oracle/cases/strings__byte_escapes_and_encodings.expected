@@ -15,6 +15,9 @@
 | [1] "unknown" "UTF-8"   "unknown"
 |      [,1] [,2] [,3]
 | <0 x 0 matrix>
+| [1] "«Latin-1»: è" " øØ "         " è"          
+| [1] "«Latin-1»: è" " øØ "         " è"          
+| [1] "«Latin-1»: è" " øØ "         " è"          
 |     foo    
 | foo "hello"
 [messages]

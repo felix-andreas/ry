@@ -23,7 +23,6 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **parallel cannot open sockets.** ry has no socket connections at all, so `makeCluster(type = "PSOCK")` stops at `.Internal(serverSocket)`; a PSOCK cluster also needs `socketAccept`, client `socketConnection`, `socketSelect` and `socketTimeout`, and `serialize`/`unserialize` over the connection. This blocks foreach's cluster tests (its 570 sequential tests pass). Forking works (`decisions.md`, "parallel's fork routines"), so `mclapply` and lgr's `future_lapply` run; libr's `R_isForkedChild` stays 0 in a forked child.
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
@@ -31,7 +30,7 @@ The quality bar is four things.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__device_files` (the PostScript header lacks `%%DocumentMedia`, and the bounding box swaps width and height), and `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 122k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: compiled promise code, since a promise's expression is evaluated by the AST walker (about 9 promises per `sd`, with their builtin arguments evaluated through `evaluate_args_into` and uncached `find_called_fun`, roughly 15k instructions); GNU R compiles it to bytecode and reads the expression back through `R_PromiseExpr`, so the 83 readers of a promise's code would go through one accessor. Then fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call, and the callers of `mk_char` in the test code.
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 115k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: compiled promise code, since a promise's expression is evaluated by the AST walker (about 9 promises per `sd`, with their builtin arguments evaluated through `evaluate_args_into` and uncached `find_called_fun`, roughly 15k instructions); GNU R compiles it to bytecode and reads the expression back through `R_PromiseExpr`, so the 83 readers of a promise's code would go through one accessor. Then fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call, and the callers of `mk_char` in the test code.
 
 ## Open: the package loader
 
@@ -499,14 +498,33 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
-- **A cached global function binding goes stale under the JIT.** `oracle compare --engine ry-jit` fails `environments__hidden_function_bindings`: once a hot call site has cached the global `g`, a `g` later bound in the calling frame (by `assign` into `parent.frame()`, a default argument, `base::assign`, or the generic's frame before `UseMethod`) is not seen, and all four loops print "global" where GNU R prints "local". The bytecode interpreter (`--engine ry`) passes it.
-- **Compiled-to-compiled calls.** `fib` in `tools/bench/why` now runs about 1.2 times faster
-  than GNU R: a hot body whose call results have not returned yet refuses to compile as cold and
-  waits (`decisions.md`, "Cold refusals"), and a frame-safe direct call binds its arguments as plain
-  values. A call still allocates an environment, a binding cell per formal and the boxed arguments,
-  and reading a formal (`jit_load`) costs about 440 instructions. A call from compiled code should
-  enter the callee's compiled code directly, with unboxed arguments and no environment when the
-  callee's frame cannot escape.
+- **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
+  comparisons, `if` and calls to other such closures compiles to a frameless native function
+  (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
+  Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
+  per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
+  Next: widen natives to vectors, loops and local closures (`Ty::Closure` is only inlined today),
+  then give non-native compiled callees a direct entry with no environment when their frame cannot
+  escape.
+- **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
+  its closure for the session, so a helper defined inside a function keeps that function's frame
+  (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
+  `Native` and roots the closure a second time. Refusals are never retried, so mutual recursion
+  (`ev` calls `od` calls `ev`) is refused for good: the inner call hits the `COMPILING` cycle guard.
+  Compile a strongly connected group of functions together instead, and root closures weakly.
+- **Native recursion has no machine-stack check.** It is bounded only by `max_depth`
+  (`jit_depth_budget`). That is safe today only because `options(expressions =)` never raises
+  `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
+  and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
+  give native entry a stack-limit check, before raising the depth limit.
+- **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
+- **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
+  compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
+  but whether a slot is stored unboxed is per object (only length-1, attribute-free, non-ALTREP
+  double, integer or logical values, and never slots at index 64 or above). Key a native on layout
+  id plus per-slot feedback and guard each read on the mask bit at `RECORD_UNBOXED_OFFSET` and the
+  NaN-box prefix, as `Intrinsic::Field` does. Records are immutable (`$<-` copies), so one guard
+  holds for the object's lifetime.
 - **Calls dominate the benchmark packages' test suites.** A `perf` profile of full-size dsbench's
   testthat suites (JIT on) puts 12% of samples under `jit::`, and about 85% of that is
   `jit::runtime::jit_step` handing a call back to tier 0. Each closure call there still matches
@@ -526,10 +544,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   direct call's result type comes from the callee's declared return type when the call site has no
   feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
   first try, and typed Arrays compile to direct item loads and stores (`decisions.md`, "Arrays are
-  their own JIT types"). Typed and untyped code now run within measurement noise of each other, but
-  every call still runs the argument and return checks (`annotations::enter`, `check_return`). Next: skip a direct call's argument checks when the
-  compile-time argument types already satisfy the callee's masks, and the return check when the
-  compiled body provably returns the declared type.
+  their own JIT types"). A native call skips the argument and return checks because its
+  parameter types satisfy the callee's masks at compile time (`annotations::return_admits`); other
+  compiled calls still run `annotations::enter` and `check_return`. Typed and untyped code run
+  equally fast: the profile proves the same facts the annotations do.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
@@ -2316,7 +2334,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
   bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
   out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
-  with a release build. `.Internal(curlVersion)` and `.Internal(serverSocket)` are still missing.
+  with a release build.
 - **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
@@ -3012,7 +3030,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
 - Not done from rust-analyzer's list, with the reason:
-  - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
   - Document highlight already exists.

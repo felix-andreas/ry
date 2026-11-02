@@ -76,6 +76,22 @@ back, as in `Loaded shapes: 1 definition bound lazily, 1 top-level statement run
 back until first use, in 5 ms.` A reload that changes one of them, or a name they bind, runs them all
 first.
 
+When the held-back definitions run after the load, ry saves what they bound (the classes, generics
+and method tables) to `$XDG_CACHE_HOME/ry/s4` (`~/.cache/ry/s4` by default), and a later process
+restores them instead of running them, much as GNU R restores an installed package's S4 metadata. On
+the 326,000-line bench package, this cuts the first S4 use from about 330 ms to about 100 ms. A saved
+entry is used only when all of these match the process that saved it:
+
+- the text of every held-back definition, the package's name and version, and the build of ry;
+- the R version, and the version of every package the namespace imports.
+
+The definitions are saved only when they read nothing but the names they bind themselves and the
+`methods` and base functions that build S4 objects, such as `setClass()`, `representation()`, `c()`
+and `function`, so no other code in the package can change what they produce. A definition that
+reads a package constant, as in `prototype(side = ZERO)`, still runs in every process. Nothing is
+saved when running them signalled a message or a warning, so a later process shows it again. The
+directory is safe to delete.
+
 ### Source references
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point

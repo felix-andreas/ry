@@ -50,7 +50,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- function_name
@@ -164,7 +164,7 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> "  #: double\n"
   edit 27..27 -> "  #: double\n"
   edit 0..0 -> "#: fn() -> double\n"
-completion (116): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
+completion (128+): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
 hint @1: fn() -> double
 hint @21: double
 hint @30: double
@@ -184,7 +184,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- global_cross_item
@@ -823,7 +823,7 @@ action: Add inferred type annotation for `count`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @5: integer
 
 #---- string_subscript_fields

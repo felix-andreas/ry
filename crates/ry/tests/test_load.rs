@@ -450,14 +450,22 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
             files[3].1.to_owned()
         };
         files[3].1 = &second;
+        // The first lazy run saves the definitions' metadata and the second restores it.
+        let root = package(&files);
+        let cache = tempfile::tempdir().expect("temp dir");
         let mut printed = Vec::new();
-        for lazy in ["TRUE", "FALSE"] {
-            let root = package(&files);
+        for lazy in ["TRUE", "TRUE", "FALSE"] {
             let reload = format!(
                 "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
                 root.path().display().to_string()
             );
-            let output = ry_load(root.path(), &[&reload, probe]);
+            let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .arg("load")
+                .arg(root.path())
+                .args(["-e", &reload, "-e", probe])
+                .env("XDG_CACHE_HOME", cache.path())
+                .output()
+                .expect("run ry load");
             let text = text(&output);
             assert!(output.status.success(), "{text}");
             let line = text
@@ -472,8 +480,13 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
                 .to_owned();
             printed.push((text, line, summary));
         }
-        let (lazy, eager) = (&printed[0], &printed[1]);
+        let (lazy, restored, eager) = (&printed[0], &printed[1], &printed[2]);
         assert_eq!(lazy.1, eager.1, "lazy:\n{}\neager:\n{}", lazy.0, eager.0);
+        assert_eq!(
+            restored.1, eager.1,
+            "restored:\n{}\neager:\n{}",
+            restored.0, eager.0
+        );
         assert!(lazy.1.contains(expected), "{}", lazy.0);
         assert!(lazy.2.contains(lazy_summary), "{}", lazy.0);
         let statements = if uses_class { 8 } else { 7 };
