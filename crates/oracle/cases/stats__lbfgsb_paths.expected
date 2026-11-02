@@ -1,0 +1,509 @@
+[stdout]
+| 0x1.0001cd2ce1babp+0 0x1.0003ab1a041c6p+0 0x1.d61de358b07a8p-31 74 74 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.6ac84fad3d39bp-1 0x1p-1 0x1.5da2fbb2fca5fp-4 12 12 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.3895262013da7p+0 0x1.8p+0 0x1.3c3d19e4ceba1p+2 6 6 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.1a542147635a1p-1 0x1.3333333333333p-2 0x1.9f7d433791ca4p-3 26 26 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.000002c6c0e66p+0 0x1.000005b6d7d4dp+0 0x1.4a18928c622bep-45 51 51 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.6ac84faf7eb92p-1 0x1p-1 0x1.5da2fbb2fca5dp-4 11 11 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.3895262013da7p+0 0x1.8p+0 0x1.3c3d19e4ceba1p+2 6 6 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.1a54210992475p-1 0x1.3333333333333p-2 0x1.9f7d433791d8cp-3 19 19 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.fffff67ee8016p-1 0x1.ffffee46a067fp-1 0x1.fe9cee9b5b8ep-43 47 47 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.6ac84faf22fp-1 0x1p-1 0x1.5da2fbb2fca5cp-4 11 11 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.3895262013da7p+0 0x1.8p+0 0x1.3c3d19e4ceba1p+2 6 6 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.1a5421418b8cp-1 0x1.3333333333333p-2 0x1.9f7d433791ca6p-3 20 20 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.fffff9d8846eep-1 0x1.fffff37fa286bp-1 0x1.4cc931d26460bp-45 45 45 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.6ac84faf22fp-1 0x1p-1 0x1.5da2fbb2fca5cp-4 11 11 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.3895262013da7p+0 0x1.8p+0 0x1.3c3d19e4ceba1p+2 6 6 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.1a542141e76ddp-1 0x1.3333333333333p-2 0x1.9f7d433791ca7p-3 20 20 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1p+0 0x1p+0 0x0p+0 51 51 0 CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL 
+| 0x1.ffffffffff30bp-1 0x1.fffffffffe539p-1 0x1.e4d1fap-83 49 49 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.ffffffffff30bp-1 0x1.fffffffffe539p-1 0x1.e4d1fap-83 49 49 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.fffc7b4671d6fp-1 0x1.fff88be35b2f7p-1 0x1.dbf40627985e6p-30 46 46 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.06eac439c818p+0 0x1.117ff4b83478dp+0 0x1.0825483d37e0bp+2 4 4 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.fffff67ee8016p-1 0x1.ffffee46a067fp-1 0x1.fe9cee9b5b8ep-43 47 47 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.ff94e8a71b424p-1 0x1.ff294b835aab1p-1 0x1.678e00b53cef4p-21 45 45 0 CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL 
+| 0x1.5cd3a46625dafp-1 0x1.dafd3ac1635bep-2 0x1.a0108b0854ae9p-4 36 36 0 CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL 
+| -0x1.0474f7e72d8e8p+0 0x1.13142d19ce0fp+0 0x1.0e69d3cbdb12p+2 3 3 0 CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL 
+| 0x1p+0 0x1.fffffffffc06cp-1 0x1.8abe731p-72 45 45 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.fffff67ee6d6bp-1 0x1.ffffee46a02b7p-1 -0x1.fea15070c4828p-43 47 47 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| $par
+| [1] -1.021385  1.039294
+| 
+| $value
+| [1] 4.087545
+| 
+| $counts
+| function gradient 
+|        7        7 
+| 
+| $convergence
+| [1] 1
+| 
+| $message
+| [1] "NEW_X"
+| 
+| -0x1.0474f7e72d8e8p+0 0x1.13142d19ce0fp+0 0x1.0e69d3cbdb12p+2 3 3 1 NEW_X 
+| ==== trace 1 
+| iter    2 value 4.307686
+| iter    4 value 4.230998
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| ==== trace 2 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| ==== trace 3 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| At X0, 0 variables are exactly at the bounds
+| At iterate     0  f=         24.2  |proj g|=            2
+| At iterate     2  f =       4.3077  |proj g|=        2.1394
+| At iterate     4  f =        4.231  |proj g|=        1.7315
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| ==== trace 4 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| At X0, 0 variables are exactly at the bounds
+| At iterate     0  f=         24.2  |proj g|=            2
+| Iteration     0
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 0  variables are free at GCP on iteration 1
+| LINE SEARCH 1 times; norm of step = 0.282007
+| Iteration     1
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -7.2474e+03  9.4903e+06
+| Distance to the stationary point =   7.6367e-04
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 2
+| LINE SEARCH 0 times; norm of step = 0.0797366
+| Iteration     2
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -1.1301e+02  1.1876e+05
+| Distance to the stationary point =   9.5154e-04
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 3
+| LINE SEARCH 0 times; norm of step = 0.0126241
+| Iteration     3
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -4.9824e+00  8.2367e+03
+| Distance to the stationary point =   6.0490e-04
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 4
+| LINE SEARCH 1 times; norm of step = 0.00861126
+| Iteration     4
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -3.2063e+00  4.8417e+02
+| Distance to the stationary point =   6.6224e-03
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 5
+| LINE SEARCH 0 times; norm of step = 0.107632
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| ==== trace 5 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| L = -2 -1 
+| X0 = -1.2 1 
+| U = 0.8 3 
+| At X0, 0 variables are exactly at the bounds
+| At iterate     0  f=         24.2  |proj g|=            2
+| Iteration     0
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -5.4227e+04  5.4227e+04
+| Distance to the next break point =   9.2764e-03
+| Distance to the stationary point =   1.0000e+00
+| Variable  1  is fixed.
+| 
+| Piece      2 f1, f2 at start point -7.6722e+03  7.7440e+03
+| Distance to the next break point =   1.3451e-02
+| Distance to the stationary point =   9.9072e-01
+| Variable  2  is fixed.
+| Cauchy X =  0.8 3 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 0  variables are free at GCP on iteration 1
+| LINE SEARCH 1 times; norm of step = 0.282007
+| Iteration     1
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -7.2474e+03  9.4903e+06
+| Distance to the next break point =   1.3266e-02
+| Distance to the stationary point =   7.6367e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -7.2474e+03  9.4903e+06
+| Distance to the stationary point =   7.6367e-04
+| Cauchy X =  -1.05812 1.16913 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| Variable 2 enters the set of free variables
+| 0 variables leave; 1 variables enter
+| Variable 1 enters the set of free variables
+| 0 variables leave; 2 variables enter
+| 2  variables are free at GCP on iteration 2
+| LINE SEARCH 0 times; norm of step = 0.0797366
+| Iteration     2
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -1.1301e+02  1.1876e+05
+| Distance to the next break point =   1.0866e-01
+| Distance to the stationary point =   9.5154e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -1.1301e+02  1.1876e+05
+| Distance to the stationary point =   9.5154e-04
+| Cauchy X =  -1.06135 1.13357 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 3
+| LINE SEARCH 0 times; norm of step = 0.0126241
+| Iteration     3
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -4.9824e+00  8.2367e+03
+| Distance to the next break point =   9.3276e-01
+| Distance to the stationary point =   6.0490e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -4.9824e+00  8.2367e+03
+| Distance to the stationary point =   6.0490e-04
+| Cauchy X =  -1.05894 1.12831 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 4
+| LINE SEARCH 1 times; norm of step = 0.00861126
+| Iteration     4
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -3.2063e+00  4.8417e+02
+| Distance to the next break point =   1.2255e+00
+| Distance to the stationary point =   6.6224e-03
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -3.2063e+00  4.8417e+02
+| Distance to the stationary point =   6.6224e-03
+| Cauchy X =  -1.05209 1.11046 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 5
+| LINE SEARCH 0 times; norm of step = 0.107632
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| ==== trace 6 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| L = -2 -1 
+| X0 = -1.2 1 
+| U = 0.8 3 
+| At X0, 0 variables are exactly at the bounds
+| At iterate     0  f=         24.2  |proj g|=            2
+| Iteration     0
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -5.4227e+04  5.4227e+04
+| Distance to the next break point =   9.2764e-03
+| Distance to the stationary point =   1.0000e+00
+| Variable  1  is fixed.
+| 
+| Piece      2 f1, f2 at start point -7.6722e+03  7.7440e+03
+| Distance to the next break point =   1.3451e-02
+| Distance to the stationary point =   9.9072e-01
+| Variable  2  is fixed.
+| Cauchy X =  0.8 3 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 0  variables are free at GCP on iteration 1
+| LINE SEARCH 1 times; norm of step = 0.282007
+| X = -1.00059 1.19941 
+| G = 75.3368 39.6456 
+| Iteration     1
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -7.2474e+03  9.4903e+06
+| Distance to the next break point =   1.3266e-02
+| Distance to the stationary point =   7.6367e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -7.2474e+03  9.4903e+06
+| Distance to the stationary point =   7.6367e-04
+| Cauchy X =  -1.05812 1.16913 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| Variable 2 enters the set of free variables
+| 0 variables leave; 1 variables enter
+| Variable 1 enters the set of free variables
+| 0 variables leave; 2 variables enter
+| 2  variables are free at GCP on iteration 2
+| LINE SEARCH 0 times; norm of step = 0.0797366
+| X = -1.05306 1.13937 
+| G = 8.71496 6.08755 
+| Iteration     2
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -1.1301e+02  1.1876e+05
+| Distance to the next break point =   1.0866e-01
+| Distance to the stationary point =   9.5154e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -1.1301e+02  1.1876e+05
+| Distance to the stationary point =   9.5154e-04
+| Cauchy X =  -1.06135 1.13357 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 3
+| LINE SEARCH 0 times; norm of step = 0.0126241
+| X = -1.06014 1.12892 
+| G = -1.99423 1.00272 
+| Iteration     3
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -4.9824e+00  8.2367e+03
+| Distance to the next break point =   9.3276e-01
+| Distance to the stationary point =   6.0490e-04
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -4.9824e+00  8.2367e+03
+| Distance to the stationary point =   6.0490e-04
+| Cauchy X =  -1.05894 1.12831 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 4
+| LINE SEARCH 1 times; norm of step = 0.00861126
+| X = -1.05512 1.12193 
+| G = -0.456383 1.73149 
+| Iteration     4
+| 
+| ---------------- CAUCHY entered-------------------
+| 
+| There are 2  breakpoints
+| 
+| Piece      1 f1, f2 at start point -3.2063e+00  4.8417e+02
+| Distance to the next break point =   1.2255e+00
+| Distance to the stationary point =   6.6224e-03
+| 
+| GCP found in this segment
+| Piece      1 f1, f2 at start point -3.2063e+00  4.8417e+02
+| Distance to the stationary point =   6.6224e-03
+| Cauchy X =  -1.05209 1.11046 
+| 
+| ---------------- exit CAUCHY----------------------
+| 
+| 2  variables are free at GCP on iteration 5
+| LINE SEARCH 0 times; norm of step = 0.107632
+| X = -1.00152 1.02859 
+| G = 6.23082 5.10916 
+| final  value 4.071343 
+| stopped after 5 iterations
+| -0x1.0063a42025de7p+0 0x1.07519ab6970b1p+0 0x1.0490e16019ac5p+2 8 8 1 NEW_X 
+| iter    5 value 4.087545
+| iter   10 value 2.743645
+| iter   15 value 1.457101
+| iter   20 value 0.517374
+| iter   25 value 0.229204
+| iter   30 value 0.022114
+| iter   35 value 0.000044
+| final  value 0.000000 
+| converged
+| 0x1.fffff67ee8016p-1 0x1.ffffee46a067fp-1 0x1.fe9cee9b5b8ep-43 47 47 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| N = 2, M = 5 machine precision = 2.22045e-16
+| The initial X is infeasible.  Restart with its projection.
+| 
+| iterations 4
+| function evaluations 5
+| segments explored during Cauchy searches 5
+| BFGS updates skipped 0
+| active bounds at final generalized Cauchy point 0
+| norm of the final projected gradient 5.56387e-13
+| final function value 7.83373e-26
+| 
+| final  value 0.000000 
+| converged
+| -0x1.14fe4c455a3cp-45 0x1.3937c87a3bfc7p-42 0x1.83e849a6ec1ffp-84 5 5 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| final  value 5.000000 
+| converged
+| 0x1p+0 0x1p+1 0x1.4p+2 21 21 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| N = 3, M = 3 machine precision = 2.22045e-16
+| Derivative >= 0, backtracking line search impossible.final  value -0.029832 
+| stopped after 4 iterations
+| 0x1.0169b656p-1 -0x1.83cd3b6000001p-1 0x1.2d555a28p-2 -0x1.e8c6023c7dc53p-6 18 18 52 ERROR: ABNORMAL_TERMINATION_IN_LNSRCH 
+| $par
+| [1] 1 1
+| 
+| $counts
+| function gradient 
+|        0        0 
+| 
+| $convergence
+| [1] 52
+| 
+| $message
+| [1] "ERROR: NO FEASIBLE SOLUTION"
+| 
+| l(1) > u(1).  No feasible solutionfinal  value <unset>
+| stopped after 0 iterations
+| $par
+| [1] 1 1
+| 
+| $counts
+| function gradient 
+|        0        0 
+| 
+| $convergence
+| [1] 52
+| 
+| $message
+| [1] "ERROR: NO FEASIBLE SOLUTION"
+| 
+| $par
+| [1] 1 2
+| 
+| $counts
+| function gradient 
+|        0        0 
+| 
+| $convergence
+| [1] 52
+| 
+| $message
+| [1] "ERROR: M .LE. 0"
+| 
+| final  value <unset>
+| stopped after 0 iterations
+| $par
+| [1] 1 2
+| 
+| $counts
+| function gradient 
+|        0        0 
+| 
+| $convergence
+| [1] 52
+| 
+| $message
+| [1] "ERROR: FACTR .LT. 0"
+| 
+| [1] "REPORT must be > 0 (method = \"L-BFGS-B\")"
+| $par
+| numeric(0)
+| 
+| $value
+| [1] 3
+| 
+| $counts
+| function gradient 
+|        1        0 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| [1] "NOTHING TO DO"
+| 
+| 0x1.af7f4cc04bb71p-5 0x1.8b4843598ebcap-4 0x1.b730cd294d6fep-2 -0x1.35b9b8f4p-2 -0x1.295d408cp-2 -0x1.e377bb200d5bep-8 -0x1.37a57d489abb4p-2 -0x1.742b30a4p-2 0x1.fb98432p-5 0x1.8c9c666a7d4a8p-9 -0x1.b8b19213bf6f5p-1 -0x1.67c7f22d5c866p+2 23 23 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.2371bbb4aef43p-2 -0x1.d5d0418c1ebecp-1 0x1.c4e67c8p-3 0x1.65c61d38c6f74p-1 -0x1.4a959ef8a1e25p-2 0x1.01c917b8p-1 -0x1.09f4c0e1ded1ap+2 14 14 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.26f890b8p-3 -0x1.80c46eb9754a1p+0 -0x1.c53d8ccep-1 -0x1.646912bad2cfp+2 7 7 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.f5e1584p-1 0x1.d6f0eb28p-2 0x1.2c9209cp-5 0x1.fd490d84cf9d1p-3 0x1.bb14861p-4 -0x1.2d386ef873266p-1 -0x1.54b611e87d9b9p-4 -0x1.32d2d53fb1582p-2 -0x1.76d398cp-6 0x1.59ce2dcd1675ap-1 0x1.b69ea88e888f3p-2 -0x1.9c475bp-5 -0x1.79d537293811bp+1 17 17 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.74540fp-3 0x1.ec5dd804p-1 0x1.77af82e92405cp+0 0x1.0a46b388p-3 0x1.6f34491p-2 -0x1.b51316684a3a9p+2 9 9 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.cbda99d68c862p-2 0x1.22983e8p-2 0x1.391d069cp-2 -0x1.938cd69d8185cp-3 0x1.23cfe8p-5 0x1.6573d9dp-4 0x1.992f6bc4p-2 -0x1.3f33dd5ca7e07p+1 14 14 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.d0783c6p-5 -0x1.7078d8c1999c4p-1 -0x1.7040e117335d4p-2 -0x1.01d6253p-4 0x1.b81183aep-1 -0x1.c706adcp-5 -0x1.d6d3af9d3153ep+2 9 9 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.2f4404ap-3 -0x1.5ca00276p-1 -0x1.36cb0d6p-2 -0x1.adfc9db8p-3 -0x1.8a91ab74p-2 0x1.52ed15ccp-2 0x1.fcf8a7a0c4a9ap-3 -0x1.d57ec3b344716p-5 -0x1.68969fecb6a02p+2 10 10 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.ad882a1f1123dp-2 -0x1.d5514cda20f11p+0 -0x1.9fc5196p-4 0x1.86bd196269317p-2 0x1.1cffc8632040ap-1 -0x1.5d4d824p-1 -0x1.ab143fdp-1 0x1.1da16da8p-3 -0x1.29ea0dced62a7p+3 26 26 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.83fbce7ffc774p-2 -0x1.2ad75ffp-2 -0x1.940d032p-3 -0x1.0eeaecefa1d02p-1 -0x1.e321ed34p-2 -0x1.5631edea34e84p-4 -0x1.430b74f8540a7p-4 -0x1.10f2884cp-1 -0x1.9db52192d29b2p-1 0x1.3c6eeb3205746p-2 0x1.9241b90595993p-3 -0x1.40c87d8p-3 -0x1.5766156eed616p+2 26 26 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.92866b83e254ep-4 0x1.2417cd33aa341p-3 -0x1.4da3093636e38p-3 0x1.03f13ddd01738p-4 0x1.b0c0857p-3 -0x1.0203203cp-2 -0x1.33db285351a6ap-1 -0x1.d47b2bae40158p-3 -0x1.fd4fe62p-3 0x1.6d0a13a49d88cp-3 0x1.826cf5p-8 0x1.9560121de5375p-3 -0x1.a2564c51e0d29p+1 24 24 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.955b0528p-3 -0x1.ee13167fb12f7p-2 0x1.2debe2296d0e2p+0 0x1.c64c9648p-2 -0x1.14f3b7b2p-1 0x1.422a8cf4p-1 -0x1.e4cf599738b9bp+2 9 9 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.8ce9cd44p-2 -0x1.00553432bea4ap-2 -0x1.60228678700bdp-2 -0x1.d4df874dea15ap-3 -0x1.ab97c87a2fb75p-2 -0x1.e823d84p-5 -0x1.2c50fa38f6324p+0 18 18 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.b96f450ba2865p-2 0x1.2381fa12p-1 0x1.29c8d9c6b8cc6p-2 0x1.63ab7bfp-2 0x1.591a2bp-1 -0x1.6cbe1746caac4p+0 -0x1.ec7f5c2a660c3p-2 0x1.a1d9b478p-2 -0x1.3bd1b6777ab95p+3 14 14 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.1a5bd4e7b716cp+1 -0x1.6f3a35d805eb9p-2 -0x1.de831d4c23ddbp+2 12 12 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.94dfa0e678501p-7 0x1.b136b30aa29f2p-6 0x1.67f5cd745b6b7p+0 -0x1.1215207p-4 0x1.fe96bc2d9627fp-4 -0x1.b306d616b904dp-1 -0x1.584ce068p-1 0x1.13653f3p-4 -0x1.76fcc684p-2 -0x1.48a345c2b9c97p-5 0x1.d4de05b1e9195p-5 -0x1.40a955687ee64p+2 28 28 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.8e465ddd57b9fp-2 -0x1.92565be938031p-1 -0x1.babb41ep-4 -0x1.30ce3c3p-3 -0x1.20b4795ap-1 0x1.6f7a7bp-4 -0x1.772caadep-1 -0x1.87cacb9p-3 0x1.bfbdf5876110fp-5 -0x1.37049294p-2 -0x1.a40ee8p-8 -0x1.f40b0c9f3be5ep+2 11 11 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.cf83032907a1cp-2 -0x1.a9228f6p-2 0x1.2c79b2111d0ebp-1 -0x1.aeeced5229e8cp+0 -0x1.dbe74acbc77eap+2 11 11 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.edd6fd3p-3 0x1.f18456bf6a579p+0 0x1.22270b48p-2 0x1.451af2dc44532p-1 -0x1.d2f6313fa2defp+2 9 9 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.55abfdf15da0ep-4 0x1.6d20cb72p-1 0x1.d578b7a27510fp-2 0x1.37e60e5cp-2 0x1.a920c82f02221p-3 -0x1.74c5dfap-4 0x1.0a41a728p-2 -0x1.326b8c68c4db1p-1 -0x1.7f7085cp-2 0x1.8bcc216e3cebfp-3 -0x1.661e8f6e122ddp+2 41 41 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.517eb53547b88p-3 0x1.e1827e0da512ap-1 0x1.2d64e1ep-2 0x1.8c0827f8p-2 -0x1.23ca8870ca00ep+2 8 8 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.7276b9d9c061dp+0 0x1.edc8dd36p-1 -0x1.b530d3ecp-2 0x1.7dad5fe9e92d3p-2 -0x1.1aedb30046b1ap+2 12 12 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.9cfccf4cp-1 0x1.bd50532p-2 0x1.533ac3e8p-2 0x1.23135a52aa7b4p-2 -0x1.216c33cb60c9p-1 0x1.7307cf32e2082p-2 0x1.e419ff5p-2 -0x1.2131273p-3 0x1.14504824p-1 0x1.5c9d912d1500ep-1 0x1.d78eacbp-2 -0x1.32f7e34d8dce2p+3 19 19 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| 0x1.749f5ba1c867bp-2 0x1.f214f1fp-3 -0x1.41ea70a6p-1 -0x1.3f06de3cp-2 0x1.0d338c8ap-1 0x1.691af838p-3 0x1.820adccp-2 -0x1.fc48b2a2p-1 -0x1.41433c9ap-1 -0x1.5e6b1063815eep-3 -0x1.38498f0549e6cp-1 0x1.49b41e5p-1 -0x1.bb6370f26b0cdp+3 13 13 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1.871f1d60d2e14p-4 -0x1.d08f64ed244fap-3 -0x1.8528d12p-1 0x1.bd7b092074183p-2 -0x1.4253e7b7fa313p+2 36 36 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1p+0 0x1p-1 -0x1p+0 -0x1p-1 0x1.5555555555553p-2 -0x1.0ccccccf2fa3dp+1 18 18 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1p+0 0x1p-1 -0x1.0c6f7a0b5f3aap-21 -0x1p-1 0x1.65e9f80f29a3ap-23 -0x1.0cc49ba5e354p+1 3 3 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1p+0 0x1p-1 -0x1.47ae147b80d54p-7 -0x1p-1 0x1.b4e81b4f56719p-9 -0x1.0cccccccccce6p+1 20 20 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+| -0x1p+0 0x1p-1 -0x1.12e0be826dcd8p-31 -0x1p-1 0x1.6e80fe033d11fp-33 -0x1.0cc49ba5e354p+1 3 3 0 CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

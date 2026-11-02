@@ -400,7 +400,8 @@ impl Model {
         Ok(model)
     }
 
-    /// The prediction step: `a = T a`, and `Pn = T P T' + V` unless `keep_prior`.
+    /// The prediction step: `a = T a`, and `Pn = V + T P T'` (accumulated onto `V` term by term,
+    /// as GNU R does) unless `keep_prior`.
     fn predict(&mut self, keep_prior: bool) {
         let n = self.size;
         let mut next = vec![0.0; n];
@@ -418,8 +419,11 @@ impl Model {
             }
             for i in 0..n {
                 for j in 0..n {
-                    let value: f64 = (0..n).map(|k| product[i + n * k] * self.t[j + n * k]).sum();
-                    self.pn[i + n * j] = self.v[i + n * j] + value;
+                    let mut value = self.v[i + n * j];
+                    for k in 0..n {
+                        value += product[i + n * k] * self.t[j + n * k];
+                    }
+                    self.pn[i + n * j] = value;
                 }
             }
         }
@@ -429,11 +433,19 @@ impl Model {
     /// innovation and its variance.
     fn update(&mut self, y: f64) -> (f64, f64) {
         let n = self.size;
-        let innovation = y - (0..n).map(|i| self.z[i] * self.a[i]).sum::<f64>();
+        // The innovation and its variance accumulate onto `y` and `h` term by term, the order
+        // that reproduces GNU R's last digits.
+        let mut innovation = y;
+        for i in 0..n {
+            innovation -= self.z[i] * self.a[i];
+        }
         let gain_vector: Vec<f64> = (0..n)
             .map(|i| (0..n).map(|k| self.pn[i + n * k] * self.z[k]).sum())
             .collect();
-        let variance = self.h + (0..n).map(|i| self.z[i] * gain_vector[i]).sum::<f64>();
+        let mut variance = self.h;
+        for i in 0..n {
+            variance += self.z[i] * gain_vector[i];
+        }
         for i in 0..n {
             self.a[i] += gain_vector[i] * innovation / variance;
         }

@@ -94,6 +94,11 @@ pub struct Heap {
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
+    /// `Rprofmem()`'s reporter and its threshold in bytes. A vector whose reported size exceeds
+    /// the threshold is passed to the reporter; `usize::MAX` turns reporting off, so the check
+    /// on every allocation is one compare.
+    allocation_reporter: Option<fn(usize) -> bool>,
+    report_threshold: usize,
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -365,6 +370,8 @@ impl Heap {
             mark_stack: Vec::new(),
             binding_epoch: 0,
             enclosure_epoch: 0,
+            allocation_reporter: None,
+            report_threshold: usize::MAX,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             new_roots: Vec::new(),
@@ -456,7 +463,54 @@ impl Heap {
         let size = object_size(kind, length).ok_or(HeapError::TooLong)?;
         let object = self.allocate_with(kind, size, &[], VECTOR_DATA_OFFSET)?;
         object.set_length_and_capacity(length as isize, length as isize);
+        self.report_allocation(kind, length);
         Ok(object)
+    }
+
+    /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
+    /// bytes to `reporter`, or stops reporting when `reporter` is `None`.
+    pub fn report_allocations(&mut self, reporter: Option<fn(usize) -> bool>, threshold: usize) {
+        self.report_threshold = if reporter.is_some() {
+            threshold
+        } else {
+            usize::MAX
+        };
+        self.allocation_reporter = reporter;
+    }
+
+    /// Replaces the reporting threshold and returns the old one, so a caller can hide its own
+    /// allocations by setting `usize::MAX` and restoring the old threshold afterwards.
+    pub fn swap_report_threshold(&mut self, threshold: usize) -> usize {
+        if self.allocation_reporter.is_none() {
+            return usize::MAX;
+        }
+        std::mem::replace(&mut self.report_threshold, threshold)
+    }
+
+    /// GNU R allocates vectors of up to 128 data bytes from pages of small cells and reports
+    /// only the larger ones, each as its data rounded up to 8 bytes plus a 48-byte header. The
+    /// reporter returns false to stop reporting, because it runs while the heap is borrowed and
+    /// so cannot turn reporting off through the heap itself.
+    #[inline]
+    fn report_allocation(&mut self, kind: SexpType, length: usize) {
+        if self.report_threshold == usize::MAX {
+            return;
+        }
+        let element = match kind {
+            SexpType::Raw => 1,
+            SexpType::Logical | SexpType::Integer => 4,
+            SexpType::Complex => 16,
+            _ => 8,
+        };
+        let data = length.saturating_mul(element).div_ceil(8).saturating_mul(8);
+        let size = data.saturating_add(48);
+        if data > 128
+            && size > self.report_threshold
+            && let Some(reporter) = self.allocation_reporter
+            && !reporter(size)
+        {
+            self.report_allocations(None, 0);
+        }
     }
 
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
@@ -492,6 +546,7 @@ impl Heap {
             }
             _ => {}
         }
+        self.report_allocation(kind, length as usize);
         Ok(object)
     }
 

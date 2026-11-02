@@ -2164,6 +2164,32 @@ primitives, and nothing built or installed packages.
   function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
   Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
   custom candidate generator and always takes the Gaussian step.
+  - The Rmath helpers and quantiles were rewritten the same way: `stirlerr` and `bd0` from
+    Loader (2000), with the half-integer table recomputed in mpmath and the deviance series
+    summed by one shared Horner-evaluated `progression_series` (which also replaced the
+    continued fraction behind `log1pmx` and `lgamma1p`); `qgamma` as Halley's method on
+    `ln P(ln y)` from Wilson-Hilferty and the leading series and asymptotic terms (Abramowitz
+    and Stegun 26.4.17, 6.5.29, 6.5.32), polished to the closest double; `dnchisq` as the
+    Poisson mixture summed outward from its peak (Johnson, Kotz and Balakrishnan), with
+    Patnaik's two-moment approximation past a peak of 1e10; `d1mach`/`i1mach` from the PORT
+    paper (Fox, Hall and Schryer 1978). `qgeom` keeps an absolute 1e-12 fuzz because that is
+    what GNU R's answers show. GNU R's `dnchisq` truncates its sum at an absolute 5e-15, so in
+    the tails ry differs from it but matches mpmath; `test_rmath` allows that absolute error.
+- **One L-BFGS-B, written from the BSD reference v3.0** (Zhu, Byrd, Lu and Nocedal's Fortran,
+  `lbfgsb.f`). `crates/interp/src/stats_lbfgsb.rs` is the only implementation: `optim` calls it
+  through `stats_optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
+  callbacks. GNU R behaves as a hybrid of the versions, found by comparing every iterate bitwise
+  (`%a`) against Rscript: the subspace step backtracks to the box without v3.0's Morales-Nocedal
+  projection, and the Cauchy search keeps the `f2` floor (`eps * f2_org`) and is skipped for an
+  unconstrained problem once memory exists. The order of additions matters to the last bit and
+  is pinned with comments where it is not the reference's (grouped terms in `cmprlb`, `cauchy`,
+  the subspace product and `formk`'s (2,1) block, ungrouped in its diagonal blocks). Traces,
+  messages and the abnormal line-search exit were matched the same way, and
+  `stats__lbfgsb_paths` and `test_numerics` hold the result exactly. The trace text for a line
+  search that exhausts 20 evaluations is unverified, since no case reached it in GNU R.
+- **KalmanLike and `prod` accumulate as GNU R observably does.** The Kalman filter subtracts and
+  adds term by term (`y -= z_i a_i`, `V[i,j] += m T`), and `prod` multiplies each argument in long
+  double, combines arguments in double, and lets the first NaN win, so `prod(NaN, NA)` is NaN.
 - **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
   scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options
   are ignored, as before.
@@ -3277,6 +3303,30 @@ first lines R had already read, leaving R mid-command.
   `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
   Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
   GNU R returns.
+- **One UNCMIN, one QUADPACK, one interval search, all in `interp`.** libR used to carry its own
+  copies of the routines behind `optif9`/`fdhess`, `Rdqags`/`Rdqagi` and `findInterval2`, next to
+  the interpreter's `nlm`, `integrate` and `findInterval`. The single copies are
+  `interp::stats_nlm` (all three methods, analytic derivatives, the `msg` bits, `fdhess`),
+  `interp::stats_optimize::{qags, qagi}` (writing into caller-owned `Subintervals`, so the C
+  entry points pass `work`/`iwork` straight through) and `interp::arith::find_interval`; libR
+  only converts C callbacks and arguments, as `lbfgsb` does. GNU R black box decided the details
+  the copies disagreed on: the cubic backtrack groups its coefficient as `3 * t3 * (...)`, and a
+  non-finite value (which nlm turns into the largest double) shrinks the step by ten. nlm's call
+  protocol is also GNU R's, as observed through call counts: an uncached probe at the start whose
+  value is ignored and which alone decides whether `gradient` and `hessian` attributes count
+  (wrong length or mode warns and ignores them), a ring of the five latest evaluations, and the
+  error "non-finite value supplied by 'nlm'" instead of a call at a non-finite point. Where GNU R
+  reads past a later attribute that is too short or missing, ry errors or uses zeros.
+  `stats__uncmin_quadpack.R` pins the iterates at full precision and the call protocol.
+  Methods 2 (double dogleg) and 3 (More-Hebdon hook) match GNU R bit for bit, which took these
+  departures from the textbook, all found by tracing every evaluation in `%a`: the trust-region
+  update retries with a doubled radius only for a Newton step whose decrease the model predicted
+  to within a tenth; after the switch to central differences an analytic gradient builds the
+  Hessian from gradient calls; the hook's mu update uses the derivative at mu = 0 (`phip0`); both
+  `phip0` and `phip` square `sqrt(dot)` instead of using the dot product; and the unfactored
+  secant update sums its two corrections before adding them to H. The libR case
+  `optif9_trust_region` compares at tolerance zero, so it assumes reference-BLAS rounding in the
+  GNU R that recorded it (GNU R's `ddot_` and `dnrm2_` come from the system BLAS).
 - **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
   documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
   (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
@@ -5215,6 +5265,40 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## utils' sockets, internal downloads and allocation profiling
+
+- `make.socket` and friends keep their `TcpStream`s and `TcpListener`s in one locked map in
+  `crates/interp/src/utils.rs`, keyed by the OS handle, because that handle is the `socket`
+  number R code sees and passes back.
+- `download.file(method = "internal")` and `url(method = "internal")` read only `file://`
+  URLs and give GNU R's "defunct" or "not supported" errors for the rest, as R 4.2 and later do.
+- `Rprofmem` logs a vector only when its data exceeds 128 bytes, sized as GNU R counts it (data
+  rounded up to 8 bytes plus a 48-byte header), because GNU R takes smaller vectors from pages of
+  small cells. ry has no such pages, so it writes no `new page:` lines. The heap calls a plain
+  `fn(usize) -> bool` reporter (`Heap::report_allocations`), which costs one compare per vector
+  while no profile runs. The reporter returns false to end the profile (a failed write), since
+  it runs while the heap is mutably borrowed and must not reach the heap itself. The bytecode compiler hides its own vectors with `Heap::swap_report_threshold`.
+- `Rprof` raises intervals below 10 ms to 10 ms with GNU R's warning, since GNU R's timer cannot
+  sample faster.
+- `system(intern = FALSE)` and `system2` return invisibly, as in GNU R.
+
+## One session temporary directory, removed at exit
+
+- **Previous shape.** The interpreter's `tempdir()` made `RtmpRy<pid>` and libR's front end
+  made a second `Rtmp<pid>` for native code's `R_TempDir`. Neither was ever removed, so every
+  run leaked two directories into `/tmp`.
+- **Target shape.** `interp::system::session_temp_dir` is the only one: a `mkdtemp`
+  `RtmpXXXXXX` under the first writable `R_TMPDIR`, `TMPDIR`, `TMP` or `TEMP`, as in GNU R.
+  libR passes it to native code. `session::finish` removes it, but only in the process that
+  created it, so a forked `mcparallel` child that ends never deletes its parent's directory.
+- **Order at exit.** `session::finish` runs the exit finalizers (the `run_exit_finalizers`
+  hook, so `quit()` runs them too) and only then removes the directory, because a finalizer
+  may still write there. The embedding exits (`R_CleanUp`, `Rf_endEmbeddedR`) remove it
+  through `R_CleanTempDir` after their finalizers.
+- **`tempdir(check = TRUE)` recreates the same path**, not a fresh name as GNU R does,
+  because native code already copied it as `R_TempDir`. It is created private, and an
+  existing directory at that path must belong to the current user.
 
 ## Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting
 

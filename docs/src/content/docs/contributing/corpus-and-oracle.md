@@ -156,12 +156,12 @@ ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
 On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time (today every case but `stats__lbfgsb` passes under 4.3.3). Four of the
+against 124 of 125 under 4.3.3 at the time (today every case passes under 4.3.3). Four of the
 remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
 and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
 seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
 calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
-and runs it. `stats__lbfgsb` differs under every version.
+and runs it.
 
 The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
 `verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
