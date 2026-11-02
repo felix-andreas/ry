@@ -9,7 +9,10 @@
 use {
     crate::analysis::{Speculation, resolve_function},
     heap::{
-        object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+        object::{
+            Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot, gp,
+            is_na_real,
+        },
         records::NativeKind,
     },
     interp::{
@@ -647,6 +650,49 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// A record, tuple or tag of `layout` whose `count` slots are `(kind, bits)` pairs in the
+/// [`representation`] encoding. Numbers go into the record unboxed, without a scalar on the way.
+pub unsafe extern "C" fn jit_construct(
+    activation: *mut Activation,
+    layout: i32,
+    pairs: *const i64,
+    count: i64,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || {
+            let pairs = std::slice::from_raw_parts(pairs, 2 * count as usize);
+            let heap = heap();
+            let mut slots: SmallVec<[Slot; 4]> = SmallVec::with_capacity(count as usize);
+            for pair in pairs.chunks_exact(2) {
+                let (kind, bits) = (pair[0] as i32, pair[1]);
+                let slot = match kind {
+                    representation::INTEGER => Slot::Integer(bits as i32),
+                    representation::LOGICAL => Slot::Logical(bits as i32),
+                    representation::DOUBLE => {
+                        let number = f64::from_bits(bits as u64);
+                        let upper = (bits as u64 >> 32) as u32;
+                        // A NaN whose upper half reads as an integer's or logical's tag stays
+                        // boxed, as `slot_for` keeps it.
+                        if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                            let value = values::scalar_real(number)?;
+                            heap.root(value);
+                            Slot::Handle(value)
+                        } else {
+                            Slot::Real(number)
+                        }
+                    }
+                    _ => Slot::Handle(
+                        Sexp::from_raw(bits as *mut Header)
+                            .ok_or_else(|| error("compiled code passed a null slot"))?,
+                    ),
+                };
+                slots.push(slot);
+            }
+            Ok(heap.alloc_record_slots(layout as u32, &slots)?)
+        })
+    }
 }
 
 /// Key kinds [`jit_collection_position`] takes.

@@ -232,6 +232,13 @@ fn seeds_agree_across_tiers() {
             "(n = 30L)",
             false,
         ),
+        // Records, tuples and tags built in compiled code from unboxed doubles, integers,
+        // logicals and NA, and from a boxed vector, read back through fields and `match`.
+        (
+            "s <- 0\nk <- 0L\nfor (i in 1:n) { r <- (a = i * 0.5, b = i, c = i > 3L, d = if (i == 7L) NA_real_ else 1, e = c(i, 2L))\nt <- (r$a, i + 1L)\ng <- :Pt(x = r$b, y = r$a)\ns <- s + r$a + r$b + r$d + t[[1L]] + match (g) { :Pt(x = x, y = y) => x * y }\nif (r$c) k <- k + r$e[[2L]] }\nlist(s, k)",
+            "(n = 12L)",
+            false,
+        ),
         // A tag pattern with `..`, constructors in the loop, and no arm matching at the end.
         (
             "s <- 0L\nfor (i in 1:n) { r <- if (i < n) :Ok(i) else :Other(i)\ns <- s + match (r) { :Ok(..) => 1L, :Err(e) => e } }\ns",

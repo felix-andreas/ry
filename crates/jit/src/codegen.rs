@@ -555,6 +555,66 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
+            Action::Construct {
+                dst,
+                layout,
+                base,
+                count,
+            } => {
+                let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (16 * count.max(1)) as u32,
+                    3,
+                ));
+                for index in 0..count {
+                    let register = base + index;
+                    let ty = before.registers[register];
+                    let (kind, bits) = match ty {
+                        // Slots past the unboxed mask hold handles only.
+                        Ty::Dbl | Ty::Int | Ty::Lgl if index >= UNBOXED_SLOTS => {
+                            let value = self.use_register(register, ty);
+                            (representation::BOXED, self.box_value(ty, value))
+                        }
+                        Ty::Dbl => {
+                            let value = self.use_register(register, ty);
+                            (
+                                representation::DOUBLE,
+                                self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
+                            )
+                        }
+                        Ty::Int | Ty::Lgl => {
+                            let value = self.use_register(register, ty);
+                            let kind = if ty == Ty::Int {
+                                representation::INTEGER
+                            } else {
+                                representation::LOGICAL
+                            };
+                            (kind, self.builder.ins().sextend(I64, value))
+                        }
+                        _ => (representation::BOXED, self.load_register(register)),
+                    };
+                    let kind = self.builder.ins().iconst(I64, kind as i64);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, kind, buffer, (16 * index) as i32);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+                }
+                let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+                let layout = self.builder.ins().iconst(I32, i64::from(layout));
+                let count = iconst(&mut self.builder, count);
+                let value = self
+                    .call(
+                        runtime::jit_construct as *const () as usize,
+                        &[I64, I32, I64, I64],
+                        Some(I64),
+                        &[self.activation, layout, pointer, count],
+                    )
+                    .ok_or(Refusal("the record helper returned nothing"))?;
+                self.store_register(dst, value);
+                self.set_visible(&before, true);
+            }
             Action::Move { dst, src, ty } => {
                 let value = self.use_register(src, ty);
                 self.def_register(dst, ty, value);

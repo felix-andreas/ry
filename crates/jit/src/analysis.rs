@@ -581,6 +581,14 @@ pub enum Action<'a> {
         slot: usize,
         ty: Ty,
     },
+    /// Builds the record, tuple or tag of `layout` from registers `base..base + count`, an
+    /// unboxed number going into its slot without being boxed.
+    Construct {
+        dst: usize,
+        layout: u32,
+        base: usize,
+        count: usize,
+    },
     /// Copies an unboxed scalar between registers.
     Move {
         dst: usize,
@@ -1637,7 +1645,14 @@ impl<'a> Builder<'a> {
             }
             Op::MatchFail => self.opaque_step(state, None, &[], Effect::Opaque),
             Op::Construct => {
-                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Pure)
+                state.registers[operand(0)] = Ty::Boxed;
+                state.visible = Some(true);
+                Action::Construct {
+                    dst: operand(0),
+                    layout: operand(1) as u32,
+                    base: operand(2),
+                    count: operand(3),
+                }
             }
             Op::Move => {
                 let ty = state.registers[operand(1)];
