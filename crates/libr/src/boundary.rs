@@ -101,6 +101,20 @@ pub struct Reachable(pub Sexp);
 
 impl Handout for Reachable {}
 
+/// A result ry builds as a view of something GNU R stores in the argument, such as `FRAME`'s
+/// pairlist. Code that is correct under GNU R walks it unprotected for as long as the argument
+/// lives, so it stays rooted until the native call returns instead of leaving with the window.
+#[derive(Clone, Copy)]
+pub struct Pinned(pub Sexp);
+
+impl Handout for Pinned {
+    fn hand_out(self, runtime: &mut Runtime) {
+        if runtime.native_depth > 0 {
+            runtime.heap.root(self.0);
+        }
+    }
+}
+
 macro_rules! plain_handout {
     ($($type:ty),*) => { $(impl Handout for $type {})* };
 }
@@ -253,20 +267,25 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
     if status != 0 {
         return Err(take_pending());
     }
+    // Rooted before the warnings, which allocate and may run handlers, because closing the
+    // scope dropped whatever protected the result.
+    let result = Sexp::from_raw(raw_result);
+    if let Some(result) = result {
+        runtime.heap.root(result);
+    }
     if exit_depth != entry_depth {
         warn(format!(
             "stack imbalance in '{what}', {entry_depth} then {exit_depth}"
         ));
     }
     // GNU R accepts a routine that returns C `NULL` and reads it as `R_NilValue`.
-    let result = match Sexp::from_raw(raw_result) {
+    let result = match result {
         Some(result) => result,
         None => {
             warn("converting NULL pointer to R NULL");
             runtime.nil()
         }
     };
-    runtime.heap.root(result);
     run_pending_finalizers();
     Ok(result)
 }
@@ -492,17 +511,34 @@ pub unsafe extern "C" fn Rf_onintr() {
 // The Rust half of native.c.
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_state_save(protect: *mut usize, vmax: *mut usize) {
+pub unsafe extern "C" fn ry_state_save(state: *mut ContextState) {
     let runtime = runtime();
-    *protect = runtime.heap.roots.protect.depth();
-    *vmax = Arena::encode(runtime.arena.watermark());
+    *state = ContextState {
+        protect: runtime.heap.roots.protect.depth(),
+        vmax: Arena::encode(runtime.arena.watermark()),
+        api_depth: runtime.api_depth as usize,
+        handout_base: runtime.handout_base,
+    };
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_state_restore(protect: usize, vmax: usize) {
+pub unsafe extern "C" fn ry_state_restore(state: *const ContextState) {
     let runtime = runtime();
-    runtime.heap.roots.protect.restore(protect);
-    runtime.arena.reset(Arena::decode(vmax));
+    let state = &*state;
+    runtime.heap.roots.protect.restore(state.protect);
+    runtime.arena.reset(Arena::decode(state.vmax));
+    runtime.api_depth = state.api_depth as u32;
+    runtime.handout_base = state.handout_base;
+}
+
+/// What a C context saves when it begins and restores when a jump lands on it. A jump may leave
+/// API entries without returning through them, so the entry depth is restored with the rest.
+#[repr(C)]
+pub struct ContextState {
+    protect: usize,
+    vmax: usize,
+    api_depth: usize,
+    handout_base: usize,
 }
 
 #[unsafe(no_mangle)]

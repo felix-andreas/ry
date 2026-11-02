@@ -138,8 +138,9 @@ pub struct Roots {
 }
 
 /// How many of a native call's most recent handouts stay rooted at least. Code that is correct
-/// under GNU R protects anything it keeps across an allocation, so it never needs an older
-/// handout rooted; the window forgives a forgotten `PROTECT` on a recent temporary.
+/// under GNU R protects anything it keeps across an allocation, so as long as the C API allocates
+/// only where GNU R does, it never needs an older handout rooted; the window forgives a forgotten
+/// `PROTECT` on a recent temporary.
 pub const HANDOUT_WINDOW: usize = 1024;
 
 /// The `PROTECT` stack. `base` is where the innermost native call's protections start, so

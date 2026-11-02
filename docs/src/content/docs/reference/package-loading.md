@@ -77,6 +77,9 @@ call `load_all()` after either.
 ## Limits
 
 - `system.file()` does not map a source package's `inst/` directory; `load_all()` does.
+- Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
+  dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
+  order, where `data()` reads only one.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that

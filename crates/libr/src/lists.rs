@@ -403,7 +403,12 @@ macro_rules! closure_reader {
     ($name:ident, $kind:expr, $slot:ident) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
-            enter(|| Ok(checked_kind(object, $kind, stringify!($name))?.$slot()))
+            enter(|| {
+                Ok(Reachable(
+                    checked_kind(object, $kind, stringify!($name))?.$slot(),
+                ))
+            })
+            .0
         }
     };
 }

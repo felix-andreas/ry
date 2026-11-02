@@ -786,6 +786,7 @@ SEXP rytest_accessor_agreement(SEXP x)
         }
         break;
     case VECSXP:
+    case EXPRSXP:
         AGREE("DATAPTR_RO", DATAPTR_RO(x), (DATAPTR_RO)(x));
         for (R_xlen_t i = 0; i < n; i++) {
             AGREE("VECTOR_ELT", VECTOR_ELT(x, i), (VECTOR_ELT)(x, i));
@@ -796,6 +797,27 @@ SEXP rytest_accessor_agreement(SEXP x)
         break;
     }
     return mkString("");
+}
+
+/* Walks FRAME(env) unprotected after many more handouts than the window keeps and a collection,
+ * as code correct under GNU R may, since there the pairlist is the environment's own. Returns
+ * the value bound to `a`, or NA when the snapshot was collected and its cells reused. */
+SEXP rytest_frame_lifetime(SEXP count)
+{
+    SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, FALSE, 0));
+    defineVar(install("a"), ScalarInteger(7), env);
+    SEXP frame = FRAME(env);
+    for (int i = 0; i < asInteger(count); i++)
+        ScalarInteger(i);
+    R_gc();
+    for (int i = 0; i < asInteger(count); i++)
+        CONS(R_NilValue, R_NilValue);
+    int value = NA_INTEGER;
+    for (SEXP cell = frame; cell != R_NilValue; cell = CDR(cell))
+        if (TAG(cell) == install("a") && TYPEOF(CAR(cell)) == INTSXP)
+            value = INTEGER(CAR(cell))[0];
+    UNPROTECT(1);
+    return ScalarInteger(value);
 }
 
 SEXP rytest_cpp_unwind(SEXP call);
@@ -850,6 +872,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
+    {"rytest_frame_lifetime", (DL_FUNC) &rytest_frame_lifetime, 1},
     {NULL, NULL, 0}
 };
 

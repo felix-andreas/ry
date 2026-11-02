@@ -396,7 +396,9 @@ through globals or preserved references. A loop that allocates and drops million
 still runs in bounded memory, because older handouts leave the scope. The scope roots results, not
 allocations, so the temporaries of an `Rf_eval` that native code calls stay collectable, and a result
 reachable through the argument it was read from (a list element, a cell's `CAR`, an attribute) takes
-no handle at all. Each native call also owns a region of the `PROTECT` stack: unprotecting below it
+no handle at all. A view ry builds of something GNU R stores in the argument, such as `FRAME`'s
+pairlist, stays rooted until the call returns, because correct code walks it unprotected. Each
+native call also owns a region of the `PROTECT` stack: unprotecting below it
 is an error, and a region left unbalanced on return is a warning and is cut back.
 
 **Hot accessors are inline.** `Rinternals.h` defines `INTEGER`, `REAL`, `LOGICAL`, `RAW`,
@@ -676,8 +678,8 @@ The rules the implementation settled:
   makes every writer of the name eager, in order.
 - **Every other top-level expression runs eagerly in `Collate` order**, then the files `Collate`
   leaves out in C-locale order, as `load_all` does. The code files include `R/unix/` (or
-  `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably pure constructor call lazy is
-  not implemented.
+  `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably
+  pure constructor call lazy is not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
   copies other development packages hold of a changed binding is not implemented; a session loads
   one development package at a time without that cascade.

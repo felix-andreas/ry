@@ -94,6 +94,18 @@ fn routines_return_correct_values() {
     );
 }
 
+/// `FRAME` builds a pairlist that GNU R would find in the environment itself, so it must outlive
+/// the handout window for as long as the native call runs.
+#[test]
+fn frame_snapshots_live_until_the_call_returns() {
+    let r = r();
+    rytest(&r);
+    let value = r
+        .call("rytest_frame_lifetime", &[r.integer(10_000)])
+        .expect("rytest_frame_lifetime");
+    assert_eq!(r.integers(value), vec![7]);
+}
+
 /// GNU R's number formatting API and the binding-cell and string-buffer entry points GNU R
 /// exports without declaring them, as packages call them.
 #[test]
@@ -209,7 +221,10 @@ fn errors_unwind_through_native_frames() {
     // `sys.calls()` does not.
     let traceback = r.call_expression(
         ".Internal",
-        &[(None, r.call_expression("traceback", &[(None, r.integer(0))]))],
+        &[(
+            None,
+            r.call_expression("traceback", &[(None, r.integer(0))]),
+        )],
     );
     let calls = r
         .call("rytest_eval", &[r.quote(traceback), global])
@@ -218,13 +233,12 @@ fn errors_unwind_through_native_frames() {
     assert_eq!(r.length(calls), 1, "only the foreign call is on the stack");
     let text = r.strings(r.element(calls, 0));
     assert!(
-        text[0].as_deref().is_some_and(|line| line.starts_with(".Call(\"rytest_eval\"")),
+        text[0]
+            .as_deref()
+            .is_some_and(|line| line.starts_with(".Call(\"rytest_eval\"")),
         "{text:?}"
     );
-    let sys_calls = r.call_expression(
-        ".Internal",
-        &[(None, r.call_expression("sys.calls", &[]))],
-    );
+    let sys_calls = r.call_expression(".Internal", &[(None, r.call_expression("sys.calls", &[]))]);
     let calls = r
         .call("rytest_eval", &[r.quote(sys_calls), global])
         .expect("sys.calls()");

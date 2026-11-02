@@ -62,7 +62,12 @@ pub unsafe extern "C" fn R_ExternalPtrAddr(object: Sexp) -> *mut c_void {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ExternalPtrTag(object: Sexp) -> Sexp {
-    enter(|| Ok(Reachable(external_ptr(object, "R_ExternalPtrTag")?.external_tag()))).0
+    enter(|| {
+        Ok(Reachable(
+            external_ptr(object, "R_ExternalPtrTag")?.external_tag(),
+        ))
+    })
+    .0
 }
 
 #[unsafe(no_mangle)]

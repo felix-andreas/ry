@@ -1822,13 +1822,21 @@ temporaries stay collectable, and only the value native code receives is kept.
   and dropped temporaries kept all of them, which GNU R would have collected. A call now keeps only
   its most recent `HANDOUT_WINDOW` (1,024) to twice that; once it holds twice the window, the older
   half is dropped in one `drain`, so the cost per handout stays constant and memory stays bounded.
-  Code correct under GNU R never needs an older handout, because GNU R may collect an unprotected
-  object at the next allocation.
+  The invariant this relies on: ry allocates on behalf of native code only where GNU R does, so
+  code correct under GNU R, which protects what it keeps across an allocation, never needs an
+  older handout. Two kinds of result break that and must not enter the window: a view ry builds
+  of something GNU R stores in the argument (`FRAME`'s pairlist) is `Pinned` to the call's handle
+  stack, and a field read is `Reachable` and takes no slot at all, which also keeps real
+  temporaries in the window longer.
 - Only the outermost API function hands out (`Runtime::api_depth`). A nested one returns to ry's own
   code, which the outer function's handle scope covers, and pushing it to the window would let it
   displace native code's recent handouts.
 - A result reachable through the argument it was read from (`CAR`, `CDR`, `TAG`, the `CADR` family,
-  `ENCLOS`, the external pointer and ALTREP fields, `PRINTNAME`) is `Reachable` and takes no handle.
+  `ENCLOS`, `R_ParentEnv`, the closure and promise fields, the external pointer and ALTREP fields,
+  `PRINTNAME`) is `Reachable` and takes no handle.
+- A C context saves and restores `api_depth` and the window's base with the `PROTECT` depth, so a
+  jump that leaves an API function without returning through it cannot leave later handouts on
+  the unbounded handle stack.
 - The previous design kept one handle stack for both the Rust side and native code. Handouts got
   their own stack because the window drops entries from the middle of a call's region, which must
   never touch handles ry's own code pushed.

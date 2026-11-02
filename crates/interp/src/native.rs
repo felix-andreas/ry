@@ -33,9 +33,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         foreign_context(call.call, || foreign_call(call, Some(Interface::C)))
     }),
     builtin(".Fortran", -1, |call| unsafe {
-        foreign_context(call.call, || {
-            foreign_call(call, Some(Interface::Fortran))
-        })
+        foreign_context(call.call, || foreign_call(call, Some(Interface::Fortran)))
     }),
     builtin(".Call.graphics", -1, |call| unsafe {
         foreign_context(call.call, || {

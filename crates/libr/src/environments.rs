@@ -370,8 +370,9 @@ pub unsafe extern "C" fn R_ParentEnv(env: Sexp) -> Sexp {
         if env == runtime().heap.known().empty_env {
             return Err(error("the empty environment has no parent"));
         }
-        Ok(env.enclosure())
+        Ok(Reachable(env.enclosure()))
     })
+    .0
 }
 
 #[unsafe(no_mangle)]

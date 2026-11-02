@@ -97,6 +97,7 @@ api! {
     REAL: fn(Sexp) -> *mut f64;
     INTEGER: fn(Sexp) -> *mut c_int;
     RAW: fn(Sexp) -> *mut u8;
+    DATAPTR: fn(Sexp) -> *mut c_void;
     STRING_ELT: fn(Sexp, isize) -> Sexp;
     SET_STRING_ELT: fn(Sexp, isize, Sexp);
     VECTOR_ELT: fn(Sexp, isize) -> Sexp;

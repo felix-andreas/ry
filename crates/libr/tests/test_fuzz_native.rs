@@ -279,10 +279,14 @@ fn fuzz_api_sequences_keep_objects_intact() {
 }
 
 /// A random object for the accessor comparison: every vector kind, ALTREP sequences, nested
-/// lists, pairlists and calls with tags, and NULL.
+/// lists and expression vectors, pairlists and calls with tags, and NULL.
 fn random_object(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
     let length = rng.below(12);
-    let choice = if depth == 0 { rng.below(7) } else { rng.below(10) };
+    let choice = if depth == 0 {
+        rng.below(8)
+    } else {
+        rng.below(11)
+    };
     match choice {
         0 => r.nil(),
         1..=4 => {
@@ -320,15 +324,29 @@ fn random_object(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
             }
             vector
         }
-        6 => r.keep(
+        6 => {
+            const CPLXSXP: c_int = 15;
+            let vector = r.keep(unsafe { (r.api().Rf_allocVector)(CPLXSXP, length as isize) });
+            let parts = unsafe { (r.api().DATAPTR)(vector) }.cast::<f64>();
+            for index in 0..2 * length {
+                unsafe { *parts.add(index) = f64::from_bits(rng.next_u64()) };
+            }
+            vector
+        }
+        7 => r.keep(
             r.call(
                 "rytest_sequence",
-                &[r.integer(rng.below(100) as c_int), r.integer(length as c_int)],
+                &[
+                    r.integer(rng.below(100) as c_int),
+                    r.integer(length as c_int),
+                ],
             )
             .expect("an ALTREP sequence"),
         ),
-        7 => {
-            let list = r.keep(unsafe { (r.api().Rf_allocVector)(VECSXP, length as isize) });
+        8 | 9 => {
+            const EXPRSXP: c_int = 20;
+            let kind = if choice == 8 { VECSXP } else { EXPRSXP };
+            let list = r.keep(unsafe { (r.api().Rf_allocVector)(kind, length as isize) });
             for index in 0..length {
                 let element = random_object(r, rng, depth - 1);
                 unsafe { (r.api().SET_VECTOR_ELT)(list, index as isize, element) };
@@ -340,7 +358,7 @@ fn random_object(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
             for position in (0..length.max(1)).rev() {
                 let value = random_object(r, rng, depth - 1);
                 cells = r.keep(unsafe {
-                    if position == 0 && choice == 9 {
+                    if position == 0 && choice == 10 {
                         (r.api().Rf_lcons)(r.symbol("f"), cells)
                     } else {
                         (r.api().Rf_cons)(value, cells)

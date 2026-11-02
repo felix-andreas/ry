@@ -488,6 +488,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         }
     };
     interp().frames.clear();
+    interp().foreign_calls.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
@@ -500,6 +501,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     {
         report_toplevel(unwind);
         interp().frames.clear();
+        interp().foreign_calls.clear();
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }

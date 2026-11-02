@@ -1032,9 +1032,18 @@ SEXP R_Unserialize(R_inpstream_t stream);
  * flags byte at offset 2, a vector's length at offset 16 and its elements from offset 32. Any
  * other case (an ALTREP instance, a wrong type, an index out of bounds) calls the out-of-line
  * function, which handles or reports it. The conditions mirror the out-of-line fast paths in
- * libR, and libR's tests pin the layout. A package that wants the plain functions defines
+ * libR, and libR's tests pin the layout. The accessors are function-like macros, so `&INTEGER`
+ * and `(INTEGER)(x)` still name the libR function. A package that wants the plain functions, or
+ * includes a header declaring its own function of one of these names, defines
  * RY_NO_INLINE_ACCESSORS before including this header. */
 #ifndef RY_NO_INLINE_ACCESSORS
+
+/* C89 has no inline keyword; GCC and Clang accept __inline__ in every mode. */
+#if defined(__cplusplus) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L)
+#define RY_INLINE static inline
+#else
+#define RY_INLINE static __inline__
+#endif
 
 #define RY_KIND(x) (((const unsigned char *)(x))[0])
 #define RY_IS_ALTREP(x) ((((const unsigned char *)(x))[2] & 2) != 0)
@@ -1055,162 +1064,162 @@ SEXP R_Unserialize(R_inpstream_t stream);
 #define RY_CDR(x) (((SEXP *)((char *)(x) + 16))[1])
 #define RY_TAG(x) (((SEXP *)((char *)(x) + 16))[2])
 
-static inline int Ry_TYPEOF(SEXP x) { return RY_KIND(x); }
+RY_INLINE int Ry_TYPEOF(SEXP x) { return RY_KIND(x); }
 
-static inline R_xlen_t Ry_XLENGTH(SEXP x)
+RY_INLINE R_xlen_t Ry_XLENGTH(SEXP x)
 {
     if (RY_PLAIN_VECTOR(x)) return RY_XLENGTH(x);
     if (RY_KIND(x) == NILSXP) return 0;
     return (XLENGTH)(x);
 }
 
-static inline int Ry_LENGTH(SEXP x)
+RY_INLINE int Ry_LENGTH(SEXP x)
 {
     if (RY_PLAIN_VECTOR(x) && RY_XLENGTH(x) <= INT_MAX) return (int) RY_XLENGTH(x);
     if (RY_KIND(x) == NILSXP) return 0;
     return (LENGTH)(x);
 }
 
-static inline R_xlen_t Ry_Rf_xlength(SEXP x)
+RY_INLINE R_xlen_t Ry_Rf_xlength(SEXP x)
 {
     if (RY_PLAIN_VECTOR(x)) return RY_XLENGTH(x);
     if (RY_KIND(x) == NILSXP) return 0;
     return (Rf_xlength)(x);
 }
 
-static inline R_len_t Ry_Rf_length(SEXP x)
+RY_INLINE R_len_t Ry_Rf_length(SEXP x)
 {
     if (RY_PLAIN_VECTOR(x) && RY_XLENGTH(x) <= INT_MAX) return (R_len_t) RY_XLENGTH(x);
     if (RY_KIND(x) == NILSXP) return 0;
     return (Rf_length)(x);
 }
 
-static inline Rboolean Ry_Rf_isNull(SEXP x) { return RY_KIND(x) == NILSXP ? TRUE : FALSE; }
+RY_INLINE Rboolean Ry_Rf_isNull(SEXP x) { return RY_KIND(x) == NILSXP ? TRUE : FALSE; }
 
-static inline int *Ry_LOGICAL(SEXP x)
+RY_INLINE int *Ry_LOGICAL(SEXP x)
 {
     return RY_PLAIN(x, LGLSXP) ? (int *) RY_DATA(x) : (LOGICAL)(x);
 }
 
-static inline int *Ry_INTEGER(SEXP x)
+RY_INLINE int *Ry_INTEGER(SEXP x)
 {
     return (RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) ? (int *) RY_DATA(x) : (INTEGER)(x);
 }
 
-static inline double *Ry_REAL(SEXP x)
+RY_INLINE double *Ry_REAL(SEXP x)
 {
     return RY_PLAIN(x, REALSXP) ? (double *) RY_DATA(x) : (REAL)(x);
 }
 
-static inline Rcomplex *Ry_COMPLEX(SEXP x)
+RY_INLINE Rcomplex *Ry_COMPLEX(SEXP x)
 {
     return RY_PLAIN(x, CPLXSXP) ? (Rcomplex *) RY_DATA(x) : (COMPLEX)(x);
 }
 
-static inline Rbyte *Ry_RAW(SEXP x)
+RY_INLINE Rbyte *Ry_RAW(SEXP x)
 {
     return RY_PLAIN(x, RAWSXP) ? (Rbyte *) RY_DATA(x) : (RAW)(x);
 }
 
-static inline const int *Ry_LOGICAL_RO(SEXP x)
+RY_INLINE const int *Ry_LOGICAL_RO(SEXP x)
 {
     return RY_PLAIN(x, LGLSXP) ? (const int *) RY_DATA(x) : (LOGICAL_RO)(x);
 }
 
-static inline const int *Ry_INTEGER_RO(SEXP x)
+RY_INLINE const int *Ry_INTEGER_RO(SEXP x)
 {
     return (RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) ? (const int *) RY_DATA(x)
                                                         : (INTEGER_RO)(x);
 }
 
-static inline const double *Ry_REAL_RO(SEXP x)
+RY_INLINE const double *Ry_REAL_RO(SEXP x)
 {
     return RY_PLAIN(x, REALSXP) ? (const double *) RY_DATA(x) : (REAL_RO)(x);
 }
 
-static inline const Rcomplex *Ry_COMPLEX_RO(SEXP x)
+RY_INLINE const Rcomplex *Ry_COMPLEX_RO(SEXP x)
 {
     return RY_PLAIN(x, CPLXSXP) ? (const Rcomplex *) RY_DATA(x) : (COMPLEX_RO)(x);
 }
 
-static inline const Rbyte *Ry_RAW_RO(SEXP x)
+RY_INLINE const Rbyte *Ry_RAW_RO(SEXP x)
 {
     return RY_PLAIN(x, RAWSXP) ? (const Rbyte *) RY_DATA(x) : (RAW_RO)(x);
 }
 
 /* A writable pointer into a list or character vector makes libR treat the vector as escaped,
  * so only atomic vectors take the inline path. */
-static inline void *Ry_DATAPTR(SEXP x)
+RY_INLINE void *Ry_DATAPTR(SEXP x)
 {
     return RY_PLAIN_ATOMIC(x) ? RY_DATA(x) : (DATAPTR)(x);
 }
 
-static inline const void *Ry_DATAPTR_RO(SEXP x)
+RY_INLINE const void *Ry_DATAPTR_RO(SEXP x)
 {
     return RY_PLAIN_VECTOR(x) ? (const void *) RY_DATA(x) : (DATAPTR_RO)(x);
 }
 
-static inline const SEXP *Ry_STRING_PTR_RO(SEXP x)
+RY_INLINE const SEXP *Ry_STRING_PTR_RO(SEXP x)
 {
     return RY_PLAIN(x, STRSXP) ? (const SEXP *) RY_DATA(x) : (STRING_PTR_RO)(x);
 }
 
-static inline SEXP Ry_STRING_ELT(SEXP x, R_xlen_t i)
+RY_INLINE SEXP Ry_STRING_ELT(SEXP x, R_xlen_t i)
 {
     if (RY_PLAIN(x, STRSXP) && RY_IN_BOUNDS(x, i)) return ((SEXP *) RY_DATA(x))[i];
     return (STRING_ELT)(x, i);
 }
 
-static inline SEXP Ry_VECTOR_ELT(SEXP x, R_xlen_t i)
+RY_INLINE SEXP Ry_VECTOR_ELT(SEXP x, R_xlen_t i)
 {
     if ((RY_PLAIN(x, VECSXP) || RY_PLAIN(x, EXPRSXP)) && RY_IN_BOUNDS(x, i))
         return ((SEXP *) RY_DATA(x))[i];
     return (VECTOR_ELT)(x, i);
 }
 
-static inline int Ry_LOGICAL_ELT(SEXP x, R_xlen_t i)
+RY_INLINE int Ry_LOGICAL_ELT(SEXP x, R_xlen_t i)
 {
     if (RY_PLAIN(x, LGLSXP) && RY_IN_BOUNDS(x, i)) return ((int *) RY_DATA(x))[i];
     return (LOGICAL_ELT)(x, i);
 }
 
-static inline int Ry_INTEGER_ELT(SEXP x, R_xlen_t i)
+RY_INLINE int Ry_INTEGER_ELT(SEXP x, R_xlen_t i)
 {
     if ((RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) && RY_IN_BOUNDS(x, i))
         return ((int *) RY_DATA(x))[i];
     return (INTEGER_ELT)(x, i);
 }
 
-static inline double Ry_REAL_ELT(SEXP x, R_xlen_t i)
+RY_INLINE double Ry_REAL_ELT(SEXP x, R_xlen_t i)
 {
     if (RY_PLAIN(x, REALSXP) && RY_IN_BOUNDS(x, i)) return ((double *) RY_DATA(x))[i];
     return (REAL_ELT)(x, i);
 }
 
-static inline Rcomplex Ry_COMPLEX_ELT(SEXP x, R_xlen_t i)
+RY_INLINE Rcomplex Ry_COMPLEX_ELT(SEXP x, R_xlen_t i)
 {
     if (RY_PLAIN(x, CPLXSXP) && RY_IN_BOUNDS(x, i)) return ((Rcomplex *) RY_DATA(x))[i];
     return (COMPLEX_ELT)(x, i);
 }
 
-static inline Rbyte Ry_RAW_ELT(SEXP x, R_xlen_t i)
+RY_INLINE Rbyte Ry_RAW_ELT(SEXP x, R_xlen_t i)
 {
     if (RY_PLAIN(x, RAWSXP) && RY_IN_BOUNDS(x, i)) return ((Rbyte *) RY_DATA(x))[i];
     return (RAW_ELT)(x, i);
 }
 
-static inline const char *Ry_R_CHAR(SEXP x)
+RY_INLINE const char *Ry_R_CHAR(SEXP x)
 {
     return RY_KIND(x) == CHARSXP ? (const char *) RY_DATA(x) : (R_CHAR)(x);
 }
 
-static inline SEXP Ry_CAR(SEXP x) { return RY_IS_CELL(x) ? RY_CAR(x) : (CAR)(x); }
-static inline SEXP Ry_CDR(SEXP x) { return RY_IS_CELL(x) ? RY_CDR(x) : (CDR)(x); }
-static inline SEXP Ry_TAG(SEXP x) { return RY_IS_CELL(x) ? RY_TAG(x) : (TAG)(x); }
+RY_INLINE SEXP Ry_CAR(SEXP x) { return RY_IS_CELL(x) ? RY_CAR(x) : (CAR)(x); }
+RY_INLINE SEXP Ry_CDR(SEXP x) { return RY_IS_CELL(x) ? RY_CDR(x) : (CDR)(x); }
+RY_INLINE SEXP Ry_TAG(SEXP x) { return RY_IS_CELL(x) ? RY_TAG(x) : (TAG)(x); }
 
 /* A path takes the inline route only while every step is a cell, so any other object reaches
  * the out-of-line function and gets the same answer or error as without this header. */
-static inline SEXP Ry_CADR(SEXP x)
+RY_INLINE SEXP Ry_CADR(SEXP x)
 {
     if (RY_IS_CELL(x)) {
         SEXP rest = RY_CDR(x);
@@ -1219,7 +1228,7 @@ static inline SEXP Ry_CADR(SEXP x)
     return (CADR)(x);
 }
 
-static inline SEXP Ry_CDDR(SEXP x)
+RY_INLINE SEXP Ry_CDDR(SEXP x)
 {
     if (RY_IS_CELL(x)) {
         SEXP rest = RY_CDR(x);
@@ -1228,7 +1237,7 @@ static inline SEXP Ry_CDDR(SEXP x)
     return (CDDR)(x);
 }
 
-static inline SEXP Ry_CADDR(SEXP x)
+RY_INLINE SEXP Ry_CADDR(SEXP x)
 {
     if (RY_IS_CELL(x)) {
         SEXP rest = RY_CDR(x);
