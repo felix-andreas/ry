@@ -1840,6 +1840,20 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
+**PGO is not used for the release build, because it measured slower.** An instrumented libR
+(`-Cprofile-generate` on the `interp`, `heap`, `libr` and `R` crates through a
+`RUSTC_WORKSPACE_WRAPPER`, so dependency fingerprints stay unchanged) was trained on every oracle
+case with the JIT off and on, and rebuilt with `-Cprofile-use`. On held-out scripts with the JIT
+off, best of three, it ran 1.4 to 1.9x slower than the plain release build: period.apply 2.10 s
+against 1.47 s, 300k `sd` calls 7.11 s against 4.44 s, row `apply` 1.28 s against 0.66 s, `fib(27)`
+0.55 s against 0.29 s, a 200k-record `lapply` 1.28 s against 0.79 s, and 50k S4 `new`/`slot<-` 13.9
+s against 8.7 s. The cause is unverified. The likeliest suspects are applying the profile only to
+the runtime crates under fat LTO, or a profile that went stale against the merged module, either of
+which leaves hot code optimized as cold. Retrying needs the profile applied to every crate linked
+into libR (cargo-pgo does this), a check for `-Wbackend-plugin` profile-mismatch warnings, and BOLT,
+which is not installed in the cloud environment. Until a retry measures a gain, the release workflow
+stays as it is.
+
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
 without moving any epoch. The rest of the walk (the top environment, the generic's registered
