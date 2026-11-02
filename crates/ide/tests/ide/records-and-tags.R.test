@@ -9,7 +9,7 @@ references: 17..18*, 32..33
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: character}\n"
+  edit 5..5 -> ": Record{x: double, y: character}"
 completion (1): y
 hint @5: Record{x: double, y: character}
 
@@ -22,9 +22,9 @@ references: 9..13
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `some`
-  edit 0..0 -> "#: :Some(integer)\n"
+  edit 4..4 -> ": :Some(integer)"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: :Some(integer)\n"
+  edit 4..4 -> ": :Some(integer)"
 completion: none
 hint @4: :Some(integer)
 
@@ -73,8 +73,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: Record{x: double, y: character}\n"
 completion (2): x, y
 hint @25: Record{x: double, y: character}
 
@@ -89,8 +87,6 @@ definition: none
 references: none
 rename: none
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: Record{height: double, width: double}\n"
 completion (1): width
 hint @25: Record{height: double, width: double}
 
@@ -199,9 +195,9 @@ references: 10..11*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `point`
-  edit 0..0 -> "#: Record{x: double, y: character}\n"
+  edit 5..5 -> ": Record{x: double, y: character}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: character}\n"
+  edit 5..5 -> ": Record{x: double, y: character}"
 completion: none
 hint @5: Record{x: double, y: character}
 
@@ -214,9 +210,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `shape`
-  edit 0..0 -> "#: :Circle(radius: double)\n"
+  edit 5..5 -> ": :Circle(radius: double)"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: :Circle(radius: double)\n"
+  edit 5..5 -> ": :Circle(radius: double)"
 completion (106): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
 hint @5: :Circle(radius: double)
 
@@ -302,7 +298,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 completion: none
 hint @1: integer
 
@@ -317,8 +313,8 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Tuple{integer, character}\n"
-  edit 18..18 -> "#: Record{first: integer}\n"
+  edit 4..4 -> ": Tuple{integer, character}"
+  edit 23..23 -> ": Record{first: integer}"
 completion: none
 hint @4: Tuple{integer, character}
 hint @23: Record{first: integer}
@@ -335,7 +331,7 @@ references: 0..7*, 35..42
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 17..17 -> "#: :Some(integer)\n"
+  edit 21..21 -> ": :Some(integer)"
 completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
 hint @21: :Some(integer)
 
@@ -427,7 +423,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: double}\n"
+  edit 5..5 -> ": Record{x: double, y: double}"
 completion (2): x, y
 hint @5: Record{x: double, y: double}
 
@@ -512,7 +508,7 @@ references: 79..90, 92..103*
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 92..92 -> "#: double\n"
+  edit 103..103 -> ": double"
 completion (1): totalRadius
 hint @103: double
 
@@ -536,9 +532,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `m`
-  edit 0..0 -> "#: Record{amount: double}\n"
+  edit 1..1 -> ": Record{amount: double}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{amount: double}\n"
+  edit 1..1 -> ": Record{amount: double}"
 completion: none
 hint @1: Record{amount: double}
 
@@ -552,9 +548,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `s`
-  edit 77..77 -> "#: :Rect(width: double)\n"
+  edit 78..78 -> ": :Rect(width: double)"
 action: Add inferred type annotations for the whole file
-  edit 77..77 -> "#: :Rect(width: double)\n"
+  edit 78..78 -> ": :Rect(width: double)"
 completion (1): height
 hint @78: :Rect(width: double)
 

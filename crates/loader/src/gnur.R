@@ -2,6 +2,12 @@
 # code is parsed from it in R, at its real position in the file, so source references, and
 # with them tracebacks and debuggers, point into the file on disk.
 
+# A console on GNU R names the roots that changed in its call to `.ry_autoreload()`.
+.ry_changed_roots <- function() ls(.ry_packages, all.names = TRUE)
+
+# ry checks a package before GNU R loads it, so the load never waits for a verdict.
+.ry_await_verdict <- function() invisible()
+
 .ry_sources <- function(state, plan) {
   if (is.null(state$texts)) {
     state$texts <- new.env(parent = emptyenv())
@@ -23,10 +29,14 @@
   if (keep) {
     previous <- options(keep.parse.data = FALSE)
     on.exit(options(previous))
-    padded <- c(character(line - 1L), paste0(strrep(" ", column), text))
-    parse(text = padded, srcfile = .ry_srcfile(state, path), keep.source = TRUE)
+    # Padding by the bytes of the line before the code keeps the byte offsets that printing a
+    # function reads exact. A multibyte character there still shifts the character columns.
+    srcfile <- .ry_srcfile(state, path)
+    prefix <- substr(srcfile$lines[[line]], 1L, column)
+    padded <- c(character(line - 1L), paste0(strrep(" ", nchar(prefix, type = "bytes")), text))
+    parse(text = padded, srcfile = srcfile, keep.source = TRUE, encoding = "UTF-8")
   } else {
-    parse(text = text, keep.source = FALSE)
+    parse(text = text, keep.source = FALSE, encoding = "UTF-8")
   }
 }
 

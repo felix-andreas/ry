@@ -3776,7 +3776,6 @@ dependencies = [
  "libmimalloc-sys",
  "loader",
  "miette",
- "mimalloc",
  "portable-pty",
  "rcmd",
  "rdb",

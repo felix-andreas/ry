@@ -1,0 +1,42 @@
+# A package author moves a file to strict mode: `ry check --annotate` writes the types inference
+# already knows, inline by default, and what is left is the code a person has to type.
+
+file ry.toml
+| [check]
+| strict = true
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file R/area.R
+| area <- function(width, height = 1) width * height
+| unit <- 1L
+| label <- function(shape) shape$name
+
+run ry check
+expect exit 1
+expect stderr "parameter `shape` has no type"
+
+run ry check --annotate
+expect exit 1
+expect stdout "added 2 inferred annotations"
+expect file R/area.R "area <- function<T: numeric>(width: T, height: T = 1) -> T width * height"
+expect file R/area.R "unit: integer <- 1L"
+expect stderr "parameter `shape` has no type"
+
+# Annotating again finds nothing new to write.
+run ry check --annotate
+expect exit 1
+expect stdout "2 problems in 1 file"
+
+# With inline annotations off, the same types go into `#:` comments.
+file ry.toml
+| [check]
+| strict = true
+| inline-annotations = false
+file R/area.R
+| area <- function(width, height = 1) width * height
+
+run ry check --annotate
+expect exit 0
+expect stdout "added 1 inferred annotation"
+expect file R/area.R "#: <T: numeric> fn(width: T, [height]: T) -> T"

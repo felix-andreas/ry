@@ -183,8 +183,12 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     let state = &mut interp().bytecode;
     let calls = state.calls.entry(body).or_insert(0);
     *calls += 1;
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes.
-    if *calls < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
+    // so does a typed one, whose signature lets the JIT compile it at that call too.
+    if *calls < COMPILE_AFTER_CALLS
+        && !contains_loop(body, LOOP_SEARCH_DEPTH)
+        && !crate::annotations::is_typed(function)
+    {
         if state.calls.len() > MAX_TRACKED_BODIES {
             state.calls.clear();
         }
@@ -415,9 +419,19 @@ pub enum Op {
     /// `dst layout base count`: the record, tuple or tag of `layout` whose slots are in registers
     /// `base..base + count`.
     Construct,
+    /// `dst src`: copies a register.
+    Move,
+    /// `dst expression names base count`: evaluates `expression` in a new child of the frame
+    /// where each symbol of the list `names` is bound to the value in the matching register of
+    /// `base..base + count`. A `match` guard's code runs this way wherever it cannot read the
+    /// bound names from registers.
+    BoundEval,
+    /// `dst src guard call`: sets `dst` to `TRUE` or `FALSE` as the value in `src` of the `match`
+    /// guard `guard` holds or not. Errors name `call`, the `match`.
+    MatchCondition,
 }
 
-pub const OPS: [Op; 37] = [
+pub const OPS: [Op; 40] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -455,6 +469,9 @@ pub const OPS: [Op; 37] = [
     Op::Slot,
     Op::MatchFail,
     Op::Construct,
+    Op::Move,
+    Op::BoundEval,
+    Op::MatchCondition,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -563,6 +580,17 @@ struct Compiler {
     /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
     /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
     tail_updates: (Vec<Sexp>, Sexp),
+    /// While a `match` guard compiles: its arm's bound names, which it reads from registers
+    /// instead of the frame.
+    bound: Option<Bound>,
+}
+
+/// The names a `match` arm binds, held in registers `base..base + names.len()` for its guard,
+/// with `list` the constant listing them for [`Op::BoundEval`].
+struct Bound {
+    names: Vec<Sexp>,
+    list: u32,
+    base: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -573,8 +601,16 @@ struct Loop {
     step: u32,
 }
 
-/// Compiles a closure body, or reports that it is better left to the AST evaluator.
+/// Compiles a closure body, or reports that it is better left to the AST evaluator. The
+/// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
+    let threshold = crate::heap().swap_report_threshold(usize::MAX);
+    let compiled = compile_unreported(body, function);
+    crate::heap().swap_report_threshold(threshold);
+    compiled
+}
+
+unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -594,6 +630,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
+        bound: None,
         tail_updates: tail_updates(body, function),
     };
     let result = compiler.allocate();
@@ -766,9 +803,57 @@ unsafe fn pattern_shape(pattern: Sexp) -> Option<PatternShape> {
     Some(PatternShape::Layout { layout, items })
 }
 
-/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` with
-/// no guard, and every pattern is one [`Compiler::pattern`] compiles. Anything else (a guard, an
-/// open record pattern, a pattern the special rejects) runs the whole `match` in the special.
+/// Whether a `match` guard can compile with the arm's bound `names` read from registers: it must
+/// not assign, create a closure, nest a `match`, leave a loop or function, or call a bound name,
+/// since each of those would reach the frame or behave differently outside the special's
+/// scratch frame. Calls the compiler cannot inline evaluate in a scratch frame anyway.
+unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
+    match guard.kind() {
+        SexpType::Symbol => {
+            guard != symbols().dots
+                && guard != missing_arg()
+                && eval::dot_dot_index(guard).is_none()
+        }
+        SexpType::Language => {
+            let head = guard.car();
+            if head.kind() != SexpType::Symbol || names.contains(&head) {
+                return false;
+            }
+            let refused = matches!(
+                head.car().bytes(),
+                b"<-"
+                    | b"="
+                    | b"<<-"
+                    | b"->"
+                    | b"->>"
+                    | b"assign"
+                    | b"function"
+                    | b"local"
+                    | b".Internal"
+                    | b".ry_match"
+                    | b"for"
+                    | b"while"
+                    | b"repeat"
+                    | b"break"
+                    | b"next"
+                    | b"return"
+                    | b"on.exit"
+                    | b"delayedAssign"
+            );
+            !refused
+                && values::pairlist_items(guard.cdr())
+                    .iter()
+                    .all(|&(_, argument)| guard_compiles_in_place(argument, names))
+        }
+        SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+        _ => true,
+    }
+}
+
+/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
+/// `pattern => guard, value`, and every pattern is one [`Compiler::pattern`] compiles. Anything
+/// else (an open record pattern, a pattern the special rejects) runs the whole `match` in the
+/// special.
 unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
     let Some(((_, scrutinee), arms)) = args.split_first() else {
         return Ok(false);
@@ -780,6 +865,7 @@ unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
         return Ok(false);
     }
     let arrow = values::install("=>")?;
+    let plain = |part: Sexp| part != symbols().dots && part != missing_arg();
     Ok(arms.iter().all(|(_, arm)| {
         if arm.kind() != SexpType::Language || arm.car() != arrow {
             return false;
@@ -788,8 +874,15 @@ unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
             [(pattern_tag, pattern), (body_tag, body)] => {
                 *pattern_tag == nil()
                     && *body_tag == nil()
-                    && *body != symbols().dots
-                    && *body != missing_arg()
+                    && plain(*body)
+                    && supported_pattern(*pattern)
+            }
+            [(pattern_tag, pattern), (guard_tag, guard), (body_tag, body)] => {
+                *pattern_tag == nil()
+                    && *guard_tag == nil()
+                    && *body_tag == nil()
+                    && plain(*guard)
+                    && plain(*body)
                     && supported_pattern(*pattern)
             }
             _ => false,
@@ -1171,6 +1264,14 @@ impl Compiler {
         {
             return self.fallback(symbol, dst);
         }
+        // A pattern that binds a name twice leaves the last value bound, as the special does.
+        if let Some(bound) = &self.bound
+            && let Some(index) = bound.names.iter().rposition(|&name| name == symbol)
+        {
+            let register = bound.base + index as u32;
+            self.emit(Op::Move, &[dst, register]);
+            return Ok(());
+        }
         let constant = self.constant(symbol);
         let cache = self.cache();
         self.emit(Op::GetVar, &[dst, constant, cache]);
@@ -1179,8 +1280,20 @@ impl Compiler {
 
     unsafe fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
         let constant = self.constant(expression);
-        self.emit(Op::Ast, &[dst, constant]);
+        self.evaluate(dst, constant);
         Ok(())
+    }
+
+    /// Evaluates the expression in constant `constant` in the frame, or with a guard's bound
+    /// names in scope while one compiles.
+    fn evaluate(&mut self, dst: u32, constant: u32) {
+        match &self.bound {
+            Some(bound) => {
+                let (list, base, count) = (bound.list, bound.base, bound.names.len() as u32);
+                self.emit(Op::BoundEval, &[dst, constant, list, base, count])
+            }
+            None => self.emit(Op::Ast, &[dst, constant]),
+        };
     }
 
     unsafe fn call(&mut self, call: Sexp, dst: u32) -> R<()> {
@@ -1218,7 +1331,8 @@ impl Compiler {
                 }
                 _ => {}
             }
-            if self.eager_subject(primitive, &args)? {
+            // Dispatch on an evaluated subject evaluates the other arguments in the frame.
+            if self.bound.is_none() && self.eager_subject(primitive, &args)? {
                 let item = name == "[["
                     && args.len() == 2
                     && args.iter().all(|(tag, _)| *tag == nil())
@@ -1994,11 +2108,41 @@ impl Compiler {
             let mut failed = Vec::new();
             let mut bound = Vec::new();
             self.pattern(parts[0].1, value, &mut failed, &mut bound)?;
+            if let [_, (_, guard), _] = parts.as_slice() {
+                // The guard sees the bindings as the special's scratch frame would, so a guard
+                // that fails leaves the function's own frame untouched. A guard of plain calls
+                // reads them from registers; anything that could reach the frame by name runs
+                // in a scratch frame, through `Op::BoundEval`.
+                let names: Vec<Sexp> = bound.iter().map(|&(name, _)| name).collect();
+                let list = self.constant(values::list_vector(&names)?);
+                let base = self.next_register;
+                for &(_, register) in &bound {
+                    let copy = self.allocate();
+                    self.emit(Op::Move, &[copy, register]);
+                }
+                let guard_constant = self.constant(*guard);
+                let value = self.allocate();
+                let in_place = guard_compiles_in_place(*guard, &names);
+                self.bound = Some(Bound { names, list, base });
+                if in_place {
+                    self.expression(*guard, value)?;
+                } else {
+                    self.evaluate(value, guard_constant);
+                }
+                self.bound = None;
+                let holds = self.allocate();
+                self.emit(
+                    Op::MatchCondition,
+                    &[holds, value, guard_constant, call_constant],
+                );
+                failed.push(self.emit_patchable(Op::JumpUnless, &[holds, call_constant, 0]));
+            }
+            let body = parts.last().map_or(nil(), |&(_, body)| body);
             for (name, register) in bound {
                 let name = self.constant(name);
                 self.emit(Op::SetVar, &[name, register]);
             }
-            self.expression(parts[1].1, dst)?;
+            self.expression(body, dst)?;
             matched.push(self.emit_patchable(Op::Jump, &[0]));
             for position in failed {
                 self.patch(position);
@@ -2103,7 +2247,7 @@ impl Compiler {
         );
         let done = self.emit_patchable(Op::Jump, &[0]);
         self.patch(generic);
-        self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+        self.generic_call(dst, function, call_constant, None);
         self.patch(done);
         self.release_to(mark);
         Ok(())
@@ -2161,6 +2305,10 @@ impl Compiler {
     }
 
     fn generic_call(&mut self, dst: u32, function: u32, call: u32, rebinding: Option<u32>) {
+        // A closure's promises would read the frame, which does not hold a guard's bound names.
+        if self.bound.is_some() {
+            return self.evaluate(dst, call);
+        }
         match rebinding {
             Some(target) => self.emit(Op::CallRebinding, &[dst, function, call, target]),
             None => self.emit(Op::CallGeneric, &[dst, function, call]),
@@ -2185,7 +2333,9 @@ pub fn operand_count(op: Op) -> usize {
         Op::Field | Op::Item => 5,
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => 3,
         Op::Slot | Op::Construct => 4,
-        Op::MatchFail => 2,
+        Op::MatchFail | Op::Move => 2,
+        Op::BoundEval => 5,
+        Op::MatchCondition => 4,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -2614,6 +2764,21 @@ unsafe fn step(
             let value = crate::records::construct(operand(1) as u32, slots)?;
             interp().visible = true;
             set(operand(0), value);
+        }
+        Op::Move => set(operand(0), register(operand(1))),
+        Op::BoundEval => {
+            let expression = constants.element(operand(1));
+            let names = constants.element(operand(2));
+            let bound = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
+            let value = crate::records::eval_bound_registers(expression, names, bound, env)?;
+            decoded.record(at, value);
+            set(operand(0), value);
+        }
+        Op::MatchCondition => {
+            let guard = constants.element(operand(2));
+            let call = constants.element(operand(3));
+            let holds = crate::records::guard_holds(register(operand(1)), guard, call)?;
+            set(operand(0), values::scalar_logical(i32::from(holds))?);
         }
         Op::BranchUnlessPrimitive => {
             if register(operand(0)) != constants.element(operand(1)) {

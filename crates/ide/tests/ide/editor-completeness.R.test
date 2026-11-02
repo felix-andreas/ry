@@ -9,9 +9,9 @@ references: 0..5*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `sales`
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (9): sales, sample, sample.int, sapply, save, save.image, savehistory, savePlot
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -25,7 +25,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -42,7 +42,7 @@ parameters: [x: character] | [as.factor]: logical
 signature: fn(x: Any, [as.factor]: logical) -> Any
 parameters: [x: Any] | [as.factor]: logical
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -57,7 +57,7 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (18): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
 hint @5: DataFrame{region: character[], units: integer[]}
 
@@ -71,10 +71,10 @@ references: 43..48*, 73..78
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `u`
-  edit 62..62 -> "#: integer[]\n"
+  edit 63..63 -> ": integer[]"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
-  edit 62..62 -> "#: integer[]\n"
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
+  edit 63..63 -> ": integer[]"
 completion (1): units
 hint @5: DataFrame{region: character[], units: integer[]}
 hint @63: integer[]
@@ -92,10 +92,10 @@ references: R/a.R:26..27*, R/b.R:25..26
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `v`
-  edit 18..18 -> "#: double\n"
+  edit 19..19 -> ": double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: double}\n"
-  edit 18..18 -> "#: double\n"
+  edit 1..1 -> ": Record{x: double, y: double}"
+  edit 19..19 -> ": double"
 completion (1): x
 hint @1: Record{x: double, y: double}
 hint @19: double
@@ -117,9 +117,9 @@ calls helper: in r [R/b.R:5..11], s [R/c.R:5..11] | out
 signature: fn(value: integer) -> integer
 parameters: [value: integer]
 action: Add inferred type annotation for `r`
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: integer\n"
+  edit 1..1 -> ": integer"
 completion (6): help, helper, help.request, help.search, help.start, .__C__MethodSelectionReport
 hint @1: integer
 
@@ -132,9 +132,13 @@ references: 14..19*, 26..31
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 25..25 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 25..25 -> " -> T"
 completion (22): alpha, alarm, alias, alist, all, all.equal, all.equal.character, all.equal.default
 hint @1: <T> fn([alpha]: T) -> T
 
@@ -174,7 +178,10 @@ rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
 parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+  edit 18..18 -> "<T, U>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 38..38 -> " -> T"
 completion (82): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 hint @52first =
@@ -203,9 +210,13 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+  edit 13..13 -> "<T>"
+  edit 19..19 -> ": T"
+  edit 20..20 -> " -> T"
 completion (128+): result, value, f, break, else, FALSE, for, function
 hint @1: <T> fn(value: T) -> T
 
@@ -220,7 +231,11 @@ rename: none
 signature: fn(first: integer, second: integer = 2L, third: integer = 3L) -> integer
 parameters: first: integer | [second: integer = 2L] | third: integer = 3L
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+  edit 18..18 -> "<T, U, V>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
 completion (128+): second = , third = , helper, break, else, FALSE, for, function
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
@@ -235,7 +250,11 @@ rename: none
 signature: <T, U, V> fn(first: T, second: U = 2L, third: V = 3L) -> T
 parameters: [first: T] | second: U = 2L | third: V = 3L
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+  edit 18..18 -> "<T, U, V>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 44..44 -> ": V"
+  edit 50..50 -> " -> T"
 completion (128+): first = , second = , helper, break, else, FALSE, for, function
 hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
 
@@ -250,7 +269,10 @@ rename: none
 signature: <T, U> fn(first: T, second: U = 2L) -> T
 parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+  edit 18..18 -> "<T, U>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": U"
+  edit 38..38 -> " -> T"
 completion (128+): helper, break, else, FALSE, for, function, if, in
 hint @6: <T, U> fn(first: T, [second]: U) -> T
 
@@ -265,9 +287,9 @@ rename: 1 edit(s)
 type-definition: stub source base at `data.frame`
 signature: none
 action: Add inferred type annotation for `frame`
-  edit 0..0 -> "#: data.frame\n"
+  edit 5..5 -> ": data.frame"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: data.frame\n"
+  edit 5..5 -> ": data.frame"
 completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head
 hint @5: data.frame
 
@@ -282,9 +304,9 @@ rename: 1 edit(s)
 type-definition: stub source base at `matrix`
 signature: none
 action: Add inferred type annotation for `grid`
-  edit 0..0 -> "#: matrix\n"
+  edit 4..4 -> ": matrix"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: matrix\n"
+  edit 4..4 -> ": matrix"
 completion (17): grid, graphics.off, gray, gray.colors, grconvertX, grconvertY, gregexec, gregexpr
 hint @4: matrix
 
@@ -299,7 +321,10 @@ rename: 3 edit(s)
 signature: fn(values: double[], factor: double[] = 2) -> double[]
 parameters: values: double[] | [factor: double[] = 2]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
 completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
 
@@ -314,9 +339,15 @@ references: 26..32*, 47..53, 69..75, 87..93
 rename: 4 edit(s)
 signature: none
 action: Add inferred type annotation for `scale`
-  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
 completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
 
@@ -334,10 +365,10 @@ rename: 4 edit(s)
 signature: fn(values: double, factor: double = 2) -> double
 parameters: values: double | [factor: double = 2]
 action: Add inferred type annotation for `doubled`
-  edit 0..0 -> "#: double\n"
+  edit 7..7 -> ": double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: double\n"
-  edit 32..32 -> "#: double\n"
+  edit 7..7 -> ": double"
+  edit 39..39 -> ": double"
 completion (72): factanal, factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @7: double
 hint @39: double
@@ -355,10 +386,9 @@ rename: 3 edit(s)
 signature: fn(x: double, by: double) -> double
 parameters: x: double | [by: double]
 action: Add inferred type annotation for `outer`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 22..22 -> "  #: fn(x: T, by: T) -> T\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 19..19 -> " -> double"
 completion (72): break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default, bartlett.test
 hint @5: fn() -> double
 hint @29: fn(x: T, by: T) -> T
@@ -375,10 +405,18 @@ references: 26..32*, 47..53, 114..120
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `scale`
-  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric> fn(values: T, [factor]: T) -> T\n"
-  edit 54..54 -> "#: <T> fn(factor: T) -> T\n"
+  edit 17..17 -> "<T: numeric>"
+  edit 24..24 -> ": T"
+  edit 32..32 -> ": T"
+  edit 37..37 -> " -> T"
+  edit 71..71 -> "<T>"
+  edit 78..78 -> ": T"
+  edit 79..79 -> " -> T"
 completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
 hint @59: <T> fn(factor: T) -> T
@@ -410,9 +448,9 @@ rename: none
 signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
 parameters: [...: Any] | [sep]: character | [collapse]: character | NULL | [recycle0]: logical
 action: Add inferred type annotation for `x`
-  edit 0..0 -> "#: character\n"
+  edit 1..1 -> ": character"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: character\n"
+  edit 1..1 -> ": character"
 completion (13): paste, paste0, packageStartupMessage, pairlist, print.NativeRoutineList, duplicated.POSIXlt, suppressPackageStartupMessages, .deparseOpts
 hint @1: character
 
@@ -438,7 +476,10 @@ rename: none
 signature: fn(principal: double, rate: double) -> double
 parameters: principal: double | [rate: double]
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double\n"
+  edit 16..16 -> "<T: numeric, U: numeric>"
+  edit 26..26 -> ": T"
+  edit 32..32 -> ": U"
+  edit 33..33 -> " -> double"
 completion (15): rainbow, randu, range, range.Date, range.default, range.POSIXct, rank, rapply
 hint @4: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double
 
@@ -452,7 +493,7 @@ references: 35..39*, 56..60
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{host: character, port: integer}\n"
+  edit 6..6 -> ": list{host: character, port: integer}"
 completion (1): port
 hint @6: list{host: character, port: integer}
 
@@ -468,12 +509,12 @@ references: 35..39*, 61..65
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `config`
-  edit 0..0 -> "#: list{host: character, port: integer}\n"
+  edit 6..6 -> ": list{host: character, port: integer}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{host: character, port: integer}\n"
-  edit 49..49 -> "#: integer\n"
-  edit 66..66 -> "#: list{port: integer}\n"
-  edit 92..92 -> "#: integer\n"
+  edit 6..6 -> ": list{host: character, port: integer}"
+  edit 50..50 -> ": integer"
+  edit 71..71 -> ": list{port: integer}"
+  edit 93..93 -> ": integer"
 completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
 hint @6: list{host: character, port: integer}
 hint @50: integer
@@ -493,8 +534,8 @@ references: 35..39*, 102..106
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn() -> list{host: character, port: integer}\n"
-  edit 71..71 -> "#: list{host: character, port: integer}\n"
+  edit 25..25 -> " -> list{host: character, port: integer}"
+  edit 77..77 -> ": list{host: character, port: integer}"
 completion (1): host
 hint @11: fn() -> list{host: character, port: integer}
 hint @77: list{host: character, port: integer}
@@ -512,7 +553,8 @@ references: 42..46*, 63..67*, 87..91
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: fn(flag: logical) -> list{size: integer}\n"
+  edit 21..21 -> ": logical"
+  edit 22..22 -> " -> list{size: integer}"
 completion (1): size
 hint @4: fn(flag: logical) -> list{size: integer}
 
@@ -527,7 +569,7 @@ references: 22..27*, 40..45
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{}\n"
+  edit 5..5 -> ": list{}"
 completion (1): count
 hint @5: list{}
 
@@ -607,7 +649,7 @@ references: 10..11*, 30..31
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: Record{x: double, y: double}\n"
+  edit 5..5 -> ": Record{x: double, y: double}"
 completion (2): x, y
 hint @5: Record{x: double, y: double}
 
@@ -621,7 +663,7 @@ references: 31..37, 52..58*
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 38..38 -> "#: list{amount: integer}\n"
+  edit 43..43 -> ": list{amount: integer}"
 completion (1): amount
 hint @43: list{amount: integer}
 
@@ -646,9 +688,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `fit`
-  edit 0..0 -> "#: double\n"
+  edit 3..3 -> ": double"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: double\n"
+  edit 3..3 -> ": double"
 completion (1): root
 hint @3: double
 hint @41interval =
@@ -663,7 +705,7 @@ references: 24..28*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{}\n"
+  edit 6..6 -> ": list{}"
 completion (1): port
 hint @6: list{}
 
@@ -695,11 +737,14 @@ rename: 2 edit(s)
 signature: fn(x: T, [envir]: NULL) -> T
 parameters: x: T | [[envir]: NULL]
 action: Add inferred type annotation for `f`
-  edit 123..123 -> "#: <T> fn(y: T) -> T\n"
+  edit 136..136 -> "<T>"
+  edit 138..138 -> ": T"
+  edit 139..139 -> " -> T"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
-  edit 80..80 -> "  #: fn(x: T, [envir]: U) -> T\n"
-  edit 123..123 -> "#: <T> fn(y: T) -> T\n"
+  edit 136..136 -> "<T>"
+  edit 138..138 -> ": T"
+  edit 139..139 -> " -> T"
 completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
 hint @11: <T> fn([expr]: T) -> Any
 hint @35expr =
@@ -731,9 +776,9 @@ references: 30..31*, 47..48*, 56..57
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `x`
-  edit 0..0 -> "#: list{a: double}\n"
+  edit 1..1 -> ": list{a: double}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{a: double}\n"
+  edit 1..1 -> ": list{a: double}"
 completion (128+): abbreviate, ability.cov, abline, abs, acf, acf2AR, acos, acosh
 hint @1: list{a: double}
 
@@ -749,9 +794,9 @@ references: 12..16*, 57..61
 rename: none
 signature: none
 action: Add inferred type annotation for `cfg`
-  edit 0..0 -> "#: list{port: double}\n"
+  edit 3..3 -> ": list{port: double}"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: list{port: double}\n"
+  edit 3..3 -> ": list{port: double}"
 completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
 hint @3: list{port: double}
 
@@ -766,9 +811,9 @@ type-definition: stub source base at `data.frame`
 signature: fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
 parameters: ...: Any | [row.names]: Any | [check.rows]: logical | [check.names]: logical | [fix.empty.names]: logical | [[stringsAsFactors]: logical]
 action: Add inferred type annotation for `df`
-  edit 0..0 -> "#: data.frame\n"
+  edit 2..2 -> ": data.frame"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: data.frame\n"
+  edit 2..2 -> ": data.frame"
 completion (1): default.stringsAsFactors
 hint @2: data.frame
 
@@ -804,30 +849,9 @@ references: 30..31*, 732..733
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: list{k: double}\n"
-  edit 37..37 -> "  #: list{k: double}\n"
-  edit 71..71 -> "  #: list{k: double}\n"
-  edit 105..105 -> "  #: list{k: double}\n"
-  edit 139..139 -> "  #: list{k: double}\n"
-  edit 173..173 -> "  #: list{k: double}\n"
-  edit 207..207 -> "  #: list{k: double}\n"
-  edit 241..241 -> "  #: list{k: double}\n"
-  edit 275..275 -> "  #: list{k: double}\n"
-  edit 309..309 -> "  #: list{k: double}\n"
-  edit 343..343 -> "  #: list{k: double}\n"
-  edit 378..378 -> "  #: list{k: double}\n"
-  edit 413..413 -> "  #: list{k: double}\n"
-  edit 448..448 -> "  #: list{k: double}\n"
-  edit 483..483 -> "  #: list{k: double}\n"
-  edit 518..518 -> "  #: list{k: double}\n"
-  edit 553..553 -> "  #: list{k: double}\n"
-  edit 588..588 -> "  #: list{k: double}\n"
-  edit 623..623 -> "  #: list{k: double}\n"
-  edit 658..658 -> "  #: list{k: double}\n"
-  edit 693..693 -> "  #: list{k: double}\n"
-  edit 0..0 -> "#: fn() -> double\n"
+  edit 15..15 -> " -> double"
 completion (1): k
 hint @1: fn() -> double
 hint @21: list{k: double}

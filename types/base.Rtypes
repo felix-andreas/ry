@@ -131,6 +131,9 @@ Arith.matrix : fn(e1: matrix, e2: double) -> matrix
 Arith.matrix : fn(e1: double, e2: matrix) -> matrix
 Arith.matrix : fn(e1: matrix, e2: double[]) -> matrix
 Arith.matrix : fn(e1: double[], e2: matrix) -> matrix
+# Arithmetic with `NULL` is a zero-length result, as for any vector.
+Arith.matrix : fn(e1: matrix, e2: NULL) -> double[]
+Arith.matrix : fn(e1: NULL, e2: matrix) -> double[]
 Compare.matrix : fn(e1: matrix, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
@@ -353,7 +356,7 @@ xor : @pure fn(x: Any, y: Any) -> logical
 # order characters — with `Any` as the fallback for mixtures the candidates cannot express. `prod`
 # genuinely always returns double. `mean`'s second positional is `trim`, not `na.rm`.
 sum : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
-sum : fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+sum : fn(...: double[] | integer[] | logical[] | matrix, [na.rm]: logical) -> double
 sum : fn(...: difftime, [na.rm]: logical) -> difftime
 sum : fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
 sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
@@ -607,6 +610,9 @@ vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[]
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
 vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+# Tried last, because a generic `FUN` would also match it. A matrix carries no element
+# type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
 mapply : Any
 Map : Any
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).

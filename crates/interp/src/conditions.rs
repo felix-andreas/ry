@@ -521,12 +521,15 @@ pub unsafe fn print_warnings() -> R<()> {
         }
         text.push('\n');
     } else {
-        text.push_str(if warnings.len() >= 50 {
-            "There were 50 or more warnings (use warnings() to see the first 50)\n"
-        } else {
-            "Warning messages:\n"
-        });
-        if warnings.len() < 50 {
+        match warnings.len() {
+            ..=10 => text.push_str("Warning messages:\n"),
+            count @ ..50 => text.push_str(&format!(
+                "There were {count} warnings (use warnings() to see them)\n"
+            )),
+            _ => text
+                .push_str("There were 50 or more warnings (use warnings() to see the first 50)\n"),
+        }
+        if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {
                 if *call == nil() {
                     text.push_str(&format!("{}: {message}\n", index + 1));

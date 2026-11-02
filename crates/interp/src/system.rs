@@ -88,15 +88,40 @@ pub const BUILTINS: &[BuiltinDef] = &[
         link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok())
     }),
     internal("setFileTime", 2, do_sys_set_file_time).invisible(),
+    // GNU R's `R_ShowFiles` sends each header, a blank line, the file and a newline through the
+    // pager; ry's console is the pager, so the same text goes to the console.
     internal("file.show", 5, |call| unsafe {
+        let delete = values::as_logical_scalar(call.arg(3)) == 1;
+        let mut text = Vec::new();
         for index in 0..length(call.arg(0)) {
-            if let Some(path) = values::string_at(call.arg(0), index) {
-                let text = std::fs::read_to_string(&*path).map_err(|failure| {
-                    call.error(format!("cannot open file '{path}': {failure}"))
-                })?;
-                crate::write_console(text.as_bytes(), false);
+            let Some(path) = values::string_at(call.arg(0), index) else {
+                continue;
+            };
+            if let Some(header) = values::string_at(call.arg(1), index)
+                && !header.is_empty()
+            {
+                text.extend_from_slice(format!("{header}\n\n").as_bytes());
+            }
+            let expanded = crate::connections::expand_path(&path);
+            match std::fs::read(&expanded) {
+                Ok(contents) => {
+                    text.extend_from_slice(&contents);
+                    text.push(b'\n');
+                    if delete {
+                        // GNU R's pager ignores a failed removal too.
+                        std::fs::remove_file(&expanded).ok();
+                    }
+                }
+                Err(failure) => text.extend_from_slice(
+                    format!(
+                        "Cannot open file '{path}': {}\n\n",
+                        crate::connections::os_message(&failure)
+                    )
+                    .as_bytes(),
+                ),
             }
         }
+        crate::write_console(&text, false);
         Ok(nil())
     })
     .invisible(),
@@ -146,18 +171,25 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dirname", 1, |call| unsafe {
+        // GNU R keeps an empty path empty and drops the slashes before the last component.
         map_strings(call, |path| {
+            if path.is_empty() {
+                return String::new();
+            }
             let trimmed = path.trim_end_matches('/');
             match trimmed.rfind('/') {
-                Some(0) => "/".to_owned(),
-                Some(position) => trimmed[..position].to_owned(),
+                Some(position) => match trimmed[..position].trim_end_matches('/') {
+                    "" => "/".to_owned(),
+                    parent => parent.to_owned(),
+                },
+                None if path.starts_with('/') => "/".to_owned(),
                 None => ".".to_owned(),
             }
         })
     }),
     internal("file.path", 2, do_file_path),
     internal("tempfile", 3, do_tempfile),
-    internal("tempdir", 1, |_| unsafe { scalar_string(&temp_dir()) }),
+    internal("tempdir", 1, do_tempdir),
     internal("unlink", 4, do_unlink).invisible(),
     internal("file.remove", 1, |call| unsafe {
         map_paths(call, |path| std::fs::remove_file(path).is_ok())
@@ -188,7 +220,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("Sys.which", 1, do_sys_which),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
-    internal("Sys.umask", 1, do_sys_umask),
+    internal("Sys.umask", 1, do_sys_umask).keep_visibility(),
     internal("Sys.getpid", 0, |_| unsafe {
         scalar_integer(std::process::id() as i32)
     }),
@@ -213,7 +245,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
                     .filter(|left| !left.is_zero())
                 {
                     crate::unwind::poll_interrupt()?;
-                    std::thread::sleep(left.min(slice));
+                    // GNU R answers help server requests while it sleeps.
+                    crate::help_server::wait_and_serve(left.min(slice))?;
                 }
             }
             Ok(nil())
@@ -231,7 +264,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", -1, do_system),
+    internal("system", -1, do_system).keep_visibility(),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
     internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
@@ -387,19 +420,96 @@ fn find_r_home() -> Result<String, String> {
     ))
 }
 
-fn temp_dir() -> String {
-    static mut DIR: Option<String> = None;
-    // SAFETY: single-threaded access.
-    #[allow(static_mut_refs)]
-    unsafe {
-        DIR.get_or_insert_with(|| {
-            let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
-            let path = format!("{base}/RtmpRy{}", std::process::id());
-            drop(std::fs::create_dir_all(&path));
-            path
-        })
-        .clone()
+/// The session's temporary directory, which `tempdir()` returns and native code reads as
+/// `R_TempDir`. As in GNU R it is a fresh `RtmpXXXXXX` under the first of `R_TMPDIR`, `TMPDIR`,
+/// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
+/// session ends.
+pub fn session_temp_dir() -> Result<&'static str, String> {
+    SESSION_TEMP
+        .get_or_init(create_session_temp_dir)
+        .as_ref()
+        .map(|temp| temp.path.as_str())
+        .map_err(Clone::clone)
+}
+
+/// Removes the session's temporary directory. Only the process that created it does: a forked
+/// child shares the path but must leave the directory to its parent.
+pub fn remove_session_temp_dir() {
+    let Some(Ok(temp)) = SESSION_TEMP.get() else {
+        return;
+    };
+    if temp.owner != std::process::id() {
+        return;
     }
+    match std::fs::remove_dir_all(&temp.path) {
+        Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "ry: cannot remove the temporary directory '{}': {failure}",
+                temp.path
+            );
+        }
+        Ok(()) | Err(_) => {}
+    }
+}
+
+struct SessionTemp {
+    path: String,
+    owner: u32,
+}
+
+static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::sync::OnceLock::new();
+
+fn create_session_temp_dir() -> Result<SessionTemp, String> {
+    let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|candidate| writable_directory(candidate))
+        .unwrap_or_else(|| "/tmp".to_owned());
+    let template = std::ffi::CString::new(format!("{root}/RtmpXXXXXX"))
+        .map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
+    let mut bytes = template.into_bytes_with_nul();
+    // SAFETY: `bytes` is a NUL-terminated template that mkdtemp rewrites in place.
+    let created = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
+    if created.is_null() {
+        return Err("cannot create 'R_TempDir'".to_owned());
+    }
+    bytes.pop();
+    let path = String::from_utf8(bytes).map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
+    Ok(SessionTemp {
+        path,
+        owner: std::process::id(),
+    })
+}
+
+fn writable_directory(path: &str) -> bool {
+    if path.is_empty() || !std::path::Path::new(path).is_dir() {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// `tempdir(check)`: with `check`, a session directory something deleted is created again at
+/// the same path, because native code already holds that path as `R_TempDir`. GNU R picks a
+/// fresh name instead; keeping the name is safe only because the directory is created
+/// private and a directory that already exists must belong to this user.
+unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let path = session_temp_dir().map_err(|message| call.error(message))?;
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        let usable = match std::fs::symlink_metadata(path) {
+            // SAFETY: geteuid has no preconditions.
+            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
+        };
+        if !usable {
+            return Err(call.error("cannot create 'R_TempDir'"));
+        }
+    }
+    scalar_string(path)
 }
 
 /// `.ry_view(x, title)`, behind ry's `View()`: opens a lazy view of `x` in the editors connected
@@ -2463,9 +2573,12 @@ unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
         let pattern = values::string_at(patterns, index % length(patterns).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let directory = values::string_at(directories, index % length(directories).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(temp_dir);
+        let directory = match values::string_at(directories, index % length(directories).max(1)) {
+            Some(text) => text.into_owned(),
+            None => session_temp_dir()
+                .map_err(|message| call.error(message))?
+                .to_owned(),
+        };
         let extension = values::string_at(extensions, index % length(extensions).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
@@ -3058,6 +3171,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
                 format!("running command '{command}' had status {status}"),
             )?;
         }
+        interp().visible = true;
         return Ok(result);
     }
     // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
@@ -3773,6 +3887,7 @@ unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_sys_umask(call: &Call<'_>) -> R<Sexp> {
     let mode = values::as_integer_scalar(call.arg(0));
     let old = if mode == NA_INTEGER {
+        interp().visible = true;
         crate::platform::umask()
     } else {
         interp().visible = false;

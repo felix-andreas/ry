@@ -154,13 +154,19 @@ impl Preflight {
 }
 
 /// Enforces strict mode on the package `ry load` is about to load, on either runtime, because
-/// strict mode is a property of the code. Its `R/` files are checked as `ry check` checks the
-/// project, so a name another file defines resolves. A package that turns strict mode on
+/// strict mode is a property of the code. Its `R/` files are checked together, so a name
+/// another file defines resolves, and alone: a load sources nothing else, so a name only a
+/// test file defines is unbound in the loaded package. A package that turns strict mode on
 /// nowhere, neither in `ry.toml` nor in a file's `# typing: strict`, skips analysis entirely.
 pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandError> {
     let sources = root.join("R");
+    // The directive is ASCII, so the bytes answer for a file in any encoding.
     let mentions_strict = |path: &Path| {
-        fs::read_to_string(path).is_ok_and(|source| source.contains("typing: strict"))
+        fs::read(path).is_ok_and(|source| {
+            source
+                .windows(b"typing: strict".len())
+                .any(|window| window == b"typing: strict")
+        })
     };
     if !config.check.strict
         && !fs::read_dir(&sources).is_ok_and(|entries| {
@@ -185,6 +191,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             .spawn_scoped(scope, || {
                 let analysis = analyze_project(
                     root,
+                    &sources,
                     config.clone(),
                     std::slice::from_ref(&sources),
                     CacheUse::Off,
@@ -200,6 +207,10 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         }
     });
     let (analysis, errors) = analysis?;
+    // A file the analysis could not read went unchecked, and it has said which.
+    if analysis.failures > 0 {
+        return Err(CommandError);
+    }
     let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
     let mut problems = 0;
     for (file, errors) in analysis.files.iter().zip(&errors) {
@@ -228,7 +239,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
 }
 
 /// Hashes everything the strict check reads: the ry binary, the configuration, every R file
-/// the project analysis walks, the override stubs, the package metadata and the data files.
+/// in `R/`, the override stubs, the package metadata and the data files.
 /// Two independently seeded hashes give 128 bits, so a stale verdict needs a real collision.
 fn strict_fingerprint(root: &Path, config: &Config) -> Result<Option<String>, CommandError> {
     let mut low = DefaultHasher::new();
@@ -263,7 +274,7 @@ fn strict_fingerprint(root: &Path, config: &Config) -> Result<Option<String>, Co
     let exclude = exclude_matcher(config, root)?;
     // An input that cannot be read cannot be fingerprinted, so that load keeps no verdict; the
     // analysis itself reports the unreadable file.
-    for path in collect_r_files(root, exclude.as_ref())? {
+    for path in collect_r_files(&root.join("R"), exclude.as_ref())? {
         let Ok(contents) = fs::read(&path) else {
             return Ok(None);
         };
