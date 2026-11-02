@@ -1533,3 +1533,81 @@ counter <- function() {
 #++++
 counter: Unknown
 123..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`
+
+#---- a_formal_passed_to_a_sibling_defined_further_down_is_not_forced
+err <- local({
+  format_advice <- function(x) {
+    if (runif(1) > 0.5) format_advice_cli(x) else format_advice_plain(x)
+  }
+  format_advice_cli <- function(x) "advice"
+  format_advice_plain <- function(x, ...) "advice"
+  list(advice = format_advice)
+})
+err$advice()
+#++++
+err: list{advice: fn([x]: Unknown) -> Unknown}
+Unknown
+
+#---- a_call_to_a_sibling_defined_further_down_still_checks_its_arity
+err <- local({
+  format_advice <- function(x) format_advice_cli(x)
+  format_advice_cli <- function(x) "advice"
+  list(advice = format_advice)
+})
+err$advice(1, 2)
+#++++
+err: list{advice: fn([x]: Unknown) -> Unknown}
+Unknown
+159..160 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- a_menu_takes_a_list_of_strings_as_its_choices
+pick <- function(urls) {
+  pretty <- lapply(urls, function(url) paste0(url, "!"))
+  utils::menu(pretty, title = "Pick one")
+}
+#++++
+pick: fn(urls: Unknown) -> integer
+
+#---- a_menu_does_not_take_a_function_as_its_choices
+pick <- function() utils::menu(sum)
+#++++
+pick: Unknown
+31..34 error[type-mismatch] expected `character | character[] | list[character]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
+#---- a_callback_called_with_the_arity_its_formals_report_is_not_an_arity_error
+new_source <- function(src, call, handler = NULL) {
+  if (is.null(handler)) {
+    return(src)
+  }
+  if (length(formals(handler)) == 1) {
+    handler(src)
+  } else {
+    handler(src, call)
+  }
+}
+#++++
+new_source: <T, U, V> fn(src: T, [call]: U, [handler]: (fn(T) -> V) | NULL) -> Unknown
+
+#---- a_callback_called_twice_with_one_argument_still_checks_the_argument
+run <- function(handler) {
+  handler(1L) + 1L
+  nchar(handler("a"))
+}
+#++++
+run: Unknown
+62..65 error[type-mismatch] expected `integer`, found `character`
+
+#---- a_callback_whose_first_call_passed_an_integer_takes_a_double_later
+palette <- function(levels, col.fun) {
+  if (length(levels) > 2) col.fun(n = length(levels)) else col.fun(n = length(levels) + 1)
+}
+#++++
+palette: <T, U> fn(levels: T, col.fun: fn(n: integer) -> U) -> U
+
+#---- a_callback_whose_first_call_passed_an_integer_does_not_take_a_string_later
+palette <- function(levels, col.fun) {
+  if (length(levels) > 2) col.fun(n = length(levels)) else col.fun(n = "many")
+}
+#++++
+palette: Unknown
+110..116 error[type-mismatch] expected `integer`, found `character`

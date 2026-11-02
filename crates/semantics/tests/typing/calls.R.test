@@ -14,7 +14,7 @@ f <- function(choices) {
   if (confirmed) selected else 0L
 }
 #++++
-f: fn(choices: character | character[]) -> integer
+f: fn(choices: character | character[] | list[character]) -> integer
 
 #---- error_handler_stubs_resolve
 options(error = recover)

@@ -74,7 +74,7 @@ globalVariables : fn(names: character | character[], [package]: character, [add]
 
 # Interactive debugging and console helpers.
 recover : fn() -> NULL
-menu : fn(choices: character | character[], [graphics]: logical, [title]: Any) -> integer
+menu : fn(choices: character | character[] | list[character], [graphics]: logical, [title]: Any) -> integer
 askYesNo : fn(msg: character, [default]: Any, [prompts]: Any, ...: Any) -> logical
 browseURL : fn(url: character, [browser]: Any, [encodeIfNeeded]: logical) -> NULL
 flush.console : fn() -> NULL

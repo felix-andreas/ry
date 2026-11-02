@@ -4820,7 +4820,17 @@ impl<'db> Checker<'db, '_> {
                     .scheme_arena
                     .get(index as usize)
                     .map(|scheme| scheme.body),
-                Some(EnvEntry::MissingFormal(_)) | None => None,
+                Some(EnvEntry::MissingFormal(_)) => None,
+                // A sibling the enclosing body defines further down runs only after its
+                // definition, and it decides for itself which arguments it reads.
+                None if self.naming.bindings.get(&slot).is_some_and(|info| {
+                    info.kind == BindingKind::Local
+                        && info.range.start() > self.module.range(callee).start()
+                }) =>
+                {
+                    return vec![true; arguments.len()];
+                }
+                None => None,
             },
             None => self
                 .globals
@@ -7257,6 +7267,9 @@ impl<'db> Checker<'db, '_> {
         };
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
+        if self.arity_tested_by_formals(callee, callee_ty, &call_arguments) {
+            return unknown(self.db);
+        }
         let source = match self.is_lookup(callee) {
             true => CalleeSource::Lookup,
             false => CalleeSource::Value,
@@ -7533,6 +7546,56 @@ impl<'db> Checker<'db, '_> {
             // Nothing else is a function either: R reports the call, and so does the checker.
             None => FunctionLookup::Found(nearest),
         }
+    }
+
+    /// A call on a parameter whose function type an earlier call inferred (`handler(src)`), with
+    /// another argument count, where the body reads `formals()` of that parameter. Such code
+    /// picks the call by the callback's arity (`if (length(formals(handler)) == 2) handler(src,
+    /// call)`), so the inferred shape is no arity to check against.
+    fn arity_tested_by_formals(
+        &self,
+        callee: ExprId,
+        callee_ty: Ty<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> bool {
+        let db = self.db;
+        let Some(&slot) = self.naming.resolutions.get(&callee) else {
+            return false;
+        };
+        let resolved = self.table.shallow_resolve(db, callee_ty);
+        let members = match resolved.kind(db) {
+            TyKind::Union(members) => members.to_vec(),
+            _ => vec![resolved],
+        };
+        let differs =
+            members.iter().any(
+                |&member| match self.table.shallow_resolve(db, member).kind(db) {
+                    TyKind::Function(function) => {
+                        function.inferred
+                            && !function.positional.is_empty()
+                            && function.variadic.is_none()
+                            && arguments.len() != function.positional.len() + function.named.len()
+                    }
+                    _ => false,
+                },
+            );
+        if !differs || arguments.iter().any(|argument| argument.forwards_dots) {
+            return false;
+        }
+        let module = self.module;
+        module.expression_ids().any(|id| {
+            let ExpressionKind::Call {
+                callee: inspector,
+                arguments: inspected,
+            } = module.kind(id)
+            else {
+                return false;
+            };
+            matches!(module.kind(*inspector), ExpressionKind::NameRef(name) if matches!(name.as_str(), "formals" | "formalArgs"))
+                && module[*inspected].first().and_then(|argument| argument.value).is_some_and(
+                    |value| self.naming.resolutions.get(&value) == Some(&slot),
+                )
+        })
     }
 
     fn read_as_value(&mut self, slot: BindingId) -> bool {
@@ -10633,6 +10696,7 @@ impl<'db> Checker<'db, '_> {
                     other == atomic
                         || (atomic == Atomic::Logical
                             && matches!(other, Atomic::Integer | Atomic::Double))
+                        || (atomic == Atomic::Integer && other == Atomic::Double)
                 }
                 _ => false,
             }
