@@ -51,10 +51,10 @@ pub mod help_server;
 pub mod http;
 pub mod latex;
 pub mod linalg;
-#[path = "../../rcmd/src/makeconf.rs"]
-mod makeconf;
 pub mod long_double;
 pub mod lower;
+#[path = "../../rcmd/src/makeconf.rs"]
+mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
