@@ -2,9 +2,14 @@
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
 use {
-    crate::{ANALYSIS_STACK_SIZE, config::Config},
+    crate::{
+        ANALYSIS_STACK_SIZE,
+        cli::{self, CommandError},
+        config::Config,
+        preflight::{self, Verdict},
+    },
     loader::{
-        LoadError, LoadState, Loader,
+        LoadError, LoadState, Loader, Plan,
         r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
     },
     repl::{
@@ -12,6 +17,7 @@ use {
         libr::{self, CallRoutine, Sexp},
     },
     std::{
+        ffi::{CStr, c_char, c_int},
         fmt, fs, io,
         panic::{AssertUnwindSafe, catch_unwind},
         path::{Path, PathBuf},
@@ -224,7 +230,7 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
             let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
             loader.set_strict(strict_config(&root));
             match loader.plan(&root, full) {
-                Ok(plan) => plan_value(&plan, true),
+                Ok(plan) => strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true)),
                 Err(error) => error_value(&error.to_string()),
             }
         });
@@ -313,9 +319,15 @@ pub struct ReloadWatcher;
 
 impl ConsoleHooks for ReloadWatcher {
     fn before_command(&mut self) -> Option<String> {
-        let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
-        let changed = !loader.changed_roots().is_empty();
-        changed.then(|| ".ry_autoreload()".to_owned())
+        let changed = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changed_roots();
+        let roots: Vec<String> = changed
+            .iter()
+            .map(|root| r_string(&root.to_string_lossy()))
+            .collect();
+        (!roots.is_empty()).then(|| format!(".ry_autoreload(c({}))", roots.join(", ")))
     }
 }
 
@@ -375,7 +387,7 @@ pub fn emit_plan(
                     .map_err(|error| EmitError::State(pending.clone(), error))?;
                 fs::write(&pending, text).map_err(|error| EmitError::Io(pending, error))?;
             }
-            plan_value(&plan, true)
+            strict_value(&plan).unwrap_or_else(|| plan_value(&plan, true))
         }
         Err(error) => error_value(&error.to_string()),
     };
@@ -402,6 +414,79 @@ pub fn current_package() -> Option<PathBuf> {
 /// For `ry load`'s error reporting.
 pub fn package_root(path: &Path) -> Result<PathBuf, LoadError> {
     loader::find_package_root(path)
+}
+
+/// The error a load of a strict package raises instead of running `plan`, when strict mode
+/// refuses the package. A plan that changes nothing needs no check.
+fn strict_value(plan: &Plan) -> Option<RValue> {
+    if !plan.strict || plan.is_noop() {
+        return None;
+    }
+    let reason = match check_strict_package(&plan.root) {
+        StrictCheck::Passed => return None,
+        StrictCheck::Refused => "strict mode refused it",
+        StrictCheck::Failed => "its strict check failed",
+    };
+    Some(error_value(&format!(
+        "{} was not loaded, because {reason}",
+        plan.package
+    )))
+}
+
+/// The outcome of [`check_strict_package`], as ry's runtime receives it from
+/// [`strict_check_on_ry_runtime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrictCheck {
+    Passed = 0,
+    Refused = 1,
+    Failed = 2,
+}
+
+/// Runs strict mode's check of the package at `root`, as `ry load` does before its first
+/// load, printing what it finds. A package that passed unchanged is remembered, so checking it
+/// again costs a hash of its files.
+fn check_strict_package(root: &Path) -> StrictCheck {
+    let config = match Config::discover(root) {
+        Ok(config) => config,
+        Err(error) => {
+            cli::report(&error);
+            return StrictCheck::Failed;
+        }
+    };
+    match preflight::check_package(root, &config) {
+        Ok(Verdict::Run) => StrictCheck::Passed,
+        Ok(Verdict::Refuse) => StrictCheck::Refused,
+        Err(CommandError) => StrictCheck::Failed,
+    }
+}
+
+/// The host side of `loader::ry_runtime::set_check`: ry's runtime calls it before a load of a
+/// strict package runs anything.
+pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
+    let Some(root) = runtime_path(root) else {
+        return StrictCheck::Failed as c_int;
+    };
+    // Unwinding into the runtime's frames aborts, so a panic in the check, whose message the
+    // panic hook has printed, counts as a failed check.
+    catch_unwind(|| check_strict_package(&root)).unwrap_or(StrictCheck::Failed) as c_int
+}
+
+/// The host side of the strict query of `loader::ry_runtime::set_check`: 1 when the
+/// configuration that governs the package at `root` turns strict mode on, as [`strict_config`]
+/// decides for GNU R's loader.
+pub extern "C" fn strict_config_on_ry_runtime(root: *const c_char) -> c_int {
+    runtime_path(root)
+        .and_then(|root| catch_unwind(|| strict_config(&root)).ok())
+        .map_or(0, c_int::from)
+}
+
+fn runtime_path(path: *const c_char) -> Option<PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the runtime passes a NUL-terminated path that outlives the call.
+    let path = unsafe { CStr::from_ptr(path) };
+    Some(PathBuf::from(path.to_string_lossy().into_owned()))
 }
 
 /// Whether the configuration that governs `root` turns strict mode on. A broken config counts as

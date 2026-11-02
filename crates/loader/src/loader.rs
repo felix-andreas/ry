@@ -22,8 +22,9 @@ use {
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
-            PackageMetadata, S3MethodDirective, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            PackageMetadata, S3MethodDirective, description_field, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::install_shipped_stubs,
     },
@@ -47,8 +48,9 @@ use {
 pub struct Loader {
     db: RootDatabase,
     packages: Vec<LoadedPackage>,
-    /// Size and modification time of each file as last read, per package root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+    /// Size, modification time and declared encoding of each file as last read, per package
+    /// root.
+    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -57,6 +59,10 @@ pub struct Loader {
     /// with [`Loader::set_strict`]: the loader reads package sources, not ry's configuration.
     /// Off, a file is strict only when its `# typing: strict` directive says so.
     strict: bool,
+    /// The packages a plan was asked for that have nothing committed, because the plan or its
+    /// application failed, with the [`source_fingerprint`] taken at that plan, so a console
+    /// retries the load once the sources change.
+    unloaded: FxHashMap<PathBuf, Option<u64>>,
 }
 
 /// A package's sources as the loader reads them.
@@ -185,6 +191,8 @@ pub struct Plan {
     /// keeps the same names and a backend need not rescan them to resync its exports.
     pub keeps_names: bool,
     pub run_on_load: bool,
+    /// Strict mode covers the package, so the host checks it before the plan runs anything.
+    pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
 }
@@ -385,17 +393,26 @@ impl Loader {
         let root = find_package_root(path)?;
         // Taken before reading, so an edit made while the plan is read shows as a change later.
         let fingerprint = source_fingerprint(&root);
-        let inputs = self.read(&root)?;
-        let plan = self.plan_inputs(&root, inputs, full)?;
-
-        if let Some(package) = self
+        let planned = self
+            .read(&root)
+            .and_then(|inputs| self.plan_inputs(&root, inputs, full));
+        let package = self
             .packages
             .iter_mut()
-            .find(|package| package.root == root)
-        {
-            package.pending_fingerprint = fingerprint;
+            .find(|package| package.root == root);
+        let committed = match package {
+            Some(package) => {
+                if planned.is_ok() {
+                    package.pending_fingerprint = fingerprint;
+                }
+                package.committed.is_some()
+            }
+            None => false,
+        };
+        if !committed {
+            self.unloaded.insert(root, fingerprint);
         }
-        Ok(plan)
+        planned
     }
 
     /// Derives the analysis a plan of the package at or above `path` reads, without planning,
@@ -570,6 +587,7 @@ impl Loader {
             Some(state) => {
                 package.committed = Some(state);
                 package.committed_fingerprint = package.pending_fingerprint.take();
+                self.unloaded.remove(root);
                 true
             }
             None => false,
@@ -577,8 +595,9 @@ impl Loader {
     }
 
     /// The roots of the loaded packages whose sources changed on disk since they were loaded,
-    /// judged from file names, sizes and modification times without reading a file. A root is
-    /// reported once per change: a reload that fails is not retried until the next change.
+    /// and of the packages whose load failed whose sources changed since that attempt, judged
+    /// from file names, sizes and modification times without reading a file. A root is reported
+    /// once per change: a reload that fails is not retried until the next change.
     pub fn changed_roots(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for package in &mut self.packages {
@@ -591,6 +610,14 @@ impl Loader {
                 changed.push(package.root.clone());
             }
         }
+        for (root, fingerprint) in &mut self.unloaded {
+            let current = source_fingerprint(root);
+            if current != *fingerprint {
+                *fingerprint = current;
+                changed.push(root.clone());
+            }
+        }
+        changed.sort();
         changed
     }
 
@@ -766,10 +793,11 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources. A file whose size and modification time are unchanged
-    /// since the last read is not read again.
+    /// Reads the package's sources. A file whose size, modification time and declared encoding
+    /// are unchanged since the last read is not read again.
     fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
-        let description = read(&root.join("DESCRIPTION"))?;
+        let description = read_description(&root.join("DESCRIPTION"))?;
+        let encoding = SourceEncoding::of(&description);
         let namespace = match fs::read_to_string(root.join("NAMESPACE")) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -781,14 +809,15 @@ impl Loader {
         let mut stamps = FxHashMap::default();
         for path in paths {
             let absolute = root.join(&path);
+            // The encoding is part of the stamp, so declaring another one decodes every file again.
             let stamp = fs::metadata(&absolute)
-                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+                .map(|metadata| (metadata.len(), metadata.modified().ok(), encoding))
                 .map_err(|error| LoadError::Io(absolute.clone(), error))?;
             let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
             let text = if unchanged {
                 None
             } else {
-                Some(read(&absolute)?.replace("\r\n", "\n").replace('\r', "\n"))
+                Some(read_source(&absolute, encoding)?)
             };
             stamps.insert(path.clone(), stamp);
             files.push((path, text));
@@ -867,9 +896,7 @@ impl Loader {
                 (None, text) => {
                     let text = match text {
                         Some(text) => text,
-                        None => read(&root.join(&path))?
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n"),
+                        None => read_source(&root.join(&path), SourceEncoding::of(&description))?,
                     };
                     let file = SourceFile::builder(text, DocumentKind::Package)
                         .durability(Durability::HIGH)
@@ -1531,6 +1558,7 @@ pub fn diff<'text>(
             .filter(|libraries| !libraries.is_empty() || !full),
         exports_changed,
         keeps_names,
+        strict: index.strict,
         namespace: index.namespace.clone(),
         warnings,
     }
@@ -1800,6 +1828,7 @@ impl Plan {
             exports_changed: false,
             keeps_names: true,
             run_on_load: false,
+            strict: state.index.strict,
             warnings: Vec::new(),
         }
     }
@@ -2023,8 +2052,63 @@ fn stamp(metadata: &fs::Metadata) -> String {
     format!("{}\0{modified}", metadata.len())
 }
 
-fn read(path: &Path) -> Result<String, LoadError> {
-    fs::read_to_string(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))
+/// How a package's code files are encoded, which `DESCRIPTION`'s `Encoding` field declares. R
+/// reads code in the declared encoding, so a latin1 package's files are decoded byte by byte;
+/// any other declaration is read as UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEncoding {
+    Utf8,
+    Latin1,
+}
+
+impl SourceEncoding {
+    pub fn of(description: &str) -> SourceEncoding {
+        match description_field(description, "Encoding") {
+            Some(name)
+                if ["latin1", "ISO-8859-1", "ISO8859-1"]
+                    .iter()
+                    .any(|latin1| name.eq_ignore_ascii_case(latin1)) =>
+            {
+                SourceEncoding::Latin1
+            }
+            _ => SourceEncoding::Utf8,
+        }
+    }
+
+    /// The text of a code file's `bytes`, or `None` when they are not valid UTF-8 in a UTF-8
+    /// package.
+    pub fn decode(self, bytes: Vec<u8>) -> Option<String> {
+        match self {
+            SourceEncoding::Latin1 => Some(bytes.iter().map(|&byte| char::from(byte)).collect()),
+            SourceEncoding::Utf8 => String::from_utf8(bytes).ok(),
+        }
+    }
+}
+
+/// A code file's text, decoded as `encoding` and with its line endings normalized to `\n`.
+fn read_source(path: &Path, encoding: SourceEncoding) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    let text = encoding.decode(bytes).ok_or_else(|| {
+        let message = "the file is not valid UTF-8; a package whose code is latin1 declares \
+                       `Encoding: latin1` in DESCRIPTION";
+        LoadError::Io(
+            path.to_path_buf(),
+            io::Error::new(io::ErrorKind::InvalidData, message),
+        )
+    })?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// `DESCRIPTION`, which R reads as latin1 when it is not valid UTF-8.
+fn read_description(path: &Path) -> Result<String, LoadError> {
+    let bytes = fs::read(path).map_err(|error| LoadError::Io(path.to_path_buf(), error))?;
+    Ok(String::from_utf8(bytes).unwrap_or_else(|error| {
+        error
+            .into_bytes()
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect()
+    }))
 }
 
 fn file_hash(path: &Path) -> Result<Option<u64>, LoadError> {

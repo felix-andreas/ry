@@ -5156,6 +5156,21 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
 - The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
 
+## Every load of a strict package is checked
+
+- Before, only `ry load`'s first load ran the strict check; `load_all()`, a console reload and the load a console makes at start ran a package strict mode would refuse.
+- The load index records whether strict mode covers any file (`PackageIndex::strict`, the same test as `prepare_purity`), and every plan carries it as `Plan::strict`, so a host decides without reading ry's configuration twice.
+- A host checks a plan that changes something (`!is_noop()`): GNU R's `.Call` routine and `ry load --emit-plan` through `load::strict_value`, ry's runtime through a host callback (`ry_runtime::set_check`, registered by every command that runs the runtime via `repl::set_package_check_on_ry_runtime`). The loader's crate cannot depend on the CLI's analysis, which is why it is a callback. A refusal turns the plan into an error before R sees it, so nothing runs and the old bindings stay.
+- Whether a package is strict is decided per package root on both runtimes, from that package's own `ry.toml` (`load::strict_config`): GNU R's routine reads it directly, and ry's runtime asks a second host callback, the strict query, before each plan. Taking it from the command's configuration instead would let a lax script `load_all()` a strict package unchecked.
+- The first plan of a session that has a verdict (`ry load` on ry's runtime) skips the callback: the concurrent check already covers that load, and checking again would serialize what the verdict overlaps.
+- The check is the whole-package `preflight::check_package` with its fingerprint-cached clean verdict, so a reload of a large strict package pays a full analysis; checking only the changed files is in `backlog.md`.
+
+## Lazy definitions keep source references
+
+- Before, a lazy definition on ry's runtime lowered its node without a srcfile, so `print(f)` deparsed and tracebacks named no file, except under the debugger, which built a whole-file srcfile per force.
+- A plan's files become per-file handles (`FileSource`) holding the source and the `keep.source` option read when the handle is made. The first force from a file that keeps source builds its `srcfile` (`srcfilecopy` semantics) and stores it in the handle, so a file costs nothing unless one of its definitions is used, and the srcfile is shared by all of them.
+- The definition is reparsed alone after as many spaces as its line has bytes before it, and its srcrefs are computed against the line's real text (bytes and character columns both match GNU R's parser), lowered with a line offset (`interp::lower::lower_node_at_line`), which gives exact line and column srcrefs without parsing or lowering the whole file. The tree in the handle is used directly when no srcref is wanted.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a

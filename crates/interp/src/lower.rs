@@ -556,23 +556,24 @@ pub unsafe fn lower_script_expression(
         values::string_vector(&["srcfilecopy", "srcfile"])?,
     )?;
     let first_line = text[..start].matches('\n').count();
-    let source = SourceMap::new(text, first_line, srcfile)?;
+    let source = SourceMap::new(text, first_line as isize, srcfile)?;
     lower(node, Some(&source))
 }
 
 /// What the lowering needs to build source references: the text with an index of its line
-/// starts, the line that is line 1 of the srcfile, and the srcfile environment itself.
+/// starts, the line of the text that is line 1 of the srcfile (negative when the text starts
+/// further into the file), and the srcfile environment itself.
 pub struct SourceMap<'text> {
     pub(crate) text: &'text str,
     line_starts: Vec<usize>,
-    first_line: usize,
+    first_line: isize,
     srcfile: Sexp,
     /// The `srcref` class vector every srcref of this parse shares.
     class: Sexp,
 }
 
 impl<'text> SourceMap<'text> {
-    unsafe fn new(text: &'text str, first_line: usize, srcfile: Sexp) -> R<SourceMap<'text>> {
+    unsafe fn new(text: &'text str, first_line: isize, srcfile: Sexp) -> R<SourceMap<'text>> {
         let line_starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(index, _)| index + 1))
             .collect();
@@ -643,7 +644,7 @@ pub(crate) fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
             column + 1
         };
     }
-    let line_number = line as i32 - source.first_line as i32 + 1;
+    let line_number = (line as isize - source.first_line + 1) as i32;
     (line_number, (offset - line_start) as i32 + 1, column)
 }
 
@@ -678,10 +679,17 @@ pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
     lower(node, None)
 }
 
-/// Lowers `node` like [`lower_node`], keeping source references against `srcfile`, a srcfile
-/// environment for `text`, the whole text of the node's tree.
-pub unsafe fn lower_node_in_file(node: &SyntaxNode, text: &str, srcfile: Sexp) -> R<Sexp> {
-    let source = SourceMap::new(text, 0, srcfile)?;
+/// Lowers `node` like [`lower_node`], keeping source references against `srcfile`. `text` is
+/// the whole text of the node's tree, a piece of the srcfile's file that starts on its line
+/// `line` (1-based), so a host can parse one definition alone and still count lines as the file
+/// does.
+pub unsafe fn lower_node_at_line(
+    node: &SyntaxNode,
+    text: &str,
+    line: usize,
+    srcfile: Sexp,
+) -> R<Sexp> {
+    let source = SourceMap::new(text, 1 - line as isize, srcfile)?;
     lower(node, Some(&source))
 }
 
