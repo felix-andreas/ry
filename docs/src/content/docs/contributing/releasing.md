@@ -8,6 +8,19 @@ workflow by hand with that version, builds each platform's archive on its own ru
 it, and then publishes the GitHub release and the VS Code extension. The workflow is
 `.github/workflows/release.yml`, and there is no other release path.
 
+Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
+one runs locally as well:
+
+| Recipe | What it does |
+| --- | --- |
+| `just release-check VERSION` | Fails unless `VERSION` is a valid release version and `Cargo.toml` and both extensions carry it. |
+| `just package VERSION TARGET` | Builds one platform's archive into `release/VERSION`. |
+| `just release-assets VERSION` | Unpacks the archives in `release/VERSION` and packages the VS Code extension from them. A platform without an archive is skipped with a note. |
+| `just release-publish VERSION` | Creates the GitHub release with every archive and `.vsix` (or refreshes the assets of one a failed run left behind), then publishes each `.vsix` to the Marketplace. |
+
+`release-publish` needs `gh` signed in, and outside the workflow it needs a `VSCE_PAT`, because
+without one it publishes with `--oidc`, which works only inside GitHub Actions.
+
 ## Enabling the workflows
 
 Agents cannot write to `.github/workflows/`, so they stage workflow files in `.github/pending/`,
@@ -19,7 +32,8 @@ git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pendin
 ```
 
 `.github/pending/workflows/release.yml` becomes the release workflow, and
-`.github/pending/workflows/ci.yml` replaces the live CI workflow.
+`.github/pending/workflows/ci.yml` replaces the live CI workflow. CI runs on every push to main and
+every pull request, and on any ref when started by hand from the Actions tab.
 
 ## Credentials
 
@@ -92,8 +106,8 @@ first stable release, or Zed keeps serving the last beta.
 and the VS Code and Zed extensions' versions to `X.Y.Z`, because the Marketplace rejects a suffix.
 The patch number is therefore the one counter across channels: never release `0.4.0-beta` and
 `0.4.0` both. A `-alpha` or `-beta` suffix marks a pre-release, on GitHub and on the Marketplace
-alike (`just release-kind`). The release workflow refuses a version that differs from any of the
-three.
+alike (`just release-kind`). `just release-check`, the release workflow's first step, refuses a
+version that differs from any of the three.
 
 ## Checklist
 

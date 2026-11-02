@@ -6,7 +6,8 @@
 # A release runs when a version tag is pushed (`git tag 0.4.0-beta && git push origin 0.4.0-beta`)
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
 # and smoke-tests every archive without publishing anything. The checklist and the one-time
-# Marketplace setup are in docs/src/content/docs/contributing/releasing.md.
+# Marketplace setup are in docs/src/content/docs/contributing/releasing.md. Past runner setup,
+# every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs locally.
 name: Release
 
 on:
@@ -50,15 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
       - name: versions match the release
-        run: |
-          workspace=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          extension=$(sed -n 's/^[[:space:]]*"version": "\(.*\)",$/\1/p' editors/code/package.json | head -n 1)
-          zed=$(sed -n 's/^version = "\(.*\)"/\1/p' editors/zed/extension.toml)
-          if [ "$workspace" != "$VERSION" ] || [ "$extension" != "${VERSION%%-*}" ] || [ "$zed" != "${VERSION%%-*}" ]; then
-            echo "::error::releasing $VERSION, but Cargo.toml is at $workspace, the VS Code extension at $extension and the Zed extension at $zed; run \`just bump-version $VERSION\` first"
-            exit 1
-          fi
-          just release-kind "$VERSION" >/dev/null
+        run: just release-check "$VERSION"
       # Reads rust-toolchain.toml, so the release builds with the pinned nightly. An empty
       # `rustflags` keeps the action's `-D warnings` from failing a release over a warning.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -134,52 +127,10 @@ jobs:
         with:
           path: release/${{ env.VERSION }}
           merge-multiple: true
-      - name: unpack the archives for the platform extensions
-        run: |
-          cd "release/$VERSION"
-          for archive in ry-*.tar.gz; do
-            mkdir -p "${archive%.tar.gz}" && tar -xzf "$archive" -C "${archive%.tar.gz}"
-          done
-          for archive in ry-*.zip; do
-            mkdir -p "${archive%.zip}" && unzip -q "$archive" -d "${archive%.zip}"
-          done
-      # One extension per platform, bundling that archive's `ry`, runtime and `ry-rcmd`, plus
-      # `ry.vsix` without a binary for every other platform.
       - name: package the VS Code extension
-        run: |
-          kind=$(just release-kind "$VERSION")
-          dir=release/$VERSION
-          (cd editors/code && bun install --frozen-lockfile)
-          just build-extension "$kind" --out "../../$dir/ry.vsix"
-          just build-platform-vsix x86_64-unknown-linux-gnu linux-x64 "$dir" "$kind"
-          just build-platform-vsix aarch64-apple-darwin darwin-arm64 "$dir" "$kind"
-          just build-platform-vsix x86_64-pc-windows-gnullvm win32-x64 "$dir" "$kind"
-      - name: GitHub release
+        run: just release-assets "$VERSION"
+      - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          prerelease=""
-          [ "$(just release-kind "$VERSION")" = pre-release ] && prerelease="--prerelease"
-          assets=("release/$VERSION"/ry-*.tar.gz "release/$VERSION"/ry-*.zip "release/$VERSION"/*.vsix)
-          # A rerun after a later step failed finds the release already there and refreshes its assets.
-          if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" --clobber "${assets[@]}"
-            exit 0
-          fi
-          gh release create "$VERSION" $prerelease --target "$GITHUB_SHA" --title "ry $VERSION" \
-            --notes "See the [news page](https://ry-lang.org/news/) for what changed." "${assets[@]}"
-      # Trusted publishing (`--oidc`) needs vsce 4.1 and a policy for this workflow on the
-      # publisher's Marketplace page. A VSCE_PAT secret, if set, is used instead; Azure DevOps
-      # retires the global token it must be on December 1, 2026. Packaging stays on the locked vsce,
-      # because 4.1 rejects bun's node_modules layout when it lists dependencies, and publishing a
-      # finished .vsix lists none. `--skip-duplicate` lets a rerun finish a partly published release.
-      - name: VS Code Marketplace
-        env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: |
-          options=(--skip-duplicate)
-          [ "$(just release-kind "$VERSION")" = pre-release ] && options+=(--pre-release)
-          [ -z "$VSCE_PAT" ] && options+=(--oidc)
-          for vsix in "release/$VERSION"/ry-*.vsix "release/$VERSION"/ry.vsix; do
-            npx --yes @vscode/vsce@4.1.0 publish "${options[@]}" --packagePath "$vsix"
-          done
+        run: just release-publish "$VERSION"
