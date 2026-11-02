@@ -274,6 +274,28 @@ hint @139<T>
 hint @145: T
 hint @146 -> double | NULL
 
+#---- condition_without_a_call_ranks_logical_results_first
+#: fn(x: double) -> character
+is_label <- function(x) format(x)
+#: fn(x: double) -> logical
+is_small <- function(x) x < 1
+check <- function(value) {
+  if (is_$0) 1
+}
+#++++
+hover 155..158: is_
+hover-definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed is_ from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `check`
+  edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
+action: Add inferred type annotations for the whole file
+  edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
+completion (86): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
+hint @127: <T> fn([value]: T) -> double | NULL
+
 #---- argument_ranks_the_parameter_type_first
 #: fn(label: character) -> character
 shout <- function(label) toupper(label)

@@ -26,7 +26,7 @@ use {
         },
         types::{
             Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
-            contains_inference_var,
+            contains_inference_var, union_of,
         },
     },
     std::{
@@ -2559,27 +2559,33 @@ pub fn completion_with(
             return false;
         };
         let name = item.label.trim_matches('`');
-        let candidate = match item.source {
+        let candidates: Vec<Ty<'_>> = match item.source {
             CompletionSource::Global => match global_items.get(name) {
-                Some(Some(item)) => global_scheme(db, *item).body,
+                Some(Some(item)) => vec![global_scheme(db, *item).body],
                 _ => return false,
             },
             CompletionSource::Stdlib => {
-                match stubs(db).and_then(|library| library.schemes.get(name)?.first()) {
-                    Some(scheme) => scheme.body,
+                match stubs(db).and_then(|library| library.schemes.get(name)) {
+                    Some(schemes) => schemes.iter().map(|scheme| scheme.body).collect(),
                     None => return false,
                 }
             }
             _ => return false,
         };
-        let produced = match (called, candidate.kind(db)) {
-            // An inferred result is how the body happens to end, too loose to rule a name out.
-            (_, TyKind::Function(function)) if function.inferred => return false,
-            (true, TyKind::Function(function)) => function.ret,
-            (true, _) => return false,
-            (false, _) => candidate,
-        };
-        type_mismatch(db, produced, expected)
+        // A name is pushed down only when no reading of it fits: no overload, and for a function
+        // neither the function itself nor, since accepting it writes the call, its result.
+        candidates
+            .iter()
+            .all(|&candidate| match candidate.kind(db) {
+                // An inferred result is how the body happens to end, too loose to rule a name out.
+                TyKind::Function(function) if function.inferred => false,
+                TyKind::Function(function) => {
+                    type_mismatch(db, function.ret, expected)
+                        && (called || type_mismatch(db, candidate, expected))
+                }
+                _ if called => false,
+                _ => type_mismatch(db, candidate, expected),
+            })
     };
     let mut result = finish_completions(items, &query, &usage, called, &mismatches)?;
     let mut unresolved: HashMap<&str, usize> = result
@@ -6162,7 +6168,9 @@ fn package_completions(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<Com
 /// rank first, counting nearer uses more: in R a call to `return` or `is.null` is far more
 /// likely than the alphabetically first global that shares the prefix. When a `(` follows the
 /// cursor, how often the project calls a name ranks first, because the names a project spells
-/// most are its data (`req`, `resp`), which it seldom calls.
+/// most are its data (`req`, `resp`), which it seldom calls. Ahead of those counts, a name whose
+/// type `mismatches` the place it is typed sorts after the names that fit; that is judged only
+/// for the names that survive truncation.
 fn finish_completions(
     items: Vec<CompletionItem>,
     query: &str,
@@ -6202,7 +6210,7 @@ fn finish_completions(
                 Some((
                     search_match(&item.label, query),
                     item.source.group(called),
-                    mismatches(item),
+                    false,
                     (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
                 ))
@@ -6230,6 +6238,11 @@ fn finish_completions(
     if is_incomplete {
         ranked.select_nth_unstable_by(COMPLETION_LIMIT, order);
         ranked.truncate(COMPLETION_LIMIT);
+    }
+    // Judging a candidate's type can type-check its item, so only the names that survive
+    // truncation are judged.
+    for entry in &mut ranked {
+        entry.2 = items.get(entry.4).is_some_and(mismatches);
     }
     ranked.sort_by(order);
     let mut slots: Vec<Option<CompletionItem>> = items.into_iter().map(Some).collect();
@@ -6342,7 +6355,7 @@ fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Op
                 }
                 return match expected.as_slice() {
                     [single] => Some(*single),
-                    _ => Some(Ty::new(db, TyKind::Union(expected))),
+                    _ => Some(union_of(db, expected)),
                 };
             }
             _ => {}
@@ -6353,9 +6366,10 @@ fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Op
 
 /// Whether `actual` is known not to fit `expected`, compared by kind of value only: a logical,
 /// integer, double, character, complex or raw vector, a list, a function, a table, ry's native
-/// values, or a named type. R widens logical to integer to double, and a condition takes any
-/// number, so those fit. Anything the comparison cannot see through, such as a type variable or
-/// a named type against a different kind, is not a mismatch.
+/// values, or a named type. R widens logical to integer to double to complex, and an expected
+/// logical accepts any integer or double (R reads a number as a condition or a flag), so those
+/// fit. Anything the comparison cannot see through, such as a type variable or a named type
+/// against a different kind, is not a mismatch.
 fn type_mismatch<'db>(db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
     let (mut actual_shapes, mut expected_shapes) = (Vec::new(), Vec::new());
     if !value_shapes(db, actual, &mut actual_shapes)

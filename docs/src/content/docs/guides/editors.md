@@ -22,7 +22,7 @@ You get:
   before a `(`, the functions the project calls most come first; a name whose type cannot fit
   where you are typing goes after the ones that can, such as a function that returns `character`
   in an `if` condition, or as an argument to a parameter that an annotation or a stub declares
-  `logical` (an inferred type never pushes a name down, since it only says how a body ends)
+  `logical` (an inferred function type never pushes a name down, since it only says how a body ends)
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition

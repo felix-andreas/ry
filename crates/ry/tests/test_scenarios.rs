@@ -1192,7 +1192,9 @@ impl Journey {
         let id = editor.code_action(&uri, range, only);
         editor.settle();
         match editor.take_response(id) {
-            Some(Ok(value)) => Ok(value.as_array().cloned().unwrap_or_default()),
+            Some(Ok(Value::Null)) => Ok(Vec::new()),
+            Some(Ok(Value::Array(actions))) => Ok(actions),
+            Some(Ok(value)) => Err(format!("the code action response is not a list: {value}")),
             Some(Err(error)) => Err(format!("the code action request failed: {error:?}")),
             None => Err("the code action request got no response from an idle server".to_owned()),
         }
