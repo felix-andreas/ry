@@ -91,11 +91,15 @@ code, so they show only their arguments.
 
 A refactoring is offered only where it keeps what the code does. Extracting a variable evaluates
 the expression once, before its statement, so it is not offered where the statement would evaluate
-it repeatedly, conditionally or not at all: in the body of a loop or a function written inside
-that statement, in an `if` branch, on the right of `&&` or `||`, or in a formula or `quote()`. Extracting a function is not
-offered for code that uses `return()`, `<<-`, `...`, or a function that inspects its caller's
-frame, such as `missing()` or `parent.frame()`. Inlining is refused when a name the value reads is
-reassigned before the last use, and when a value with a call would run more than once.
+it repeatedly, conditionally, later or not at all: in the body of a loop or a function written
+inside that statement, in an `if` branch or a `switch` case, on the right of `&&` or `||`, inside
+`tryCatch()` and other calls that handle conditions, after an earlier call in the same statement,
+or in code that is not evaluated as written (a formula, `quote()`, a `dplyr` verb or `with()`, or
+the index of a `[`, where data.table reads columns). Extracting a function is not offered for code
+that uses `return()`, `<<-`, `...`, or a function that inspects its caller's frame, such as
+`missing()` or `parent.frame()`. Inlining is refused when a name the value reads is reassigned
+before the last use, and when the value assigns. A value with a call is inlined only into a single
+use that the next statement evaluates first, so the call still runs once, at the same point.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.

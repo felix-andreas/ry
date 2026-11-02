@@ -79,3 +79,40 @@ grow <- function(x) x * (1 + rate)
 #++++
 action Inline variable `rate`
   grow <- function(x) x * (1 + 0.05)
+#==== inline_keeps_evaluation
+#---- call_moved_past_a_statement
+f <- function() {
+  $0start <- Sys.time()
+  work()
+  print(Sys.time() - start)
+}
+#++++
+no refactors
+
+#---- call_moved_into_a_branch
+f <- function(v) {
+  $0x <- file.remove(v)
+  if (FALSE) print(x)
+}
+#++++
+no refactors
+
+#---- call_into_the_next_statement
+f <- function(v) {
+  $0x <- read(v)
+  print(x)
+}
+#++++
+action Inline variable `x`
+  f <- function(v) {
+    print(read(v))
+  }
+
+#---- chained_assignment
+f <- function() {
+  $0x <- y <- 0
+  print(y)
+  g(x)
+}
+#++++
+no refactors

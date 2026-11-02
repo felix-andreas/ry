@@ -2949,7 +2949,13 @@ impl LanguageServer for ServerState {
             };
             let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
             let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
-            let wants_refactors = wants(&lsp_types::CodeActionKind::REFACTOR);
+            let wants_refactors = [
+                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                lsp_types::CodeActionKind::REFACTOR_INLINE,
+                lsp_types::CodeActionKind::REFACTOR_REWRITE,
+            ]
+            .iter()
+            .any(|kind| wants(kind));
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);
@@ -2966,7 +2972,13 @@ impl LanguageServer for ServerState {
                         actions.extend(ide::code_actions(&worker.db, file, range));
                     }
                     if wants_refactors {
-                        actions.extend(ide::refactors(&worker.db, file, range));
+                        // `only: ["refactor.extract"]` (an extract keybinding) asks for one
+                        // kind, so each refactoring is filtered by its own.
+                        actions.extend(
+                            ide::refactors(&worker.db, file, range)
+                                .into_iter()
+                                .filter(|action| wants(&lsp_action_kind(action.kind))),
+                        );
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
                     let worth_listing =
@@ -3001,25 +3013,9 @@ impl LanguageServer for ServerState {
                         let is_preferred = (action.kind
                             == ide::CodeActionKind::DiagnosticFix(Applicability::Safe))
                         .then_some(true);
-                        let kind = match action.kind {
-                            ide::CodeActionKind::FixAll => {
-                                lsp_types::CodeActionKind::SOURCE_FIX_ALL
-                            }
-                            ide::CodeActionKind::ExtractVariable
-                            | ide::CodeActionKind::ExtractFunction => {
-                                lsp_types::CodeActionKind::REFACTOR_EXTRACT
-                            }
-                            ide::CodeActionKind::InlineVariable => {
-                                lsp_types::CodeActionKind::REFACTOR_INLINE
-                            }
-                            ide::CodeActionKind::ConvertAnnotation => {
-                                lsp_types::CodeActionKind::REFACTOR_REWRITE
-                            }
-                            _ => lsp_types::CodeActionKind::QUICKFIX,
-                        };
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+                            kind: Some(lsp_action_kind(action.kind)),
                             title: action.title,
-                            kind: Some(kind),
                             is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
@@ -4057,4 +4053,16 @@ fn stub_type_definition(text: &str, offset: TextSize) -> Option<TextRange> {
         }
     }
     None
+}
+
+fn lsp_action_kind(kind: ide::CodeActionKind) -> lsp_types::CodeActionKind {
+    match kind {
+        ide::CodeActionKind::FixAll => lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+        ide::CodeActionKind::ExtractVariable | ide::CodeActionKind::ExtractFunction => {
+            lsp_types::CodeActionKind::REFACTOR_EXTRACT
+        }
+        ide::CodeActionKind::InlineVariable => lsp_types::CodeActionKind::REFACTOR_INLINE,
+        ide::CodeActionKind::ConvertAnnotation => lsp_types::CodeActionKind::REFACTOR_REWRITE,
+        _ => lsp_types::CodeActionKind::QUICKFIX,
+    }
 }

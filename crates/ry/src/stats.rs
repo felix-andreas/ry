@@ -708,8 +708,14 @@ fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
     let mut tallies: BTreeMap<&str, ReferenceTally> = BTreeMap::new();
     let mut latencies = Vec::new();
     let location = |file: usize, start: TextSize| {
-        let record = package[file];
-        let line = record.source[..usize::from(start)].matches('\n').count() + 1;
+        let Some(record) = package.get(file) else {
+            return String::new();
+        };
+        let line = record
+            .source
+            .get(..usize::from(start))
+            .map_or(0, |before| before.matches('\n').count())
+            + 1;
         let name = record
             .path
             .file_name()
@@ -931,8 +937,14 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
         }
     }
     let location = |file: usize, start: TextSize| {
-        let record = package[file];
-        let line = record.source[..usize::from(start)].matches('\n').count() + 1;
+        let Some(record) = package.get(file) else {
+            return String::new();
+        };
+        let line = record
+            .source
+            .get(..usize::from(start))
+            .map_or(0, |before| before.matches('\n').count())
+            + 1;
         let name = record
             .path
             .file_name()
@@ -946,7 +958,9 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
     let mut outgoing = HierarchyTally::default();
     let mut latencies = Vec::new();
     for definition in sampled.iter().step_by(stride) {
-        let record = package[definition.file];
+        let Some(record) = package.get(definition.file) else {
+            continue;
+        };
         let began = Instant::now();
         let item = ide::call_hierarchy_item(db, files, record.file, definition.name_range.start());
         let (found_incoming, found_outgoing) = match &item {
@@ -1015,7 +1029,9 @@ fn hierarchy_coverage(db: &RootDatabase, records: &[FileRecord]) {
     let mut symbol_latencies = Vec::new();
     let stride = definitions.len().div_ceil(HIERARCHY_SAMPLES).max(1);
     for definition in definitions.iter().step_by(stride) {
-        let record = package[definition.file];
+        let Some(record) = package.get(definition.file) else {
+            continue;
+        };
         let half = definition.name.chars().count().div_ceil(2).max(3);
         let prefix: String = definition.name.chars().take(half).collect();
         for (tally, query) in [

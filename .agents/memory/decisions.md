@@ -6159,6 +6159,17 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `is_quoted` refuses code under a formula or a quoting call. Extract function refuses `return()`,
   `<<-`, `...` and frame-inspecting calls. Inline refuses when a read name is reassigned before the
   last use or a call would run more than once.
+- Calls that do not evaluate their arguments once, in order, in the caller are classified by
+  `argument_evaluation`: *captured* (quoting, data masking such as `with()` and `dplyr` verbs,
+  and the index of a `[`, for data.table) blocks every refactoring; *guarded* (condition
+  handlers, `switch`, `withr::with_*`) blocks hoisting a variable out but allows extracting a
+  function that is called in place. `evaluated_first` is the one rule for hoisting and for
+  inlining a value with a call: every node between the expression and its statement evaluates it
+  exactly once, and nothing before it in the statement calls or assigns. A value that assigns is
+  never inlined (`x <- y <- 0`). Extract function treats a read anywhere in the enclosing loop as
+  later code, because the next pass runs it. These came from review, and the property check
+  cannot see them (the result parses and resolves), so each is pinned in
+  `crates/ide/tests/refactor`.
 - Text that only parses as one expression inside its old context is parenthesized
   (`needs_grouping`: a `?`, or a reparse that is not exactly one node), because `value <- d?f`
   and a multi-line operand chain change meaning when moved out.

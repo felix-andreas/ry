@@ -5221,7 +5221,18 @@ fn is_called_name(token: &SyntaxToken) -> bool {
         return false;
     };
     let head = match name.parent() {
-        Some(parent) if parent.kind() == NAMESPACE_EXPR => parent,
+        // `pkg` in `pkg::f()` is not called; `f` is.
+        Some(parent) if parent.kind() == NAMESPACE_EXPR => {
+            if parent
+                .children()
+                .filter(|child| child.kind() == NAME)
+                .last()
+                != Some(name)
+            {
+                return false;
+            }
+            parent
+        }
         _ => name,
     };
     head.parent()

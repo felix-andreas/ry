@@ -14,7 +14,7 @@ use {
     },
     std::collections::HashSet,
     syntax::{
-        SyntaxElement,
+        Direction, SyntaxElement,
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize,
         ast::BinaryExpr,
@@ -46,45 +46,18 @@ fn extract_variable(
 ) -> Option<CodeAction> {
     let expression = expression_at(root, range)?;
     let statement = enclosing_statement(&expression)?;
-    if statement == expression || is_assignment(&expression) || is_quoted(&statement) {
+    if statement == expression || is_assignment(&expression) || is_captured(&statement) {
         return None;
     }
-    // Hoisting runs the expression once, before the statement, so every node between the two
-    // must evaluate it exactly once and first: not in a loop, a function, a branch, the right
-    // side of `&&`, a quoted context, or an assignment's target.
-    let mut child = expression.clone();
-    for parent in expression.ancestors().skip(1) {
-        let is_first = parent.first_child().as_ref() == Some(&child);
-        let allowed = match parent.kind() {
-            FUNCTION_DEF | FOR_EXPR | WHILE_EXPR | REPEAT_EXPR | MATCH_ARM => false,
-            IF_EXPR => is_first,
-            BINARY_EXPR => {
-                let operator = BinaryExpr::cast(parent.clone())
-                    .and_then(|binary| binary.operator())
-                    .map(|operator| operator.kind());
-                match operator {
-                    Some(AMP2 | PIPE2 | PIPE_GREATER) => is_first,
-                    Some(TILDE) => false,
-                    Some(SPECIAL) => is_first || !is_pipe_special(&parent),
-                    _ => !is_assignment_target(&parent, &child),
-                }
-            }
-            UNARY_EXPR => child_token(&parent, TILDE).is_none(),
-            CALL_EXPR => !is_quoting_call(&parent),
-            _ => true,
-        };
-        if !allowed {
-            return None;
-        }
-        if parent == statement {
-            break;
-        }
-        child = parent;
+    if !evaluated_first(&expression, &statement, has_call(&expression)) {
+        return None;
     }
     if has_quiet_reads(db, file, range) {
         return None;
     }
     let indent = line_indent(text, statement.text_range().start())?;
+    // Above the statement's `#:` annotation, which keeps typing the statement.
+    let insert_at = leading_comments_start(&statement);
     let name = fresh_name(db, root, "value");
     let value = slice(text, range);
     let definition = if needs_grouping(&expression, value) {
@@ -93,7 +66,7 @@ fn extract_variable(
         format!("{name} <- {value}\n{indent}")
     };
     // Same-offset insertion and replacement may apply in either order, so they become one edit.
-    let edits = if statement.text_range().start() == range.start() {
+    let edits = if insert_at == range.start() {
         vec![TextEdit {
             range,
             replacement: format!("{definition}{name}"),
@@ -101,7 +74,7 @@ fn extract_variable(
     } else {
         vec![
             TextEdit {
-                range: TextRange::empty(statement.text_range().start()),
+                range: TextRange::empty(insert_at),
                 replacement: definition,
             },
             TextEdit {
@@ -150,7 +123,7 @@ fn extract_function(
     };
     if nodes
         .iter()
-        .any(|node| !can_move_into_function(node) || is_quoted(node))
+        .any(|node| !can_move_into_function(node) || is_captured(node))
         || has_quiet_reads(db, file, range)
     {
         return None;
@@ -164,6 +137,16 @@ fn extract_function(
     if !inside_function && !assigned.is_empty() {
         return None;
     }
+    // Inside a loop, code after the selection runs again before it on the next pass, so a read
+    // anywhere in the outermost loop of the function sees what the selection assigns.
+    let enclosing_loop = nodes
+        .first()?
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| ancestor.kind() != FUNCTION_DEF)
+        .filter(|ancestor| matches!(ancestor.kind(), FOR_EXPR | WHILE_EXPR | REPEAT_EXPR))
+        .last()
+        .map(|ancestor| ancestor.text_range());
     let mut parameters: Vec<(TextSize, String)> = Vec::new();
     let mut outputs: Vec<String> = Vec::new();
     for item in item_tree(db, file) {
@@ -191,7 +174,9 @@ fn extract_function(
                 if !parameters.iter().any(|(_, known)| known == name) {
                     parameters.push((read.start(), name.to_owned()));
                 }
-            } else if read.start() >= range.end()
+            } else if !range.contains_range(read)
+                && (read.start() >= range.end()
+                    || enclosing_loop.is_some_and(|loop_range| loop_range.contains_range(read)))
                 && assigned.contains(name)
                 && !outputs.iter().any(|known| known == name)
             {
@@ -210,7 +195,7 @@ fn extract_function(
     let name = fresh_name(db, root, "extracted");
     let first = nodes.first()?;
     let base_indent = line_indent(text, first.text_range().start()).unwrap_or_default();
-    let body = reindent(slice(text, range), &base_indent);
+    let body = reindent(root, text, range, &base_indent);
     let definition = match (&extraction, &output) {
         (Extraction::Expression(expression), _)
             if needs_grouping(expression, slice(text, range)) =>
@@ -301,17 +286,28 @@ fn inline_variable(
         .collect::<Option<_>>()?;
     let last_read = reads.iter().map(|read| read.text_range().end()).max()?;
     let is_literal = value.kind() == LITERAL;
-    let has_effects = value
-        .descendants()
-        .any(|node| node.kind() == CALL_EXPR || is_assignment(&node));
-    if reads.len() > 1 && has_effects {
+    // An assignment in the value (`x <- y <- 0`) would move after the reads of what it assigns.
+    if value.descendants().any(|node| is_assignment(&node)) {
         return None;
+    }
+    // A call may have effects, so it must still run exactly once and before anything else
+    // runs: its single read is evaluated first in the very next statement.
+    if has_call(&value) {
+        let next = statement.next_sibling()?;
+        let [read] = reads.as_slice() else {
+            return None;
+        };
+        if !next.text_range().contains_range(read.text_range())
+            || !evaluated_first(read, &next, true)
+        {
+            return None;
+        }
     }
     for read in &reads {
         if read.text_range().start() < statement.text_range().end()
             || assignment_target_of(read)
             || in_annotation_or_pattern(read)
-            || is_quoted(read)
+            || is_captured(read)
         {
             return None;
         }
@@ -813,13 +809,95 @@ fn callee_name(call: &SyntaxNode) -> Option<String> {
     }
 }
 
-fn is_quoting_call(call: &SyntaxNode) -> bool {
-    callee_name(call).is_some_and(|name| {
-        matches!(
-            name.as_str(),
-            "quote" | "bquote" | "substitute" | "expression" | "alist" | "enquote"
-        )
-    })
+/// How a call evaluates its arguments when that is not once each, in order, in the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgumentEvaluation {
+    /// Taken as code: quoted, or evaluated in a data mask where a name may mean a column.
+    Captured,
+    /// Evaluated later, maybe not at all, or under a condition handler or changed state that
+    /// code moved out of the call would escape.
+    Guarded,
+}
+
+fn argument_evaluation(call: &SyntaxNode) -> Option<ArgumentEvaluation> {
+    let name = callee_name(call)?;
+    match name.as_str() {
+        "quote" | "bquote" | "substitute" | "expression" | "alist" | "enquote" | "with"
+        | "within" | "subset" | "transform" | "local" | "eval" | "evalq" | "filter" | "mutate"
+        | "summarise" | "summarize" | "select" | "arrange" | "group_by" | "transmute"
+        | "rename" | "reframe" | "across" | "test_that" | "expect_snapshot" => {
+            Some(ArgumentEvaluation::Captured)
+        }
+        "tryCatch"
+        | "try"
+        | "withCallingHandlers"
+        | "suppressWarnings"
+        | "suppressMessages"
+        | "suppressPackageStartupMessages"
+        | "system.time"
+        | "switch"
+        | "on.exit"
+        | "capture.output"
+        | "invisible"
+        | "expect_error"
+        | "expect_warning"
+        | "expect_message"
+        | "expect_condition"
+        | "expect_output"
+        | "expect_silent"
+        | "expect_no_error"
+        | "expect_no_warning"
+        | "expect_no_message" => Some(ArgumentEvaluation::Guarded),
+        name if name.starts_with("with_") || name.starts_with("local_") => {
+            Some(ArgumentEvaluation::Guarded)
+        }
+        _ => None,
+    }
+}
+
+/// Whether evaluating `expression` once, just before `statement`, is what running `statement`
+/// would do: every node between them evaluates it exactly once, and nothing that runs before it
+/// inside `statement` assigns, or calls when `moves_call` (two calls may not trade places).
+fn evaluated_first(expression: &SyntaxNode, statement: &SyntaxNode, moves_call: bool) -> bool {
+    let mut child = expression.clone();
+    for parent in expression.ancestors().skip(1) {
+        let is_first = parent.first_child().as_ref() == Some(&child);
+        let allowed = match parent.kind() {
+            FUNCTION_DEF | FOR_EXPR | WHILE_EXPR | REPEAT_EXPR | MATCH_ARM => false,
+            IF_EXPR | SUBSET_EXPR => is_first,
+            BINARY_EXPR => {
+                let operator = BinaryExpr::cast(parent.clone())
+                    .and_then(|binary| binary.operator())
+                    .map(|operator| operator.kind());
+                match operator {
+                    Some(AMP2 | PIPE2 | PIPE_GREATER) => is_first,
+                    Some(TILDE) => false,
+                    Some(SPECIAL) => is_first || !is_pipe_special(&parent),
+                    _ => !is_assignment_target(&parent, &child),
+                }
+            }
+            UNARY_EXPR => child_token(&parent, TILDE).is_none(),
+            CALL_EXPR => is_first || argument_evaluation(&parent).is_none(),
+            _ => true,
+        };
+        let runs_before = child.siblings(Direction::Prev).skip(1).any(|sibling| {
+            sibling
+                .descendants()
+                .any(|node| is_assignment(&node) || (moves_call && node.kind() == CALL_EXPR))
+        });
+        if !allowed || runs_before {
+            return false;
+        }
+        if parent == *statement {
+            return true;
+        }
+        child = parent;
+    }
+    false
+}
+
+fn has_call(node: &SyntaxNode) -> bool {
+    node.descendants().any(|node| node.kind() == CALL_EXPR)
 }
 
 /// Whether an expression moved to the right of `<-` or `function()` needs parentheses to stay
@@ -832,16 +910,24 @@ fn needs_grouping(expression: &SyntaxNode, text: &str) -> bool {
         || alone.syntax_node().children().count() != 1
 }
 
-/// Whether `node` sits in code that is captured rather than evaluated: a formula, or an
-/// argument of `quote()` and its relatives.
-fn is_quoted(node: &SyntaxNode) -> bool {
-    node.ancestors()
-        .skip(1)
-        .any(|ancestor| match ancestor.kind() {
+/// Whether `node` sits in code that is taken as code rather than evaluated in place: a formula,
+/// an argument of `quote()` or a data-masking call, or the index of a `[`, where data.table
+/// reads columns.
+fn is_captured(node: &SyntaxNode) -> bool {
+    let mut child = node.clone();
+    for ancestor in node.ancestors().skip(1) {
+        let captured = match ancestor.kind() {
             BINARY_EXPR | UNARY_EXPR => child_token(&ancestor, TILDE).is_some(),
-            CALL_EXPR => is_quoting_call(&ancestor),
+            CALL_EXPR => argument_evaluation(&ancestor) == Some(ArgumentEvaluation::Captured),
+            SUBSET_EXPR => ancestor.first_child().as_ref() != Some(&child),
             _ => false,
-        })
+        };
+        if captured {
+            return true;
+        }
+        child = ancestor;
+    }
+    false
 }
 
 /// Whether the code reads its caller's frame or leaves it early, which a function boundary
@@ -1022,9 +1108,22 @@ fn line_indent(text: &str, offset: TextSize) -> Option<String> {
 }
 
 /// Moves code from `base` indentation to one level inside a new function body.
-fn reindent(code: &str, base: &str) -> String {
-    code.split('\n')
+/// Indents the code at `range` by two spaces past `base`, leaving alone the lines that continue
+/// a multi-line string, whose leading spaces are part of its value.
+fn reindent(root: &SyntaxNode, text: &str, range: TextRange, base: &str) -> String {
+    let mut offset = range.start();
+    slice(text, range)
+        .split('\n')
         .map(|line| {
+            let line_start = offset;
+            offset += TextSize::of(line) + TextSize::of('\n');
+            let in_string = root.token_at_offset(line_start).any(|token| {
+                matches!(token.kind(), STRING | RAW_STRING)
+                    && token.text_range().start() < line_start
+            });
+            if in_string {
+                return line.to_owned();
+            }
             let line = line.strip_prefix(base).unwrap_or(line);
             if line.trim().is_empty() {
                 String::new()

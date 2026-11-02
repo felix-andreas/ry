@@ -192,3 +192,136 @@ counter <- function() {
 }
 #++++
 no refactors
+#==== extract_keeps_evaluation
+#---- loop_write_read_on_next_pass
+f <- function(x) {
+  while (x > 1) {
+    $0x <- x / 2$1
+  }
+  x
+}
+#++++
+action Extract into function
+  extracted <- function(x) {
+    x <- x / 2
+    x
+  }
+
+  f <- function(x) {
+    while (x > 1) {
+      x <- extracted(x)
+    }
+    x
+  }
+
+#---- loop_write_read_earlier_in_body
+f <- function(x) {
+  for (i in 1:3) {
+    print(x)
+    $0x <- i$1
+  }
+}
+#++++
+action Extract into function
+  extracted <- function(x, i) {
+    x <- i
+    x
+  }
+
+  f <- function(x) {
+    for (i in 1:3) {
+      print(x)
+      x <- extracted(x, i)
+    }
+  }
+
+#---- handler_argument
+f <- function() {
+  tryCatch($0stop("boom")$1, error = function(e) NA)
+}
+#++++
+action Extract into function
+  extracted <- function() stop("boom")
+
+  f <- function() {
+    tryCatch(extracted(), error = function(e) NA)
+  }
+
+#---- switch_branch
+f <- function(k) {
+  switch(k, b = $0expensive()$1)
+}
+#++++
+action Extract into function
+  extracted <- function() expensive()
+
+  f <- function(k) {
+    switch(k, b = extracted())
+  }
+
+#---- data_mask
+f <- function(df) {
+  dplyr::filter(df, $0col > 1$1)
+}
+#++++
+no refactors
+
+#---- data_table_index
+f <- function(d) {
+  d[$0x > 1$1, ]
+}
+#++++
+no refactors
+
+#---- later_operand_with_earlier_call
+f <- function(x) {
+  y <- g() + $0f(x)$1
+  y
+}
+#++++
+action Extract into function
+  extracted <- function(x) f(x)
+
+  f <- function(x) {
+    y <- g() + extracted(x)
+    y
+  }
+
+#---- above_the_annotation
+#: double
+x <- sqrt($01 + 2$1)
+#++++
+action Extract into variable
+  value <- 1 + 2
+  #: double
+  x <- sqrt(value)
+action Extract into function
+  extracted <- function() 1 + 2
+
+  #: double
+  x <- sqrt(extracted())
+action Convert to inline annotation
+  x: double <- sqrt(1 + 2)
+
+#---- multi_line_string_keeps_its_lines
+f <- function() {
+  $0s <- "a
+b"
+  print(s)$1
+}
+#++++
+action Extract into function
+  extracted <- function() {
+    s <- "a
+  b"
+    print(s)
+  }
+
+  f <- function() {
+    extracted()
+  }
+action Inline variable `s`
+  f <- function() {
+    print("a
+  b")
+  }
