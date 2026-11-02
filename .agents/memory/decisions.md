@@ -5001,6 +5001,33 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `menu`'s `choices` is one union including `list[Any]`, because a list and a character overload disagree and would make an untyped caller `Unknown`.
 - The cost of the second `grepl` candidate: `grepl(1L, x)` now reports "no overload matches" over the whole call instead of the argument.
 
+## Strict-friction rules for matrices, unions, `...: Any` and `$` members
+
+- `m[i, j]` on a `matrix` types in `matrix_index` (`check.rs`): elements are `Any` because a matrix carries no element type, two vector or empty slots give `matrix`, a scalar slot gives `Any` (R drops dimensions), and `drop = FALSE` keeps `matrix`. Any other named argument falls back to the general rules rather than guessing.
+- An operator on a union beside a class dispatches per member, and a member with no class takes the ordinary operator rules (`ordinary_operator_result`). The per-member path applies only when some member is a class and commits only if it adds no error, so plain unions keep their old messages.
+- An expected `fn(...: Any)` pads a lambda's parameter hints with `Any` past the declared formals: R would forward any arguments through `...`, so `Any` is the honest type, and `Unknown` would make every callback in plumber or shiny a strict report.
+- An annotation covers strict origins anywhere inside its value except inside a nested function literal or braced block (`annotation_covers`), because those have their own bindings to annotate. Before, only an `Unknown` right-hand side as a whole was covered.
+- A stub declares an environment member as `Class$member : T` (`is_stub_name`, `infer_field`). This is how polars types `frame$select(...)`; it is looked up before `$.class` dispatch and keyed by the class name, so no new table exists beside the global scheme map.
+
+## Inferred annotations follow the project's annotation style
+
+- `ide::inferred_annotations` is the one source of the edits behind the per-binding code action, the whole-file action and `ry check --annotate`, so the editor and the CLI cannot write different annotations.
+- With inline annotations on (the default) the type goes where inline syntax puts it: binders after `function` or `\\`, each formal's type after its name, ` -> R` after the parameter list, and `name: T` for any other binding. A right assignment, a quoted name, or a generic type on a value that is not a function literal has no inline place, so it falls back to a `#:` line.
+- The whole-file action and `--annotate` write top-level bindings only, because locals carry no interface and annotating each one would bury the signatures; the per-binding action still offers a local.
+- `--annotate` is its own flag rather than part of `--fix`: a fix repairs a finding, while an annotation records what inference found and rewrites every signature, which `--fix` users have not asked for.
+- A formal that is optional only because the body may never read it (`[value]: T`) also falls back to `#:`: inline syntax spells optionality only as a default, so the inline form would make a caller that leaves the argument out an error.
+
+## The strict load check overlaps the runtime start
+
+- Before, `ry load` on a strict package ran the whole-project strict check, test files included, and only then started the runtime, so a cold typed load cost the check plus the load (4.8 s against 2.4 s untyped on finbench).
+- On ry's runtime the check now runs on a thread (`run_load` in `crates/ry/src/main.rs`) while the runtime starts. The loader receives a verdict callback (`ry_loader_set_verdict`) and calls it before any statement that is not effect-free, before compiled code and `.onLoad` (`.ry_await_verdict()` in `runtime.R`), after the load returns, and before an S4 statement held back for a later lookup (`do_run_deferred`) that is not effect-free; a refusal exits with the verdict's status. GNU R still checks before it starts, because its loader cannot call back into ry.
+- An eager item is effect-free (`EagerItem.effect_free`, `load_index.rs`) when it binds a function literal, or when `item_effect_free` (`top_level.rs`) holds: a strict constant, or a definition whose declaring calls' arguments have no effect. Strict mode's `Definition` alone is not enough, because it leaves a declaring call's arguments to R, so `setRefClass(..., methods = list(m = { cat(1); function() 1 }))` passes strict mode yet prints. Loading an imported package (NAMESPACE imports, `library()` with effect-free arguments) is allowed before the verdict; this package's own code with an effect never is.
+- `.ry_await_verdict()` sits before `sysdata.rda` and `data/*.R`, because a data file is ordinary code.
+- A constant may call a user `@pure` function before the verdict. That purity is trusted, not checked, which is the documented contract of `@pure`.
+- The check walks only `R/` and computes diagnostics only for requested files (`analyze_project`'s `walk` and `requested`): a name that only a test file defines is unbound in the loaded package anyway, and the tests' diagnostics were never reported. That cut the check's CPU from 6.3 to 4.3 s on typed finbench.
+- `package_verdict` is `extern "C"`, so a panic in the check exits 101 instead of unwinding into libR, which would abort.
+- The check thread lowers its own priority (`lower_priority`), and the analysis workers inherit it, so on a loaded machine the runtime start keeps the cores it needs; the check has the whole load to finish.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a

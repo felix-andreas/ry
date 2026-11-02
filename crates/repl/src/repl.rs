@@ -102,16 +102,24 @@ pub fn run(options: RunOptions) -> Result<(), ReplError> {
 
 /// Runs R code on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
 /// beside the executable), evaluates `input`, then the script `file`. Both are optional, and
-/// `load_all()` is attached before either runs. Returns the exit status.
+/// `load_all()` is attached before either runs. With a `verdict`, the loader calls it before the
+/// package's first effect and exits with its status unless that is 0. Returns the exit status.
 pub fn run_on_ry_runtime(
     file: Option<&std::path::Path>,
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
     package: Option<&Path>,
+    verdict: Option<PackageVerdict>,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
     let library = ry_runtime()?;
+    if let Some(verdict) = verdict {
+        type SetVerdict = unsafe extern "C" fn(PackageVerdict);
+        let set_verdict = runtime_entry::<SetVerdict>(library, "ry_loader_set_verdict")?;
+        // SAFETY: the entry point has this signature in every runtime of this build.
+        unsafe { set_verdict(verdict) };
+    }
     if let Some(package) = package {
         prepare_package(library, package, flags);
     }
@@ -149,6 +157,10 @@ pub fn run_on_ry_runtime(
         )
     })
 }
+
+/// Called by the package loader before the parts of a load that may have effects: 0 lets them
+/// run, and any other value is the status the process exits with. It may block.
+pub type PackageVerdict = extern "C" fn() -> std::ffi::c_int;
 
 /// What ry's runtime does with inline type annotations; mirrors the `RUN_FLAG_*` bits of
 /// `libr::eval`.

@@ -556,7 +556,7 @@ smooth <- function(x, previous) {
   (current + 2) / 2
 }
 #++++
-smooth: <T, U> fn([x]: T, previous: U | NULL) -> Unknown
+smooth: <T, U> fn([x]: T, previous: U | NULL) -> double | matrix
 
 #---- arithmetic_accepts_an_open_parameter_or_a_vector
 drop_rows <- function(x, drop) {
@@ -1289,6 +1289,17 @@ f <- function() {
 #++++
 f: fn() -> Unknown
 20..21 warning[unused] `x` is assigned but never used.
+
+#---- a_matrix_valued_vapply_callback_and_a_matrix_sum_type
+pair <- function(x) matrix(c(x, x), nrow = 1)
+#: fn(xs: character[]) -> matrix
+pairs <- function(xs) vapply(xs, pair, character(2))
+#: fn(m: matrix | double[]) -> double
+energy <- function(m) sum(m^2)
+#++++
+pair: <T> fn(x: T) -> matrix
+pairs: fn(xs: character[]) -> matrix
+energy: fn(m: matrix | double[]) -> double
 
 #---- a_union_with_a_string_member_is_a_condition
 # usethis reads `cfg$origin$is_configured` from a list whose fields mix strings and flags.

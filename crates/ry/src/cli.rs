@@ -7,6 +7,7 @@ use {
         position::LineIndex,
     },
     console::style,
+    ide::{InferredAnnotation, TextEdit, inferred_annotations},
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
@@ -122,6 +123,7 @@ pub fn check(
     output: OutputFormat,
     min_severity: MinSeverity,
     fix: FixMode,
+    annotate: bool,
     cache: CacheUse,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
@@ -156,8 +158,9 @@ pub fn check(
     let mut n_fixed = 0;
     let mut n_fixable = 0;
     let mut n_unsafe_fixable = 0;
+    let mut n_annotated = 0;
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+        let mut analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -165,7 +168,14 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(&root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+            }
+        }
+        if annotate {
+            let annotated = write_inferred_annotations(&analysis)?;
+            if annotated > 0 {
+                n_annotated += annotated;
+                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
             }
         }
         n_failures += analysis.failures;
@@ -203,6 +213,14 @@ pub fn check(
         if n_fixed > 0 {
             let fixes = if n_fixed == 1 { "fix" } else { "fixes" };
             println!("applied {n_fixed} {fixes}");
+        }
+        if n_annotated > 0 {
+            let annotations = if n_annotated == 1 {
+                "annotation"
+            } else {
+                "annotations"
+            };
+            println!("added {n_annotated} inferred {annotations}");
         }
         report_check_summary(n_files, n_diagnostics);
         let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
@@ -262,6 +280,54 @@ fn apply_check_fixes(
     Ok(applied)
 }
 
+/// Writes the inferred annotation of every unannotated top-level binding in the requested files
+/// and returns how many it wrote. One pass is enough: an annotation states what inference
+/// already found, so it exposes no further binding to annotate.
+fn write_inferred_annotations(analysis: &ProjectAnalysis) -> Result<usize, CommandError> {
+    let mut written = 0;
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
+        let annotations: Vec<InferredAnnotation> = inferred_annotations(&analysis.db, file.file)
+            .into_iter()
+            .filter(|annotation| annotation.top_level)
+            .collect();
+        if annotations.is_empty() {
+            continue;
+        }
+        let count = annotations.len();
+        let mut edits: Vec<TextEdit> = annotations
+            .into_iter()
+            .flat_map(|annotation| annotation.edits)
+            .collect();
+        let original = fs::read_to_string(&file.path).map_err(|err| {
+            error_because(&format!("failed to read: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+            continue;
+        }
+        // Every edit is an insertion at a distinct offset, so applying them from the end keeps
+        // each earlier offset valid.
+        edits.sort_by_key(|edit| Reverse(edit.range.start()));
+        let mut edited = original;
+        for edit in edits {
+            edited.replace_range(
+                usize::from(edit.range.start())..usize::from(edit.range.end()),
+                &edit.replacement,
+            );
+        }
+        fs::write(&file.path, edited).map_err(|err| {
+            error_because(&format!("failed to write: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        written += count;
+    }
+    Ok(written)
+}
+
 /// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
 /// may not mean what they say.
 fn fixes_apply(file: &AnalyzedFile) -> bool {
@@ -272,8 +338,8 @@ fn fixes_apply(file: &AnalyzedFile) -> bool {
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
-/// it. Analysis always covers the whole project root; `requested` only marks which files the
-/// caller asked about.
+/// it. Analysis always covers the whole project root, so names resolve across it, but only the
+/// files the caller asked about are checked: the others' `diagnostics` are empty.
 pub(crate) struct ProjectAnalysis {
     pub db: RootDatabase,
     pub files: Vec<AnalyzedFile>,
@@ -323,8 +389,11 @@ impl ProjectAnalysis {
     }
 }
 
+/// Analyzes the R files under `walk` as one project rooted at `root`, whose `ry.toml`, stubs,
+/// `DESCRIPTION` and `NAMESPACE` apply, and checks the files under `requested`.
 pub(crate) fn analyze_project(
     root: &Path,
+    walk: &Path,
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
@@ -333,10 +402,10 @@ pub(crate) fn analyze_project(
         true => cache,
         false => CacheUse::Off,
     };
-    let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
+    let (analysis, reused) = analyze_project_with(root, walk, config.clone(), requested, cache)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
-        let fresh = analyze_project_with(root, config, requested, CacheUse::Off)?.0;
+        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off)?.0;
         let source_files = |analysis: &ProjectAnalysis| -> Vec<SourceFile> {
             analysis.files.iter().map(|file| file.file).collect()
         };
@@ -347,7 +416,13 @@ pub(crate) fn analyze_project(
                 .map(|diagnostic| check_cache::recorded_form(diagnostic, files))
                 .collect()
         };
-        for (cached, recomputed) in analysis.files.iter().zip(&fresh.files) {
+        // A fresh run without the cache checks only the requested files.
+        for (cached, recomputed) in analysis
+            .files
+            .iter()
+            .zip(&fresh.files)
+            .filter(|(cached, _)| cached.requested)
+        {
             assert_eq!(
                 comparable(&cached.diagnostics, &reused_files),
                 comparable(&recomputed.diagnostics, &fresh_files),
@@ -373,13 +448,14 @@ pub(crate) fn analyze_project(
 /// The analysis, and whether any finding in it came from the check cache.
 fn analyze_project_with(
     root: &Path,
+    walk: &Path,
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<(ProjectAnalysis, bool), CommandError> {
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
-    let mut paths = collect_r_files(root, exclude.as_ref())?;
+    let mut paths = collect_r_files(walk, exclude.as_ref())?;
     // `exclude` scopes the project walk; it does not veto a file named directly.
     for target in requested {
         if !target.is_dir() && !paths.contains(target) {
@@ -685,11 +761,26 @@ fn analyze_project_with(
         metadata.set_attached(&mut db).to(attached.clone());
     }
 
+    // Without the cache only the requested files are checked: another file's items are still
+    // analyzed where a requested file's check reaches them, but its own findings would only be
+    // thrown away. The cache records every file's findings, so with it every stale file is checked.
+    let checked = |index: usize| match cache {
+        CacheUse::ReadWrite => true,
+        CacheUse::Off => reported.get(index).copied().unwrap_or(false),
+    };
+    let checked_by_size: Vec<usize> = checked_order
+        .iter()
+        .copied()
+        .filter(|&index| checked(index))
+        .collect();
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
     in_parallel(&db, workers, &checked_order, |db, index| {
         if let Some(tree) = trees.get(index) {
             drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
+        if !checked(index) {
+            return;
         }
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
@@ -700,7 +791,7 @@ fn analyze_project_with(
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &checked_order, |db, index| {
+    for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {
@@ -2419,6 +2510,7 @@ mod tests {
             }
             let config = config::Config::discover(&root).expect("the simulated ry.toml");
             let analysis = analyze_project(
+                &root,
                 &root,
                 config,
                 std::slice::from_ref(&root),
