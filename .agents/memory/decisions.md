@@ -4197,9 +4197,11 @@ check` releases its trees once, and memoized records are compact" below).
   tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
   moves. Before this, one shared call made every later call copy, because the dead frame kept
   each result shared.
-- **Tail update.** A helper whose body ends in `f(p, ...)`, `f` a library builtin that reuses its
-  first argument and `p` the first parameter, compiles that call to `Op::CallTailUpdate`
-  (`bytecode::tail_update`). It updates `p`'s value in place only when, after its arguments are
+- **Tail update.** A call `f(p, ...)` in tail position, `f` a library builtin that reuses its
+  first argument and `p` the first parameter, compiles to `Op::CallTailUpdate`
+  (`bytecode::tail_updates`). Tail position is the body, the last statement of a `{` or a branch
+  of an `if` in tail position, or the argument of a `return` in a statement outside any function
+  literal or `local`. It updates `p`'s value in place only when, after its arguments are
   evaluated, a move into this frame still lasts and every closure created while it lasted is
   dead once the frame is, with none among the call's other arguments, whose values the heap does
   not count (`moves::frame_private`): then nothing outlives the frame, and nothing in it runs

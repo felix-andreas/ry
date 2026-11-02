@@ -558,10 +558,10 @@ struct Compiler {
     /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
     /// call of a closure becomes [`Op::CallRebinding`].
     rebinding: Option<(Sexp, Sexp)>,
-    /// The body's last call when it is `f(p, ...)` for a library builtin that updates its first
-    /// argument in place and `p` is the first parameter, with `p`: the call becomes
-    /// [`Op::CallTailUpdate`].
-    tail_update: Option<(Sexp, Sexp)>,
+    /// The body's calls in tail position that are `f(p, ...)` for a library builtin that
+    /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
+    /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
+    tail_updates: (Vec<Sexp>, Sexp),
 }
 
 #[derive(Clone, Copy)]
@@ -593,7 +593,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
-        tail_update: tail_update(body, function),
+        tail_updates: tail_updates(body, function),
     };
     let result = compiler.allocate();
     compiler.expression(body, result)?;
@@ -933,40 +933,63 @@ unsafe fn rebinds_first_argument(expression: Sexp) -> bool {
         && value.cdr().tag() == nil()
 }
 
-/// The last call of `body`, the body itself or the last statement of a `{`, when it is
-/// `f(p, ...)` for a standard library builtin that updates its first argument in place and `p`
-/// is the first parameter of `function`, with `p`. A move into the frame leaves the parameter holding the
-/// only reference to the caller's value, and nothing runs in the frame after this call, so
+/// The calls in tail position of `body` that are `f(p, ...)` for a standard library builtin that
+/// updates its first argument in place, with `p` the first parameter of `function`, and `p`. A
+/// call is in tail position when it is the body, the last statement of a `{` in tail position, a
+/// branch of an `if` in tail position, or the argument of a `return` in a statement of the body
+/// outside any function literal or `local`. A move into the frame leaves the parameter holding
+/// the only reference to the caller's value, and nothing runs in the frame after such a call, so
 /// updating the parameter's value in place is invisible while the move lasts.
-unsafe fn tail_update(body: Sexp, function: Sexp) -> Option<(Sexp, Sexp)> {
+unsafe fn tail_updates(body: Sexp, function: Sexp) -> (Vec<Sexp>, Sexp) {
     let formals = function.car();
-    let mut last = body;
-    if last.kind() == SexpType::Language
-        && last.car().kind() == SexpType::Symbol
-        && &*symbol_name(last.car()) == "{"
-    {
-        let mut statement = last.cdr();
-        if statement.kind() != SexpType::Pairlist {
-            return None;
-        }
-        while statement.cdr().kind() == SexpType::Pairlist {
-            statement = statement.cdr();
-        }
-        last = statement.car();
-    }
-    if formals.kind() != SexpType::Pairlist
-        || last.kind() != SexpType::Language
-        || last.car().kind() != SexpType::Symbol
-        || !crate::standard_library::reuses_first_argument(&symbol_name(last.car()))
-    {
-        return None;
+    let mut calls = Vec::new();
+    if formals.kind() != SexpType::Pairlist {
+        return (calls, nil());
     }
     let parameter = formals.tag();
-    let arguments = last.cdr();
-    let matches = arguments.kind() == SexpType::Pairlist
-        && arguments.tag() == nil()
-        && arguments.car() == parameter;
-    matches.then_some((last, parameter))
+    collect_tail_updates(body, parameter, true, &mut calls);
+    (calls, parameter)
+}
+
+/// Adds the tail updates of `expression` to `calls`: the expression itself when `tail`, and the
+/// arguments of `return` in the statements it runs.
+unsafe fn collect_tail_updates(expression: Sexp, parameter: Sexp, tail: bool, calls: &mut Vec<Sexp>) {
+    if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+        return;
+    }
+    let mut arguments = Vec::new();
+    let mut argument = expression.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        arguments.push(argument.car());
+        argument = argument.cdr();
+    }
+    match (&*symbol_name(expression.car()), arguments.as_slice()) {
+        ("{", statements) => {
+            for (index, &statement) in statements.iter().enumerate() {
+                let last = index + 1 == statements.len();
+                collect_tail_updates(statement, parameter, tail && last, calls);
+            }
+        }
+        ("if", [condition, branches @ ..]) if branches.len() <= 2 => {
+            collect_tail_updates(*condition, parameter, false, calls);
+            for &branch in branches {
+                collect_tail_updates(branch, parameter, tail, calls);
+            }
+        }
+        ("for", [_, _, statement]) | ("while", [_, statement]) | ("repeat", [statement]) => {
+            collect_tail_updates(*statement, parameter, false, calls);
+        }
+        ("return", [value]) => collect_tail_updates(*value, parameter, true, calls),
+        (name, [first, ..])
+            if tail
+                && *first == parameter
+                && expression.cdr().tag() == nil()
+                && crate::standard_library::reuses_first_argument(name) =>
+        {
+            calls.push(expression);
+        }
+        _ => {}
+    }
 }
 
 /// Whether `expression` is `x <- f(x, ...)` for a standard library builtin that updates its
@@ -1423,8 +1446,8 @@ impl Compiler {
         let mark = self.next_register;
         let function_register = self.allocate();
         self.emit(Op::Constant, &[function_register, expected]);
-        if let Some((_, target)) = self.tail_update.filter(|&(tail, _)| tail == call) {
-            let target = self.constant(target);
+        if self.tail_updates.0.contains(&call) {
+            let target = self.constant(self.tail_updates.1);
             self.emit(
                 Op::CallTailUpdate,
                 &[dst, function_register, call_constant, target],

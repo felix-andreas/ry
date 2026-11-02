@@ -422,6 +422,15 @@ const PRINTS: &[(&str, &str)] = &[
         "{ h <- function(d) { g <- function() length(d); List.append(d, list(g)) }; f <- function() { for (i in 1) NULL; d <- list(1, 2); for (i in 1:4) d <- h(d); c(length(d), d[[6L]][[1L]](), d[[3L]][[1L]]()) }; f() }",
         "[1] 6 5 2\n",
     ),
+    // The tail form in an `if` branch and under `return`.
+    (
+        "{ h <- function(d, k) { if (k > 100L) return(d); if (k %% 2L == 0L) Dict.insert(d, k, k) else d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:6) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(keep), Dict.len(d), Dict.len(h(d, 200L))) }; f() }",
+        "[1] 3 4 4\n",
+    ),
+    (
+        "{ h <- function(xs, k) { for (i in 1:2) if (i == k) return(List.append(xs, i)); xs }; f <- function() { for (i in 1) NULL; xs <- list(); for (k in c(1L, 2L, 3L, 1L)) xs <- h(xs, k); keep <- xs; xs <- h(xs, 2L); c(length(keep), length(xs), List.to_vector(xs)) }; f() }",
+        "[1] 3 4 1 2 1 2\n",
+    ),
     (
         "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
         "[1] 4 5\n",
