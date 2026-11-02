@@ -2283,17 +2283,15 @@ fn scan_nul_and_ascii(bytes: &[u8]) -> (bool, bool) {
     const ONES: u64 = 0x0101_0101_0101_0101;
     const HIGHS: u64 = 0x8080_8080_8080_8080;
     let (mut zero_bits, mut high_bits) = (0u64, 0u64);
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        let word = u64::from_le_bytes(word);
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         // The classic zero-byte test, which is nonzero exactly when some byte of the word is.
         zero_bits |= word.wrapping_sub(ONES) & !word & HIGHS;
         high_bits |= word;
     }
     let mut tail_nul = false;
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         tail_nul |= byte == 0;
         high_bits |= u64::from(byte);
     }

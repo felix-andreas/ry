@@ -42,6 +42,9 @@ use {
     xxhash_rust::xxh3::{Xxh3, xxh3_64},
 };
 
+/// A file's size, modification time and declared encoding.
+type FileStamp = (u64, Option<SystemTime>, SourceEncoding);
+
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.
 #[derive(Default)]
@@ -50,7 +53,7 @@ pub struct Loader {
     packages: Vec<LoadedPackage>,
     /// Size, modification time and declared encoding of each file as last read, per package
     /// root.
-    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>, SourceEncoding)>>,
+    stamps: FxHashMap<PathBuf, FxHashMap<String, FileStamp>>,
     /// Whether the shipped stubs are in the database. A strict package needs them to tell
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
@@ -1902,6 +1905,7 @@ fn parse_detached(db: &RootDatabase, files: Vec<SourceFile>) {
                             }));
                             // A cancelled parse is redone by the plan that cancelled it.
                             if let Err(cancelled) = parsed {
+                                #[allow(clippy::drop_non_drop)]
                                 drop(cancelled);
                             }
                         });

@@ -858,20 +858,6 @@ pub enum Op {
     IntegerDivide,
 }
 
-impl Op {
-    fn symbol(self) -> &'static str {
-        match self {
-            Op::Add => "+",
-            Op::Subtract => "-",
-            Op::Multiply => "*",
-            Op::Divide => "/",
-            Op::Power => "^",
-            Op::Modulo => "%%",
-            Op::IntegerDivide => "%/%",
-        }
-    }
-}
-
 /// Runs an operator, enforcing an Array's strict rules when an operand is one: R's own operator
 /// computes the plain result, which then becomes an Array again.
 unsafe fn strict(

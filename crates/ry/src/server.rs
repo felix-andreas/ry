@@ -1519,9 +1519,11 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let mut updated = self.apply_content_changes(text, &params.content_changes);
-        if self.literate_documents.contains_key(&file) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) =
+            self.literate_documents.entry(file)
+        {
             let analysed = r_source_of_literate(&updated);
-            self.literate_documents.insert(file, updated);
+            e.insert(updated);
             updated = analysed;
         }
         self.pending_lowering.retain(|owed| owed != &path);
@@ -2664,7 +2666,7 @@ impl LanguageServer for ServerState {
                 usize::from(offset),
                 &items,
             ));
-            Ok((!items.is_empty()).then(|| {
+            Ok((!items.is_empty()).then_some({
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete,
                     items,

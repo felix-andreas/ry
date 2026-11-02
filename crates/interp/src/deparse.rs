@@ -86,7 +86,6 @@ enum Kind {
     Assign,
     Dollar,
     Subset,
-    Other,
 }
 
 /// GNU R's precedences.
@@ -1663,7 +1662,6 @@ unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
                             || (main.precedence == info.precedence
                                 && left == main.right_associative);
                     }
-                    Kind::Other => return false,
                 }
             }
             if matches!(name, b"for" | b"if" | b"while" | b"repeat") {

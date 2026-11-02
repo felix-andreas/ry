@@ -1030,7 +1030,7 @@ mod tests {
         install_shipped_stubs(&db);
         let check = first_item_check(&db, "f <- function() cumsum(1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let ret = scheme_return(&db, &check);
+        let ret = scheme_return(&db, check);
         let TyKind::Vector(element) = ret.kind(&db) else {
             panic!("expected integer[], got {:?}", ret.kind(&db));
         };
@@ -1044,7 +1044,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function() sum(1, 2)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1063,7 +1063,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(1)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1103,7 +1103,7 @@ mod tests {
         let scheme = check.scheme.clone().expect("scheme");
         assert!(scheme.binders.is_empty(), "{scheme:?}");
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Unknown
         ));
     }
@@ -1124,7 +1124,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function() f(function(v) v, 1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }
@@ -1146,7 +1146,7 @@ mod tests {
         let check = first_item_check(&db, "g <- function(n) f(n, 2L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Double)
         ));
     }
@@ -1172,7 +1172,7 @@ mod tests {
             "the parameter must stay generic: {scheme:?}"
         );
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Character)
         ));
     }
@@ -1216,7 +1216,7 @@ mod tests {
         let check = first_item_check(&db, "f <- function(x) base::length(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
+            scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
         ));
     }

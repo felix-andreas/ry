@@ -417,7 +417,7 @@ pub unsafe extern "C" fn jit_call(
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                for pair in arguments.chunks_exact(2) {
+                for pair in arguments.as_chunks::<2>().0 {
                     let (kind, bits) = (pair[0] as i32, pair[1]);
                     let value = match kind {
                         representation::INTEGER => values::scalar_integer(bits as i32)?,
@@ -671,7 +671,7 @@ pub unsafe extern "C" fn jit_construct(
                 heap.root(value);
                 Slot::Handle(value)
             };
-            for (index, pair) in pairs.chunks_exact(2).enumerate() {
+            for (index, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
                 let (kind, bits) = (pair[0] as i32, pair[1]);
                 let wide = index >= UNBOXED_SLOTS;
                 let slot = match kind {

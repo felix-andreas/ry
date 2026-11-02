@@ -1534,10 +1534,10 @@ unsafe fn printed(code: &str) -> String {
     unsafe {
         match evaluate(code) {
             Ok(value) => {
-                if interp::interp().visible {
-                    if let Err(failure) = print::print_value_top(value, values::global_env()) {
-                        return format!("printing failed: {}", message(failure));
-                    }
+                if interp::interp().visible
+                    && let Err(failure) = print::print_value_top(value, values::global_env())
+                {
+                    return format!("printing failed: {}", message(failure));
                 }
                 take_output()
             }

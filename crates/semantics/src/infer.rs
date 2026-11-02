@@ -1665,6 +1665,77 @@ fn constraint_rejects<'db>(
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))
 }
 
+/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
+/// only when both sides know it: a written `GroupBy{...}` names no keys.
+fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
+    match (left, right) {
+        (
+            FrameKind::GroupBy {
+                lazy: left_lazy,
+                keys: left_keys,
+            },
+            FrameKind::GroupBy {
+                lazy: right_lazy,
+                keys: right_keys,
+            },
+        ) => {
+            left_lazy == right_lazy
+                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
+        }
+        _ => left == right,
+    }
+}
+
+/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
+/// whether it is a vector. A union of numeric types ranks as its widest member, since every
+/// member coerces to that one (`double | integer` widens a binding to `double`).
+/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
+/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
+/// it). `None` when a type is not numeric.
+pub(crate) fn numeric_join<'db>(
+    db: &'db dyn Db,
+    types: impl IntoIterator<Item = Ty<'db>>,
+) -> Option<Ty<'db>> {
+    let (vector, rank) = types
+        .into_iter()
+        .try_fold((false, 0), |(vector, rank), ty| {
+            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
+            Some((vector || ty_vector, rank.max(ty_rank)))
+        })?;
+    let element = scalar(
+        db,
+        match rank {
+            2 => Atomic::Double,
+            1 => Atomic::Integer,
+            _ => Atomic::Logical,
+        },
+    );
+    Some(if vector {
+        Ty::new(db, TyKind::Vector(element))
+    } else {
+        element
+    })
+}
+
+fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
+    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(0),
+        TyKind::Scalar(Atomic::Integer) => Some(1),
+        TyKind::Scalar(Atomic::Double) => Some(2),
+        _ => None,
+    };
+    match ty.kind(db) {
+        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
+        TyKind::Union(members) => members
+            .iter()
+            .try_fold((false, 0), |(vector, rank), member| {
+                let (member_vector, member_rank) = numeric_rank(db, *member)?;
+                Some((vector || member_vector, rank.max(member_rank)))
+            }),
+        _ => atomic_rank(ty).map(|rank| (false, rank)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -1830,76 +1901,5 @@ mod tests {
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
-    }
-}
-
-/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
-/// only when both sides know it: a written `GroupBy{...}` names no keys.
-fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
-    match (left, right) {
-        (
-            FrameKind::GroupBy {
-                lazy: left_lazy,
-                keys: left_keys,
-            },
-            FrameKind::GroupBy {
-                lazy: right_lazy,
-                keys: right_keys,
-            },
-        ) => {
-            left_lazy == right_lazy
-                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
-        }
-        _ => left == right,
-    }
-}
-
-/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
-/// whether it is a vector. A union of numeric types ranks as its widest member, since every
-/// member coerces to that one (`double | integer` widens a binding to `double`).
-/// The type R's arithmetic promotes a set of numeric values to: the widest of `logical`,
-/// `integer` and `double`, as a vector when any of them is one (a scalar recycles against
-/// it). `None` when a type is not numeric.
-pub(crate) fn numeric_join<'db>(
-    db: &'db dyn Db,
-    types: impl IntoIterator<Item = Ty<'db>>,
-) -> Option<Ty<'db>> {
-    let (vector, rank) = types
-        .into_iter()
-        .try_fold((false, 0), |(vector, rank), ty| {
-            let (ty_vector, ty_rank) = numeric_rank(db, ty)?;
-            Some((vector || ty_vector, rank.max(ty_rank)))
-        })?;
-    let element = scalar(
-        db,
-        match rank {
-            2 => Atomic::Double,
-            1 => Atomic::Integer,
-            _ => Atomic::Logical,
-        },
-    );
-    Some(if vector {
-        Ty::new(db, TyKind::Vector(element))
-    } else {
-        element
-    })
-}
-
-fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
-    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
-        TyKind::Scalar(Atomic::Logical) => Some(0),
-        TyKind::Scalar(Atomic::Integer) => Some(1),
-        TyKind::Scalar(Atomic::Double) => Some(2),
-        _ => None,
-    };
-    match ty.kind(db) {
-        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
-        TyKind::Union(members) => members
-            .iter()
-            .try_fold((false, 0), |(vector, rank), member| {
-                let (member_vector, member_rank) = numeric_rank(db, *member)?;
-                Some((vector || member_vector, rank.max(member_rank)))
-            }),
-        _ => atomic_rank(ty).map(|rank| (false, rank)),
     }
 }

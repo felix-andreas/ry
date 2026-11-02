@@ -124,7 +124,7 @@ pub fn hover(
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
     let hir = item_hir(db, position.item).as_ref()?;
-    if let Some(member) = member_at(db, hir, &check, position.relative) {
+    if let Some(member) = member_at(db, hir, check, position.relative) {
         let mut renderer = TypeRenderer::default();
         let line = match &member.label {
             Some(name) => format!("{name}: {}", renderer.render(db, member.ty)),
@@ -170,7 +170,7 @@ pub fn hover(
             let referenced = || {
                 naming.filter(|naming| naming.non_locals.contains_key(&expression))?;
                 contains_inference_var(db, ty).then_some(())?;
-                referenced_scheme(db, files, name, &check, expression)
+                referenced_scheme(db, files, name, check, expression)
             };
             // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
             let mut scheme = exported
@@ -984,7 +984,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             {
                 continue;
             }
-            let Some(scheme) = inferred_scheme(db, &check, id, *value, is_root) else {
+            let Some(scheme) = inferred_scheme(db, check, id, *value, is_root) else {
                 continue;
             };
             let label = TypeRenderer::default().render_scheme(db, &scheme);
@@ -1375,7 +1375,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
         && contains_inference_var(db, function)
         && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(scheme) = referenced_scheme(db, files, &name, &check, callee)
+        && let Some(scheme) = referenced_scheme(db, files, &name, check, callee)
     {
         scheme
     } else {
@@ -1999,7 +1999,7 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             else {
                 continue;
             };
-            let Some(scheme) = inferred_scheme(db, &check, id, *value, is_root) else {
+            let Some(scheme) = inferred_scheme(db, check, id, *value, is_root) else {
                 continue;
             };
             let target_range = hir.range(*target) + item_offset;
@@ -3665,7 +3665,7 @@ fn string_subscript_completion(
     {
         Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
         Some(_) => return None,
-        None => dataframe_columns_for(db, hir, &check, string_range)?,
+        None => dataframe_columns_for(db, hir, check, string_range)?,
     };
 
     let typed = usize::from(offset - string_token.text_range().start());

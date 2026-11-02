@@ -1905,7 +1905,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
+        (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
