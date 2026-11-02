@@ -1817,6 +1817,23 @@ interned symbol, the weak-reference list, and any `RootSource` an interpreter or
 function that allocates while it holds a handle that nothing else roots must root it first, and collection stress is what
 exposes a miss.
 
+**Root scanning is proportional to new roots on a minor collection.** The four root stacks (globals,
+`PROTECT`, handles, handouts) are `RootStack`s that remember how far the last collection scanned. A
+minor collection marks only the entries above that watermark, because an entry below it was marked
+by an earlier collection and a mark stays until the next major one; popping or removing entries
+lowers the watermark. Permanent objects go through `Heap::add_global_root` (primitives do), and
+interned symbols are heap roots already, so a `RootSource` traces only state that changes, such as
+frames and handlers. Before this, unserialize held 15k handles while lazy-loading base, and every
+minor collection rescanned them along with every symbol and builtin, so `RY_GC_STRESS=startup` on
+an empty script took over 300 s in a debug build. It now takes about 7 s, with the `heap` crate at
+`opt-level = 2` in the dev profile. Under stress, every eighth collection is major while the heap
+is small, and past that one per sixteenth of the live objects, which keeps the total linear.
+
+**Removing a binding is O(1) amortized** (`crates/heap/src/env.rs`). The slot stays in place with a
+sentinel symbol, the hash index drops its key, and the frame compacts once half its slots are
+removed. Removing by shifting kept insertion order but rewrote every later index entry, so `rm()`
+over a large frame was quadratic.
+
 **The handle scope roots what the API hands out, not every allocation, and only recently.** While a
 native call is on the stack, a handle an API function returns to native code goes to the heap's
 handouts stack (`Heap::hand_out`), which the native call truncates on return. Rooting results
