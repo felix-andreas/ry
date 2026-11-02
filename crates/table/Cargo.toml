@@ -30,10 +30,11 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-u8",
     "dtype-u16",
     "cum_agg",
+    "dtype-extension",
 ] }
 polars-arrow = { version = "0.55", default-features = false }
 # The kernels run on Polars' own thread pool, so `POLARS_MAX_THREADS` governs them too.
-polars-core = { version = "0.55", default-features = false }
+polars-core = { version = "0.55", default-features = false, features = ["dtype-extension"] }
 polars-buffer = { version = "0.55", default-features = false }
 rayon = "1.12"
 memmap2 = "0.9"

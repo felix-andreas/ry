@@ -217,7 +217,7 @@ fn typed_hover(
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
     let hir = item_hir(db, position.item).as_ref()?;
-    if let Some(member) = member_at(db, hir, check, position.relative) {
+    if let Some(member) = member_at(db, file, hir, check, position.relative) {
         let mut renderer = TypeRenderer::default();
         let line = match &member.label {
             Some(name) => format!("{name}: {}", renderer.render(db, member.ty)),
@@ -371,6 +371,7 @@ struct Member<'db> {
 
 fn member_at<'db>(
     db: &'db dyn Db,
+    file: SourceFile,
     hir: &Module,
     check: &ItemCheck<'db>,
     relative: TextSize,
@@ -493,7 +494,7 @@ fn member_at<'db>(
             }
             ExpressionKind::Literal(LiteralKind::String(name)) => {
                 let name = &hir[name];
-                if let Some(columns) = dataframe_columns_for(db, hir, check, range)
+                if let Some(columns) = dataframe_columns_for(db, file, hir, check, range)
                     && let Some(column) = columns.iter().find(|column| column.name.text(db) == name)
                 {
                     return Some(Member {
@@ -2766,7 +2767,16 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         });
     }
     // Listed only where the cursor offers a rewrite, and only when it does more than that one.
-    if rewrites.len() > 1
+    let file_edits: Vec<TextEdit> = rewrites
+        .iter()
+        .filter_map(|rewrite| {
+            Some(TextEdit {
+                range: rewrite.range,
+                replacement: rewrite.replacement.clone()?,
+            })
+        })
+        .collect();
+    if file_edits.len() > 1
         && rewrites
             .iter()
             .any(|rewrite| ranges_overlap(rewrite.range, viewport))
@@ -2774,13 +2784,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         actions.push(CodeAction {
             title: "Rewrite all data.table code in the file as DataFrame code".to_owned(),
             kind: CodeActionKind::MigrateDataTableFile,
-            edits: rewrites
-                .into_iter()
-                .map(|rewrite| TextEdit {
-                    range: rewrite.range,
-                    replacement: rewrite.replacement,
-                })
-                .collect(),
+            edits: file_edits,
         });
     }
 
@@ -4848,7 +4852,7 @@ fn string_subscript_completion(
     {
         Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
         Some(_) => return None,
-        None => dataframe_columns_for(db, hir, check, string_range)?,
+        None => dataframe_columns_for(db, file, hir, check, string_range)?,
     };
 
     let typed = usize::from(offset - string_token.text_range().start());
@@ -4873,12 +4877,13 @@ fn string_subscript_completion(
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
 /// `DataFrame.select(sales, "price")`, or the name in `col("price")` inside one. The verb's first
 /// argument is the frame whose columns are in scope.
-fn dataframe_columns_for<'a, 'db>(
+fn dataframe_columns_for<'db>(
     db: &'db dyn Db,
+    file: SourceFile,
     hir: &Module,
-    check: &'a ItemCheck<'db>,
+    check: &ItemCheck<'db>,
     string_range: TextRange,
-) -> Option<&'a [RecordField<'db>]> {
+) -> Option<&'db [RecordField<'db>]> {
     let is_column_string = hir.expressions().any(|expression| match &expression.kind {
         ExpressionKind::Call { callee, arguments } => {
             let in_arguments = |arguments: &[Argument]| {
@@ -4917,7 +4922,9 @@ fn dataframe_columns_for<'a, 'db>(
             _ => None,
         })
         .min_by_key(|(length, _)| *length)?;
-    match check.expression_types.get(&subject)?.kind(db) {
+    // A frame typed by a named definition, such as a parameter of type `Sales`, has the
+    // columns of the definition's body.
+    match representation(db, file, *check.expression_types.get(&subject)?).kind(db) {
         TyKind::Frame(_, Some(columns)) => Some(columns.as_slice()),
         _ => None,
     }

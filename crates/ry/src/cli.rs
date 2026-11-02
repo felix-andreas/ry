@@ -300,7 +300,11 @@ pub fn migrate_data_table(
             .filter(|file| file.requested && fixes_apply(file))
         {
             let rewrites = data_table_rewrites(&analysis.db, file.file);
-            if rewrites.is_empty() {
+            let applied = rewrites
+                .iter()
+                .filter(|rewrite| rewrite.replacement.is_some())
+                .count();
+            if applied == 0 {
                 continue;
             }
             let original = fs::read_to_string(&file.path).map_err(|err| {
@@ -313,7 +317,7 @@ pub fn migrate_data_table(
                 continue;
             }
             let migrated = apply_data_table_rewrites(&original, &rewrites);
-            n_rewrites += rewrites.len();
+            n_rewrites += applied;
             n_files += 1;
             if write {
                 fs::write(&file.path, migrated).map_err(|err| {

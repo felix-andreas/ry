@@ -4498,19 +4498,35 @@ check` releases its trees once, and memoized records are compact" below).
   driver at 5e7: q3 1.42 s scattered against 1.18 s scanned, q4 1.71 s against 1.19 s. Keeping
   one thread below a cache-sized slot count was slower too (q4 1.42 s).
 
-## Factors stay Polars Enums
+## Factors are ry's own codes plus one level table, outside Polars
 
-- A factor column is a Polars `Enum` with u8, u16 or u32 codes; `string_to_factor` builds the
-  levels itself (parallel hash partitions, byte-order sort) and calls `FrozenCategories::new` once.
-- Replacing the Enum with ry's own codes-plus-levels type would remove the interning cost that
-  dominates high-cardinality reads (backlog, "A factor build is bound by Polars' Enum
-  interning"), but the Enum is the factor type in every kernel (`Codes::of`), the joins, group-by,
-  the lazy planner and the readers. That change is a factor type of its own, worth doing only once
-  a real workload reads multi-million-level factors; at db-benchmark's sizes the conversion
-  already beats `fread` by 3x to 6x.
-- That condition is now met: db-benchmark's join inputs at 1e8 rows carry up to 1e8 distinct
-  levels, and the Enum's roughly 135 bytes per level keep `join_x` alone from fitting next to
-  `join_big` in 15 GB (backlog, "Open: DataFrame", top item). The replacement is the next step.
+- **Previous shape.** A factor column was a Polars `Enum`; `string_to_factor` built the levels
+  (parallel hash partitions, byte-order sort) and then called `FrozenCategories::new`, which
+  interned every level a second time at roughly 135 bytes per level. The CSV reader parsed factor
+  columns as `Categorical` with a shared mapping and re-read a column whole as text when it held
+  an `NA`. At db-benchmark's 1e8 join inputs (up to 1e8 distinct levels) the Enum alone kept
+  `join_x` from fitting next to `join_big` in 15 GB.
+- **Target shape.** `crates/table/src/factor.rs`: a factor is a Polars extension type
+  (`ry.factor`, feature `dtype-extension`) whose storage is a dense zero-based code column
+  (u8, u16 or u32 by level count) and whose dtype holds one `Arc<Levels>`: a `Utf8ViewArray` of
+  labels in R's order plus a lazily built label-to-code hash index. Extension series filter,
+  take, sort, group and append through their storage, and `to_physical_repr` gives the codes, so
+  `kernel::Codes::of` and the row encoder need no factor case. Casting an extension column is
+  refused by Polars, so every conversion goes through `factor::cast`, `factor::text` or their
+  lazy forms `cast_expr`/`text_expr` (Polars `map` UDFs).
+- **Reader.** A factor column parses as String slice by slice, and each slice is interned into a
+  persistent `Interner` with 256 hash partitions, each owning its labels' views and byte arena (a
+  label of up to 12 bytes lives in its view). Codes during the read are `index << 8 | partition`.
+  A partition that the first slice fills with mostly distinct labels is sized for the whole file
+  from that slice, because growing it later copies and rehashes every label and holds both tables
+  at once. `finish` sorts one 16-byte key per level (the label's first 12 bytes read big-endian, then
+  its code), stored in the view type so that the sorted keys become the label views in place, re-sorts only the runs
+  whose prefix ties, remaps the codes in parallel, and turns the arenas into the label buffers
+  without copying a byte. `NA` never enters the levels, so the whole-column text re-read is gone.
+- **Joins.** `join::factor_codes` translates one side's codes into the other's levels through
+  `Levels::position`; identical level tables (the same `Arc`) translate by identity.
+- **Impact.** One source of truth for a column's levels, about 16 bytes of view plus the label
+  bytes per level, and no second interning pass.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 
@@ -5617,6 +5633,30 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** No new state: the checks run inside the existing refinement of a verb call, which is
   per item, so incremental analysis is unchanged.
 
+## Strict mode reports a DataFrame query over unknown columns
+
+- **Previous shape.** A `DataFrame` whose columns are unknown (a computed `read_csv` path, a bare
+  `DataFrame` parameter, a verb argument the checker cannot read) is a known type, not `Unknown`,
+  so strict mode let every `col("x")` on it through unchecked, and "a clean strict run checks
+  every column" did not hold.
+- **Target shape.** `note_unchecked_columns` in `check.rs` records a strict origin
+  (`StrictOriginKind::UnknownColumns`) on the subject of a verb that names a column, through a
+  string argument or a `col("x")` anywhere inside one, when the subject's columns are unknown. A
+  verb whose chain already has an earlier step over unknown columns that names a column is
+  skipped, so a chain is reported once, at its first step that names a column; steps that name
+  none (`head`, `lazy`) are looked through. The message suggests the annotation with the first column the query names.
+- **Why at the query, not at the read.** The unknown schema has many origins (readers,
+  parameters, pivots, unreadable arguments), and a frame nobody queries by column needs no schema.
+  Reporting the first unchecked query is precise and always actionable; an annotation on the
+  binding gives the frame columns, so the origin disappears rather than needing to be cleared.
+- **`read_csv` has its own reader typing.** `read_csv_type` matches `read_csv`'s own formals
+  (`path`, `strings_as_factors`) instead of borrowing `fread_type`, whose argument whitelist made
+  `strings_as_factors = TRUE` fall back to unknown columns. Both share `sniffed_columns`, and the
+  file read goes through the per-path `data_file_layout` query, so a data-file edit re-checks only
+  the reads of that file (`a_data_file_edit_rechecks_only_the_reads_of_that_file`).
+- **Impact.** No new state; the check reads recorded types inside the existing per-item
+  refinement.
+
 ## The data-table lint is opt-in and marks only constructors
 
 - **Shape.** `[lint] data-table` (off by default, `data_table_lint` in `lints.rs`) flags
@@ -5640,11 +5680,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `Quoting` over each stretch in parallel from all three start states and chains them), appends
   each slice's columns into one `Builder` per column (a `Vec<i32>`, `Vec<f64>` or `Vec<u32>` of
   factor codes plus a validity bitmap, reserved from the first slice's bytes per row), and
-  `madvise(DONTNEED)`s the parsed slice. A factor column parses as Polars `Categorical` with one
-  mapping per column shared through the schema, so codes stay valid across slices, and its codes
-  are remapped in place into R's sorted levels at the end.
-- **Fallbacks.** A factor column that holds a missing value is re-read whole as text, because R
-  keeps `NA` out of the levels and the categorical cannot say where it was. A Polars parse error on
+  `madvise(DONTNEED)`s the parsed slice. A factor column's slices are interned into one
+  `factor::Interner` (see "Factors are ry's own codes plus one level table, outside Polars").
+- **Fallbacks.** A Polars parse error on
   a slice retries the whole file as text, so a row a slice boundary breaks never changes the
   answer. `check_csv_input` (the fuzz target) compares a 16-byte sliced read with a whole read.
 - **Impact.** 1e8 load peak 5.6 GB (was 9.9 GB). No duplicated state: the builders are the final
@@ -6243,6 +6281,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **What counts as a table.** A query `x[...]` is rewritten only when `item_check`'s type of `x` is a `Frame` (data.table or DataFrame) or the `data.table` named type, so a vector index is never touched.
 - **Column or variable.** With the frame's columns known, a bare name is a column exactly when it is one of them; data.table also looks columns up first, so a same-named variable loses there too. With unknown columns, a name is a column unless it resolves to a local binding (`item_naming().resolutions`), is a project global name (`project_global_names`), is a base constant (`T`, `F`, `pi`, `letters`, ...), or is one of data.table's own symbols. A guess cannot be wrong silently in the other direction: a name taken for a column that is not one makes the DataFrame query fail with a missing-column error at run time.
 - **Nothing approximate.** Every unsupported shape returns `None` and produces no rewrite. Updates in place (`:=`, `setorder`, `setDT`) are rewritten only as top-level statements outside any function, as `x <- x |> ...`, because inside a function the caller would stop seeing the change. `dt[i, col := v]` needs known columns: an existing column is rewritten only for a literal of its own type, as `Expr.if_else(test & !Expr.is_null(test), v, col("col"))`, since data.table leaves a row whose test is `NA` unchanged. A keyed join (`setkey` then `X[Y]`) is skipped because it needs statement order.
+- **A rewritten table never escapes to unrewritten code.** Every rewrite turns a data.table into a DataFrame. `[.DataFrame` still answers `x[i, j, by]` and `:=`, but data.table's own functions refuse one (`setorder(df, -x)` stops with "x must be a data.frame or data.table"), and so does any package code that checks `is.data.table`, so the whole-file migration (`DataTableRewrite.replacement`) keeps a form only where its table flows into other kept rewrites, into `$`, `[[` or a shape function (`nrow`, `names`, ...), or is discarded. A query that is its function's return value is wrapped in `data.table::as.data.table()`, so a function's interface keeps its classes (parameters already enter through `as.DataFrame()`). Every other form gets `replacement: None`; dropping one can expose another, so `data_table_rewrites` iterates to a fixpoint (`fate`, `uses_are_safe`). Uses are matched by name across the whole scope, which can only leave more forms alone. A single code action (`standalone`) is user-directed and stays offered. Found by `tools/bench/migrate/fuzz.py`: the previous engine rewrote the `data.table()` constructors in the benchmark templates while their callers stayed data.table code.
 - **Accepted differences.** DataFrame aggregations skip `NA` (so `na.rm = TRUE` is dropped and `sum(x)` without it no longer gives `NA`), `DataFrame.sort` puts `NA` last where `setorder` puts it first, and a join lists the left table's columns first. The guide's own mapping makes the same choices; `docs/.../guides/from-data-table.md` states them.
 
 ## Dates, windows, ranks, cross joins and pivots in the table engine

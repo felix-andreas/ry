@@ -10,7 +10,7 @@
 use {
     crate::{
         ColumnType, Error, Result, Table,
-        convert::{enum_dtype, factor_levels},
+        factor::{self, Levels},
         io::write_double,
         kernel::{
             CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
@@ -35,7 +35,10 @@ use {
     std::{
         collections::HashMap,
         mem::swap,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     },
 };
 
@@ -93,7 +96,7 @@ pub fn view_rows(table: &Table, search: &str, sort: Option<(&str, bool)>) -> Res
                     .columns()
                     .par_iter()
                     .map(|column| {
-                        let text = column.cast(&DataType::String)?;
+                        let text = factor::text(column)?;
                         Ok(text
                             .str()?
                             .iter()
@@ -290,7 +293,9 @@ pub fn rbind_list(tables: &[&Table], bind: Bind) -> Result<Table> {
         let mut stacked: Option<Series> = None;
         for (piece, table) in pieces.iter().zip(tables) {
             let series = match piece {
-                Some(column) => cast_to(column, &dtype)?.as_materialized_series().clone(),
+                Some(column) => factor::cast(column, &dtype)?
+                    .as_materialized_series()
+                    .clone(),
                 None => Series::full_null(name.clone(), table.height(), &dtype),
             };
             let series = series.with_name(name.clone());
@@ -338,8 +343,9 @@ pub fn melt(
     {
         warnings.push(Warning::MeltCoerced { to });
     }
-    let levels: Vec<String> = measure.iter().map(|name| name.to_string()).collect();
-    let variable_dtype = enum_dtype(&levels)?;
+    let levels = Arc::new(Levels::from_labels(
+        measure.iter().map(|name| name.as_ref()),
+    ));
     let height = table.height();
     let mut stacked: Option<DataFrame> = None;
     for (name, column) in measure.iter().zip(measures.iter().flatten()) {
@@ -347,11 +353,12 @@ pub fn melt(
         for name in id {
             piece.push(table.frame().column(name)?.clone());
         }
-        let label = Series::new(PlSmallStr::from(variable), [*name])
-            .cast(&variable_dtype)?
-            .new_from_index(0, height);
+        let code = levels.position(name.as_ref()).unwrap_or(0);
+        let label =
+            factor::from_codes(PlSmallStr::from(variable), levels.clone(), vec![code], None)
+                .new_from_index(0, height);
         piece.push(label.into_column());
-        piece.push(cast_to(column, &dtype)?.with_name(PlSmallStr::from(value)));
+        piece.push(factor::cast(column, &dtype)?.with_name(PlSmallStr::from(value)));
         let piece = DataFrame::new(height, piece)?;
         match &mut stacked {
             None => stacked = Some(piece),
@@ -458,8 +465,8 @@ pub fn dcast(
                 .collect();
             (labels, cells)
         } else {
-            let label_text = labels_series.cast(&DataType::String)?;
-            let cell_text = spread_column.cast(&DataType::String)?;
+            let label_text = factor::text(&labels_series.clone().into_column())?;
+            let cell_text = factor::text(&spread_column.clone().into_column())?;
             let positions: HashMap<Option<&str>, usize> = label_text
                 .str()?
                 .iter()
@@ -661,8 +668,7 @@ fn pivot_labels(labels: &Series) -> Result<Vec<Option<String>>> {
             })
             .collect());
     }
-    Ok(labels
-        .cast(&DataType::String)?
+    Ok(factor::text(&labels.clone().into_column())?
         .str()?
         .iter()
         .map(|label| label.map(str::to_string))
@@ -719,14 +725,14 @@ pub fn fifelse(test: &Column, yes: &Column, no: &Column, na: Option<&Column>) ->
     if let Some(na) = na {
         dtype = common_type("yes", &yes.cast(&dtype)?, "na", na)?;
     }
-    let yes = recycle("yes", &cast_to(yes, &dtype)?, length)?;
-    let no = recycle("no", &cast_to(no, &dtype)?, length)?;
+    let yes = recycle("yes", &factor::cast(yes, &dtype)?, length)?;
+    let no = recycle("no", &factor::cast(no, &dtype)?, length)?;
     let picked = yes.zip_with(&mask.fill_null_with_values(false)?, &no)?;
     if mask.null_count() == 0 {
         return Ok(picked);
     }
     let na = match na {
-        Some(na) => recycle("na", &cast_to(na, &dtype)?, length)?,
+        Some(na) => recycle("na", &factor::cast(na, &dtype)?, length)?,
         None => Column::full_null(picked.name().clone(), length, &dtype),
     };
     Ok(picked.zip_with(&mask.is_not_null(), &na)?)
@@ -910,7 +916,7 @@ pub fn between(column: &Column, lower: f64, upper: f64, inclusive: bool) -> Resu
 
 /// Whether each string is one of `set`, as `x %chin% set` does. `NA` matches an `NA` in the set.
 pub fn chin(column: &Column, set: &[Option<&str>]) -> Result<Column> {
-    let text = column.cast(&DataType::String)?;
+    let text = factor::text(column)?;
     let strings = text.str()?.rechunk();
     let wanted: FxHashSet<&str> = set.iter().flatten().copied().collect();
     let listed: Vec<&str> = wanted.iter().copied().collect();
@@ -943,7 +949,7 @@ pub fn tstrsplit(column: &Column, separator: &str) -> Result<Vec<Column>> {
     if separator.is_empty() {
         return Err(Error::Query("the separator must not be empty".into()));
     }
-    let text = column.cast(&DataType::String)?;
+    let text = factor::text(column)?;
     let strings = text.str()?;
     // `strsplit` drops one empty piece after a trailing separator, so `"a,b,"` has two pieces
     // and `""` has none.
@@ -1105,7 +1111,10 @@ fn mark_changes(column: &Column, changed: &mut [bool]) -> Result<()> {
                 });
             }
         }
-        (None, DataType::Enum(..)) if let Some(codes) = Codes::of(column) => {
+        (None, dtype)
+            if factor::is_factor(dtype)
+                && let Some(codes) = Codes::of(column) =>
+        {
             mark(changed, |row| {
                 differs(codes.validity.as_ref(), row, || {
                     code_at(&codes.values, row) == code_at(&codes.values, row - 1)
@@ -1340,8 +1349,8 @@ fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
             });
             digit(codes, 2)
         }
-        None if matches!(column.dtype(), DataType::Enum(..)) => {
-            let (Some(codes), Some(levels)) = (Codes::of(column), factor_levels(column.dtype()))
+        None if factor::is_factor(column.dtype()) => {
+            let (Some(codes), Some(levels)) = (Codes::of(column), factor::levels(column.dtype()))
             else {
                 return Ok(None);
             };
@@ -1890,27 +1899,24 @@ fn stacked_type(pieces: &[Option<Column>]) -> Result<DataType> {
             .iter()
             .all(|kind| matches!(kind, ColumnType::Factor | ColumnType::Character))
     {
-        let mut levels: Vec<String> = Vec::new();
-        let mut seen: FxHashSet<String> = FxHashSet::default();
+        let mut labels: Vec<String> = Vec::new();
         for column in pieces.iter().flatten() {
-            let values: Vec<String> = match factor_levels(column.dtype()) {
-                Some(levels) => levels,
-                None => column
-                    .as_materialized_series()
-                    .unique_stable()?
-                    .str()?
-                    .iter()
-                    .flatten()
-                    .map(str::to_string)
-                    .collect(),
-            };
-            for level in values {
-                if seen.insert(level.clone()) {
-                    levels.push(level);
-                }
+            match factor::levels(column.dtype()) {
+                Some(levels) => labels.extend(levels.iter().map(str::to_string)),
+                None => labels.extend(
+                    column
+                        .as_materialized_series()
+                        .unique_stable()?
+                        .str()?
+                        .iter()
+                        .flatten()
+                        .map(str::to_string),
+                ),
             }
         }
-        return enum_dtype(&levels);
+        return Ok(factor::dtype(Arc::new(Levels::from_labels(
+            labels.iter().map(String::as_str),
+        ))));
     }
     Ok(if has(ColumnType::Character) || has(ColumnType::Factor) {
         DataType::String
@@ -1921,19 +1927,6 @@ fn stacked_type(pieces: &[Option<Column>]) -> Result<DataType> {
     } else {
         DataType::Boolean
     })
-}
-
-/// Casts a column to a stacked type. A factor going to another factor's levels passes through
-/// its labels, so codes are matched by label rather than by position.
-fn cast_to(column: &Column, dtype: &DataType) -> Result<Column> {
-    if column.dtype() == dtype {
-        return Ok(column.clone());
-    }
-    let column = match (column.dtype(), dtype) {
-        (DataType::Enum(..), DataType::Enum(..)) => column.cast(&DataType::String)?,
-        _ => column.clone(),
-    };
-    Ok(column.cast(dtype)?)
 }
 
 /// The type `fifelse` gives two branches: the same type, or a double when an integer meets one.

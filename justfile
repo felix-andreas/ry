@@ -447,3 +447,9 @@ simulate count="200" actions="60" base="0":
 scenarios name="":
     cargo build -q -p libr
     SCENARIO={{ name }} cargo test -p ry-lang --test test_scenarios -- --nocapture
+
+# Fuzz `ry migrate data-table --write` over the generated benchmark code bases and the data.table users: parse, strict checks and checksums, e.g. `just bench-migrate --lines 20000`.
+bench-migrate *args:
+    cargo build --release -p ry-lang
+    cargo build --release -p libr
+    python3 -I tools/bench/migrate/fuzz.py {{ args }}

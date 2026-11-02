@@ -152,6 +152,7 @@ value <- fread("data/prices.csv")
 fread: <T> fn([path]: T) -> integer
 value: integer
 27..32 warning[unused] `value` is assigned but never used.
+18..22 error[strict] strict mode: parameter `path` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `path: TYPE`
 
 #---- a_null_placeholder_is_the_column_of_an_unknown_frame
 library(data.table)
@@ -173,6 +174,9 @@ read_sorted <- function(path, frame) {
 #++++
 read_sorted: <T, U> fn([path]: T, frame: U) -> Unknown
 0..11 warning[unused] `read_sorted` is assigned but never used.
+24..28 error[strict] strict mode: parameter `path` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `path: TYPE`
+30..35 error[strict] strict mode: parameter `frame` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `frame: TYPE`
+56..75 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- a_null_value_indexing_a_vector_is_still_checked
 sorted <- function(values) {
@@ -184,3 +188,4 @@ sorted <- function(values) {
 sorted: Unknown
 0..6 warning[unused] `sorted` is assigned but never used.
 83..87 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
+19..25 error[strict] strict mode: parameter `values` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `values: TYPE`
