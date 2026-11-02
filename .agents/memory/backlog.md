@@ -3053,7 +3053,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A cold check is about 1.4-1.5 s on 4 cores (4.3 s on one core) and already uses about 3.3 of
   them, so the 1 s cold target still needs about a third less CPU work. Under callgrind the finance
   bench went from 27.6 to 24.6 G instructions with green walks and direct descent, then to about
-  22.6 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
+  22.6-22.8 G with a per-check bump arena for argument matching, borrowed stub schemes and item checks,
   symbol-keyed `GlobalEnv` lookups, a token-only green builder, lexer fast paths and parallel
   rendering (`decisions.md`, "The cold check's per-call work"). In interleaved runs against the
   build before them, one-core wall went from 4.6-4.8 s to 4.2-4.5 s and 4-core medians from about

@@ -5143,8 +5143,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     lookup rejects by length and first byte.
   - `ry check` reads sources and renders findings in parallel and prints them in path order, and it
     hashes sources for the cache key only when the cache is read or written.
-- **Impact.** Callgrind on the finance bench (`ry check --no-cache`): 24.60 G to 22.6 G
-  instructions, byte-identical diagnostics. Wall time moved only within the machine's noise, and the
-  1 s cold-check target is not met: the rest of the profile is flat across mimalloc, salsa's
+- **Impact.** Callgrind on the finance bench (`ry check --no-cache`) went from 24.60 G to
+  22.6-22.8 G instructions across runs, with byte-identical diagnostics. In interleaved runs the
+  one-core median fell from 4.7 to 4.3 s and the 4-core median from about 1.6 to 1.48 s. The 1 s
+  cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
