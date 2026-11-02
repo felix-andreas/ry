@@ -2121,6 +2121,7 @@ dependencies = [
  "bincode",
  "heap",
  "interp",
+ "rcmd",
  "rustc-hash 2.1.3",
  "salsa",
  "semantics",

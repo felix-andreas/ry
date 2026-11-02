@@ -86,7 +86,7 @@
 
           # libR links zlib, bzip2 and xz (crates/libr/build.rs).
           commonArgsNative = commonArgs // {
-            cargoExtraArgs = "-p ry-lang -p libr";
+            cargoExtraArgs = "-p ry-lang -p libr -p rcmd";
             buildInputs = [
               pkgs.zlib
               pkgs.bzip2
@@ -123,10 +123,12 @@
                 export XDG_CACHE_HOME="$TMPDIR/.cache"
               '';
               # `ry run` finds ry's runtime at ../lib/ry/libR.so relative to the executable, and the
-              # name must stay libR.so, the soname compiled packages record.
+              # name must stay libR.so, the soname compiled packages record. `ry load` looks for
+              # ry-rcmd beside the runtime to compile a package's src/.
               postInstall = ''
                 mkdir -p "$out/lib/ry"
                 mv "$out"/lib/libR${pkgs.stdenv.hostPlatform.extensions.sharedLibrary} "$out/lib/ry/"
+                mv "$out"/bin/ry-rcmd "$out/lib/ry/"
                 rm -f "$out"/lib/libR.a "$out"/lib/*.rlib
               '';
               meta.mainProgram = "ry";
