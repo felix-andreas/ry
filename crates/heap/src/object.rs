@@ -557,10 +557,13 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 length
             };
             let data = elements.checked_mul(element)?;
+            // A string's bytes need no alignment, so a string of up to seven bytes fits the
+            // 40-byte slot class, a sixth smaller than the 48 bytes 16-byte rounding gives it.
+            let align = if kind == SexpType::Char { 7 } else { 15 };
             VECTOR_DATA_OFFSET
                 .checked_add(data)?
-                .checked_add(15)
-                .map(|size| size & !15)
+                .checked_add(align)
+                .map(|size| size & !align)
         }
         Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),

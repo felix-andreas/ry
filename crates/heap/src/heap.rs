@@ -1096,7 +1096,7 @@ impl Heap {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
-        self.strings.insert(hash, object);
+        self.strings.insert(hash, object, &mut self.space);
         Ok(object)
     }
 
@@ -1906,8 +1906,9 @@ impl Heap {
             if escaped_strings {
                 // Every CHARSXP but the rooted `NA_STRING` is interned, so the young ones are
                 // the strings interned since the last collection.
-                for index in 0..self.strings.young().len() {
-                    let string = self.strings.young()[index];
+                self.space.mark_young_interned();
+                for index in 0..self.strings.young_large().len() {
+                    let string = self.strings.young_large()[index];
                     self.mark(string);
                 }
             }

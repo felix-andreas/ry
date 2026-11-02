@@ -855,9 +855,23 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             if let Some(mark) = &mark {
                 set_output_decimal(mark);
             }
-            let formatted = format_vector(vector, settings, false, "NA");
+            let formatted = (|| -> R<Result<Sexp, Vec<String>>> {
+                // SAFETY: `vector` is rooted as the call's argument.
+                unsafe {
+                    Ok(match format_numbers(vector, settings, trim, min_width)? {
+                        Some(result) => Ok(result),
+                        None => Err(format_vector(vector, settings, false, "NA")?),
+                    })
+                }
+            })();
             set_output_decimal(&saved);
-            let mut items = formatted?;
+            let mut items = match formatted? {
+                Ok(result) => {
+                    copy_format_attributes(vector, result)?;
+                    return Ok(result);
+                }
+                Err(items) => items,
+            };
             if trim {
                 items = items
                     .into_iter()
@@ -889,13 +903,100 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
         };
         values::set_elt(result, index, charsxp);
     }
+    copy_format_attributes(vector, result)?;
+    Ok(result)
+}
+
+/// `format` of a logical, integer or double vector, written into the result element by element.
+/// Formatting every element to a Rust string first and interning them afterwards would hold a
+/// million heap strings at once for a million elements, which more than doubles the call's peak
+/// memory. Returns `None` when the vector needs the general path: a complex vector, or double
+/// elements whose texts differ in width, so that justifying them changes them.
+unsafe fn format_numbers(
+    vector: Sexp,
+    settings: Settings,
+    trim: bool,
+    min_width: usize,
+) -> R<Option<Sexp>> {
+    const NA: &str = "NA";
+    let vector = values::materialize(vector)?;
+    let count = length(vector);
+    let real_format = match vector.kind() {
+        SexpType::Real => Some(format_real_common(
+            values::reals(vector),
+            Settings {
+                na_width: display_width(NA),
+                ..settings
+            },
+        )),
+        SexpType::Logical | SexpType::Integer => None,
+        _ => return Ok(None),
+    };
+    // Logical and integer texts are justified to the widest one, which their values give
+    // without formatting them.
+    let common = match vector.kind() {
+        SexpType::Logical => values::ints(vector)
+            .iter()
+            .map(|&value| match value {
+                NA_INTEGER => NA.len(),
+                value => format_logical(value).len(),
+            })
+            .max(),
+        SexpType::Integer => values::ints(vector)
+            .iter()
+            .map(|&value| match value {
+                NA_INTEGER => NA.len(),
+                value => {
+                    usize::from(value < 0)
+                        + value
+                            .unsigned_abs()
+                            .checked_ilog10()
+                            .map_or(1, |digits| digits as usize + 1)
+                }
+            })
+            .max(),
+        _ => None,
+    }
+    .unwrap_or(0);
+    let text_at = |index: usize| -> String {
+        match (vector.kind(), real_format) {
+            (SexpType::Real, Some(format)) => {
+                let text = format_real_with(values::reals(vector)[index], format, NA);
+                localize_decimal(pad(&text, format.width, true))
+            }
+            (SexpType::Logical, _) => match values::ints(vector)[index] {
+                NA_INTEGER => pad(NA, common, true),
+                value => pad(format_logical(value), common, true),
+            },
+            _ => match values::ints(vector)[index] {
+                NA_INTEGER => pad(NA, common, true),
+                value => pad(&value.to_string(), common, true),
+            },
+        }
+    };
+    let result = alloc(SexpType::String, count)?;
+    let mut width = None;
+    for index in 0..count {
+        let text = text_at(index);
+        if real_format.is_some()
+            && *width.get_or_insert(display_width(&text)) != display_width(&text)
+        {
+            return Ok(None);
+        }
+        let text = if trim { text.trim_start() } else { &text };
+        values::set_elt(result, index, values::mkchar(&pad(text, min_width, true))?);
+    }
+    Ok(Some(result))
+}
+
+unsafe fn copy_format_attributes(vector: Sexp, result: Sexp) -> R<()> {
     for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
         let value = values::get_attr(vector, symbol);
         if value != nil() {
             values::set_attr(result, symbol, value)?;
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 /// `formatC(x, mode, width, digits, format, flag, i.strlen)`: C-style formatting per element.

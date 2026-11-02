@@ -851,7 +851,11 @@ fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
         let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
         for round in 0..fuzz_iterations(24) {
             for _ in 0..random.below(20_000) {
-                let bytes = format!("s{round}_{}", random.below(50_000)).into_bytes();
+                // One string in a hundred is longer than the largest small-object slot, so the
+                // large strings' own young list is exercised too.
+                let padding = if random.chance(1, 100) { 3000 } else { 0 };
+                let bytes = format!("s{round}_{}{}", random.below(50_000), "x".repeat(padding))
+                    .into_bytes();
                 let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
                 if random.chance(1, 4) {
                     heap.root(string);

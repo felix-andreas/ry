@@ -70,19 +70,21 @@ impl Encoding {
 /// table of millions of strings is a cache miss on every call to `mk_char`.
 pub(crate) struct StringTable {
     /// A power-of-two count of slots: 0 for empty, [`TOMBSTONE`] for a removed entry, and
-    /// otherwise a string's address over 16 in the low [`ADDRESS_BITS`] with the low
+    /// otherwise a string's address over 8 in the low [`ADDRESS_BITS`] with the low
     /// [`TAG_BITS`] of its hash above.
     slots: Vec<u64>,
     /// Live entries, and removed ones still marked by a tombstone.
     len: usize,
     tombstones: usize,
-    /// Strings interned since the last collection, the only ones a minor collection can free.
-    young: Vec<Sexp>,
+    /// Strings interned since the last collection that are too long for the small-object
+    /// space; the space's interned bits track the others.
+    young_large: Vec<Sexp>,
 }
 
-/// Objects are 16-byte aligned and user-space addresses fit in 47 bits on every supported
-/// platform, so an address over 16 takes 43 bits and leaves 21 for the tag.
-const ADDRESS_BITS: u32 = 43;
+/// Objects are 8-byte aligned (a short string takes a 40-byte slot) and user-space addresses fit
+/// in 47 bits on every supported platform, so an address over 8 takes 44 bits and leaves 20 for
+/// the tag.
+const ADDRESS_BITS: u32 = 44;
 const ADDRESS_MASK: u64 = (1 << ADDRESS_BITS) - 1;
 const TAG_BITS: u32 = 64 - ADDRESS_BITS;
 const EMPTY: u64 = 0;
@@ -204,7 +206,7 @@ impl Default for StringTable {
             slots: vec![EMPTY; INITIAL_SLOTS],
             len: 0,
             tombstones: 0,
-            young: Vec::new(),
+            young_large: Vec::new(),
         }
     }
 }
@@ -236,9 +238,9 @@ impl StringTable {
         }
     }
 
-    /// Adds `string`, which the table must not hold.
-    pub unsafe fn insert(&mut self, hash: u32, string: Sexp) {
-        if (self.len + self.tombstones + 1) * 4 > self.slots.len() * 3 {
+    /// Adds `string`, which the table must not hold, and records it as young.
+    pub unsafe fn insert(&mut self, hash: u32, string: Sexp, space: &mut Space) {
+        if (self.len + self.tombstones + 1) * 8 > self.slots.len() * 7 {
             unsafe { self.rebuild() };
         }
         let mask = self.slots.len() - 1;
@@ -252,17 +254,23 @@ impl StringTable {
         }
         self.slots[index] = pack(string, hash);
         self.len += 1;
-        self.young.push(string);
+        if !space.set_interned(string) {
+            self.young_large.push(string);
+        }
     }
 
-    /// The strings interned since the last collection.
-    pub fn young(&self) -> &[Sexp] {
-        &self.young
+    /// The young strings outside the small-object space.
+    pub fn young_large(&self) -> &[Sexp] {
+        &self.young_large
     }
 
-    /// Drops the entries for young strings the current minor collection did not mark.
+    /// Drops the entries for young strings the current minor collection did not mark. Runs
+    /// before the sweep, while the space's interned bits still name the dead strings.
     pub unsafe fn remove_dead_young(&mut self, space: &Space) {
-        for string in std::mem::take(&mut self.young) {
+        for string in space.unmarked_young_interned() {
+            unsafe { self.remove(string) };
+        }
+        for string in std::mem::take(&mut self.young_large) {
             if unsafe { !space.is_marked(string) } {
                 unsafe { self.remove(string) };
             }
@@ -281,7 +289,7 @@ impl StringTable {
         }
         self.len -= removed;
         self.tombstones += removed;
-        self.young.clear();
+        self.young_large.clear();
         if self.tombstones * 8 > self.slots.len() {
             unsafe { self.rebuild() };
         }
@@ -307,11 +315,17 @@ impl StringTable {
         }
     }
 
-    /// Re-places every live entry into a table sized for twice their number, which drops the
-    /// tombstones. Each entry's hash is read from its string, in slot order, so the reads are
-    /// independent and overlap.
+    /// Re-places every live entry into the smallest power-of-two table they fill to at most 5/8,
+    /// which drops the tombstones. Growth at 7/8 then keeps the table between 5/16 and 7/8 full,
+    /// close to GNU R's chained table, which grows at 0.85. Near the top of that range a probe
+    /// for an absent string scans a few consecutive cache lines, but it compares only the tags in
+    /// them; a sparser table would double the slots' memory, 32 MB at four million strings, and
+    /// a growth step taken while the old slots are still live briefly costs both. Each entry's
+    /// hash is read from its string, in slot order, so the reads are independent and overlap.
     unsafe fn rebuild(&mut self) {
-        let wanted = ((self.len + 1) * 2).next_power_of_two().max(INITIAL_SLOTS);
+        let wanted = ((self.len + 1) * 8 / 5)
+            .next_power_of_two()
+            .max(INITIAL_SLOTS);
         let old = std::mem::replace(&mut self.slots, vec![EMPTY; wanted]);
         let mask = wanted - 1;
         for slot in old {
@@ -345,16 +359,16 @@ fn tag(hash: u32) -> u64 {
 fn pack(string: Sexp, hash: u32) -> u64 {
     let address = string.as_ptr() as u64;
     assert!(
-        address & 15 == 0 && address >> (ADDRESS_BITS + 4) == 0,
+        address & 7 == 0 && address >> (ADDRESS_BITS + 3) == 0,
         "a string's address {address:#x} does not fit the intern table's slot"
     );
-    (address >> 4) | tag(hash)
+    (address >> 3) | tag(hash)
 }
 
 /// # Safety
 /// `slot` must hold a string, neither empty nor a tombstone.
 #[inline]
 unsafe fn unpack(slot: u64) -> Sexp {
-    let pointer = ((slot & ADDRESS_MASK) << 4) as *mut Header;
+    let pointer = ((slot & ADDRESS_MASK) << 3) as *mut Header;
     Sexp::from_non_null(unsafe { NonNull::new_unchecked(pointer) })
 }
