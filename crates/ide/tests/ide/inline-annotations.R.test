@@ -145,7 +145,11 @@ action: Add inferred type annotations for the whole file
   edit 44..44 -> ": Any"
   edit 45..45 -> " -> T"
 completion (128+): scale_by, scale, scale.default, scan, scatter.smooth, smoothScatter, cmdscale, LazyFrame.scan_csv
-hint @8: <T: numeric> fn(values: T, [factor]: T, ...: Any) -> T
+hint @20<T: numeric>
+hint @27: T
+hint @35: T
+hint @44: Any
+hint @45 -> T
 
 #---- inferred_annotation_fills_a_backslash_lambda
 twi$0ce <- \(x) x * 2L
@@ -166,7 +170,9 @@ action: Add inferred type annotations for the whole file
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
 completion (51): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
-hint @5: <T: numeric> fn(x: T) -> T
+hint @10<T: numeric>
+hint @12: T
+hint @13 -> T
 
 #---- inferred_annotation_falls_back_to_a_comment_for_a_right_assignment
 1L -> cou$0nt
@@ -203,7 +209,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
 completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
-hint @1: fn() -> integer
+hint @15 -> integer
 hint @25: integer
 
 #---- inferred_annotation_keeps_an_unread_formal_optional_in_a_comment
@@ -242,6 +248,6 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
 completion (54): count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote
-hint @1: fn() -> double
+hint @15 -> double
 hint @25: double
 hint @46: double

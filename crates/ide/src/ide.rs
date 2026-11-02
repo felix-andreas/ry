@@ -1257,6 +1257,24 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             let Some(scheme) = inferred_scheme(db, &check, id, *value, is_root) else {
                 continue;
             };
+            // A function's types sit in its header, at the places an inline annotation would put
+            // them, so each parameter reads with its own type.
+            if matches!(hir.kind(*value), ExpressionKind::Function { .. })
+                && let Some(edits) = inline_annotation_edits(
+                    db,
+                    &node,
+                    &scheme,
+                    hir.range(*target) + node.text_range().start(),
+                    hir.range(*value) + node.text_range().start(),
+                )
+            {
+                hints.extend(edits.into_iter().map(|edit| InlayHint {
+                    offset: edit.range.start(),
+                    label: edit.replacement,
+                    kind: InlayHintKind::Type,
+                }));
+                continue;
+            }
             let label = TypeRenderer::default().render_scheme(db, &scheme);
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),

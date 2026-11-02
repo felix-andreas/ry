@@ -140,7 +140,9 @@ action: Add inferred type annotations for the whole file
   edit 19..19 -> ": T"
   edit 25..25 -> " -> T"
 completion (22): alpha, alarm, alias, alist, all, all.equal, all.equal.character, all.equal.default
-hint @1: <T> fn([alpha]: T) -> T
+hint @13<T>
+hint @19: T
+hint @25 -> T
 
 #---- loop_var_hover
 for (i$0 in seq_len(3L)) print(i)
@@ -183,7 +185,10 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
 completion (82): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
-hint @6: <T, U> fn(first: T, [second]: U) -> T
+hint @18<T, U>
+hint @24: T
+hint @32: U
+hint @38 -> T
 hint @52first =
 hint @56second =
 
@@ -218,7 +223,9 @@ action: Add inferred type annotations for the whole file
   edit 19..19 -> ": T"
   edit 20..20 -> " -> T"
 completion (128+): value, result, f, function, break, else, FALSE, for
-hint @1: <T> fn(value: T) -> T
+hint @13<T>
+hint @19: T
+hint @20 -> T
 
 #---- completion_skips_positionally_filled_parameter
 helper <- function(first, second = 2L, third = 3L) first
@@ -237,7 +244,11 @@ action: Add inferred type annotations for the whole file
   edit 44..44 -> ": V"
   edit 50..50 -> " -> T"
 completion (128+): second = , third = , helper, function, break, else, FALSE, for
-hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
+hint @18<T, U, V>
+hint @24: T
+hint @32: U
+hint @44: V
+hint @50 -> T
 
 #---- completion_skips_named_parameter
 helper <- function(first, second = 2L, third = 3L) first
@@ -256,7 +267,11 @@ action: Add inferred type annotations for the whole file
   edit 44..44 -> ": V"
   edit 50..50 -> " -> T"
 completion (128+): first = , second = , helper, function, break, else, FALSE, for
-hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
+hint @18<T, U, V>
+hint @24: T
+hint @32: U
+hint @44: V
+hint @50 -> T
 
 #---- completion_no_parameter_names_in_named_value
 helper <- function(first, second = 2L) first
@@ -274,7 +289,10 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
 completion (128+): helper, function, break, else, FALSE, for, if, in
-hint @6: <T, U> fn(first: T, [second]: U) -> T
+hint @18<T, U>
+hint @24: T
+hint @32: U
+hint @38 -> T
 
 #---- base_data_frame_hover
 fra$0me <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
@@ -326,7 +344,10 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+hint @17<T: numeric>
+hint @24: T
+hint @32: T
+hint @37 -> T
 
 #---- parameter_renames_its_named_arguments
 scale <- function(values, fac$0tor = 2) values * factor
@@ -349,7 +370,10 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
+hint @17<T: numeric>
+hint @24: T
+hint @32: T
+hint @37 -> T
 
 #---- named_argument_in_another_file_renames_with_its_parameter
 #~~~~ R/def.R
@@ -390,8 +414,10 @@ action: Add inferred type annotation for `outer`
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
 completion (72): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
-hint @5: fn() -> double
-hint @29: fn(x: T, by: T) -> T
+hint @19 -> double
+hint @43: T
+hint @47: T
+hint @48 -> T
 
 #---- named_argument_of_a_different_function_stays
 scale <- function(values, fac$0tor = 2) values * factor
@@ -418,8 +444,13 @@ action: Add inferred type annotations for the whole file
   edit 78..78 -> ": T"
   edit 79..79 -> " -> T"
 completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @5: <T: numeric> fn(values: T, [factor]: T) -> T
-hint @59: <T> fn(factor: T) -> T
+hint @17<T: numeric>
+hint @24: T
+hint @32: T
+hint @37 -> T
+hint @71<T>
+hint @78: T
+hint @79 -> T
 
 #---- named_argument_into_dots_widens_to_the_call
 wrap <- function(...) list(...)
@@ -482,7 +513,10 @@ action: Add inferred type annotations for the whole file
   edit 32..32 -> ": U"
   edit 33..33 -> " -> double"
 completion (16): rate, rainbow, randu, range, range.Date, range.default, range.POSIXct, rank
-hint @4: <T: numeric, U: numeric> fn(principal: T, rate: U) -> double
+hint @16<T: numeric, U: numeric>
+hint @26: T
+hint @32: U
+hint @33 -> double
 
 #---- field_list_literal
 config <- list(host = "localhost", port = 8080L)
@@ -538,7 +572,7 @@ action: Add inferred type annotations for the whole file
   edit 25..25 -> " -> list{host: character, port: integer}"
   edit 77..77 -> ": list{host: character, port: integer}"
 completion (1): host
-hint @11: fn() -> list{host: character, port: integer}
+hint @25 -> list{host: character, port: integer}
 hint @77: list{host: character, port: integer}
 
 #---- field_if_branches
@@ -557,7 +591,8 @@ action: Add inferred type annotations for the whole file
   edit 21..21 -> ": logical"
   edit 22..22 -> " -> list{size: integer}"
 completion (1): size
-hint @4: fn(flag: logical) -> list{size: integer}
+hint @21: logical
+hint @22 -> list{size: integer}
 
 #---- field_write
 state <- list()
@@ -847,7 +882,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
 completion (1): k
-hint @1: fn() -> double
+hint @15 -> double
 hint @21: list{k: double}
 hint @40: list{k: double}
 hint @74: list{k: double}

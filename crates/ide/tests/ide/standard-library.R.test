@@ -103,6 +103,7 @@ action: Add inferred type annotations for the whole file
   edit 139..139 -> ": list[Position]"
   edit 140..140 -> " -> double[]"
 completion (37): summarise, summary, summary.aov, summary.connection, summary.data.frame, summary.Date, summary.default, summary.difftime
-hint @117: fn(positions: list[Position]) -> double[]
+hint @139: list[Position]
+hint @140 -> double[]
 hint @159FUN =
 hint @175FUN.VALUE =

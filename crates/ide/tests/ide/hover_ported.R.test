@@ -19,7 +19,9 @@ action: Add inferred type annotations for the whole file
   edit 43..43 -> ": integer"
   edit 56..56 -> ": integer"
 completion (128+): result, resetClass, resetGeneric, reshape, resid, residuals, residuals.glm, residuals.lm
-hint @6: <T> fn(argument: T) -> T
+hint @18<T>
+hint @27: T
+hint @28 -> T
 hint @43: integer
 hint @56: integer
 
@@ -44,7 +46,9 @@ action: Add inferred type annotations for the whole file
   edit 43..43 -> ": integer"
   edit 56..56 -> ": integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @6: <T> fn(argument: T) -> T
+hint @18<T>
+hint @27: T
+hint @28 -> T
 hint @43: integer
 hint @56: integer
 
@@ -265,7 +269,9 @@ action: Add inferred type annotations for the whole file
   edit 27..27 -> ": T"
   edit 28..28 -> " -> T"
 completion (56): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
-hint @5: <T> fn(parameter: T) -> T
+hint @17<T>
+hint @27: T
+hint @28 -> T
 
 #==== hover_literals
 #---- null_literal
@@ -421,7 +427,7 @@ action: Add inferred type annotation for `touch`
 action: Add inferred type annotations for the whole file
   edit 99..99 -> " -> Person"
 completion (127): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
-hint @85: fn() -> Person
+hint @99 -> Person
 
 #---- alias_declaration_tag
 #: @al$0ias Identifier {character}
@@ -489,7 +495,8 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": logical"
   edit 25..25 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: fn(flag: logical) -> integer
+hint @24: logical
+hint @25 -> integer
 hint @45: integer
 
 #---- conditional_update_single_type
@@ -514,7 +521,8 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> ": logical"
   edit 19..19 -> " -> integer"
 completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
-hint @1: fn(flag: logical) -> integer
+hint @18: logical
+hint @19 -> integer
 hint @25: integer
 hint @51: integer
 
@@ -540,7 +548,8 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> ": logical"
   edit 19..19 -> " -> integer | character"
 completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
-hint @1: fn(flag: logical) -> integer | character
+hint @18: logical
+hint @19 -> integer | character
 hint @25: integer
 hint @51: character
 
@@ -564,7 +573,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
 completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
-hint @1: fn() -> integer
+hint @15 -> integer
 hint @25: integer
 hint @40: integer
 hint @60: integer
@@ -614,7 +623,9 @@ action: Add inferred type annotations for the whole file
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
 completion (75): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
-hint @6: <T> fn(x: T) -> T
+hint @18<T>
+hint @20: T
+hint @21 -> T
 
 #---- two_type_variables
 pair <- function(x, y) x
@@ -648,7 +659,9 @@ action: Add inferred type annotations for the whole file
   edit 21..21 -> ": T"
   edit 22..22 -> " -> T"
 completion (68): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
-hint @7: <T: numeric> fn(x: T) -> T
+hint @19<T: numeric>
+hint @21: T
+hint @22 -> T
 
 #---- partially_inferred_function
 make <- function(x) list(x, 1L)
@@ -666,7 +679,9 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> ": T"
   edit 19..19 -> " -> list{T, integer}"
 completion (48): make, mad, mahalanobis, maintainer, make.link, make.names, make.packages.html, make.rgb
-hint @4: <T> fn(x: T) -> list{T, integer}
+hint @16<T>
+hint @18: T
+hint @19 -> list{T, integer}
 
 #---- parameter_never_raw_variable
 wrap <- function(first, second) sec$0ond
@@ -831,4 +846,6 @@ action: Add inferred type annotations for the whole file
   edit 17..17 -> ": T"
   edit 18..18 -> " -> T"
 completion (6): head, head.matrix, help, help.request, help.search, help.start
-hint @1: <T> fn(obj: T) -> T
+hint @13<T>
+hint @17: T
+hint @18 -> T
