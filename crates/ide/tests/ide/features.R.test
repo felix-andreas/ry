@@ -419,8 +419,8 @@ hint @1: fn() -> character
 #---- unknown_name_hits_dots
 h <- function() paste(collapse$0 = "")
 #++++
-hover 16..36: character
-definition: none
+hover 22..30: [collapse]: character | NULL
+definition: stub source base at `paste`
 references: none
 rename: none
 signature: fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character

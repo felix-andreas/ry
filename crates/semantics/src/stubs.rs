@@ -61,7 +61,19 @@ pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDec
 
 /// `None` when no corpus is installed, so callers skip validation.
 pub fn namespace_known(db: &dyn Db, package: &str) -> Option<bool> {
-    stubs(db).map(|library| library.exports_by_namespace.contains_key(package))
+    stubs(db).map(|library| library.knows_namespace(package))
+}
+
+impl StubLibrary<'_> {
+    pub fn knows_namespace(&self, package: &str) -> bool {
+        self.exports_by_namespace.contains_key(package)
+    }
+
+    pub fn exports(&self, package: &str, name: &str) -> bool {
+        self.exports_by_namespace
+            .get(package)
+            .is_some_and(|names| names.contains(name))
+    }
 }
 
 /// The last declaring source in precedence order owns the name.
@@ -78,12 +90,7 @@ pub fn declaring_namespace<'db>(db: &'db dyn Db, name: &str) -> Option<&'db str>
 }
 
 pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
-    stubs(db).is_some_and(|library| {
-        library
-            .exports_by_namespace
-            .get(package)
-            .is_some_and(|names| names.contains(name))
-    })
+    stubs(db).is_some_and(|library| library.exports(package, name))
 }
 
 /// The namespace of ry's standard library (`Result.map`, `Dict.get`, ...). Its functions are
@@ -1002,7 +1009,7 @@ mod tests {
         assert!(!package_scheme_exists(&db, "definitely_not_a_name"));
     }
 
-    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
+    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> &'db ItemCheck<'db> {
         let file = SourceFile::new(db, source.to_owned(), DocumentKind::Package);
         ProjectFiles::new(db, vec![file]);
         let item = item_tree(db, file)[0];

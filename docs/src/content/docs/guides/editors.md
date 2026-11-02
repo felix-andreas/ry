@@ -17,7 +17,8 @@ You get:
 - completion, including the fields of a list such as `person$` and the argument names a call
   still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
-  callees of a project function, across files
+  callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
+  own package, to the definition
 - signature help with each parameter's type and default, and inlay hints for assignments, loop
   variables, and parameter names in calls with two or more positional arguments
   (`grow(principal = 100, years = 2)`)
@@ -40,7 +41,11 @@ Hover, completion and inlay hints use inferred types even when type errors are s
 get them on any R project.
 
 Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
-word "total" in a string are three different things.
+word "total" in a string are three different things. A parameter and the named arguments that fill
+it are one binding, so renaming `rate` in `grow <- function(principal, rate)` also rewrites
+`grow(100, rate = 0.05)` in every file, and hover, go-to-definition and references work from either
+end. An abbreviated argument that R completes by partial matching (`grow(100, ra = 0.05)`) is not
+followed, so spell arguments out before you rename their parameter.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
@@ -72,10 +77,15 @@ The VS Code extension runs your code on ry's runtime.
 - **Attaching to the console**: "ry: Attach to Console" attaches the debugger to the `ry run`
   console running in your workspace, starting one if none runs. Breakpoints in your files then stop
   the commands you type, and `debug(f)` or `debugonce(f)` stops when `f` is next called, even for a
-  function you typed at the prompt. Stopping the debug session leaves the console running.
+  function you typed at the prompt. Attaching while the console waits at a `browser()` stop's
+  `Browse[1]>` prompt takes that stop over. Stopping the debug session leaves the console running.
 - **Viewing data**: right-click a data frame, matrix, vector or `DataFrame` in the debugger's
   variables view and choose "View Data", or call `View(x)` in the console. The viewer fetches
-  100 rows at a time, so a large table opens instantly.
+  100 rows at a time, so a large table opens instantly. Click a column header to sort by it
+  (again for descending, a third time for the original order), and type in "Filter rows" to keep
+  the rows where some cell contains the text, ignoring case. Both apply to the whole table in the
+  console, not only to the rows on screen; missing values sort first and match no filter, and each
+  row keeps its original row name or number.
 
 While a console runs in the workspace, hover and completion also use its live values: hovering
 `df` shows its class and size, and `df$` completes the columns of the data frame you actually
