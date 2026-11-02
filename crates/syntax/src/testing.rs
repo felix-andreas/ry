@@ -121,8 +121,9 @@ pub fn fixture_case_sources() -> Vec<(String, String)> {
 }
 
 /// A suite missing from this list is invisible to the invariant batteries.
-const FIXTURE_SUITES: [&str; 13] = [
+const FIXTURE_SUITES: [&str; 14] = [
     "format/tests/format",
+    "format/tests/format-range",
     "ide/tests/ide",
     "semantics/tests/lints",
     "semantics/tests/lints-style",

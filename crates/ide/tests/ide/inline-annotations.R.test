@@ -8,7 +8,7 @@ definition 0..5
 references: 0..5*
 rename: 1 edit(s)
 signature: none
-completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 
 #---- hover_on_a_parameter_read_uses_its_inline_type
 f <- function(count: integer) cou$0nt
@@ -19,7 +19,7 @@ definition 14..19
 references: 14..19*, 30..35
 rename: 2 edit(s)
 signature: none
-completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 
 #---- hover_on_a_builtin_type_name
 count: inte$0ger <- 1L

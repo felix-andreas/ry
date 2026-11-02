@@ -20,6 +20,12 @@ exclude = []             # gitignore-style patterns that ry check skips
 assignment-operator = "warn"  # `=` used for assignment
 boolean-shorthand = "warn"    # T or F instead of TRUE or FALSE
 trailing-comma = "warn"       # a comma after a call's last argument
+equals-na = "warn"            # x == NA, which is always NA
+vector-logic = "warn"         # & or | in an if or while condition
+length-sequence = "warn"      # 1:length(x), which counts down when x is empty
+class-equals = "warn"         # class(x) == "name" instead of inherits()
+redundant-return = "off"      # return() as a function's last expression
+commented-code = "off"        # a comment that is commented-out code
 unused-parameter = "off"      # a parameter the body never reads
 unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function
