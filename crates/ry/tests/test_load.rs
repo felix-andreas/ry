@@ -1158,3 +1158,66 @@ fn compiled_code_builds_with_rys_toolchain_and_a_rebuild_reloads_it() {
     assert!(printed.contains("before: 42"), "{printed}");
     assert!(printed.contains("after: 63"), "{printed}");
 }
+
+#[test]
+fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let namespace = "export(always)\n\
+         if (getRversion() >= \"3.0.0\") {\n  export(modern)\n  \
+         if (Sys.getenv(\"RY_FLAG\") == \"on\") export(flagged) else export(unflagged)\n\
+         } else export(ancient)\n\
+         if (FALSE) export(never)\n";
+    let root = package(&[
+        ("DESCRIPTION", "Package: ifpkg\nVersion: 1.0\n"),
+        ("NAMESPACE", namespace),
+        (
+            "R/a.R",
+            "always <- function() 1\nmodern <- function() 2\nflagged <- function() 3\n\
+             unflagged <- function() 4\nancient <- function() 5\nnever <- function() 6\n\
+             later <- function() 7\n",
+        ),
+    ]);
+    let path = root.path().join("NAMESPACE");
+    let probe = |label: &str| {
+        format!(
+            "load_all({root:?}, export_all = FALSE); \
+             cat('{label}:', sort(getNamespaceExports('ifpkg')), '\\n')",
+            root = root.path().display().to_string(),
+        )
+    };
+    let edited = format!("{namespace}if (TRUE) export(later)\n");
+    for runtime in RUNTIMES {
+        fs::write(&path, namespace).expect("write NAMESPACE");
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                &probe("first"),
+                "Sys.setenv(RY_FLAG = 'on')",
+                &probe("flag"),
+                &format!(
+                    "writeLines({edited:?}, {path:?})",
+                    path = path.display().to_string()
+                ),
+                &probe("edited"),
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("first: always modern unflagged"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("flag: always flagged modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(
+            printed.contains("edited: always flagged later modern"),
+            "{runtime}: {printed}"
+        );
+        assert!(!printed.contains("ignored"), "{runtime}: {printed}");
+    }
+}

@@ -24,7 +24,7 @@ use {
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
             PackageMetadata, S3MethodDirective, description_field, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
-            parse_namespace,
+            parse_namespace, resolve_namespace_conditionals,
         },
         stubs::install_shipped_stubs,
     },
@@ -200,6 +200,53 @@ pub struct Plan {
     pub strict: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
+    /// The `if` directives of `NAMESPACE`, whose conditions the host evaluates and passes to
+    /// the next plan.
+    pub namespace_conditionals: Vec<String>,
+}
+
+/// The values the host gave the conditions of each `if` directive in `NAMESPACE`, by the
+/// directive's source text (see [`resolve_namespace_conditionals`]).
+pub type NamespaceConditions = FxHashMap<String, Vec<bool>>;
+
+/// Reads [`NamespaceConditions`] from the one string every transport can carry: a line per
+/// directive, its values as `T` and `F` letters, a tab, then its text with `\\`, `\n` and `\r`
+/// escaped. A malformed line is skipped, which leaves its directive unresolved, so the plan
+/// asks for it again.
+pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
+    let mut conditions = NamespaceConditions::default();
+    for line in encoded.lines() {
+        let Some((values, text)) = line.split_once('\t') else {
+            continue;
+        };
+        let values: Option<Vec<bool>> = values
+            .chars()
+            .map(|value| match value {
+                'T' => Some(true),
+                'F' => Some(false),
+                _ => None,
+            })
+            .collect();
+        let Some(values) = values else {
+            continue;
+        };
+        let mut unescaped = String::with_capacity(text.len());
+        let mut characters = text.chars();
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                unescaped.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('n') => unescaped.push('\n'),
+                Some('r') => unescaped.push('\r'),
+                Some(other) => unescaped.push(other),
+                None => {}
+            }
+        }
+        conditions.insert(unescaped, values);
+    }
+    conditions
 }
 
 /// A package's S4 definitions when all of them can wait for first use: running them later,
@@ -329,6 +376,9 @@ pub enum LoadError {
     Io(PathBuf, io::Error),
     NoPackageName(PathBuf),
     Syntax(Vec<(String, u32, String)>),
+    /// `NAMESPACE` has `if` directives whose conditions the host has not evaluated. It
+    /// evaluates these and plans again.
+    Conditionals(Vec<String>),
 }
 
 impl fmt::Display for LoadError {
@@ -346,6 +396,11 @@ impl fmt::Display for LoadError {
                 formatter,
                 "{} has no `Package:` field",
                 path.join("DESCRIPTION").display()
+            ),
+            LoadError::Conditionals(conditionals) => write!(
+                formatter,
+                "the conditions of {} `if` directive(s) in NAMESPACE were not evaluated",
+                conditionals.len()
             ),
             LoadError::Syntax(errors) => {
                 let shown: Vec<String> = errors
@@ -393,13 +448,30 @@ impl Loader {
 
     /// Reads the package at or above `path` and plans loading it. Without a committed state, or
     /// with `full`, the plan builds the namespace from scratch; otherwise it patches the loaded
-    /// one. The plan stays pending until [`Loader::commit`].
-    pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
+    /// one. `conditions` holds the host's values for the conditions of `if` directives in
+    /// `NAMESPACE`; a directive it lacks fails the plan with [`LoadError::Conditionals`]. The
+    /// plan stays pending until [`Loader::commit`].
+    pub fn plan(
+        &mut self,
+        path: &Path,
+        full: bool,
+        conditions: &NamespaceConditions,
+    ) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
         // Taken from the stamps the read takes before it reads each file, so an edit made
         // while the plan is read shows as a change later.
-        let (fingerprint, planned) = match self.read(&root) {
-            Ok((inputs, fingerprint)) => (fingerprint, self.plan_inputs(&root, inputs, full)),
+        let (fingerprint, planned) = match self.read(&root, Some(conditions)) {
+            Ok((inputs, fingerprint, conditionals)) => {
+                let planned = self.plan_inputs(&root, inputs, full).map(|mut plan| {
+                    plan.namespace_conditionals = conditionals;
+                    plan
+                });
+                (fingerprint, planned)
+            }
+            // The read stopped before it took any stamp, so the package is as it was.
+            Err(LoadError::Conditionals(conditionals)) => {
+                return Err(LoadError::Conditionals(conditionals));
+            }
             Err(error) => (source_fingerprint(&root), Err(error)),
         };
         let package = self
@@ -428,7 +500,7 @@ impl Loader {
         let Ok(root) = find_package_root(path) else {
             return;
         };
-        let Ok((inputs, _)) = self.read(&root) else {
+        let Ok((inputs, _, _)) = self.read(&root, None) else {
             return;
         };
         // A failure is the plan's to report: it reads the same sources.
@@ -673,7 +745,7 @@ impl Loader {
 
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
-        let (inputs, _) = self.read(&state.root)?;
+        let (inputs, _, _) = self.read(&state.root, None)?;
         let (position, _, _) = self.sync(
             &state.root,
             inputs.description,
@@ -804,10 +876,18 @@ impl Loader {
         });
     }
 
-    /// Reads the package's sources, and returns them with their [`source_fingerprint`]. A file
-    /// whose size, modification time and declared encoding are unchanged since the last read is
-    /// not read again.
-    fn read(&mut self, root: &Path) -> Result<(PackageInputs, Option<u64>), LoadError> {
+    /// Reads the package's sources, and returns them with their [`source_fingerprint`] and the
+    /// `if` directives of `NAMESPACE`. A file whose size, modification time and declared
+    /// encoding are unchanged since the last read is not read again.
+    ///
+    /// With `conditions`, `NAMESPACE` comes back with its `if` directives resolved, and a
+    /// directive `conditions` lacks fails the read before it takes any stamp, so the next read
+    /// still sees every edit. Without, `NAMESPACE` comes back as written.
+    fn read(
+        &mut self,
+        root: &Path,
+        conditions: Option<&NamespaceConditions>,
+    ) -> Result<(PackageInputs, Option<u64>, Vec<String>), LoadError> {
         let mut fingerprint = Fingerprint::default();
         let description_path = root.join("DESCRIPTION");
         fingerprint.path(&description_path);
@@ -819,6 +899,16 @@ impl Loader {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(LoadError::Io(namespace_path, error)),
+        };
+        let (namespace, conditionals) = match conditions {
+            Some(conditions) => {
+                let resolved = resolve_namespace_conditionals(&namespace, conditions);
+                if !resolved.resolved {
+                    return Err(LoadError::Conditionals(resolved.conditionals));
+                }
+                (resolved.text, resolved.conditionals)
+            }
+            None => (namespace, Vec::new()),
         };
         let paths = collated_r_files(root, &parse_description_collate(&description))?;
         let known = self.stamps.entry(root.to_path_buf()).or_default();
@@ -854,7 +944,7 @@ impl Loader {
         };
         // `source_fingerprint` has none for a package without `R/`.
         let fingerprint = root.join("R").is_dir().then(|| fingerprint.finish());
-        Ok((inputs, fingerprint))
+        Ok((inputs, fingerprint, conditionals))
     }
 
     /// Sets the analysis inputs to `files`, writing only what changed, and returns the
@@ -1596,6 +1686,7 @@ pub fn diff<'text>(
         strict: index.strict,
         namespace: index.namespace.clone(),
         warnings,
+        namespace_conditionals: Vec::new(),
     }
 }
 
@@ -1865,6 +1956,7 @@ impl Plan {
             run_on_load: false,
             strict: state.index.strict,
             warnings: Vec::new(),
+            namespace_conditionals: Vec::new(),
         }
     }
 

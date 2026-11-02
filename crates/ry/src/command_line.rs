@@ -145,6 +145,9 @@ pub enum Command {
         /// Where `--emit-plan` keeps what the session has loaded
         #[arg(long, hide = true, requires = "emit_plan")]
         state: Option<PathBuf>,
+        /// A file holding the values R gave the conditions of `if` directives in `NAMESPACE`
+        #[arg(long, hide = true, requires = "emit_plan")]
+        conditions: Option<PathBuf>,
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,

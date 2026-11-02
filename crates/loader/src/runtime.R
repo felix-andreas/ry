@@ -7,10 +7,37 @@
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
 # R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The backend's
 # `.ry_await_verdict()` returns once the host lets the package's effects run. The host defines the
-# transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
+# transport, `.ry_request(root, full, conditions)` (which returns the plan, given the values of
+# the conditions of `if` directives in NAMESPACE, see `.ry_namespace_conditions`) and
+# `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
 # `.ry_timing`, since a host may cache the compiled functions across sessions and state must
 # not be.
+
+# The values of the conditions of each `if` directive (given as source text), encoded for
+# `.ry_request`: per directive, a line of `T` and `F` letters, a tab, and the escaped text. As in
+# `parseNamespaceFile`, a condition is evaluated in the global environment, and only the
+# conditions on the branch taken are, depth first.
+.ry_namespace_conditions <- function(directives) {
+  lines <- vapply(directives, function(text) {
+    values <- logical()
+    walk <- function(e) {
+      if (!is.call(e)) return(invisible())
+      head <- as.character(e[[1L]])[[1L]]
+      if (identical(head, "if")) {
+        value <- if (eval(e[[2L]], .GlobalEnv)) TRUE else FALSE
+        values <<- c(values, value)
+        if (value) walk(e[[3L]]) else if (length(e) == 4L) walk(e[[4L]])
+      } else if (identical(head, "{")) {
+        for (inner in as.list(e)[-1L]) walk(inner)
+      }
+    }
+    walk(parse(text = text, keep.source = FALSE, encoding = "UTF-8")[[1L]])
+    escaped <- gsub("\r", "\\r", gsub("\n", "\\n", gsub("\\", "\\\\", text, fixed = TRUE), fixed = TRUE), fixed = TRUE)
+    paste0(paste(ifelse(values, "T", "F"), collapse = ""), "\t", escaped)
+  }, character(1), USE.NAMES = FALSE)
+  paste(lines, collapse = "\n")
+}
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
@@ -29,7 +56,13 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   full <- isTRUE(full) || !current
   started <- proc.time()[["elapsed"]]
   .ry_phase(NULL)
-  plan <- .ry_request(root, full)
+  # R evaluates the conditions of NAMESPACE's `if` directives at every load, so they are
+  # evaluated again for the directives the last load had, and once more when the plan names
+  # directives that are new.
+  plan <- .ry_request(root, full, .ry_namespace_conditions(state$namespace_conditionals))
+  if (isTRUE(plan$unresolved)) {
+    plan <- .ry_request(root, full, .ry_namespace_conditions(plan$namespace_conditionals))
+  }
   .ry_phase("plan")
   if (!is.null(plan$error)) {
     stop(plan$error, call. = FALSE)
@@ -56,6 +89,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   state$export_all <- export_all
   state$namespace_spec <- plan$namespace
+  state$namespace_conditionals <- plan$namespace_conditionals
   # Exports are resynced by scanning every name in the namespace, which a reload that only
   # rebinds existing names cannot change.
   plan$keeps_names <- isTRUE(plan$keeps_names) && !resync

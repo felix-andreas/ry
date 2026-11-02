@@ -42,6 +42,11 @@ This page is the exact behavior.
   the attached `package:<name>` holds a copy of each, which wins over an export of the same name.
   Unlike an installed package, every dataset is read at load time whatever `LazyData` says, as with
   `load_all()`.
+- **`if` in `NAMESPACE`** works as in GNU R: at every load, the condition is evaluated in the
+  global environment, and the directives on the branch it takes apply, so
+  `if (.Platform$OS.type == "windows") export(f)` exports `f` only on Windows. A condition that
+  fails stops the load with its error. `ry check` cannot evaluate R, so it reads the directives
+  of both branches: an import on either one resolves the names it brings in.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
   and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against
   ry's own headers and `libR`, with the `ry-rcmd` that sits beside ry's runtime; GNU R and
@@ -188,7 +193,6 @@ importer keeps its old imports with a warning until you reload it.
 - Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.
-- `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - A reload that leaves a declared S3 method without its function is refused before it changes
   anything, unless it also runs top-level statements or reloads `R/sysdata.rda`, either of which
   could define the function. Then the refusal comes after they ran, and the namespace holds the

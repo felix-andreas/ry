@@ -2,7 +2,7 @@
 # interpreter lowers each definition and statement straight from the analysis's syntax tree,
 # so no source text reaches R and nothing is parsed twice.
 
-.ry_request <- function(root, full) .Internal(ryLoaderPlan(root, full))
+.ry_request <- function(root, full, conditions) .Internal(ryLoaderPlan(root, full, conditions))
 
 .ry_commit <- function(root) invisible(.Internal(ryLoaderCommit(root)))
 

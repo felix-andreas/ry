@@ -51,8 +51,6 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **`ry test --watch` polls** file stamps every 0.2 s; an OS file watcher would cut the latency
   and the idle cost. It also stamps only `R/` and `tests/testthat/*.R`, so an edit under `inst/`
   or `src/` does not trigger a rerun.
-- **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
-  would fix it.
 - **A reload that runs statements refuses a missing S3 method late**: `.ry_refuse_missing_s3`
   checks before anything changes only when the reload runs no statement and keeps
   `sysdata.rda`, since either could define the function; otherwise `.ry_register_s3` refuses

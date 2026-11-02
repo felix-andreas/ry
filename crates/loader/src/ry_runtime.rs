@@ -11,8 +11,9 @@
 
 use {
     crate::{
-        Code, Loader, Source, cache_directory, find_package_root,
-        r::{RUNTIME_RY, RValue, error_value, plan_value},
+        Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
+        parse_namespace_conditions,
+        r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
         s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
@@ -41,7 +42,7 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("ryLoaderPlan", 2, do_plan),
+    internal("ryLoaderPlan", 3, do_plan),
     internal("ryLoaderCommit", 1, do_commit).invisible(),
     internal("ryLoaderBind", 2, do_bind).invisible(),
     internal("ryLoaderRun", 3, do_run).invisible(),
@@ -260,15 +261,19 @@ fn session() -> std::sync::MutexGuard<'static, Session> {
     SESSION.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `.Internal(ryLoaderPlan(root, full))`: the plan as `runtime.R` reads it, or `list(error =)`.
+/// `.Internal(ryLoaderPlan(root, full, conditions))`: the plan as `runtime.R` reads it, or
+/// `list(error =)`, or the `if` directives of `NAMESPACE` to evaluate. `conditions` is
+/// encoded as [`parse_namespace_conditions`] reads it.
 unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let full = values::require_flag(call.arg(1), "full")?;
+    let conditions =
+        parse_namespace_conditions(&values::require_string(call.arg(2), "conditions")?);
     let value = thread::scope(|threads| {
         thread::Builder::new()
             .name("ry-loader".to_owned())
             .stack_size(ANALYSIS_STACK_SIZE)
-            .spawn_scoped(threads, || plan(&root, full))
+            .spawn_scoped(threads, || plan(&root, full, &conditions))
             .map(|thread| {
                 thread
                     .join()
@@ -281,7 +286,7 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     scope(|| r_value(&value))
 }
 
-fn plan(root: &str, full: bool) -> RValue {
+fn plan(root: &str, full: bool, conditions: &NamespaceConditions) -> RValue {
     let Ok(path) = CString::new(root) else {
         return error_value(&format!("{root} has a NUL byte in its path"));
     };
@@ -291,9 +296,9 @@ fn plan(root: &str, full: bool) -> RValue {
     };
     let mut session = session();
     session.loader.set_strict(strict);
-    let plan = match session.loader.plan(Path::new(root), full) {
+    let plan = match session.loader.plan(Path::new(root), full, conditions) {
         Ok(plan) => plan,
-        Err(failure) => return error_value(&failure.to_string()),
+        Err(failure) => return failure_value(&failure),
     };
     let covered = VERDICT.get().is_some() && !PLANNED.swap(true, Ordering::Relaxed);
     if plan.strict

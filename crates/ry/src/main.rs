@@ -229,10 +229,11 @@ fn main() -> ExitCode {
             full,
             emit_plan: Some(plan_file),
             state,
+            conditions,
             ..
         } => {
             let state = state.unwrap_or_else(|| plan_file.with_extension("state.json"));
-            match load::emit_plan(&path, &plan_file, &state, full) {
+            match load::emit_plan(&path, &plan_file, &state, conditions.as_deref(), full) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     cli::error(&error.to_string());
