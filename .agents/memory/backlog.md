@@ -1091,11 +1091,8 @@ Gaps in the simulation, fuzzing and scenario design that `contributing/robustnes
 - **Allocation failure is not injectable** in the heap or the analysis.
 - **The simulator does not open `.Rtypes` stub buffers**, does not send `workspace/didChangeConfiguration`,
   and never restarts the server mid-session. Each is a cheap action to add to `Session::act`.
-- **`ry test --watch` has no end-to-end scenario.** `check_reload` (`crates/loader/src/testing.rs`) checks that every name whose call graph reaches changed code is among `Loader::callers`, but its reachability follows identifier tokens only, so a caller that reaches an edited S3 method through dispatch is not checked. Add a scenario that edits a file under a running watcher, and model dispatch in `reachable`.
-- **The make differential strips `include` lines** (`gnu_make_info` in `crates/rcmd/src/rcmd.rs`), because GNU R's `Makeconf` includes `$(R_SHARE_DIR)/make/vars.mk` from a home the test does not build. Point the include at a real file, or generate includes, so `include` handling is compared too.
-- **`fuzz/fuzz_targets/csv.rs` is not compiled by the default suite**; build the `fuzz/` crate in `just gate` (it needs nightly) or keep the target a one-line call into `io::check_csv_input`.
-- **`test_console_server` waits on the wall clock** (its `initialize` helper polls `sleep(10ms)` up to 200 times for the console to notice a closed debugger), so a heavily loaded machine can fail it. Signal the console's notice through a condition instead.
-- **The REPL is not driven by a seed.** `crates/repl` has no seeded harness; the console protocol is covered from the server side (`interp` `test_console_server`), not the REPL's line editing and evaluation loop.
+- **The console's completeness check disagrees with GNU R** (`syntax::input_is_unfinished`, used by `repl::input_is_complete`). A string left open across lines reads as finished, and `pkg::`, a trailing `\`, a leading `;`, `f(1\n2` and a bare `[` or `[[` read as unfinished where GNU R reports an error. `the_console_holds_back_what_gnu_r_finds_unfinished` (`crates/repl/tests/test_console_input.rs`) skips the `::` and `\` endings; drop the skip once the rule matches R's lexer.
+- **Run `just fuzz-deep` on a schedule.** It needs about 20 GB of build space and GNU R with testthat at `R_LIBS_USER` for the scenario-backed suites; a scheduled run passes a fresh base (`just fuzz-deep 480 $(date +%s)`).
 - **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
   query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
   protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
