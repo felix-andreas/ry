@@ -20,6 +20,8 @@ section lists the places where ry reports correct code instead.
   receives an object.
 - **Packages without a [stub](/type-checking/stubs).** Their names are `Unknown`, and attaching one
   switches off unresolved-name reports for the whole project.
+- **`$` on an atomic vector in a project that defines a `$` method.** A classed vector may carry
+  that method, so the read is `Unknown` instead of an error.
 - **A project's own `%op%` operators**, because one may quote its right operand instead of
   evaluating it, as magrittr's `%>%` does.
 

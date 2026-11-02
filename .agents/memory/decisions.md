@@ -6323,3 +6323,39 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   unless an argument also overflows the parameters; those fall through to full matching.
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
+
+## `[[` by name on a named atomic vector is the element, not `T | NULL`
+
+- Previous rule: `c(foo = 1L)[["foo"]]` was `integer | NULL`, treating a named atomic vector like a
+  list. R stops with "subscript out of bounds" on an absent name in an atomic vector, so a read that
+  returns never yields `NULL`, and the `NULL` member only produced false reports downstream (diffobj
+  `symb[["add"]]` into `gsub`). Lists keep `T | NULL`, which R does return.
+- Target shape: `extract_result` gives `T` for `T[named]`. The spec (`type-system.mdx`, "`[[` on
+  vectors") and the indexing fixtures say so.
+
+## S-era package sources are R sources
+
+- `R CMD INSTALL` collates `R/*.R`, `R/*.r`, `R/*.S`, `R/*.s` and `R/*.q`. ry read only `.R`, so
+  every NAMESPACE export defined in an S-era file (Hmisc, VGAM, boot, cluster) was reported as
+  undefined: 627 errors on a fresh 99-package sample. `cli::is_package_source` is the one predicate
+  the CLI and the server use; a `.s` file outside `R/` (such as `src/fast.s`, assembler) is not R.
+
+## Correlated-path allowances added for the fresh sample
+
+Each one trades a narrow class of missed errors for a class of false reports seen on real packages.
+
+- A flag-selected return also accepts branches written with `return()` and an earlier
+  `if (flag) return(value)`, when those are the body's only early returns (Matrix and VGAM `iam`).
+- `isTRUE()` and `isFALSE()` narrow like `is.logical()`, deliberately loose in the false branch
+  (car's `if (isFALSE(fit)) ... else fit$m`).
+- When the project defines any `$` method, `$` on an atomic vector is `Unknown`: the project-wide
+  fact is a tracked per-file projection (`project_defines_dollar_method`), so an edit that does not
+  add or remove a `$.` definition does not invalidate checks.
+- In arithmetic, a list member beside a numeric one is skipped, and a list or `NULL` operand beside
+  an `Unknown` one is not reported (mgcv offsets, ggplot2 `+`).
+- A range endpoint read through a list field drops its `NULL` member (mgcv `b$off[i]:...`); a local
+  or a directly indexed value keeps it, as `guards__a_length_test_that_admits_zero_keeps_null` pins.
+- A guard on `is.x(name <- value)` narrows `name`.
+- A bare `NA` local that a closure fills with `<<-` is a placeholder like `NULL` (knitr).
+- `seq`'s integer and double overloads come before the Date and POSIXct ones, so a `from` of an
+  unresolved numeric type does not pick a date.

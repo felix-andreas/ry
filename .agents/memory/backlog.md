@@ -124,101 +124,105 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
-reference, rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
-lifecycle, and is down to 51 after the bare-`NA` return, correlated-`NULL` test, project
-predicate, `Reduce`-wrapper, `exists()` probe and branch-join fixes. About 26 of the rest are true
-bugs in the packages (NlcOptim calls the matrices `indall` and `A` as functions); the other 25 or
-so are false reports on correct R, mostly one per cause: diffobj (6), renv (3), gmp, ks,
-PerformanceAnalytics (2 each), and devtools, knitr, mgcv, R6, Rsolnp, bit64, htmltools, httr,
-pracma, roxygen2 and snakecase (1 or 2 each). The three generated benchmark
-packages (`tools/bench/generate.py`) report nothing. Inferred signatures now carry body facts a call
-reads (`decisions.md`, "Inferred signatures carry body facts that a call reads"), which cleared the
-flag-default return, `match.fun` value-read formals, logical callback slots, logical text,
-substituted arguments, the conditional requirement of `function(x, y = x)`, the `Reduce` fold and
-forwarding to a `missing()`-tested parameter. The classes:
+gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports on correct R. The
+three generated benchmark packages (`tools/bench/generate.py`) report nothing. To reproduce, give
+each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
+`ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
+gap, on `type-checking/limitations.md`.
 
-- **True bugs the corpus run reports, left as reported.** kernlab `ramloss(...)` is a typo for
-  `ramploss` (2), GeneralizedHyperbolic `llfunc(paramStart, x)` on a one-parameter `llfunc` (2) and
-  `logHypDens <- function(y) log(dhyperb(t, ...))`, which reads base `t` for `y`,
-  DBI coerce calls that leave out `to` (5), ff passes `verbose` (3), rugarch reads `temph` for
-  `tmph`, mclust leaves out `k`, NlcOptim (2), processx `new_not_implemented_error` without `call`, diffobj
-  `!is.valid.width(...)` and `!is.valid.guide.fun(...)` negate a value R rejects with "invalid
-  argument type" (2), gmp `if (log)` with no `log` formal, httr `revoke_oauth2.0(x)` without
-  `credentials`.
-- **Metaprogrammed bodies read names from a frame the checker cannot see.** R6's `generator_funs$new` reads `class` from the generator environment it is
-  copied into.
-- **A conditional library read is taken as a force.** PerformanceAnalytics passes a missing
-  `angle` to `rect(angle = angle)`, which reads it only when `density` is not `NULL`.
-- **A defaulted callback pins its slot to the first call's argument.** ks has
-  `if (missing(col.fun)) col.fun <- function(n) ...`, then calls `col.fun(n = length(levels))` and
-  `col.fun(n = length(levels) + 1)`. The join binds the lambda, so `n` is a variable bound to
-  `integer` rather than an inferred scalar slot, and the `double` fails.
-- **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
-  `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
-  caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
-  `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
-  has not been isolated yet for these; the ks `mise.mixt` case (arithmetic-tied operands bound by a
-  literal) is fixed by `widen_numeric_binding`. The scalar-claim returns themselves remain.
-- **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
-  another tests in a condition (brew `.extendedError`, rvest `new_chromote`). knitr's `NA` placeholder that `<<-`
-  fills later is the same class.
-- **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
-  an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
-- **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
-  `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
-  named parameters.
-- **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
+### True bugs, left reported (25)
+
+- DBI `data.R` (5): coerce calls that leave out the required `to`.
+- GeneralizedHyperbolic `nigFit.R` 99 and 110: `llfunc(paramStart, x)` on a one-parameter `llfunc`.
+- GeneralizedHyperbolic `hyperbFit.R` 285: `logHypDens <- function(y) log(dhyperb(t, ...))` reads
+  base `t` instead of `y`.
+- NlcOptim `solqp.R` 297 and 528: calls the vector `indall` and the matrix `A` as functions.
+- NlcOptim `NlcOptim.R` 261 and 262: indexes a value that is a function on one path.
+- diffobj `core.R` 492 and `check.R` 476: `!is.valid.*(...)` negates a `character` message, which R
+  rejects with "invalid argument type".
+- ff `ordermerge.R` 3006, 3009, 3012: passes `verbose`, which the callee does not take.
+- gmp `Stirling-n-etc.R` 277: `if (log)` with no `log` formal reads base `log`.
+- httr `oauth-token-utils.R` 34: `revoke_oauth2.0(x)` leaves out `credentials`.
+- kernlab `kqr.R` 173 and 263: `ramloss(...)` is a typo for `ramploss`.
+- kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
+- mclust `toremove.R` 259: leaves out `k`.
+- processx `process.R` 748: `new_not_implemented_error` without `call`.
+- rugarch `rugarch-startpars.R` 518: reads `temph` for `tmph`.
+
+### Known limitation (2)
+
+- devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
+  (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
+  The value has length one at run time, but no type says so.
+
+### False reports (12), one cause each
+
+- PerformanceAnalytics `legend.R` 293: a missing `angle` is passed to `rect(angle = angle)`, which
+  forces it only when `density` is not `NULL`. Laziness that depends on a value.
+- PerformanceAnalytics `PortfolioRisk.R` 387: `VAR$VaR` on a value inferred as a tuple.
+- Rsolnp `benchmarks.R` 470: `eqB = NULL` to a project parameter typed numeric from a use outside
+  the callee's `is.null()` test.
+- bit64 `highlevel64.R` 309: an `if` joining `table()` and a list return reaches a stub union.
+- diffobj `diff.R` 654: a one-parameter callback against an interface that names more parameters.
+- ks `kdde.R` 304: a rigid `T` meets `double[] | integer[]`; not reduced.
+- ks `kdde.R` 568: `if (missing(col.fun)) col.fun <- function(n) ...` binds the lambda's `n` to
+  the first call's `integer`, so a later `double` fails.
+- renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
+  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a bounded variable so the return names
+  the argument's own type.
+- renv `r.R` 137: a callback of a project `lapply` wrapper receives the whole tuple of records
+  instead of one element.
+- renv `use.R` 100: `records[!compat]` where `compat` is a named list from a project `enum_lgl`.
+- roxygen2 `rd-usage.R` 88: `format_name(name)` after `identical(format_name, identity)` sees an
+  over-wide `name`.
+- snakecase `to_any_case.R` 266: `vapply` over a union with a `factor` member, which the stub's
+  `list[T] | T[]` does not accept.
+
+### Scalar-claim chains
+
+A stub's scalar return (`round`, `sum`, `nchar`) or a scalar use far down a call chain pins an
+unannotated project parameter, and a caller passing a vector is reported. The corpus no longer
+shows an instance: gmp's `x <- 1:n; lapply(n, f)` was one, and a variable bounded by a scalar
+constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pracma
+`.adaptsimstp` and rugarch no longer report, and no isolated repro exists. Reopen with a repro.
+
+### A fresh sample outside the corpus
+
+The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
+1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
+lines). After the fixes they give 468, about 400 of them false (33 per 100,000 lines); the rest are
+50 true bugs and 15 debatable ones (psych's `print(quote = "FALSE")` works by coercion). Remaining
+false classes, largest first:
+
+- Return types selected by a flag the body reassigns or nests (VGAM `iam`, about 60 in `.q` files
+  that are now checked).
+- Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
+- An unannotated parameter over-inferred from one use, a default or one branch (21).
+- A variable correlated with a flag tested elsewhere (20).
+- A union of function types where a function is expected (lme4, kableExtra, 18).
+- A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
+- An element write `d[[i]] <- v` does not update the container type (psych, 10).
+- `vapply` over a parameter turns it into `list[T] | T[]`, so a later `$` fails (ggplot2, 10).
+- A project S3 method for a stubbed generic is ignored (R.utils, 9); NSE arguments checked (9);
+  narrowing gaps after `tryCatch` and inside `&&` (8); Windows-only NAMESPACE imports (8).
+
+### Other open checker items found on the corpus
+
 - **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
   on as a placeholder, but the same signature declared reports the call, so the round-trip test
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
-  it; settle which before the list grows.
-- **A union parameter that flows to the return keeps every member at the call** (renv
-  `renv_path_normalize`, about 5 reports): `path: list[T] | T[]` from `map_lgl(path, ...)` is
-  returned, so a `character` argument returns `character | list[character] | character[]`, which an
-  inferred `character` parameter then rejects. Needs a bounded variable (`<P: list[T] | T[]>`) so the
-  return names the argument's own type.
-- **A computed-key write into a record leaves the record unchanged** (highs `globals[[key]] <<-
-  value` on `list(threads = NA_integer_)`), so a later computed read claims only the declared
-  fields' types. Combined with a `missing(key)` path that returns the whole record, the result is
-  `list{threads: integer} | integer | T` and arithmetic on it is reported (4 corpus reports).
-- **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
-  `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
-  `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
-  write; treating a string-named target of either as a write that makes the binding `Unknown`
-  would clear both.
-- **A literal `NULL` passed to a numeric parameter of a project function is reported** (Rsolnp
-  benchmarks `eqB = NULL`). The callee tests `is.null()`, but its parameter type came from a
-  numeric use outside the test.
-- **A number passed to a parameter tested as a condition is reported** (diffobj
-  `trim_hunk(h, "tar", 0L)` over `if (!line.id)`, ff `if (pagesize)`, renv, rmgarch; about 12
-  corpus reports). R takes `0L` as a condition, but `if (x)` and `!x` bind an open parameter to
-  `logical`. Bounding it by `scalar numeric` instead clears them but turns every flag's signature
-  into `<T: scalar numeric> fn(flag: T)`, which was tried and rejected for hover readability. A
-  call-site relaxation for parameters whose `logical` came from inference is the likely shape, but
-  schemes do not record that.
-- **A generic's dispatch formal, forwarded, reads as optional.** `f <- function(fit) persistence(fit)`
-  over `persistence <- function(object, ...) UseMethod("persistence")` gives `f` an optional `fit`,
-  yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
-  called without one. A parameter cannot express "may be omitted, but read when passed", so the
-  missed error stays until it can (`a_generic_does_not_require_the_formals_it_passes_on`).
-- **A formal forwarded to a local closure that never reads it is still required.** callr
-  `error.R` and processx `run.R`: `format_advice(x)` forwards `x` to `format_advice_cli(x)`, both
-  defined inside `local({...})`, which ignores it. The forwarding rule in `collect_formal_uses`
-  reads only global schemes, so `err$format$advice()` is reported as leaving out `x`.
+  it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
+  cannot say that a literal flag picks the branch.
+- **A generic's dispatch formal, forwarded, reads as optional** (missed error).
+  `f <- function(fit) persistence(fit)` over a `UseMethod` generic gives `f` an optional `fit`, yet
+  `f()` errors in R (`a_generic_does_not_require_the_formals_it_passes_on`).
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported. A missed error, not a false report.
-- **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
-  (httr `oauth_listener(url)$code`, rlang `trace$call`).
-- One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
-  and no such function exists.
-- Singletons: an infinite-type error in pkgdown `news_search_index`, gmp `lapply(n, B1)` over a
-  recursive `B1` (no small repro yet), knitr `read.csv(inst_dir(...))`, PerformanceAnalytics
-  `VAR$VaR` on a tuple, codetools `new.env(parent = .EmptyEnv)` with a `NULL` fallback.
-
-To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
-default) and run `ry check --output json R` inside it.
+  `fast_svd("a", 1)` is not reported (missed error).
+- **A number passed to a parameter tested as a condition.** `if (x)` and `!x` bind an open
+  parameter to `logical`, and R takes `0L` there. Bounding it by `scalar numeric` was tried and
+  rejected for hover readability; a call-site relaxation for an inferred `logical` is the likely
+  shape, but schemes do not record where the `logical` came from.
 
 ## Open: where findings point, and what the type system still refuses
 
