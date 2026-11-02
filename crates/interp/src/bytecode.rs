@@ -348,6 +348,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         rebinding: None,
         bound: None,
         tail_updates: (Vec::new(), nil()),
+        bound: None,
     };
     let heap = crate::heap();
     let mut list = nil();
