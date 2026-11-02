@@ -2111,7 +2111,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                 }
             }
             NodeOrToken::Token(token) => {
-                let writes = match token.kind {
+                let writes = match token.kind() {
                     SyntaxKind::LESS_MINUS
                     | SyntaxKind::LESS2_MINUS
                     | SyntaxKind::MINUS_GREATER
@@ -2119,9 +2119,9 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                     | SyntaxKind::COLON_EQ
                     | SyntaxKind::FOR_KW => true,
                     SyntaxKind::EQ => parent_kind == SyntaxKind::BINARY_EXPR,
-                    SyntaxKind::SPECIAL => matches!(token.text, "%<-%" | "%->%"),
+                    SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
                     SyntaxKind::IDENT => matches!(
-                        token.text.trim_matches('`'),
+                        token.text().trim_matches('`'),
                         ":=" | "setnames" | "setcolorder"
                     ),
                     _ => false,
@@ -3210,8 +3210,8 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
         .filter(|child| is_expression_kind(child.kind()));
     let (lhs, rhs) = (operands.next(), operands.next());
     for child in binary.child_tokens() {
-        if !child.kind.is_trivia() {
-            operator = Some(child.kind);
+        if !child.kind().is_trivia() {
+            operator = Some(child.kind());
             break;
         }
     }
@@ -3223,13 +3223,13 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     };
     let target = target?;
     let name = match target.kind() {
-        SyntaxKind::NAME => name_text(target.first_token()?.text).into_owned(),
+        SyntaxKind::NAME => name_text(target.first_token()?.text()).into_owned(),
         SyntaxKind::LITERAL
             if target
                 .first_token()
-                .is_some_and(|token| token.kind == SyntaxKind::STRING) =>
+                .is_some_and(|token| token.kind() == SyntaxKind::STRING) =>
         {
-            let text: String = target.child_tokens().map(|token| token.text).collect();
+            let text: String = target.child_tokens().map(|token| token.text()).collect();
             text.trim_matches(['"', '\'']).to_owned()
         }
         _ => return None,

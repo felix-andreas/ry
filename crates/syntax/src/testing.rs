@@ -706,7 +706,9 @@ fn check_geometry(node: &SyntaxNode, input: &str) {
 /// agree with the plain child-by-child definitions a nested tree would use.
 fn check_navigation(root: &SyntaxNode, input: &str) {
     let mut text = String::new();
-    crate::for_each_token(root, |_, token| text.push_str(token));
+    for token in root.node_ref().tokens() {
+        text.push_str(token.text());
+    }
     assert_eq!(text, input, "token walk lost text for input {input:?}");
     let descendants: Vec<SyntaxNode> = root.descendants().collect();
     let mut visited = Vec::new();

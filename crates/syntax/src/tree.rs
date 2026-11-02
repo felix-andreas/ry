@@ -1311,22 +1311,54 @@ pub struct NodeRef<'a> {
     index: u32,
 }
 
-/// A token borrowed from a tree, read out in full.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A token borrowed from a tree. It reads nothing until asked: most tokens a child walk passes
+/// over are only checked for their kind, so slicing every token's text up front would cost more
+/// than the walk itself.
+#[derive(Clone, Copy)]
 pub struct TokenRef<'a> {
-    pub kind: SyntaxKind,
-    pub text: &'a str,
-    pub range: TextRange,
+    tree: &'a Tree,
+    index: u32,
 }
 
 pub type ElementRef<'a> = NodeOrToken<NodeRef<'a>, TokenRef<'a>>;
 
 fn token_ref(tree: &Tree, index: u32) -> TokenRef<'_> {
-    let range = tree.range(index);
-    TokenRef {
-        kind: tree.kind(index),
-        text: tree.slice(range),
-        range,
+    TokenRef { tree, index }
+}
+
+impl<'a> TokenRef<'a> {
+    #[inline]
+    pub fn kind(self) -> SyntaxKind {
+        self.tree.kind(self.index)
+    }
+
+    #[inline]
+    pub fn range(self) -> TextRange {
+        self.tree.range(self.index)
+    }
+
+    #[inline]
+    pub fn text(self) -> &'a str {
+        self.tree.slice(self.range())
+    }
+}
+
+impl PartialEq for TokenRef<'_> {
+    fn eq(&self, other: &TokenRef<'_>) -> bool {
+        self.kind() == other.kind() && self.range() == other.range() && self.text() == other.text()
+    }
+}
+
+impl Eq for TokenRef<'_> {}
+
+impl fmt::Debug for TokenRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenRef")
+            .field("kind", &self.kind())
+            .field("text", &self.text())
+            .field("range", &self.range())
+            .finish()
     }
 }
 
@@ -1395,7 +1427,7 @@ impl<'a> NodeRef<'a> {
     }
 
     pub fn has_child(self, kind: SyntaxKind) -> bool {
-        self.child_nodes().any(|child| child.kind() == kind)
+        kind.is_node() && self.child_kinds().any(|child| child == kind)
     }
 
     /// The text of a node that is a single token, such as most names.
@@ -1530,14 +1562,14 @@ impl<'a> ElementRef<'a> {
     pub fn kind(self) -> SyntaxKind {
         match self {
             NodeOrToken::Node(node) => node.kind(),
-            NodeOrToken::Token(token) => token.kind,
+            NodeOrToken::Token(token) => token.kind(),
         }
     }
 
     pub fn range(self) -> TextRange {
         match self {
             NodeOrToken::Node(node) => node.range(),
-            NodeOrToken::Token(token) => token.range,
+            NodeOrToken::Token(token) => token.range(),
         }
     }
 }

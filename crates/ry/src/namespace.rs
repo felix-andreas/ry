@@ -7,7 +7,7 @@ use {
         lints::{LintLevel, lint_severity},
         metadata::NamespaceImport,
     },
-    syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token},
+    syntax::{SyntaxKind, SyntaxNode, TextRange},
 };
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
@@ -153,10 +153,12 @@ pub fn collect_used_tokens<'a>(
             out.insert(name);
         }
     };
-    for_each_token(root, |kind, text| {
+    for token in root.node_ref().tokens() {
+        let kind = token.kind();
         if kind.is_trivia() {
-            return;
+            continue;
         }
+        let text = token.text();
         insert(text);
         if kind == SyntaxKind::STRING {
             let content = text
@@ -166,7 +168,7 @@ pub fn collect_used_tokens<'a>(
                 insert(content);
             }
         }
-    });
+    }
 }
 
 #[cfg(test)]

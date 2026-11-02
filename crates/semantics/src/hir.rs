@@ -1072,7 +1072,7 @@ impl Lowering {
                 self.allocate(ExpressionKind::Block { statements }, range)
             }
             SyntaxKind::UNARY_EXPR => {
-                let operator = node.child_tokens().find_map(|token| match token.kind {
+                let operator = node.child_tokens().find_map(|token| match token.kind() {
                     SyntaxKind::MINUS => Some(UnaryOperator::Minus),
                     SyntaxKind::PLUS => Some(UnaryOperator::Plus),
                     SyntaxKind::BANG => Some(UnaryOperator::Not),
@@ -1152,7 +1152,7 @@ impl Lowering {
             SyntaxKind::NAMESPACE_EXPR => {
                 let internal = node
                     .child_tokens()
-                    .any(|token| token.kind == SyntaxKind::COLON3);
+                    .any(|token| token.kind() == SyntaxKind::COLON3);
                 let mut children = expression_children(node);
                 let package = children.next().and_then(field_name_text);
                 let name = children.next().and_then(field_name_text);
@@ -1381,7 +1381,7 @@ impl Lowering {
             SyntaxKind::PATTERN_LITERAL => {
                 let negative = node
                     .child_tokens()
-                    .any(|token| token.kind == SyntaxKind::MINUS);
+                    .any(|token| token.kind() == SyntaxKind::MINUS);
                 match child_of_kind(node, SyntaxKind::LITERAL) {
                     Some(literal) => PatternKind::Literal {
                         literal: literal_kind(literal, &mut self.module.text),
@@ -1480,12 +1480,13 @@ impl Lowering {
     }
 
     fn lower_binary(&mut self, node: NodeRef<'_>, range: TextRange) -> ExprId {
-        let Some(operator_token) = node.child_tokens().find(|token| !token.kind.is_trivia()) else {
+        let Some(operator_token) = node.child_tokens().find(|token| !token.kind().is_trivia())
+        else {
             return self.missing(range);
         };
         let mut operands = expression_children(node);
         let (lhs, rhs) = (operands.next(), operands.next());
-        let operator = match operator_token.kind {
+        let operator = match operator_token.kind() {
             kind @ (SyntaxKind::LESS_MINUS
             | SyntaxKind::EQ
             | SyntaxKind::LESS2_MINUS
@@ -1518,7 +1519,7 @@ impl Lowering {
             SyntaxKind::COLON_EQ => {
                 let callee = self.allocate(
                     ExpressionKind::NameRef(Symbol::new(":=")),
-                    operator_token.range,
+                    operator_token.range(),
                 );
                 let mark = self.argument_stack.len();
                 for operand in [lhs, rhs] {
@@ -1537,7 +1538,7 @@ impl Lowering {
                 }
                 BinaryOperator::Pipe
             }
-            SyntaxKind::SPECIAL => match operator_token.text {
+            SyntaxKind::SPECIAL => match operator_token.text() {
                 "%%" => BinaryOperator::Modulo,
                 "%/%" => BinaryOperator::IntegerDivide,
                 _ => BinaryOperator::Special,
@@ -1565,7 +1566,7 @@ impl Lowering {
         let lhs = self.lower_optional(lhs, range);
         let rhs = self.lower_optional(rhs, range);
         if operator == BinaryOperator::Special {
-            let (pattern, value) = match operator_token.text {
+            let (pattern, value) = match operator_token.text() {
                 "%<-%" => (lhs, rhs),
                 "%->%" => (rhs, lhs),
                 _ => (lhs, lhs),
@@ -1582,7 +1583,7 @@ impl Lowering {
             }
         }
         let special_name =
-            (operator == BinaryOperator::Special).then(|| Symbol::new(operator_token.text));
+            (operator == BinaryOperator::Special).then(|| Symbol::new(operator_token.text()));
         self.allocate(
             ExpressionKind::Binary {
                 operator,
@@ -1647,7 +1648,7 @@ impl Lowering {
                 .filter(|_| {
                     argument
                         .child_tokens()
-                        .any(|token| token.kind == SyntaxKind::EQ)
+                        .any(|token| token.kind() == SyntaxKind::EQ)
                 });
             // R's grammar also takes `NULL` as an argument tag: `switch(x, NULL = 1)`
             // labels the case for the string "NULL".
@@ -1655,7 +1656,7 @@ impl Lowering {
                 let null_tag = tag.kind() == SyntaxKind::LITERAL
                     && tag
                         .first_token()
-                        .is_some_and(|token| token.kind == SyntaxKind::NULL_KW);
+                        .is_some_and(|token| token.kind() == SyntaxKind::NULL_KW);
                 let name = if null_tag {
                     Symbol::new("NULL")
                 } else {
@@ -1686,7 +1687,7 @@ impl Lowering {
             let first = parameter.first_token();
             let name = first
                 .map(|token| {
-                    let text = token.text;
+                    let text = token.text();
                     Symbol::new(
                         text.strip_prefix('`')
                             .and_then(|t| t.strip_suffix('`'))
@@ -1697,7 +1698,7 @@ impl Lowering {
             let default = expression_children(parameter)
                 .next()
                 .map(|node| self.lower_expression(node));
-            let range = first.map_or_else(|| parameter.range(), |token| token.range);
+            let range = first.map_or_else(|| parameter.range(), |token| token.range());
             self.parameter_stack.push(Parameter {
                 name,
                 default,
@@ -1743,7 +1744,7 @@ fn significant_range_of(node: NodeRef<'_>) -> TextRange {
 /// Where the last token that is neither trivia nor inside an `ANNOTATION` ends.
 fn significant_end(node: NodeRef<'_>) -> Option<TextSize> {
     node.children().rev().find_map(|child| match child {
-        ElementRef::Token(token) => (!token.kind.is_trivia()).then_some(token.range.end()),
+        ElementRef::Token(token) => (!token.kind().is_trivia()).then_some(token.range().end()),
         ElementRef::Node(child) if child.kind() == SyntaxKind::ANNOTATION => None,
         ElementRef::Node(child) => significant_end(child),
     })
@@ -1751,7 +1752,7 @@ fn significant_end(node: NodeRef<'_>) -> Option<TextSize> {
 
 /// The name a `NAME` node spells, read from its first token.
 fn name_symbol(node: NodeRef<'_>) -> Option<Symbol> {
-    Some(Symbol::new(&name_text(node.first_token()?.text)))
+    Some(Symbol::new(&name_text(node.first_token()?.text())))
 }
 
 fn literal_kind(node: NodeRef<'_>, buffer: &mut String) -> LiteralKind {
@@ -1766,12 +1767,12 @@ fn literal_kind(node: NodeRef<'_>, buffer: &mut String) -> LiteralKind {
     let Some(token) = node.first_token() else {
         return LiteralKind::Null;
     };
-    match token.kind {
-        SyntaxKind::INTEGER => LiteralKind::Integer(text(token.text)),
-        SyntaxKind::DOUBLE => LiteralKind::Double(text(token.text)),
-        SyntaxKind::COMPLEX => LiteralKind::Complex(text(token.text)),
+    match token.kind() {
+        SyntaxKind::INTEGER => LiteralKind::Integer(text(token.text())),
+        SyntaxKind::DOUBLE => LiteralKind::Double(text(token.text())),
+        SyntaxKind::COMPLEX => LiteralKind::Complex(text(token.text())),
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
-            LiteralKind::String(text(string_value(token.text)))
+            LiteralKind::String(text(string_value(token.text())))
         }
         SyntaxKind::TRUE_KW => LiteralKind::Logical(true),
         SyntaxKind::FALSE_KW => LiteralKind::Logical(false),
@@ -1843,7 +1844,7 @@ fn field_name_text(node: NodeRef<'_>) -> Option<Symbol> {
         SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
-            (token.kind == SyntaxKind::STRING).then(|| Symbol::new(string_value(token.text)))
+            (token.kind() == SyntaxKind::STRING).then(|| Symbol::new(string_value(token.text())))
         }
         _ => None,
     }
@@ -1868,14 +1869,14 @@ fn pipe_shape(call: NodeRef<'_>) -> Option<PipeShape> {
         .position(|argument| {
             let named = argument
                 .child_tokens()
-                .any(|token| token.kind == SyntaxKind::EQ);
+                .any(|token| token.kind() == SyntaxKind::EQ);
             // With a tag present, the value is the second expression child.
             named
                 && expression_children(argument).nth(1).is_some_and(|value| {
                     value.kind() == SyntaxKind::NAME
                         && value
                             .child_tokens()
-                            .any(|token| token.kind == SyntaxKind::UNDERSCORE)
+                            .any(|token| token.kind() == SyntaxKind::UNDERSCORE)
                 })
         })
         .map(PipeShape::NamedPlaceholder)
@@ -1884,7 +1885,7 @@ fn pipe_shape(call: NodeRef<'_>) -> Option<PipeShape> {
 fn count_placeholders(node: NodeRef<'_>) -> usize {
     node.children()
         .map(|child| match child {
-            ElementRef::Token(token) => usize::from(token.kind == SyntaxKind::UNDERSCORE),
+            ElementRef::Token(token) => usize::from(token.kind() == SyntaxKind::UNDERSCORE),
             ElementRef::Node(child) => count_placeholders(child),
         })
         .sum()

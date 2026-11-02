@@ -269,13 +269,6 @@ pub fn node_text(node: &SyntaxNode) -> Cow<'_, str> {
     Cow::Borrowed(node.text())
 }
 
-/// Every token under `node` in source order.
-pub fn for_each_token(node: &SyntaxNode, mut visit: impl FnMut(SyntaxKind, &str)) {
-    for token in node.node_ref().tokens() {
-        visit(token.kind, token.text);
-    }
-}
-
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
 /// in `new_text`; the result always equals `parse(new_text)`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {

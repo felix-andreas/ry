@@ -1023,9 +1023,9 @@ impl Eraser {
             match child {
                 NodeOrToken::Node(child) => self.node(child, Some(kind)),
                 NodeOrToken::Token(token) => {
-                    self.record(token.range.start());
-                    self.out.push_str(token.text);
-                    self.record(token.range.end());
+                    self.record(token.range().start());
+                    self.out.push_str(token.text());
+                    self.record(token.range().end());
                 }
             }
         }
@@ -1035,8 +1035,8 @@ impl Eraser {
 
 fn collect_identifiers<'a>(node: NodeRef<'a>, names: &mut Vec<&'a str>) {
     for token in node.tokens() {
-        if token.kind == SyntaxKind::IDENT {
-            let text = token.text;
+        if token.kind() == SyntaxKind::IDENT {
+            let text = token.text();
             let name = text
                 .strip_prefix('`')
                 .and_then(|text| text.strip_suffix('`'))

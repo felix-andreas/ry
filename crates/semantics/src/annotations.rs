@@ -869,8 +869,8 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
         }
     }
     for token in node.node_ref().tokens() {
-        if token.kind == SyntaxKind::ANNOTATION_MARKER {
-            markers.push(token.range.start());
+        if token.kind() == SyntaxKind::ANNOTATION_MARKER {
+            markers.push(token.range().start());
         }
     }
     let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
@@ -1014,13 +1014,13 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
     node.node_ref()
         .child_tokens()
-        .any(|token| token.kind == kind)
+        .any(|token| token.kind() == kind)
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {
     node.node_ref()
         .child_tokens()
-        .any(|token| token.kind == SyntaxKind::IDENT && token.text == word)
+        .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == word)
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the
