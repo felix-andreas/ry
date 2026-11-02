@@ -87,6 +87,24 @@ pub struct LintConfig {
     pub redundant_equals: LintLevel,
     /// Off by default: a string in single quotes.
     pub single_quotes: LintLevel,
+    /// Off by default: `expect_equal(x, NULL)` and kin, which a specific expectation says better.
+    pub testthat_expectation: LintLevel,
+    /// Off by default: `stop(paste0(...))` and kin, which join their arguments themselves.
+    pub condition_message: LintLevel,
+    /// Off by default: `!(x == y)`, which is `x != y`.
+    pub comparison_negation: LintLevel,
+    /// Off by default: `all(!x)`, which is `!any(x)`.
+    pub outer_negation: LintLevel,
+    /// Off by default: a regular expression without regex syntax, which `fixed = TRUE` matches faster.
+    pub fixed_regex: LintLevel,
+    /// Off by default: `which(grepl(...))`, which is `grep(...)`.
+    pub which_grepl: LintLevel,
+    /// Off by default: `length(levels(x))`, which is `nlevels(x)`.
+    pub length_levels: LintLevel,
+    /// Off by default: a `browser()` call, which a debugging session leaves behind.
+    pub browser_call: LintLevel,
+    /// Off by default: a number such as `.5` without its leading zero.
+    pub numeric_leading_zero: LintLevel,
     /// Copied from `[check] object-systems = false` when the config loads, which turns
     /// every definition into an error whatever `object_system` says.
     #[serde(skip)]
@@ -261,6 +279,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::BRACE_EXPR => {
                     unreachable_code_lint(&red, config, &mut lints.unless_redefined);
                 }
+                SyntaxKind::UNARY_EXPR => comparison_negation_lint(&red, config, diagnostics),
                 SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
                     vector_logic_lint(&red, config, diagnostics);
                 }
@@ -281,6 +300,26 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
             }
             if kind == SyntaxKind::STRING && annotation_depth == 0 {
                 single_quotes_lint(text, range, config, diagnostics);
+            }
+            if matches!(
+                kind,
+                SyntaxKind::DOUBLE | SyntaxKind::INTEGER | SyntaxKind::COMPLEX
+            ) && annotation_depth == 0
+                && text.starts_with('.')
+            {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.numeric_leading_zero),
+                    Severity::Warning,
+                    "numeric-leading-zero",
+                    range,
+                    format!("Write `0{text}` with a leading zero, which is easier to read"),
+                    Some((
+                        Applicability::Safe,
+                        "Add a leading zero",
+                        format!("0{text}"),
+                    )),
+                );
             }
         }
     });
@@ -389,14 +428,19 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
         }
         SyntaxKind::PARAMETER => config.naming_style.is_some(),
         SyntaxKind::NAME => matches!(node.single_token_text(), Some("T" | "F")),
+        SyntaxKind::UNARY_EXPR => {
+            is_enabled(config.comparison_negation, None)
+                && node.child_kinds().any(|kind| kind == SyntaxKind::BANG)
+                && node
+                    .child_kinds()
+                    .any(|kind| kind == SyntaxKind::PAREN_EXPR)
+        }
         SyntaxKind::CALL_EXPR => {
             let mut children = node.child_nodes();
             let callee_lints = match children.next() {
-                Some(callee) if callee.kind() == SyntaxKind::NAME => {
-                    callee.single_token_text().is_none_or(|name| {
-                        object_system_function(name).is_some() || CALL_LINT_NAMES.contains(&name)
-                    })
-                }
+                Some(callee) if callee.kind() == SyntaxKind::NAME => callee
+                    .single_token_text()
+                    .is_none_or(|name| callee_may_lint(name, config)),
                 Some(callee) => callee.kind() == SyntaxKind::NAMESPACE_EXPR,
                 None => false,
             };
@@ -730,21 +774,33 @@ fn length_sequence_lint(
     );
 }
 
-/// Bare callees some call lint looks at, so the green pre-check can skip every other call.
-const CALL_LINT_NAMES: &[&str] = &[
-    "seq",
-    "sprintf",
-    "gettextf",
-    "any",
-    "paste",
-    "sapply",
-    "vapply",
-    "as.integer",
-    "as.numeric",
-    "as.double",
-    "as.logical",
-    "as.character",
-];
+/// Whether a call to the bare callee `name` can report anything, so the green pre-check
+/// builds a red node only for calls some enabled lint looks at.
+fn callee_may_lint(name: &str, config: &LintConfig) -> bool {
+    let opted = |level| is_enabled(level, None);
+    match name {
+        "seq" => is_enabled(config.length_sequence, Some(Severity::Warning)),
+        "sprintf" | "gettextf" => is_enabled(config.sprintf_arguments, Some(Severity::Warning)),
+        "any" => opted(config.any_is_na) || opted(config.outer_negation),
+        "all" => opted(config.outer_negation),
+        "paste" => opted(config.paste_sep),
+        "sapply" | "vapply" => opted(config.lengths),
+        "as.integer" | "as.numeric" | "as.double" | "as.logical" | "as.character" => {
+            opted(config.literal_coercion)
+        }
+        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" => {
+            opted(config.testthat_expectation)
+        }
+        "stop" | "warning" | "message" | "packageStartupMessage" => opted(config.condition_message),
+        "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
+            opted(config.fixed_regex)
+        }
+        "which" => opted(config.which_grepl),
+        "length" => opted(config.length_levels),
+        "browser" => opted(config.browser_call),
+        name => object_system_function(name).is_some(),
+    }
+}
 
 /// Functions that evaluate their arguments in order, so naming a column twice is how they
 /// update it (`mutate(x = x + 1, x = x * 2)`).
@@ -816,7 +872,11 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             length_sequence_lint(call, positional[0], true, config, diagnostics);
         }
         "sprintf" | "gettextf" => sprintf_arguments_lint(&callee, &arguments, config, diagnostics),
-        "any" if all_positional && positional.len() == 1 => {
+        "any" | "all" if all_positional && positional.len() == 1 => {
+            outer_negation_lint(call, &callee, positional[0], config, diagnostics);
+            if callee != "any" {
+                return;
+            }
             if let Some(("is.na", value)) = single_argument_of(positional[0], &["is.na"]) {
                 push_lint(
                     diagnostics,
@@ -863,6 +923,67 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
         {
             literal_coercion_lint(call, &callee, positional[0], config, diagnostics);
         }
+        "expect_equal" | "expect_identical" | "expect_true" | "expect_false" if all_positional => {
+            testthat_expectation_lint(call, &callee, &positional, config, diagnostics);
+        }
+        "stop" | "warning" | "message" | "packageStartupMessage" => {
+            condition_message_lint(&callee, &arguments, config, diagnostics);
+        }
+        "grepl" | "grep" | "sub" | "gsub" | "regexpr" | "gregexpr" | "regexec" | "strsplit" => {
+            fixed_regex_lint(call, &callee, &arguments, config, diagnostics);
+        }
+        "which" if all_positional && positional.len() == 1 => {
+            if positional[0].kind() != SyntaxKind::CALL_EXPR
+                || bare_callee(positional[0]).as_deref() != Some("grepl")
+            {
+                return;
+            }
+            let Some(grepl_arguments) = positional[0]
+                .children()
+                .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+            else {
+                return;
+            };
+            push_lint(
+                diagnostics,
+                opt_in(config.which_grepl),
+                Severity::Warning,
+                "which-grepl",
+                significant_range(call),
+                "Use grep(...), which returns the matching positions directly, instead of which(grepl(...))",
+                Some((
+                    Applicability::Safe,
+                    "Change to `grep()`",
+                    format!("grep{}", significant_text(&grepl_arguments)),
+                )),
+            );
+        }
+        "length" if all_positional && positional.len() == 1 => {
+            if let Some(("levels", value)) = single_argument_of(positional[0], &["levels"]) {
+                push_lint(
+                    diagnostics,
+                    opt_in(config.length_levels),
+                    Severity::Warning,
+                    "length-levels",
+                    significant_range(call),
+                    "Use nlevels(x) instead of length(levels(x))",
+                    Some((
+                        Applicability::Safe,
+                        "Change to `nlevels()`",
+                        format!("nlevels({})", significant_text(&value)),
+                    )),
+                );
+            }
+        }
+        "browser" if !is_quoted(call) => push_lint(
+            diagnostics,
+            opt_in(config.browser_call),
+            Severity::Warning,
+            "browser-call",
+            significant_range(call),
+            "Remove this browser() call, which pauses the code whenever it runs in an interactive session",
+            None,
+        ),
         _ => {}
     }
 }
@@ -1195,17 +1316,7 @@ fn redundant_equals_lint(
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let boolean = |node: &SyntaxNode| {
-        (node.kind() == SyntaxKind::LITERAL)
-            .then(|| node.first_token())
-            .flatten()
-            .and_then(|token| match token.kind() {
-                SyntaxKind::TRUE_KW => Some(true),
-                SyntaxKind::FALSE_KW => Some(false),
-                _ => None,
-            })
-    };
-    let (value, other) = match (boolean(lhs), boolean(rhs)) {
+    let (value, other) = match (boolean_literal(lhs), boolean_literal(rhs)) {
         (None, Some(value)) => (value, lhs),
         (Some(value), None) => (value, rhs),
         _ => return,
@@ -1443,6 +1554,488 @@ fn commented_code_lint(
             None,
         );
     }
+}
+
+/// `all(!x)` is `!any(x)` and `any(!x)` is `!all(x)` by De Morgan's laws, which hold for NA in
+/// R's three-valued logic too. The negation then runs once on the result, not on every element.
+fn outer_negation_lint(
+    call: &SyntaxNode,
+    callee: &str,
+    value: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(operand) = negated_operand(value) else {
+        return;
+    };
+    let other = if callee == "all" { "any" } else { "all" };
+    push_lint(
+        diagnostics,
+        opt_in(config.outer_negation),
+        Severity::Warning,
+        "outer-negation",
+        significant_range(call),
+        format!("Use `!{other}(x)` instead of `{callee}(!x)`, which negates every element first"),
+        Some((
+            Applicability::Safe,
+            &format!("Change to `!{other}()`"),
+            in_place_of(call, format!("!{other}({})", significant_text(&operand))),
+        )),
+    );
+}
+
+/// `!(x == y)` is `x != y`, and every comparison has such a negation, which also holds for NA.
+fn comparison_negation_lint(
+    node: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(parenthesized) = negated_operand(node) else {
+        return;
+    };
+    if parenthesized.kind() != SyntaxKind::PAREN_EXPR {
+        return;
+    }
+    let Some(comparison) = parenthesized.first_child().and_then(BinaryExpr::cast) else {
+        return;
+    };
+    let (Some(operator), Some(lhs), Some(rhs)) =
+        (comparison.operator(), comparison.lhs(), comparison.rhs())
+    else {
+        return;
+    };
+    let negated = match operator.kind() {
+        SyntaxKind::EQ2 => "!=",
+        SyntaxKind::BANG_EQ => "==",
+        SyntaxKind::LESS => ">=",
+        SyntaxKind::GREATER => "<=",
+        SyntaxKind::LESS_EQ => ">",
+        SyntaxKind::GREATER_EQ => "<",
+        _ => return,
+    };
+    let has_comment = node
+        .descendants_with_tokens()
+        .any(|element| element.kind() == SyntaxKind::COMMENT);
+    let fix = (!has_comment).then(|| {
+        (
+            Applicability::Safe,
+            "Negate the comparison",
+            in_place_of(
+                node,
+                format!(
+                    "{} {negated} {}",
+                    significant_text(&lhs),
+                    significant_text(&rhs)
+                ),
+            ),
+        )
+    });
+    push_lint(
+        diagnostics,
+        opt_in(config.comparison_negation),
+        Severity::Warning,
+        "comparison-negation",
+        significant_range(node),
+        format!("Use `{negated}` instead of negating `{}`", operator.text()),
+        fix,
+    );
+}
+
+/// testthat has an expectation for each of these checks, and its failure message names what
+/// went wrong (`x is not NULL`) instead of printing two values. The fixes that change which
+/// values pass are unsafe. `expect_true(x)` ignores attributes that `expect_equal(x, TRUE)`
+/// compares, and `expect_false(x)` accepts only `FALSE` where `expect_true(!x)` also passes
+/// for `0`. `expect_length()` and `expect_named()` reject a value without a length or names,
+/// and `expect_s3_class()` rejects an S4 object that `inherits()` accepts.
+fn testthat_expectation_lint(
+    call: &SyntaxNode,
+    callee: &str,
+    positional: &[&SyntaxNode],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let text = |node: &SyntaxNode| significant_text(node);
+    let (applicability, expectation, replacement) = match (callee, positional) {
+        ("expect_equal" | "expect_identical", [actual, expected]) => {
+            if is_null_literal(expected) {
+                let replacement = format!("expect_null({})", text(actual));
+                (Applicability::Safe, "expect_null", replacement)
+            } else if let Some(value) = boolean_literal(expected) {
+                let expectation = if value { "expect_true" } else { "expect_false" };
+                let replacement = format!("{expectation}({})", text(actual));
+                (Applicability::Unsafe, expectation, replacement)
+            } else if let Some((function, inner)) = single_argument_of(actual, &["length", "names"])
+            {
+                let expectation = if function == "length" {
+                    "expect_length"
+                } else {
+                    "expect_named"
+                };
+                let replacement = format!("{expectation}({}, {})", text(&inner), text(expected));
+                (Applicability::Unsafe, expectation, replacement)
+            } else {
+                return;
+            }
+        }
+        ("expect_true" | "expect_false", [value]) => {
+            if let Some(operand) = negated_operand(value) {
+                let expectation = if callee == "expect_true" {
+                    "expect_false"
+                } else {
+                    "expect_true"
+                };
+                let replacement = format!("{expectation}({})", text(&operand));
+                (Applicability::Unsafe, expectation, replacement)
+            } else if callee == "expect_false" {
+                return;
+            } else if let Some((_, inner)) = single_argument_of(value, &["is.null"]) {
+                let replacement = format!("expect_null({})", text(&inner));
+                (Applicability::Safe, "expect_null", replacement)
+            } else {
+                let inherits = (value.kind() == SyntaxKind::CALL_EXPR
+                    && bare_callee(value).as_deref() == Some("inherits"))
+                .then(|| call_arguments(value))
+                .filter(|arguments| {
+                    arguments.len() == 2 && arguments.iter().all(|argument| argument.name.is_none())
+                });
+                let Some([object, class]) = inherits.as_deref() else {
+                    return;
+                };
+                let (Some(object), Some(class)) = (&object.value, &class.value) else {
+                    return;
+                };
+                let replacement = format!("expect_s3_class({}, {})", text(object), text(class));
+                (Applicability::Unsafe, "expect_s3_class", replacement)
+            }
+        }
+        _ => return,
+    };
+    push_lint(
+        diagnostics,
+        opt_in(config.testthat_expectation),
+        Severity::Warning,
+        "testthat-expectation",
+        significant_range(call),
+        format!(
+            "Use {expectation}(), which says what the test checks and fails with a clearer message"
+        ),
+        Some((
+            applicability,
+            &format!("Change to `{expectation}()`"),
+            replacement,
+        )),
+    );
+}
+
+/// `stop()`, `warning()` and `message()` join their arguments with no separator, so a
+/// `paste0()` inside them is redundant, and it hides each piece from translation, which
+/// works argument by argument. The fix is unsafe because `paste0()` recycles vectors
+/// element-wise while the condition joins them end to end.
+fn condition_message_lint(
+    callee: &str,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for value in arguments
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .filter_map(|argument| argument.value.as_ref())
+        .filter(|value| value.kind() == SyntaxKind::CALL_EXPR)
+    {
+        let Some(paste) = bare_callee(value) else {
+            continue;
+        };
+        let pasted = call_arguments(value);
+        let named = |wanted: &str| {
+            pasted.iter().find(|argument| {
+                argument
+                    .name
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == wanted)
+            })
+        };
+        let separator = named("sep");
+        let joins = match paste.as_str() {
+            "paste0" => separator.is_none(),
+            "paste" => separator
+                .and_then(|argument| argument.value.as_ref())
+                .is_some_and(|value| matches!(value.text().to_string().as_str(), "\"\"" | "''")),
+            _ => false,
+        };
+        if !joins || named("collapse").is_some() || named("recycle0").is_some() {
+            continue;
+        }
+        let rest: Vec<String> = pasted
+            .iter()
+            .filter(|argument| separator.is_none_or(|separator| separator.node != argument.node))
+            .map(|argument| significant_text(&argument.node))
+            .collect();
+        let has_comment = value
+            .descendants_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::COMMENT);
+        let fix = (!has_comment && !rest.is_empty()).then(|| {
+            (
+                Applicability::Unsafe,
+                "Pass the pieces directly",
+                rest.join(", "),
+            )
+        });
+        push_lint(
+            diagnostics,
+            opt_in(config.condition_message),
+            Severity::Warning,
+            "condition-message",
+            significant_range(value),
+            format!("{callee}() joins its arguments itself, so {paste}() is not needed"),
+            fix,
+        );
+    }
+}
+
+/// A pattern with no regular expression syntax matches the same text as a fixed string, and
+/// `fixed = TRUE` skips compiling and running a regex. Calls that set `fixed`, `perl` or
+/// `ignore.case` (which `fixed` does not support) are left alone, and so are `sub()` and
+/// `gsub()` with a replacement that may hold backreferences. The fix is unsafe because R may
+/// mark the encoding of a fixed match's result differently: DBI quotes identifiers without
+/// `fixed = TRUE` for that reason.
+fn fixed_regex_lint(
+    call: &SyntaxNode,
+    callee: &str,
+    arguments: &[CallArgument],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let formals: &[&str] = match callee {
+        "grepl" => &["pattern", "x", "ignore.case", "perl", "fixed", "useBytes"],
+        "grep" => &[
+            "pattern",
+            "x",
+            "ignore.case",
+            "perl",
+            "value",
+            "fixed",
+            "useBytes",
+            "invert",
+        ],
+        "sub" | "gsub" => &[
+            "pattern",
+            "replacement",
+            "x",
+            "ignore.case",
+            "perl",
+            "fixed",
+            "useBytes",
+        ],
+        "strsplit" => &["x", "split", "fixed", "perl", "useBytes"],
+        _ => &[
+            "pattern",
+            "text",
+            "ignore.case",
+            "perl",
+            "fixed",
+            "useBytes",
+        ],
+    };
+    let Some(matched) = match_formals(arguments, formals) else {
+        return;
+    };
+    let value_of = |formal: &str| {
+        formals
+            .iter()
+            .position(|candidate| *candidate == formal)
+            .and_then(|index| matched.get(index).copied().flatten())
+    };
+    if ["fixed", "perl", "ignore.case"]
+        .iter()
+        .any(|formal| value_of(formal).is_some())
+    {
+        return;
+    }
+    let plain_literal = |node: &SyntaxNode| {
+        node.kind() == SyntaxKind::LITERAL
+            && node.first_token().is_some_and(|token| {
+                token.kind() == SyntaxKind::STRING && {
+                    let text = token.text();
+                    let inner = text.get(1..text.len().saturating_sub(1)).unwrap_or("");
+                    !inner.is_empty()
+                        && !inner.contains(|character: char| {
+                            matches!(
+                                character,
+                                '\\' | '.'
+                                    | '|'
+                                    | '('
+                                    | ')'
+                                    | '['
+                                    | ']'
+                                    | '{'
+                                    | '}'
+                                    | '^'
+                                    | '$'
+                                    | '*'
+                                    | '+'
+                                    | '?'
+                            )
+                        })
+                }
+            })
+    };
+    let pattern_formal = if callee == "strsplit" {
+        "split"
+    } else {
+        "pattern"
+    };
+    let Some(pattern) = value_of(pattern_formal).filter(|pattern| plain_literal(pattern)) else {
+        return;
+    };
+    if matches!(callee, "sub" | "gsub")
+        && !value_of("replacement").is_some_and(|replacement| {
+            replacement.kind() == SyntaxKind::LITERAL
+                && replacement.first_token().is_some_and(|token| {
+                    token.kind() == SyntaxKind::STRING && !token.text().contains('\\')
+                })
+        })
+    {
+        return;
+    }
+    let Some(severity) = lint_severity(opt_in(config.fixed_regex), None) else {
+        return;
+    };
+    let closing = call
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+        .and_then(|list| list.last_token())
+        .filter(|token| token.kind() == SyntaxKind::R_PAREN);
+    let before_closing = closing
+        .as_ref()
+        .and_then(|token| {
+            std::iter::successors(token.prev_token(), |token| token.prev_token())
+                .find(|token| !token.kind().is_trivia())
+        })
+        .map(|token| token.kind());
+    let diagnostic = Diagnostic::new(
+        significant_range(pattern),
+        severity,
+        "fixed-regex",
+        format!(
+            "This pattern has no regular expression syntax, so {callee}() matches it faster with `fixed = TRUE`"
+        ),
+    );
+    diagnostics.push(match closing {
+        Some(closing) if before_closing != Some(SyntaxKind::COMMA) => diagnostic.with_fix(
+            Applicability::Unsafe,
+            "Add `fixed = TRUE`".to_owned(),
+            TextRange::empty(closing.text_range().start()),
+            ", fixed = TRUE".to_owned(),
+        ),
+        _ => diagnostic,
+    });
+}
+
+/// R's argument matching for exact names and positions: each named argument takes its formal,
+/// and the positional ones fill the remaining formals in order. `None` when an argument is
+/// `...`, its name is not exactly a formal (R would try a partial match), or there are more
+/// arguments than formals.
+fn match_formals<'a>(
+    arguments: &'a [CallArgument],
+    formals: &[&str],
+) -> Option<Vec<Option<&'a SyntaxNode>>> {
+    let mut matched: Vec<Option<&SyntaxNode>> = vec![None; formals.len()];
+    for argument in arguments {
+        let value = argument.value.as_ref()?;
+        if value.kind() == SyntaxKind::NAME && value.text() == "..." {
+            return None;
+        }
+        if let Some((name, _)) = &argument.name {
+            let index = formals.iter().position(|formal| formal == name)?;
+            *matched.get_mut(index)? = Some(value);
+        }
+    }
+    let mut free = (0..formals.len())
+        .filter(|index| matched[*index].is_none())
+        .collect::<Vec<_>>()
+        .into_iter();
+    for argument in arguments.iter().filter(|argument| argument.name.is_none()) {
+        let index = free.next()?;
+        *matched.get_mut(index)? = argument.value.as_ref();
+    }
+    Some(matched)
+}
+
+/// Whether `node` sits inside `quote()`, `bquote()`, `substitute()` or `expression()`, which
+/// build code to run elsewhere, such as a debugging helper that injects a `browser()` call.
+fn is_quoted(node: &SyntaxNode) -> bool {
+    node.ancestors().skip(1).any(|ancestor| {
+        ancestor.kind() == SyntaxKind::CALL_EXPR
+            && matches!(
+                bare_callee(&ancestor).as_deref(),
+                Some("quote" | "bquote" | "substitute" | "expression")
+            )
+    })
+}
+
+/// The operand of a `!x` expression.
+fn negated_operand(node: &SyntaxNode) -> Option<SyntaxNode> {
+    let negates = node.kind() == SyntaxKind::UNARY_EXPR
+        && node
+            .children_with_tokens()
+            .find(|element| !element.kind().is_trivia())
+            .is_some_and(|element| element.kind() == SyntaxKind::BANG);
+    negates.then(|| node.first_child()).flatten()
+}
+
+/// The text that replaces `node`, in parentheses unless `node` sits where nothing binds to
+/// it. A replacement such as `!any(x)` binds more loosely than `+`, so `all(!x) + 1` must
+/// become `(!any(x)) + 1`.
+fn in_place_of(node: &SyntaxNode, replacement: String) -> String {
+    let stands_alone = node.parent().is_none_or(|parent| match parent.kind() {
+        SyntaxKind::ARGUMENT
+        | SyntaxKind::PAREN_EXPR
+        | SyntaxKind::BRACE_EXPR
+        | SyntaxKind::SOURCE_FILE
+        | SyntaxKind::IF_EXPR
+        | SyntaxKind::WHILE_EXPR
+        | SyntaxKind::FOR_EXPR
+        | SyntaxKind::REPEAT_EXPR
+        | SyntaxKind::FUNCTION_DEF => true,
+        SyntaxKind::BINARY_EXPR => {
+            let binary = BinaryExpr::cast(parent.clone());
+            binary
+                .as_ref()
+                .and_then(BinaryExpr::operator)
+                .is_some_and(|operator| {
+                    matches!(
+                        operator.kind(),
+                        SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ
+                    )
+                })
+                && binary.and_then(|binary| binary.rhs()).as_ref() == Some(node)
+        }
+        _ => false,
+    });
+    if stands_alone {
+        replacement
+    } else {
+        format!("({replacement})")
+    }
+}
+
+fn boolean_literal(node: &SyntaxNode) -> Option<bool> {
+    (node.kind() == SyntaxKind::LITERAL)
+        .then(|| node.first_token())
+        .flatten()
+        .and_then(|token| match token.kind() {
+            SyntaxKind::TRUE_KW => Some(true),
+            SyntaxKind::FALSE_KW => Some(false),
+            _ => None,
+        })
+}
+
+fn is_null_literal(node: &SyntaxNode) -> bool {
+    node.kind() == SyntaxKind::LITERAL
+        && node
+            .first_token()
+            .is_some_and(|token| token.kind() == SyntaxKind::NULL_KW)
 }
 
 fn is_na_literal(node: &SyntaxNode) -> bool {

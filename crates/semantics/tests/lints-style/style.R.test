@@ -326,3 +326,182 @@ df |> mutate(x = x + 1, x = x * 2)
 g(1, 1, 1)
 #++++
 clean
+
+#==== testthat-expectation
+#---- general_expectations_with_a_specific_form_warn
+expect_equal(x, NULL)
+expect_identical(x, TRUE)
+expect_equal(length(x), 3)
+expect_equal(names(x), e)
+expect_true(!ok)
+expect_false(!ok)
+expect_true(is.null(x))
+expect_true(inherits(x, "tbl"))
+#++++
+0..21 warning[testthat-expectation] Use expect_null(), which says what the test checks and fails with a clearer message
+  safe fix 0..21 "expect_null(x)"
+22..47 warning[testthat-expectation] Use expect_true(), which says what the test checks and fails with a clearer message
+  unsafe fix 22..47 "expect_true(x)"
+48..74 warning[testthat-expectation] Use expect_length(), which says what the test checks and fails with a clearer message
+  unsafe fix 48..74 "expect_length(x, 3)"
+75..100 warning[testthat-expectation] Use expect_named(), which says what the test checks and fails with a clearer message
+  unsafe fix 75..100 "expect_named(x, e)"
+101..117 warning[testthat-expectation] Use expect_false(), which says what the test checks and fails with a clearer message
+  unsafe fix 101..117 "expect_false(ok)"
+118..135 warning[testthat-expectation] Use expect_true(), which says what the test checks and fails with a clearer message
+  unsafe fix 118..135 "expect_true(ok)"
+136..159 warning[testthat-expectation] Use expect_null(), which says what the test checks and fails with a clearer message
+  safe fix 136..159 "expect_null(x)"
+160..191 warning[testthat-expectation] Use expect_s3_class(), which says what the test checks and fails with a clearer message
+  unsafe fix 160..191 "expect_s3_class(x, \"tbl\")"
+
+#---- specific_expectations_are_clean
+expect_null(x)
+expect_equal(x, 1)
+expect_true(ok)
+expect_false(is.null(x))
+expect_equal(x, NULL, info = "why")
+#++++
+clean
+
+#==== condition-message
+#---- pasted_messages_warn
+stop(paste0("no file ", path))
+warning(paste("a", b, sep = ""), call. = FALSE)
+message(paste0())
+#++++
+5..29 warning[condition-message] stop() joins its arguments itself, so paste0() is not needed
+  unsafe fix 5..29 "\"no file \", path"
+39..62 warning[condition-message] warning() joins its arguments itself, so paste() is not needed
+  unsafe fix 39..62 "\"a\", b"
+39..62 warning[paste-sep] Use paste0(...) instead of paste(..., sep = "")
+  safe fix 39..62 "paste0(\"a\", b)"
+87..95 warning[condition-message] message() joins its arguments itself, so paste0() is not needed
+
+#---- plain_messages_are_clean
+stop("no file ", path)
+stop(paste("no", "file"))
+message(paste0(x, collapse = ", "))
+#++++
+clean
+
+#==== comparison-negation
+#---- negated_comparisons_warn
+if (!(x == 1)) 1
+y <- !(a < b)
+z <- 1 + !(a >= b)
+#++++
+4..13 warning[comparison-negation] Use `!=` instead of negating `==`
+  safe fix 4..13 "x != 1"
+22..30 warning[comparison-negation] Use `>=` instead of negating `<`
+  safe fix 22..30 "a >= b"
+40..49 warning[comparison-negation] Use `<` instead of negating `>=`
+  safe fix 40..49 "(a < b)"
+
+#---- other_negations_are_clean
+if (!(x %in% y)) 1
+!x
+!(a & b)
+#++++
+clean
+
+#==== outer-negation
+#---- negated_elements_warn
+all(!x)
+y <- any(!is.na(x))
+all(!x) + 1
+#++++
+0..7 warning[outer-negation] Use `!any(x)` instead of `all(!x)`, which negates every element first
+  safe fix 0..7 "!any(x)"
+13..27 warning[outer-negation] Use `!all(x)` instead of `any(!x)`, which negates every element first
+  safe fix 13..27 "!all(is.na(x))"
+28..35 warning[outer-negation] Use `!any(x)` instead of `all(!x)`, which negates every element first
+  safe fix 28..35 "(!any(x))"
+
+#---- outer_negations_are_clean
+!any(x)
+all(!x, na.rm = TRUE)
+#++++
+clean
+
+#==== fixed-regex
+#---- plain_patterns_warn
+grepl("abc", x)
+sub("-", "_", x)
+strsplit(x, ",")
+regexpr(text = x, "a b")
+#++++
+6..11 warning[fixed-regex] This pattern has no regular expression syntax, so grepl() matches it faster with `fixed = TRUE`
+  unsafe fix 14..14 ", fixed = TRUE"
+20..23 warning[fixed-regex] This pattern has no regular expression syntax, so sub() matches it faster with `fixed = TRUE`
+  unsafe fix 31..31 ", fixed = TRUE"
+45..48 warning[fixed-regex] This pattern has no regular expression syntax, so strsplit() matches it faster with `fixed = TRUE`
+  unsafe fix 48..48 ", fixed = TRUE"
+68..73 warning[fixed-regex] This pattern has no regular expression syntax, so regexpr() matches it faster with `fixed = TRUE`
+  unsafe fix 73..73 ", fixed = TRUE"
+
+#---- regex_and_configured_patterns_are_clean
+grepl("^abc", x)
+grepl("a.c", x)
+grepl("abc", x, fixed = TRUE)
+grepl("abc", x, ignore.case = TRUE)
+gsub("a", "\\1", x)
+grepl(pattern, x)
+grepl("abc", ...)
+#++++
+clean
+
+#==== which-grepl
+#---- which_of_grepl_warns
+which(grepl("a", x, fixed = TRUE))
+#++++
+0..34 warning[which-grepl] Use grep(...), which returns the matching positions directly, instead of which(grepl(...))
+  safe fix 0..34 "grep(\"a\", x, fixed = TRUE)"
+
+#---- which_of_others_is_clean
+which(x > 1)
+which(grepl("^a", x), arr.ind = TRUE)
+#++++
+clean
+
+#==== length-levels
+#---- length_of_levels_warns
+length(levels(f))
+#++++
+0..17 warning[length-levels] Use nlevels(x) instead of length(levels(x))
+  safe fix 0..17 "nlevels(f)"
+
+#---- nlevels_is_clean
+nlevels(f)
+length(unique(f))
+#++++
+clean
+
+#==== browser-call
+#---- browser_warns
+f <- function() {
+  browser()
+}
+#++++
+20..29 warning[browser-call] Remove this browser() call, which pauses the code whenever it runs in an interactive session
+
+#---- quoted_browser_is_clean
+debug_at <- function(env) eval(quote(browser()), env)
+#++++
+clean
+
+#==== numeric-leading-zero
+#---- missing_leading_zeros_warn
+x <- .5
+y <- .5e3L
+#++++
+5..7 warning[numeric-leading-zero] Write `0.5` with a leading zero, which is easier to read
+  safe fix 5..7 "0.5"
+13..18 warning[numeric-leading-zero] Write `0.5e3L` with a leading zero, which is easier to read
+  safe fix 13..18 "0.5e3L"
+
+#---- leading_zeros_are_clean
+x <- 0.5
+y <- 5.
+#++++
+clean

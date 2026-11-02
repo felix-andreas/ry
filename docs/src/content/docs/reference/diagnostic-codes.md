@@ -63,6 +63,15 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `paste-sep` | `paste(..., sep = "")` to `paste0(...)`, when no comment sits inside the call | safe |
 | `literal-coercion` | `as.integer(1)` to `1L`, and the like for other literals | safe |
 | `single-quotes` | `'text'` to `"text"`, when the text holds no `"` or `\'` | safe |
+| `comparison-negation` | `!(x == y)` to `x != y`, and the like for other comparisons | safe |
+| `outer-negation` | `all(!x)` to `!any(x)`, `any(!x)` to `!all(x)` | safe |
+| `which-grepl` | `which(grepl(...))` to `grep(...)` | safe |
+| `length-levels` | `length(levels(x))` to `nlevels(x)` | safe |
+| `numeric-leading-zero` | `.5` to `0.5` | safe |
+| `testthat-expectation` | `expect_equal(x, NULL)` and `expect_true(is.null(x))` to `expect_null(x)` | safe |
+| `testthat-expectation` | `expect_equal(x, TRUE)` to `expect_true(x)`, `expect_true(!x)` to `expect_false(x)`, `expect_equal(length(x), n)` to `expect_length(x, n)`, `expect_equal(names(x), n)` to `expect_named(x, n)`, `expect_true(inherits(x, "a"))` to `expect_s3_class(x, "a")` | unsafe |
+| `condition-message` | `stop(paste0(a, b))` to `stop(a, b)` | unsafe |
+| `fixed-regex` | add `fixed = TRUE` | unsafe |
 | `lengths` | `sapply(x, length)` to `lengths(x)` | unsafe |
 | `redundant-equals` | `x == TRUE` to `x`, `x == FALSE` to `!x` | unsafe |
 | `equals-na` | `x == NA` to `is.na(x)`, `x != NA` to `!is.na(x)` | unsafe |
@@ -258,6 +267,32 @@ column.
 **`single-quotes`** (off by default): spellings with a shorter or faster equivalent, listed with
 their fixes under [Fixes](#fixes). `redundant-equals` and `lengths` have unsafe fixes, because
 `1 == TRUE` is `TRUE` and `sapply()` on an empty list returns a list, not an integer vector.
+
+**`testthat-expectation`** (off by default): a general testthat expectation where a specific one
+exists, such as `expect_equal(x, NULL)` for `expect_null(x)`. The specific one fails with a message
+that says what went wrong. Most fixes are unsafe because the specific expectation accepts different
+values: `expect_false(x)` passes only for `FALSE`, while `expect_true(!x)` also passes for `0`.
+
+**`condition-message`** (off by default): `paste0()`, or `paste()` with `sep = ""`, inside `stop()`,
+`warning()`, `message()` or `packageStartupMessage()`, which join their arguments themselves. R
+translates a condition message argument by argument, so a pasted message cannot be translated. The
+fix is unsafe because `paste0()` recycles vectors element by element where `stop()` joins them end
+to end.
+
+**`fixed-regex`** (off by default): a literal pattern with no regular expression syntax in `grepl()`,
+`grep()`, `sub()`, `gsub()`, `regexpr()`, `gregexpr()`, `regexec()` or `strsplit()`, which
+`fixed = TRUE` matches faster. Calls that already set `fixed`, `perl` or `ignore.case` are skipped,
+and so are `sub()` and `gsub()` with a replacement that may hold a backreference. The fix is unsafe
+because R can mark the encoding of a fixed match's result differently.
+
+**`browser-call`** (off by default): a `browser()` call, which pauses the code whenever it runs
+interactively. A call inside `quote()`, `bquote()`, `substitute()` or `expression()` is skipped,
+because there it is code built on purpose.
+
+**`comparison-negation`**, **`outer-negation`**, **`which-grepl`**, **`length-levels`** and
+**`numeric-leading-zero`** (off by default): more spellings with a shorter equivalent, each with a
+safe fix under [Fixes](#fixes). A fix that would change how the surrounding expression parses gets
+parentheses, so `all(!x) + 1` becomes `(!any(x)) + 1`.
 
 These lints take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
 still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.

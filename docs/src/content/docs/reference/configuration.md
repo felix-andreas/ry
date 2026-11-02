@@ -35,6 +35,15 @@ lengths = "off"               # sapply(x, length) instead of lengths(x)
 literal-coercion = "off"      # as.integer(1) instead of 1L
 redundant-equals = "off"      # x == TRUE instead of x
 single-quotes = "off"         # 'text' instead of "text"
+testthat-expectation = "off"  # expect_equal(x, NULL) instead of expect_null(x)
+condition-message = "off"     # stop(paste0(...)) instead of stop(...)
+comparison-negation = "off"   # !(x == y) instead of x != y
+outer-negation = "off"        # all(!x) instead of !any(x)
+fixed-regex = "off"           # a regex with no regex syntax and no fixed = TRUE
+which-grepl = "off"           # which(grepl(...)) instead of grep(...)
+length-levels = "off"         # length(levels(x)) instead of nlevels(x)
+browser-call = "off"          # a browser() call left in the code
+numeric-leading-zero = "off"  # .5 instead of 0.5
 unused-parameter = "off"      # a parameter the body never reads
 unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function
