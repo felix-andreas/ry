@@ -217,6 +217,11 @@ struct Pars {
     tck: f64,
     tcl: f64,
     usr: [f64; 4],
+    /// The plot region, in figure fractions, that `usr` was mapped onto when it was last set
+    /// (GNU R's `win2fig`). User coordinates go through it rather than the current plot
+    /// region, so changing the margins or the layout after `plot.window` moves the plot region
+    /// without moving what is drawn in user coordinates until the next `plot.window`.
+    window: [f64; 4],
     xaxp: [f64; 3],
     xaxs: char,
     xaxt: char,
@@ -401,6 +406,7 @@ impl Pars {
             tck: values::na_real(),
             tcl: -0.5,
             usr: [0.0, 1.0, 0.0, 1.0],
+            window: [0.0, 1.0, 0.0, 1.0],
             xaxp: [0.0, 1.0, 5.0],
             xaxs: 'r',
             xaxt: 's',
@@ -2080,6 +2086,9 @@ unsafe fn set_par(
         pars.margin_cex = pars.cex;
         pars.square = pars.pty == 's';
     }
+    if name == "usr" {
+        device.pars.window = device.plot_region();
+    }
     Ok(())
 }
 
@@ -2161,6 +2170,7 @@ unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
         {
             return Err(error("plot region too large"));
         }
+        let window = device.plot_region();
         let pars = &mut device.pars;
         pars.xlog = false;
         pars.ylog = false;
@@ -2168,6 +2178,7 @@ unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
         let (x, xaxp) = scale_axis([0.0, 1.0], pars.xaxs, false, lab[0]);
         let (y, yaxp) = scale_axis([0.0, 1.0], pars.yaxs, false, lab[1]);
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
     }
@@ -2281,10 +2292,12 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let (x, xaxp) = scale_axis(x, xaxs, xlog, lab[0]);
         let (y, yaxp) = scale_axis(y, yaxs, ylog, lab[1]);
+        let window = device.plot_region();
         let pars = &mut device.pars;
         pars.xlog = xlog;
         pars.ylog = ylog;
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
         Ok(())
@@ -3102,6 +3115,7 @@ struct AxisFrames {
     inner: [f64; 2],
     figure: [f64; 2],
     plot: [f64; 2],
+    window: [f64; 2],
     usr: [f64; 2],
     log: bool,
     device: [f64; 2],
@@ -3119,6 +3133,7 @@ fn axis_frames(device: &Device, vertical: bool) -> AxisFrames {
         inner: pick(device.inner_region()),
         figure: pick(device.figure_region()),
         plot: pick(device.plot_region()),
+        window: pick(device.pars.window),
         usr: pick(device.pars.usr),
         log: if vertical {
             device.pars.ylog
@@ -3152,7 +3167,7 @@ fn to_ndc(device: &Device, value: f64, unit: i32, vertical: bool) -> f64 {
         8 => figure_to_ndc(value),
         13 => {
             let value = if frames.log { value.log10() } else { value };
-            figure_to_ndc(lerp(frames.plot, unlerp(frames.usr, value)))
+            figure_to_ndc(lerp(frames.window, unlerp(frames.usr, value)))
         }
         14 => value / frames.size,
         15 => figure_to_ndc(value * frames.line_inches / frames.figure_inches),
@@ -3170,7 +3185,7 @@ fn from_ndc(device: &Device, ndc: f64, unit: i32, vertical: bool) -> f64 {
         7 => unlerp(frames.inner, ndc),
         8 => ndc_to_figure(ndc),
         13 => {
-            let value = lerp(frames.usr, unlerp(frames.plot, ndc_to_figure(ndc)));
+            let value = lerp(frames.usr, unlerp(frames.window, ndc_to_figure(ndc)));
             if frames.log { 10f64.powf(value) } else { value }
         }
         14 => ndc * frames.size,
@@ -3388,6 +3403,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
         let pin = device.plot_size();
         let delta = extent.map(|range| (range[1] - range[0]).abs());
         let fit = (pin[0] / delta[0]).min(pin[1] / delta[1]);
+        let plot_region = device.plot_region();
         let pars = &mut device.pars;
         let pad = [0, 1].map(|axis| 0.5 * (pin[axis] / fit - delta[axis]));
         let (x_window, xaxp) = scale_axis(
@@ -3403,9 +3419,10 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
             pars.lab[1],
         );
         pars.usr = [x_window[0], x_window[1], y_window[0], y_window[1]];
+        pars.window = plot_region;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
-        let window = (pars.usr, xaxp, yaxp);
+        let window = (pars.usr, pars.window, xaxp, yaxp);
         let pars = device.pars.clone();
         let [x_axis, y_axis] = user_axes(device);
         let inches = |point: [f64; 2]| [x_axis.inches(point[0]), y_axis.inches(point[1])];
@@ -3495,7 +3512,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     })?;
     with_device(|device| {
         let pars = &mut device.pars;
-        (pars.usr, pars.xaxp, pars.yaxp) = window;
+        (pars.usr, pars.window, pars.xaxp, pars.yaxp) = window;
         pars.xlog = false;
         pars.ylog = false;
         Ok(())
@@ -3868,12 +3885,14 @@ unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
     })?;
     let ymax = tree.heights.iter().copied().fold(tree.heights[0], f64::max);
     with_started_plot(|device| {
+        let window = device.plot_region();
         let pars = &mut device.pars;
         let (x, xaxp) = scale_axis([1.0, (merges + 1) as f64], pars.xaxs, false, pars.lab[0]);
         let (y, yaxp) = scale_axis([ymin, ymax], pars.yaxs, false, pars.lab[1]);
         pars.xlog = false;
         pars.ylog = false;
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
         Ok(())
@@ -4236,7 +4255,7 @@ fn user_axes(device: &Device) -> [UserAxis; 2] {
         let ndc = |fraction: f64| {
             lerp(
                 frames.inner,
-                lerp(frames.figure, lerp(frames.plot, fraction)),
+                lerp(frames.figure, lerp(frames.window, fraction)),
             )
         };
         let size = device.size()[usize::from(vertical)];
@@ -5552,12 +5571,9 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
     }
     with_inline_pars(call, 10, |device| {
         let pars = device.pars.clone();
-        let clip = clip_rect(device);
-        let clip = if pars.xpd == 0 {
-            region_rect(device, 8)
-        } else {
-            clip
-        };
+        // GNU R's `C_mtext` tests the `outer` argument vector itself rather than its value, so
+        // every margin label, outer or not, clips to the device.
+        let clip = device_rect(device);
         for index in 0..count {
             let Some(lines) = labels.get(index % labels.len()) else {
                 continue;
@@ -5573,13 +5589,23 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             let at = real_at(arguments[3], index, f64::NAN);
             let along = if at.is_finite() {
                 along_side(device, side, at, outer)
-            } else {
-                let region = region_rect(device, if outer { 7 } else { 17 });
+            } else if outer {
+                let region = region_rect(device, 7);
                 if side % 2 == 1 {
                     lerp([region.x0, region.x1], adj)
                 } else {
                     lerp([region.y0, region.y1], adj)
                 }
+            } else {
+                // GNU R interpolates `usr` here, so the label follows the window user
+                // coordinates go through, not a plot region changed since `plot.window`.
+                let [x_axis, y_axis] = user_axes(device);
+                let (axis, usr) = if side % 2 == 1 {
+                    (x_axis, [pars.usr[0], pars.usr[1]])
+                } else {
+                    (y_axis, [pars.usr[2], pars.usr[3]])
+                };
+                axis.origin + axis.scale * lerp(usr, adj)
             };
             let perpendicular = match side {
                 1 | 3 => pars.las == 2 || pars.las == 3,
@@ -5593,8 +5619,14 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 0.0
             };
+            // Unlike other text, a margin label ignores the shrinking `mfrow` and `mfcol`
+            // apply through `par("cex")`.
             let cex = real_at(arguments[6], index, 1.0);
-            let cex = if cex.is_finite() { cex } else { 1.0 } * pars.cex;
+            let cex = if cex.is_finite() {
+                cex
+            } else {
+                pars.inline_cex
+            };
             let colour = text_colour_at(arguments[7], index, pars.col, pars.bg)?;
             let font = real_at(arguments[8], index, f64::from(pars.font));
             let font = if font.is_finite() {
@@ -5602,7 +5634,6 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 pars.font
             };
-            let clip = if outer { device_rect(device) } else { clip };
             push_margin_text(
                 device, clip, side, line, outer, along, lines, pars.las, adj, padj, cex, font,
                 colour,

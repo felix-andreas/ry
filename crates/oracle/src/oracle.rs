@@ -8,6 +8,7 @@
 
 pub mod bench;
 pub mod fuzz;
+pub mod gallery;
 pub mod install;
 
 use {
@@ -433,7 +434,7 @@ impl Drop for Scratch {
     }
 }
 
-fn gnu_r_program() -> String {
+pub(crate) fn gnu_r_program() -> String {
     std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string())
 }
 
