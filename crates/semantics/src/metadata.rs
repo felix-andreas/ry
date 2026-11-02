@@ -6,6 +6,7 @@ use {
         Db, SiteRole, SourceFile, file_syntax_sites, parse,
         stubs::{META_PACKAGE_MEMBERS, stubs},
     },
+    rustc_hash::FxHashMap,
     std::{collections::BTreeSet, num::NonZero, thread},
     syntax::{
         NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind,
@@ -394,11 +395,28 @@ fn namespace_imports(directives: &[(String, Vec<SyntaxNode>)]) -> Vec<NamespaceI
     imports
 }
 
-/// Each top-level call with a bare-name callee, with its argument values. A named argument
+/// Each directive call with a bare-name callee, with its argument values. A named argument
 /// (`except = ...`) puts its name first; the value is the last expression child.
+///
+/// Analysis cannot evaluate the condition of an `if` directive, which R evaluates at load time,
+/// so the directives of both branches count: an import that only one platform makes still
+/// resolves the names it brings in.
 fn namespace_directives(root: &SyntaxNode) -> Vec<(String, Vec<SyntaxNode>)> {
     let mut directives = Vec::new();
-    for node in root.children() {
+    let mut pending: Vec<SyntaxNode> = root.children().collect();
+    pending.reverse();
+    while let Some(node) = pending.pop() {
+        if matches!(node.kind(), SyntaxKind::IF_EXPR | SyntaxKind::BRACE_EXPR) {
+            let mut inner: Vec<SyntaxNode> = node
+                .children()
+                .filter(|child| is_expression_kind(child.kind()))
+                .collect();
+            if node.kind() == SyntaxKind::IF_EXPR && !inner.is_empty() {
+                inner.remove(0);
+            }
+            pending.extend(inner.into_iter().rev());
+            continue;
+        }
         if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
@@ -490,10 +508,7 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
 
 fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
     let mut spec = NamespaceSpec::default();
-    for node in root.children() {
-        if !is_expression_kind(node.kind()) {
-            continue;
-        }
+    for node in unbraced_directives(root) {
         let Some(Call {
             callee: directive,
             qualified: false,
@@ -566,7 +581,7 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
                 };
                 let flag = |wanted: &str| {
                     named(wanted)
-                        .is_some_and(|value| matches!(node_text(&value).trim(), "TRUE" | "T"))
+                        .is_some_and(|value| matches!(node_text(value).trim(), "TRUE" | "T"))
                 };
                 let fixes = named(".fixes")
                     .and_then(name_argument)
@@ -597,6 +612,134 @@ fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
         }
     }
     spec
+}
+
+/// `NAMESPACE` with its `if` directives replaced by the directives on the branches R takes, so
+/// it parses into the spec R builds. R evaluates each condition when it loads the package, so
+/// the loader's host evaluates them and passes their values in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNamespace {
+    pub text: String,
+    /// The source text of each top-level `if` directive, in file order: what the host
+    /// evaluates.
+    pub conditionals: Vec<String>,
+    /// Whether `values` held the conditions of every `if` directive. When it did not, `text`
+    /// still holds the unresolved ones.
+    pub resolved: bool,
+}
+
+/// Replaces each top-level `if` directive of `source` by the directives on the branches that
+/// `values` takes. `values` maps an `if` directive's source text to its conditions' values in
+/// the order R's `parseNamespaceFile` evaluates them: the condition first, then, depth first,
+/// the conditions on the branch it took. A `{` block contributes each of its directives.
+pub fn resolve_namespace_conditionals(
+    source: &str,
+    values: &FxHashMap<String, Vec<bool>>,
+) -> ResolvedNamespace {
+    let unchanged = |conditionals| ResolvedNamespace {
+        text: source.to_owned(),
+        conditionals,
+        resolved: true,
+    };
+    // `if` is a keyword, so a file without the two letters has no conditional directive.
+    if !source.contains("if") {
+        return unchanged(Vec::new());
+    }
+    let root = syntax::parse(source).syntax_node();
+    let conditionals: Vec<SyntaxNode> = unbraced_directives(&root)
+        .into_iter()
+        .filter(|node| node.kind() == SyntaxKind::IF_EXPR)
+        .collect();
+    if conditionals.is_empty() {
+        return unchanged(Vec::new());
+    }
+    let mut text = String::with_capacity(source.len());
+    let mut resolved = true;
+    let mut copied = 0;
+    for node in &conditionals {
+        let mut taken = Vec::new();
+        let walked = values.get(&node.text().to_string()).and_then(|values| {
+            let mut values = values.iter().copied();
+            taken_directives(node, &mut values, &mut taken)?;
+            values.next().is_none().then_some(())
+        });
+        if walked.is_none() {
+            resolved = false;
+            continue;
+        }
+        let range = node.text_range();
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        text.push_str(source.get(copied..start).unwrap_or_default());
+        text.push_str(&taken.join("\n"));
+        copied = end;
+    }
+    text.push_str(source.get(copied..).unwrap_or_default());
+    ResolvedNamespace {
+        text,
+        conditionals: conditionals
+            .iter()
+            .map(|node| node.text().to_string())
+            .collect(),
+        resolved,
+    }
+}
+
+/// The top-level expressions of `NAMESPACE` in order, with each `{` block replaced by the
+/// expressions inside it, as R's `parseNamespaceFile` reads them.
+fn unbraced_directives(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    let mut directives = Vec::new();
+    let mut pending: Vec<SyntaxNode> = root
+        .children()
+        .filter(|node| is_expression_kind(node.kind()))
+        .collect();
+    pending.reverse();
+    while let Some(node) = pending.pop() {
+        if node.kind() == SyntaxKind::BRACE_EXPR {
+            pending.extend(
+                node.children()
+                    .filter(|child| is_expression_kind(child.kind()))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+        } else {
+            directives.push(node);
+        }
+    }
+    directives
+}
+
+/// Collects the directives `node` contributes when its conditions take `values`, or `None`
+/// when `values` runs out first.
+fn taken_directives(
+    node: &SyntaxNode,
+    values: &mut impl Iterator<Item = bool>,
+    taken: &mut Vec<String>,
+) -> Option<()> {
+    let expressions = || {
+        node.children()
+            .filter(|child| is_expression_kind(child.kind()))
+    };
+    match node.kind() {
+        SyntaxKind::IF_EXPR => {
+            let mut parts = expressions();
+            parts.next()?;
+            let then_branch = parts.next()?;
+            let else_branch = parts.next();
+            if values.next()? {
+                taken_directives(&then_branch, values, taken)?;
+            } else if let Some(else_branch) = else_branch {
+                taken_directives(&else_branch, values, taken)?;
+            }
+        }
+        SyntaxKind::BRACE_EXPR => {
+            for child in expressions() {
+                taken_directives(&child, values, taken)?;
+            }
+        }
+        _ => taken.push(node.text().to_string()),
+    }
+    Some(())
 }
 
 /// A call as the loader and `NAMESPACE` read it.
@@ -814,7 +957,7 @@ fn dcf_fields(source: &str) -> Vec<(&str, String)> {
 /// R accepts a bare name or a string literal for a NAMESPACE directive argument.
 fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
     match value.kind() {
-        SyntaxKind::NAME => Some((unquote(&node_text(&value)), value.text_range())),
+        SyntaxKind::NAME => Some((unquote(&node_text(value)), value.text_range())),
         SyntaxKind::LITERAL => {
             let token = value
                 .children_with_tokens()
@@ -823,7 +966,7 @@ fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
             Some((string_content(token.text()), value.text_range()))
         }
         // `S3method(pkg::generic, class)` names a generic in another namespace.
-        SyntaxKind::NAMESPACE_EXPR => Some((node_text(&value).into_owned(), value.text_range())),
+        SyntaxKind::NAMESPACE_EXPR => Some((node_text(value).into_owned(), value.text_range())),
         _ => None,
     }
 }

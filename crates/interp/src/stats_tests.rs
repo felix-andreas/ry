@@ -771,7 +771,7 @@ pub unsafe fn fexact(call: &NativeCall<'_>) -> R<Sexp> {
                     .collect();
                 child.sort_unstable();
                 let step = -cells.iter().map(|&count| factorial[count]).sum::<f64>();
-                let entry = next.entry(child).or_insert_with(PastPaths::default);
+                let entry = next.entry(child).or_default();
                 for &(value, multiplicity) in &open {
                     entry.add(value + step, multiplicity);
                 }

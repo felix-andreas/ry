@@ -144,57 +144,108 @@ pub struct LintConfig {
 }
 
 /// Each lint's config key, which is also its code, with its level, for code that sets levels by
-/// name, such as reading lintr's configuration.
+/// name, such as reading lintr's configuration. The destructuring names every field, so a new
+/// field fails to compile until it is listed here or explicitly skipped.
 pub fn lint_levels_mut(config: &mut LintConfig) -> Vec<(&'static str, &mut LintLevel)> {
+    let LintConfig {
+        assignment_operator,
+        boolean_shorthand,
+        trailing_comma,
+        unused_parameter,
+        unused_import,
+        shadows_builtin,
+        shadows_namespace,
+        object_system,
+        equals_na,
+        vector_logic,
+        length_sequence,
+        class_equals,
+        commented_code,
+        redundant_return,
+        duplicate_argument,
+        unreachable_code,
+        sprintf_arguments,
+        any_is_na,
+        paste_sep,
+        lengths,
+        literal_coercion,
+        redundant_equals,
+        single_quotes,
+        testthat_expectation,
+        condition_message,
+        comparison_negation,
+        outer_negation,
+        fixed_regex,
+        which_grepl,
+        length_levels,
+        browser_call,
+        numeric_leading_zero,
+        length_test,
+        implicit_assignment,
+        while_true,
+        scalar_in,
+        order_subset,
+        matrix_apply,
+        empty_assignment,
+        unnecessary_lambda,
+        yoda_test,
+        nzchar,
+        sample_int,
+        unnecessary_concatenation,
+        line_length,
+        data_table,
+        naming_style: _,
+        missing_comma: _,
+        max_line_length: _,
+        object_systems_disabled: _,
+    } = config;
     vec![
-        ("assignment-operator", &mut config.assignment_operator),
-        ("boolean-shorthand", &mut config.boolean_shorthand),
-        ("trailing-comma", &mut config.trailing_comma),
-        ("unused-parameter", &mut config.unused_parameter),
-        ("unused-import", &mut config.unused_import),
-        ("shadows-builtin", &mut config.shadows_builtin),
-        ("shadows-namespace", &mut config.shadows_namespace),
-        ("object-system", &mut config.object_system),
-        ("equals-na", &mut config.equals_na),
-        ("vector-logic", &mut config.vector_logic),
-        ("length-sequence", &mut config.length_sequence),
-        ("class-equals", &mut config.class_equals),
-        ("commented-code", &mut config.commented_code),
-        ("redundant-return", &mut config.redundant_return),
-        ("duplicate-argument", &mut config.duplicate_argument),
-        ("unreachable-code", &mut config.unreachable_code),
-        ("sprintf-arguments", &mut config.sprintf_arguments),
-        ("any-is-na", &mut config.any_is_na),
-        ("paste-sep", &mut config.paste_sep),
-        ("lengths", &mut config.lengths),
-        ("literal-coercion", &mut config.literal_coercion),
-        ("redundant-equals", &mut config.redundant_equals),
-        ("single-quotes", &mut config.single_quotes),
-        ("testthat-expectation", &mut config.testthat_expectation),
-        ("condition-message", &mut config.condition_message),
-        ("comparison-negation", &mut config.comparison_negation),
-        ("outer-negation", &mut config.outer_negation),
-        ("fixed-regex", &mut config.fixed_regex),
-        ("which-grepl", &mut config.which_grepl),
-        ("length-levels", &mut config.length_levels),
-        ("browser-call", &mut config.browser_call),
-        ("numeric-leading-zero", &mut config.numeric_leading_zero),
-        ("length-test", &mut config.length_test),
-        ("implicit-assignment", &mut config.implicit_assignment),
-        ("while-true", &mut config.while_true),
-        ("scalar-in", &mut config.scalar_in),
-        ("order-subset", &mut config.order_subset),
-        ("matrix-apply", &mut config.matrix_apply),
-        ("empty-assignment", &mut config.empty_assignment),
-        ("unnecessary-lambda", &mut config.unnecessary_lambda),
-        ("yoda-test", &mut config.yoda_test),
-        ("nzchar", &mut config.nzchar),
-        ("sample-int", &mut config.sample_int),
-        (
-            "unnecessary-concatenation",
-            &mut config.unnecessary_concatenation,
-        ),
-        ("line-length", &mut config.line_length),
+        ("assignment-operator", assignment_operator),
+        ("boolean-shorthand", boolean_shorthand),
+        ("trailing-comma", trailing_comma),
+        ("unused-parameter", unused_parameter),
+        ("unused-import", unused_import),
+        ("shadows-builtin", shadows_builtin),
+        ("shadows-namespace", shadows_namespace),
+        ("object-system", object_system),
+        ("equals-na", equals_na),
+        ("vector-logic", vector_logic),
+        ("length-sequence", length_sequence),
+        ("class-equals", class_equals),
+        ("commented-code", commented_code),
+        ("redundant-return", redundant_return),
+        ("duplicate-argument", duplicate_argument),
+        ("unreachable-code", unreachable_code),
+        ("sprintf-arguments", sprintf_arguments),
+        ("any-is-na", any_is_na),
+        ("paste-sep", paste_sep),
+        ("lengths", lengths),
+        ("literal-coercion", literal_coercion),
+        ("redundant-equals", redundant_equals),
+        ("single-quotes", single_quotes),
+        ("testthat-expectation", testthat_expectation),
+        ("condition-message", condition_message),
+        ("comparison-negation", comparison_negation),
+        ("outer-negation", outer_negation),
+        ("fixed-regex", fixed_regex),
+        ("which-grepl", which_grepl),
+        ("length-levels", length_levels),
+        ("browser-call", browser_call),
+        ("numeric-leading-zero", numeric_leading_zero),
+        ("length-test", length_test),
+        ("implicit-assignment", implicit_assignment),
+        ("while-true", while_true),
+        ("scalar-in", scalar_in),
+        ("order-subset", order_subset),
+        ("matrix-apply", matrix_apply),
+        ("empty-assignment", empty_assignment),
+        ("unnecessary-lambda", unnecessary_lambda),
+        ("yoda-test", yoda_test),
+        ("nzchar", nzchar),
+        ("sample-int", sample_int),
+        ("unnecessary-concatenation", unnecessary_concatenation),
+        ("line-length", line_length),
+        ("data-table", data_table),
     ]
 }
 
@@ -1622,7 +1673,7 @@ fn paste_sep_lint(
             && argument
                 .value
                 .as_ref()
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''"))
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''"))
     }) else {
         return;
     };
@@ -1997,12 +2048,12 @@ fn matrix_apply_lint(
     else {
         return;
     };
-    let prefix = match &*node_text(&margin) {
+    let prefix = match &*node_text(margin) {
         "1" | "1L" => "row",
         "2" | "2L" => "col",
         _ => return,
     };
-    let suffix = match &*node_text(&function) {
+    let suffix = match &*node_text(function) {
         "sum" if function.kind() == SyntaxKind::NAME => "Sums",
         "mean" if function.kind() == SyntaxKind::NAME => "Means",
         _ => return,
@@ -2025,7 +2076,7 @@ fn matrix_apply_lint(
             "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
-        (!has_comment(call)).then(|| (Applicability::Unsafe, title.as_str(), replacement)),
+        (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
     );
 }
 
@@ -2133,7 +2184,7 @@ fn nzchar_lint(
     let Some(("nchar", value)) = single_argument_of(lhs, &["nchar"]) else {
         return;
     };
-    if !matches!(&*node_text(&rhs), "0" | "0L") {
+    if !matches!(&*node_text(rhs), "0" | "0L") {
         return;
     }
     let negation = if operator == SyntaxKind::EQ2 { "!" } else { "" };
@@ -2594,7 +2645,7 @@ fn condition_message_lint(
             "paste0" => separator.is_none(),
             "paste" => separator
                 .and_then(|argument| argument.value.as_ref())
-                .is_some_and(|value| matches!(&*node_text(&value), "\"\"" | "''")),
+                .is_some_and(|value| matches!(&*node_text(value), "\"\"" | "''")),
             _ => false,
         };
         if !joins || named("collapse").is_some() || named("recycle0").is_some() {

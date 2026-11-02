@@ -11,8 +11,9 @@
 
 use {
     crate::{
-        Code, Loader, Source, find_package_root,
-        r::{RUNTIME_RY, RValue, error_value, plan_value},
+        Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
+        parse_namespace_conditions,
+        r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
         s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
@@ -41,7 +42,7 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("ryLoaderPlan", 2, do_plan),
+    internal("ryLoaderPlan", 3, do_plan),
     internal("ryLoaderCommit", 1, do_commit).invisible(),
     internal("ryLoaderBind", 2, do_bind).invisible(),
     internal("ryLoaderRun", 3, do_run).invisible(),
@@ -53,10 +54,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
     internal("ryLoaderChanged", 0, do_changed),
     internal("ryLoaderCallers", 2, do_callers),
+    internal("ryLoaderCompile", 2, do_compile).invisible(),
 ];
 
 /// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
 /// gives the session `load_all()`.
+///
+/// # Safety
+/// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn attach() -> R<()> {
     scope(|| {
         let runtime = values::new_env(values::base_env())?;
@@ -259,15 +264,19 @@ fn session() -> std::sync::MutexGuard<'static, Session> {
     SESSION.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `.Internal(ryLoaderPlan(root, full))`: the plan as `runtime.R` reads it, or `list(error =)`.
+/// `.Internal(ryLoaderPlan(root, full, conditions))`: the plan as `runtime.R` reads it, or
+/// `list(error =)`, or the `if` directives of `NAMESPACE` to evaluate. `conditions` is
+/// encoded as [`parse_namespace_conditions`] reads it.
 unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let full = values::require_flag(call.arg(1), "full")?;
+    let conditions =
+        parse_namespace_conditions(&values::require_string(call.arg(2), "conditions")?);
     let value = thread::scope(|threads| {
         thread::Builder::new()
             .name("ry-loader".to_owned())
             .stack_size(ANALYSIS_STACK_SIZE)
-            .spawn_scoped(threads, || plan(&root, full))
+            .spawn_scoped(threads, || plan(&root, full, &conditions))
             .map(|thread| {
                 thread
                     .join()
@@ -280,7 +289,7 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     scope(|| r_value(&value))
 }
 
-fn plan(root: &str, full: bool) -> RValue {
+fn plan(root: &str, full: bool, conditions: &NamespaceConditions) -> RValue {
     let Ok(path) = CString::new(root) else {
         return error_value(&format!("{root} has a NUL byte in its path"));
     };
@@ -290,9 +299,9 @@ fn plan(root: &str, full: bool) -> RValue {
     };
     let mut session = session();
     session.loader.set_strict(strict);
-    let plan = match session.loader.plan(Path::new(root), full) {
+    let plan = match session.loader.plan(Path::new(root), full, conditions) {
         Ok(plan) => plan,
-        Err(failure) => return error_value(&failure.to_string()),
+        Err(failure) => return failure_value(&failure),
     };
     let covered = VERDICT.get().is_some() && !PLANNED.swap(true, Ordering::Relaxed);
     if plan.strict
@@ -476,6 +485,50 @@ unsafe fn do_callers(call: &Call<'_>) -> R<Sexp> {
     let root = find_package_root(Path::new(&root)).map_err(|failure| error(failure.to_string()))?;
     let callers = session().loader.callers(&root, &changed);
     values::string_vector(&callers)
+}
+
+/// `.Internal(ryLoaderCompile(root, libraries))`: builds the compiled code of the package at
+/// `root` with ry's own toolchain, against ry's R home, so the shared object links ry's `libR`
+/// and its `Makevars` runs ry's `bin/R`. `libraries` are the session's library paths, searched
+/// for the headers of the packages in `LinkingTo`.
+unsafe fn do_compile(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let libraries: Vec<PathBuf> = values::strings(call.arg(1))
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .collect();
+    let home = ry_home().map_err(error)?;
+    rcmd::compile(&home, Path::new(&root), &libraries)
+        .map_err(|failure| error(format!("compiling src/ failed\n{failure}")))?;
+    Ok(nil())
+}
+
+/// ry's R home for this runtime, assembled in the user's cache on first use (`rcmd::cached_home`)
+/// from this `libR`, the `ry-rcmd` front end beside it, and the base R the session runs.
+fn ry_home() -> Result<PathBuf, String> {
+    let libr = interp::platform::library_path(do_compile as *const c_void)
+        .map(PathBuf::from)
+        .ok_or("cannot tell which file ry's runtime was loaded from")?;
+    let rcmd = libr.with_file_name(if cfg!(windows) {
+        "ry-rcmd.exe"
+    } else {
+        "ry-rcmd"
+    });
+    if !rcmd.is_file() {
+        return Err(format!(
+            "compiling src/ needs ry's R front end {}, which is missing",
+            rcmd.display()
+        ));
+    }
+    let cache = cache_directory()
+        .ok_or(
+            "compiling src/ needs a cache directory, and neither XDG_CACHE_HOME nor HOME is set",
+        )?
+        .join("ry")
+        .join("home");
+    let gnu_r_home = PathBuf::from(interp::system::r_home());
+    rcmd::cached_home(&cache, &libr, &rcmd, &gnu_r_home).map_err(|failure| failure.to_string())
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

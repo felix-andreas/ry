@@ -22,8 +22,10 @@ action: Add inferred type annotations for the whole file
   edit 25..25 -> ": T"
   edit 26..26 -> " -> T"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: <T> fn(value: T) -> T
-hint @36: fn() -> T
+hint @19<T>
+hint @25: T
+hint @26 -> T
+hint @50 -> T
 
 #---- outer_parameter_shadowed_by_inner_parameter
 wrapper <- function(val$0ue) {
@@ -45,8 +47,11 @@ action: Add inferred type annotations for the whole file
   edit 25..25 -> ": T"
   edit 26..26 -> " -> T"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: <T> fn(value: T) -> T
-hint @36: fn(value: T) -> T
+hint @19<T>
+hint @25: T
+hint @26 -> T
+hint @54: T
+hint @55 -> T
 
 #---- outer_local_in_nested_function
 wrapper <- function() {
@@ -68,9 +73,9 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 21..21 -> " -> integer"
 completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
-hint @7: fn() -> integer
+hint @21 -> integer
 hint @31: integer
-hint @45: fn() -> integer
+hint @59 -> integer
 
 #---- for_variable_shadowed_by_nested_parameter
 wrapper <- function(values) {
@@ -95,8 +100,11 @@ action: Add inferred type annotations for the whole file
   edit 26..26 -> ": T"
   edit 27..27 -> " -> NULL"
 completion (1): item
-hint @7: <T> fn(values: T) -> NULL
-hint @64: fn(item: T) -> T
+hint @19<T>
+hint @26: T
+hint @27 -> NULL
+hint @81: T
+hint @82 -> T
 
 #---- at_field_rhs
 obj@fie$0ld

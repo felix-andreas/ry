@@ -274,7 +274,9 @@ pub struct PackageIndex {
     pub version: String,
     /// `Depends` packages, which a load attaches.
     pub depends: Vec<String>,
-    pub namespace: NamespaceSpec,
+    /// Shared, since a large package's exports run to tens of thousands of names, and a reload
+    /// that leaves `NAMESPACE` alone hands back the same one.
+    pub namespace: Arc<NamespaceSpec>,
     /// Collation order, which is the order R runs top-level code in.
     pub files: Vec<IndexedFile>,
     /// Which names are lazy and where their definitions are. An edit inside a function body
@@ -429,9 +431,9 @@ impl PackageIndex {
     }
 }
 
-#[salsa::tracked(returns(ref))]
-pub fn namespace_spec(db: &dyn Db, sources: PackageSources) -> NamespaceSpec {
-    parse_namespace_spec(sources.namespace(db))
+#[salsa::tracked(returns(clone))]
+pub fn namespace_spec(db: &dyn Db, sources: PackageSources) -> Arc<NamespaceSpec> {
+    Arc::new(parse_namespace_spec(sources.namespace(db)))
 }
 
 /// The per-file layer between the per-item queries and [`package_index`], so re-deriving the
@@ -527,7 +529,7 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         package: description_field(description, "Package").unwrap_or_default(),
         version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
         depends: parse_description_depends(description),
-        namespace: namespace_spec(db, sources).clone(),
+        namespace: namespace_spec(db, sources),
         bindings,
         files,
         strict,

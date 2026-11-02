@@ -2108,6 +2108,7 @@ dependencies = [
  "bincode",
  "heap",
  "interp",
+ "rcmd",
  "rustc-hash",
  "salsa",
  "semantics",
@@ -3419,6 +3420,7 @@ name = "rcmd"
 version = "0.4.0-beta"
 dependencies = [
  "libloading",
+ "syntax",
 ]
 
 [[package]]
@@ -3748,6 +3750,7 @@ dependencies = [
  "portable-pty",
  "rcmd",
  "rdb",
+ "regex",
  "repl",
  "rustc-hash",
  "salsa",

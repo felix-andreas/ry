@@ -5,10 +5,11 @@
 
 use {
     ide::{
-        CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, HoverDefinition,
-        call_hierarchy_item, code_actions, code_lenses, completion, definition, diagnostic_fixes,
-        document_symbols, folding_ranges, hover, incoming_calls, inlay_hints, outgoing_calls,
-        references, rename, selection_ranges, semantic_tokens, signature_help, type_definition,
+        CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, Formal, HoverDefinition,
+        Installed, PackageTarget, call_hierarchy_item, code_actions, code_lenses, completion,
+        completion_with, definition, diagnostic_fixes, document_symbols, folding_ranges, hover,
+        import_fixes, incoming_calls, inlay_hints, outgoing_calls, references, rename,
+        selection_ranges, semantic_tokens, signature_help, signature_help_with, type_definition,
         workspace_symbols,
     },
     semantics::{
@@ -19,12 +20,40 @@ use {
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_project},
     },
-    std::path::Path,
+    std::{path::Path, sync::Arc},
     syntax::{
         TextRange, TextSize,
         testing::{run_fixture_suite, split_files},
     },
 };
+
+/// The installed library the cases see: one package without stubs, `fakepkg`, so a case can
+/// exercise what the editor reads from an installed package's `NAMESPACE` and source.
+struct FixtureLibrary;
+
+impl Installed for FixtureLibrary {
+    fn formals(&mut self, target: &PackageTarget) -> Option<Vec<Formal>> {
+        (target.packages.first().map(String::as_str) == Some("fakepkg")
+            && target.name == "fetch_rows")
+            .then(|| {
+                vec![
+                    Formal {
+                        name: "con".to_owned(),
+                        default: None,
+                    },
+                    Formal {
+                        name: "limit".to_owned(),
+                        default: Some("10".to_owned()),
+                    },
+                ]
+            })
+    }
+
+    fn exports(&mut self, package: &str) -> Option<Arc<[String]>> {
+        (package == "fakepkg")
+            .then(|| Arc::from(["fetch_columns".to_owned(), "fetch_rows".to_owned()]))
+    }
+}
 
 fn render(source: &str) -> String {
     let files: Vec<(Option<String>, String)> = match split_files(source) {
@@ -242,7 +271,7 @@ fn render_at(
     if let Some(type_target) = type_definition(db, files, file, offset) {
         output.push_str(&render_target("type-definition", Some(type_target)));
     }
-    match signature_help(db, file, offset) {
+    match signature_help_with(db, file, offset, &mut FixtureLibrary) {
         Some(help) => {
             for (signature_index, signature) in help.signatures.iter().enumerate() {
                 let marker =
@@ -282,7 +311,7 @@ fn render_at(
             ));
         }
     }
-    match completion(db, files, file, offset) {
+    match completion_with(db, files, file, offset, &mut FixtureLibrary) {
         Some(result) => {
             let labels: Vec<String> = result
                 .items
@@ -556,6 +585,16 @@ fn render_structure(source: &str) -> String {
                     output.push_str(&format!(
                         "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            for action in import_fixes(db, file, &diagnostics, whole, &mut FixtureLibrary) {
+                for edit in &action.edits {
+                    output.push_str(&format!(
+                        "fix {}: {} -> {:?}\n",
+                        action.title,
                         covered(edit.range),
                         edit.replacement
                     ));

@@ -1,0 +1,38 @@
+[stdout]
+|     
+| [1,]
+| [2,]
+|     c
+| r   
+|   a 
+|   bb
+|     
+| r   
+|   a 
+|   bb
+|       c
+|       
+|   [1,]
+|   [2,]
+|         c
+| longname
+|       a 
+|       bb
+|     longname
+| r   
+|   a 
+|   bb
+|     cc
+| r   
+|   a 
+|   bb
+| <0 x 0 matrix>
+|       cols
+| rows   a bb ccc
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(numeric(0), dim = c(0L, 3L), dimnames = list(rows = NULL, 
+|     cols = c("a", "bb", "ccc")))

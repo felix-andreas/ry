@@ -1,0 +1,37 @@
+[stdout]
+| `f<-`(`*tmp*`, value = 1)
+| `w<-`(`*tmp*`, value = 1)
+| `g<-`(`*tmp*`, value = 2)
+| `g<-`(x = `*tmp*`, value = 2)
+| [1] 1
+| [1] FALSE
+| List of 1
+|  $ a: num 1
+| a 
+| 5 
+| List of 1
+|  $ NA: num 2
+| <notSubsettableError in l[[c("e", "v")]] <- 1: object of type 'environment' is not subsettable>
+| <subscriptOutOfBoundsError in q[[1e+20]] <- 1: [[ ]] subscript out of bounds>
+| <notSubsettableError in sum[1]: object of type 'builtin' is not subsettable>
+| <notSubsettableError in `if`[1]: object of type 'special' is not subsettable>
+| <notSubsettableError in sum[[1]]: object of type 'builtin' is not subsettable>
+| <notSubsettableError in quote(a)[1]: object of type 'symbol' is not subsettable>
+| <notSubsettableError in quote(a)$b: object of type 'symbol' is not subsettable>
+| <notSubsettableError in fn[1]: object of type 'closure' is not subsettable>
+| <notSubsettableError in fn$a: object of type 'closure' is not subsettable>
+| <notSubsettableError in sum$a: object of type 'builtin' is not subsettable>
+| <simpleError in v$a: $ operator is invalid for atomic vectors>
+| <notSubsettableError in v[1] <- 2: object of type 'builtin' is not subsettable>
+| <notSubsettableError in v[[1]] <- 2: object of type 'builtin' is not subsettable>
+| <notSubsettableError in v$b <- 2: object of type 'symbol' is not subsettable>
+| <notSubsettableError in v$a <- 1: object of type 'closure' is not subsettable>
+| <notSubsettableError in v[1] <- 1: object of type 'environment' is not subsettable>
+| [1] "notSubsettableError" "error"               "condition"          
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

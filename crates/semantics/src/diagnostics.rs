@@ -25,7 +25,10 @@ use {
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
-        stubs::{CONDITIONAL_NAMESPACES, StubLibrary, namespace_exports, namespace_known, stubs},
+        stubs::{
+            CONDITIONAL_NAMESPACES, StubLibrary, dormant_namespace_exports, namespace_exports,
+            namespace_known, stubs,
+        },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -330,10 +333,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let sites = file_syntax_sites(db, file);
     // Only a sequence with an annotation among its statements can hold a dangling one.
     let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
-    for (node, target) in sequences
-        .iter()
-        .flat_map(|parent| statement_annotations(parent))
-    {
+    for (node, target) in sequences.iter().flat_map(statement_annotations) {
         let Some(annotation) = comment_annotation(db, file, &node) else {
             continue;
         };
@@ -636,7 +636,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 db,
                 context.get_or_init(|| read_context(db, file)),
                 item_index,
-                &check,
+                check,
                 naming,
                 expression,
                 *name,
@@ -712,7 +712,7 @@ fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId,
                 .iter()
                 .filter_map(|(expression, name)| {
                     let read = classify_non_local_read(
-                        db, &context, item_index, &check, naming, expression, *name,
+                        db, &context, item_index, check, naming, expression, *name,
                     );
                     (read != NonLocalRead::Resolvable).then_some((*expression, read))
                 })
@@ -797,6 +797,7 @@ fn classify_non_local_read(
     if crate::package_scheme_exists_in(db, files, context.library, name)
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
+        || crate::sourced_definition(db, file, symbol).is_some()
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -1321,7 +1322,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
         };
         let governing = match coercion(&lower_inline_annotation(db, &site)) {
             Some(directive) => Some(("inline annotation's", directive)),
-            None => coercion(&lowered_comment).map(|directive| ("comment's", directive)),
+            None => coercion(lowered_comment).map(|directive| ("comment's", directive)),
         };
         for inline in inline_slots(db, &site) {
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
@@ -1917,14 +1918,16 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed. A shipped package
-        // the project neither declares nor attaches is real too: `pkg::name` loads it
-        // without attaching it, so a script may use it that way alone.
-        false
-            if declared_dependency(db, &read.package)
-                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
-        {
-            None
+        // A declared dependency without stubs is real, just undescribed.
+        false if declared_dependency(db, &read.package) => None,
+        // A shipped package the project neither declares nor attaches is real too: `pkg::name`
+        // loads it without attaching it, so a script may use it that way alone. Its name is
+        // still checked against the shipped export list, without activating the namespace for
+        // bare names.
+        false if CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) => {
+            let name = read.name.as_ref()?;
+            (!read.internal && dormant_namespace_exports(db, &read.package, name) == Some(false))
+                .then(|| format!("`{name}` is not exported by `{}`.", read.package))
         }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
@@ -2312,6 +2315,10 @@ fn edit_distance_within(
 /// A script's top level is one frame run in order, so the unused check spans
 /// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    // A sourced file's bindings land in the sourcing frame, which reads them.
+    if ProjectFiles::try_get(db).is_some_and(|files| *crate::file_is_sourced(db, files, file)) {
+        return Vec::new();
+    }
     let error_ranges = file_error_ranges(db, file);
     struct Definer {
         item_index: usize,
