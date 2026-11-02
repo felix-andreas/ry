@@ -2262,12 +2262,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
       `format`/`strptime` do not recycle the format.
     - The fancy-regex backtrack limit is unbounded, so a catastrophic POSIX pattern can hang.
     - `iconv(sub = , "ASCII//TRANSLIT")`.
-  - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
-    `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
-    0.036 between `besselI` results), data.table's `S4.Rraw` test 2, an F value in nlme's
-    `anova`, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's
-    error message for `hashfile(NA)`, openssl's bignum "not valid integer", jose's `grepRaw`,
-    Rdpack's bibliography, and a long-path error in rprojroot.
+  - Smaller classes: Bessel's `IJKY.R` (a relative difference of 0.036 between `besselI`
+    results), an F value in nlme's `anova`, seven of data.table's `froll.Rraw` tests (6000.114
+    and neighbours), three tinytest failures in RcppArmadillo and four in RcppSimdJson,
+    and plumber's `test-async.R`.
+  - A process the oracle kills at its deadline leaves an empty `.Rout`, because ry buffers
+    stdout; reproduce a hang with `ry run` in the background and `gdb -p` to see where it is.
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
     ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
   - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure

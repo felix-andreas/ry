@@ -428,10 +428,7 @@ pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
 /// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
 /// `"NA"`, so it goes through `install` too.
 pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
-    if name != na_string()
-        && name.has_gp(gp::ASCII)
-        && name.has_gp(gp::CACHED)
-        && name.length() > 0
+    if name != na_string() && name.has_gp(gp::ASCII) && name.has_gp(gp::CACHED) && name.length() > 0
     {
         return Ok(crate::heap().install_char(name)?);
     }
