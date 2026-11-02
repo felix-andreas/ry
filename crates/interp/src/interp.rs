@@ -135,6 +135,9 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
+    /// A compact ALTREP integer sequence of the length, first element and increment (1 or
+    /// -1), or `None` when the host has no ALTREP classes.
+    pub compact_intseq: unsafe fn(usize, i32, i32) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -392,6 +395,7 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        compact_intseq: |_, _, _| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),

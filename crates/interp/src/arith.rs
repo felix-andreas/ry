@@ -6,7 +6,7 @@ use {
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
-        conditions,
+        conditions, interp,
         long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
@@ -3451,6 +3451,10 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
         && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs()
             <= i32::MAX as f64;
     if use_integer {
+        let increment = if start <= end { 1 } else { -1 };
+        if let Some(sequence) = compact_intseq(count, start as i32, increment)? {
+            return Ok(sequence);
+        }
         let result = alloc(SexpType::Integer, count)?;
         let start = start as i64;
         let output = values::ints_mut(result);
@@ -3473,6 +3477,32 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     Ok(result)
 }
 
+/// Sequences at least this long are compact ALTREP objects, as GNU R makes every `1:n`, so
+/// `seq_len(2^31 - 1)` costs nothing until its elements are read. Shorter ones stay ordinary
+/// vectors, which the evaluator's hot loops read without an indirection.
+const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
+
+/// A compact integer sequence when `count` reaches [`COMPACT_SEQUENCE_MIN`] and the host
+/// provides ALTREP classes.
+unsafe fn compact_intseq(count: usize, first: i32, increment: i32) -> R<Option<Sexp>> {
+    if count < COMPACT_SEQUENCE_MIN {
+        return Ok(None);
+    }
+    (interp().hooks.compact_intseq)(count, first, increment)
+}
+
+/// `1, 2, ..., count` as integers.
+unsafe fn one_to(count: usize) -> R<Sexp> {
+    if let Some(sequence) = compact_intseq(count, 1, 1)? {
+        return Ok(sequence);
+    }
+    let result = alloc(SexpType::Integer, count)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result)
+}
+
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3486,11 +3516,7 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
     let count = count as usize;
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
@@ -3500,11 +3526,7 @@ unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
     } else {
         length(object)
     };
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = index as i32 + 1;
-    }
-    Ok(result)
+    one_to(count)
 }
 
 /// `seq.int(from, to, by, length.out, along.with, ...)`.

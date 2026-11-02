@@ -2248,10 +2248,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
     of i is -10" warning), froll misses the warnings of 6000.114 and 6000.115, nafill fails
     3.07, and `programming.Rraw` stops on "invalid type/length (symbol/0) in vector allocation".
-  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
-    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
-    group, order, runs, split, expand and slice-chop files also fail; run them with
-    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -2295,8 +2291,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
-- **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
-  intseq does not.
+- **Indexing a compact sequence materializes it.** `1:n`, `seq_len` and `seq_along` of at least
+  2^20 elements are compact ALTREP objects, but `x[i]` and `x[[i]]` on one expand the whole
+  vector, because subsetting does not call `Elt` or `Extract_subset` (the item above).
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
