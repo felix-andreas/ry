@@ -2798,9 +2798,12 @@ fn matching_error(failure: fancy_regex::Error) -> crate::unwind::Unwind {
 pub(crate) struct Translation {
     pub(crate) pattern: String,
     pub(crate) problem: Option<&'static str>,
-    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`). TRE then ends a match at the
-    /// first end it reaches, so the whole match is the shortest one at the leftmost start, and
-    /// even a greedy `.*` in such a pattern matches as little as it can.
+    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`) outside every capture group,
+    /// with no capture group opening after it. TRE then ends a match at the first end it
+    /// reaches, so the whole match is the shortest one at the leftmost start, and even a greedy
+    /// `.*` in such a pattern matches as little as it can. A minimal repetition inside a capture
+    /// group, or followed by one, matches as in PCRE: `a.*?b.*` matches `aXb` of `aXbXb`, but
+    /// `a(.*?)b.*` and `a.*?(b).*` match all of it.
     minimal: bool,
 }
 
@@ -2841,7 +2844,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                 && approximate_settings(&chars, index).is_some()
         });
     // Where each open group starts in `output`, and whether it is a lookaround assertion.
-    let mut groups: Vec<(usize, bool)> = Vec::new();
+    let mut groups: Vec<(usize, bool, bool)> = Vec::new();
     // Where the assertion that just closed starts, while a quantifier may still apply to it.
     let mut assertion: Option<usize> = None;
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
@@ -2871,7 +2874,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
                         || (chars.get(index + 2) == Some(&'<')
                             && matches!(chars.get(index + 3), Some('=' | '!')));
-                    groups.push((start, lookaround));
+                    groups.push((start, lookaround, false));
                 }
                 atom = None;
                 quantified = false;
@@ -2894,7 +2897,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
                         if close == ':' {
-                            groups.push((start, false));
+                            groups.push((start, false, false));
                         }
                         atom = None;
                         quantified = false;
@@ -2903,7 +2906,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     }
                     _ => {
                         problem.get_or_insert("Invalid regexp");
-                        groups.push((start, false));
+                        groups.push((start, false, false));
                         output.push('(');
                         atom = None;
                         quantified = false;
@@ -2915,7 +2918,9 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                 continue;
             }
             '(' => {
-                groups.push((start, false));
+                groups.push((start, false, true));
+                // TRE matches a minimal repetition followed by a capture group as PCRE does.
+                minimal = false;
                 output.push('(');
                 atom = None;
                 quantified = false;
@@ -2929,7 +2934,7 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
             }
             ')' => {
                 output.push(')');
-                let (group_start, lookaround) = groups.pop().unwrap_or((start, false));
+                let (group_start, lookaround, _) = groups.pop().unwrap_or((start, false, false));
                 atom = Some(group_start);
                 assertion = lookaround.then_some(group_start);
                 quantified = false;
@@ -2968,7 +2973,9 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     } else if modifier == Some('?')
                         || (syntax == Syntax::Perl && modifier == Some('+'))
                     {
-                        minimal |= syntax == Syntax::Extended && modifier == Some('?');
+                        minimal |= syntax == Syntax::Extended
+                            && modifier == Some('?')
+                            && !groups.iter().any(|&(_, _, capturing)| capturing);
                         output.extend(modifier);
                         index += 1;
                     }
@@ -2998,7 +3005,8 @@ fn translate_dialect(chars: &[char], dialect: Dialect) -> Translation {
                     index = next;
                     if chars.get(index) == Some(&'?') {
                         if !approximate {
-                            minimal |= syntax == Syntax::Extended;
+                            minimal |= syntax == Syntax::Extended
+                                && !groups.iter().any(|&(_, _, capturing)| capturing);
                             output.push('?');
                         }
                         index += 1;
