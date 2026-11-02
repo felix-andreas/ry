@@ -47,7 +47,10 @@ use {
 };
 
 mod fields;
+mod migrate;
 pub mod testing;
+
+pub use migrate::{DataTableRewrite, apply_data_table_rewrites, data_table_rewrites};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
@@ -2451,6 +2454,10 @@ pub enum CodeActionKind {
     DiagnosticFix(Applicability),
     /// Every safe fix in the file at once, as `ry check --fix` applies them in one pass.
     FixAll,
+    /// One data.table form rewritten as DataFrame code.
+    MigrateDataTable,
+    /// Every data.table form in the file, as `ry migrate data-table` rewrites it.
+    MigrateDataTableFile,
     /// Makes an unresolved name reach the package that exports it: `pkg::` before the name, or
     /// in a script a `library(pkg)` call.
     ImportName,
@@ -2563,6 +2570,39 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             title: "Add inferred type annotations for the whole file".to_owned(),
             kind: CodeActionKind::AddMissingAnnotations,
             edits: all_annotation_edits,
+        });
+    }
+
+    let rewrites = data_table_rewrites(db, file);
+    for rewrite in rewrites
+        .iter()
+        .filter(|rewrite| ranges_overlap(rewrite.range, viewport))
+    {
+        actions.push(CodeAction {
+            title: rewrite.title.to_owned(),
+            kind: CodeActionKind::MigrateDataTable,
+            edits: vec![TextEdit {
+                range: rewrite.range,
+                replacement: rewrite.standalone.clone(),
+            }],
+        });
+    }
+    // Listed only where the cursor offers a rewrite, and only when it does more than that one.
+    if rewrites.len() > 1
+        && rewrites
+            .iter()
+            .any(|rewrite| ranges_overlap(rewrite.range, viewport))
+    {
+        actions.push(CodeAction {
+            title: "Rewrite all data.table code in the file as DataFrame code".to_owned(),
+            kind: CodeActionKind::MigrateDataTableFile,
+            edits: rewrites
+                .into_iter()
+                .map(|rewrite| TextEdit {
+                    range: rewrite.range,
+                    replacement: rewrite.replacement,
+                })
+                .collect(),
         });
     }
 

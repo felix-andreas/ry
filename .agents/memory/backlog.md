@@ -2084,6 +2084,22 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** At 2e7 rows the five
+  joins take 3.7 s against data.table's 22.3 s but peak at 11.6 GB against 5.2 GB, and nearly all
+  of it is reading the CSVs (`join_x` 4.9 GB, `join_big` 4.2 GB more). Two causes, both measured:
+  - A Polars Enum stores every level twice (a `Utf8ViewArray` plus `CategoricalMapping`'s hash
+    table and boxcar vector), about 135 bytes per level, and the read peaks at about twice its
+    resident size (2e7 `join_x` with factors: 4.87 GB peak, 2.37 GB resident, 0.64 GB of column
+    data). The fix is a factor type outside Polars: u32 codes plus one levels array beside the
+    frame (`Table.string_codes` is precedent), converted to an Enum only where a Polars plan needs
+    one. About 50 sites read the Enum: `query.rs`, `ops.rs`, `convert.rs`, `table.rs`,
+    `kernel.rs`, `io.rs`, `join.rs`, `group.rs`, interp's `data_table.rs` and `frame.rs`, libr's
+    `frame_altrep.rs`, and the lazy plans' string expressions.
+  - Reading the id columns as text (`strings_as_factors = FALSE`) holds slices and final columns
+    at once: 2.44 GB peak and 1.4 GB resident at 2e7, and an 11.7 GB peak for the 5.1 GB 1e8
+    `join_x`, after which `join_big` no longer fits.
+  At 1e8, data.table runs out of memory reading `join_x` with factors as well, so "at or below
+  data.table's memory" is met trivially there; the target is that ry completes.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
@@ -2110,10 +2126,10 @@ The end-to-end guard rests on the corpus suites.
   a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
   Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
   "Factors stay Polars Enums").
-- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
-  `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
-  `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
-  chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
+- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
+  `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
+  `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
+  `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
@@ -2123,9 +2139,10 @@ The end-to-end guard rests on the corpus suites.
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
   and the numeric aggregations.
-- **data-table lint:** flags only the constructors (`data.table`, `fread`, `as.data.table`,
-  `setDT`); it offers no fix, because a query rewrite from bracket syntax to verbs is not
-  mechanical in general.
+- **Building a DataFrame copies every column** into the engine, where `data.table()` keeps R's
+  vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
+  and `enrol` (`contributing/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
+  columns could share R's buffers once the collector can pin them for a Polars buffer's life.
 - **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
@@ -2955,7 +2972,7 @@ typing on:
 | data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
 | biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (done since: the flat preorder tree replaced rowan, see "Check cache follow-ups"), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
@@ -3078,9 +3095,8 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   RSS), so the 1 s target still needs about a third less CPU work. Under callgrind it is 22.0 G
   instructions, after the one-shot check path, shared small green nodes, unaligned mimalloc entry
   points and green walks in the annotation and lint passes (`decisions.md`, "One-shot checks record
-  coarse dependencies"). HIR already lowers from the green tree; the red nodes left (about 3.7 M
-  `NodeData::new`) come from `first_child` and `child_or_token_at_range` in the syntax sites, the
-  annotation queries and the lints' `node_at`. What is left is flat: item checking about 7.7 G
+  coarse dependencies"). (The red nodes these figures counted are gone with rowan; see the flat-tree
+  item below.) What is left is flat: item checking about 7.7 G
   inclusive, parse about 3.1 G (lexing 0.7 G, about 105 instructions per token in the tree builder
   and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
   mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker

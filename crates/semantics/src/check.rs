@@ -194,6 +194,13 @@ pub enum TypeErrorKind<'db> {
         left: Ty<'db>,
         right: Ty<'db>,
     },
+    /// An operator in a DataFrame expression that dates do not support, such as `col("day") * 2`
+    /// or a date compared with a number.
+    DateOperation {
+        operator: &'static str,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
     /// requires.
     ColumnNameCount {
@@ -8856,8 +8863,9 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns. `DataFrame.join_asof(left, right, on, by)` joins on
-    /// `by` and then `on`, with a left join's columns.
+    /// join keeps only the left's columns, and a cross join has no keys.
+    /// `DataFrame.join_asof(left, right, on, by)` joins on `by` and then `on`, with a left join's
+    /// columns.
     fn join_type(
         &mut self,
         lazy: bool,
@@ -8918,6 +8926,8 @@ impl<'db> Checker<'db, '_> {
             let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
                 (Some(on), None, None) => (on.clone()?, on?),
                 (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
+                // A cross join pairs every row with every row, so it has no keys.
+                (None, None, None) if how == "cross" => (Vec::new(), Vec::new()),
                 _ => return None,
             };
             (how, suffix, left_keys, right_keys)
@@ -9137,6 +9147,29 @@ impl<'db> Checker<'db, '_> {
                             ..column
                         })
                     }
+                    "Expr.over" => {
+                        let column = argument(self)?;
+                        for key in module[arguments].iter().skip(1) {
+                            let key = key.value?;
+                            let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(key)
+                            else {
+                                return None;
+                            };
+                            self.column_reference(&module[text], module.range(key), columns, frame);
+                        }
+                        Some(ComputedColumn {
+                            shape: Shape::PerRow,
+                            ..column
+                        })
+                    }
+                    "Expr.rank" => {
+                        let column = argument(self)?;
+                        Some(ComputedColumn {
+                            ty: vector(Atomic::Integer),
+                            ..column
+                        })
+                    }
                     "Expr.is_null" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
@@ -9235,6 +9268,20 @@ impl<'db> Checker<'db, '_> {
                 {
                     return None;
                 }
+                if is_date_column(db, left.ty) || is_date_column(db, right.ty) {
+                    let ty =
+                        self.date_operation(value, *operator, (*lhs, &left), (*rhs, &right))?;
+                    return Some(ComputedColumn {
+                        name: if left.reads_column || !right.reads_column {
+                            left.name
+                        } else {
+                            right.name
+                        },
+                        ty,
+                        reads_column: left.reads_column || right.reads_column,
+                        shape: left.shape.combine(right.shape),
+                    });
+                }
                 self.check_expression_operator(value, *operator, (*lhs, &left), (*rhs, &right));
                 let ty = match operator {
                     BinaryOperator::Add
@@ -9279,6 +9326,59 @@ impl<'db> Checker<'db, '_> {
             }
             _ => None,
         }
+    }
+
+    /// Types a binary operator with a `Date` operand, which the engine stores as whole days: a
+    /// date plus or minus a number of days is a date, one date minus another is the integer
+    /// number of days between them, and two dates compare. Anything else on a date is reported,
+    /// and gives `None` so that the enclosing expression is not reported again.
+    fn date_operation(
+        &mut self,
+        value: ExprId,
+        operator: BinaryOperator,
+        (lhs, left): (ExprId, &ComputedColumn<'db>),
+        (rhs, right): (ExprId, &ComputedColumn<'db>),
+    ) -> Option<Ty<'db>> {
+        let db = self.db;
+        let is_date = |ty| is_date_column(db, ty);
+        let days =
+            |ty| matches!(join_class(db, ty), None | Some(JoinClass::Number)) && !is_date(ty);
+        let result = match operator {
+            BinaryOperator::Add if is_date(left.ty) && days(right.ty) => Some(left.ty),
+            BinaryOperator::Add if days(left.ty) && is_date(right.ty) => Some(right.ty),
+            BinaryOperator::Subtract if is_date(left.ty) && days(right.ty) => Some(left.ty),
+            BinaryOperator::Subtract if is_date(left.ty) && is_date(right.ty) => {
+                Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))))
+            }
+            BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEq
+            | BinaryOperator::GreaterEq
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+                if is_date(left.ty) && is_date(right.ty) =>
+            {
+                Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Logical))))
+            }
+            _ => None,
+        };
+        if result.is_none() {
+            let operator = match operator {
+                BinaryOperator::And => "&",
+                BinaryOperator::Or => "|",
+                _ => operator_spelling(operator)?,
+            };
+            let kind = TypeErrorKind::DateOperation {
+                operator,
+                left: self.shown_operand_type(lhs, left),
+                right: self.shown_operand_type(rhs, right),
+            };
+            self.errors.push(TypeError {
+                range: self.blame_range(value),
+                kind,
+            });
+        }
+        result
     }
 
     /// Checks a binary operator's operands against what the table engine accepts: arithmetic
@@ -15620,6 +15720,10 @@ fn element_atomic(db: &dyn Db, ty: Ty<'_>) -> Option<Atomic> {
         TyKind::Scalar(atomic) => Some(*atomic),
         _ => None,
     }
+}
+
+fn is_date_column(db: &dyn Db, ty: Ty<'_>) -> bool {
+    matches!(column_element(db, ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Date")
 }
 
 fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {

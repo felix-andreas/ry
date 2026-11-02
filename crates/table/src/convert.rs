@@ -57,13 +57,15 @@ pub enum RVector {
         codes: Vec<i32>,
         levels: Vec<String>,
     },
+    /// Days since 1970-01-01 with [`NA_REAL`] for `NA`: a `Date` vector without its class.
+    Date(Vec<f64>),
 }
 
 impl RVector {
     pub fn len(&self) -> usize {
         match self {
             RVector::Logical(values) | RVector::Integer(values) => values.len(),
-            RVector::Double(values) => values.len(),
+            RVector::Double(values) | RVector::Date(values) => values.len(),
             RVector::Character(values) => values.len(),
             RVector::Factor { codes, .. } => codes.len(),
         }
@@ -86,6 +88,16 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
             let validity = validity(&values, |value| !is_na_real(*value));
             Float64Chunked::from_vec_validity(name, values, validity).into_series()
         }
+        RVector::Date(values) => Int32Chunked::from_iter_options(
+            name,
+            values.iter().map(|value| {
+                // A date past the range of whole days a Polars date holds is out of reach of any
+                // calendar R prints, so it becomes `NA` rather than wrapping.
+                (!value.is_nan() && value.abs() < f64::from(i32::MAX)).then(|| value.floor() as i32)
+            }),
+        )
+        .into_date()
+        .into_series(),
         RVector::Logical(values) => BooleanChunked::from_iter_options(
             name,
             values
@@ -187,6 +199,14 @@ pub fn to_r(series: &Series) -> Result<RVector> {
             }
             RVector::Double(values)
         }
+        DataType::Date => RVector::Date(
+            series
+                .date()?
+                .physical()
+                .iter()
+                .map(|day| day.map_or(NA_REAL, f64::from))
+                .collect(),
+        ),
         DataType::Boolean => RVector::Logical(
             series
                 .bool()?
