@@ -377,8 +377,11 @@ protects construction but nothing after it.
 ## Open: standard library rows slower than GNU R
 
 `just bench-stdlib` compares each function with its fastest R equivalent at n = 1e6, and
-`tools/bench/stdlib/results.md` has the numbers. These rows are still slower, grouped by cause:
+`tools/bench/stdlib/results.md` has the numbers. These rows are still slower, grouped by cause.
 
+- **Rerun the full bench.** `tools/bench/stdlib/results.md` predates the materialized-double R
+  inputs and the Array paths of `List.min`/`List.max`; regenerate it with a full `just bench-stdlib`
+  (about 75 minutes) and update the rows below.
 - **One string call per element against one vectorized call.** `Str.starts_with`,
   `ends_with`, `contains`, the `trim`, `replace`, prefix and suffix functions, `repeat`,
   `with_prefix`, the case conversions, `split_first`/`split_last` and the UTF-8, 16 and 32
