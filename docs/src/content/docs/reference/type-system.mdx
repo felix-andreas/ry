@@ -2303,8 +2303,9 @@ to such a name is resolved separately at each call site:
   `function(a, b) .f(a, b, ...)`. With `reduce <- function(.x, .f, ..., .init)` written that way,
   `reduce(sizes, .init = list(0), function(output, input) c(output, list(input)))` folds the callback
   from `list(0)` instead of pinning the accumulator to the start's type, and
-  `reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")` is reported at the
-  `+`. A wrapper with an early `return` keeps its ordinary signature.
+  `reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")` is reported at
+  `"zero"`. A wrapper with an early `return`, or a call that also passes arguments on through the
+  wrapper's `...`, keeps its ordinary signature.
 
 Only a declaration file can overload a name, because a name with several signatures has no single
 most general type and must be resolved by search rather than inferred. A `#:` annotation on your own
@@ -2341,8 +2342,9 @@ join does not merge or coerce branch types beyond unification; it records the al
   `function(flag, x) if (flag) x else "s"` is `<T> fn(flag: logical, [x]: T) -> T | character`, not
   `fn(flag: logical, x: character)`, because unifying would make a caller wrong because of a line
   that is not wrong. A variable that only carries a bound such as `numeric` is not pinned by a
-  branch that is not a plain vector either, so in `if (is.null(L)) rho + rho0 else L %*% rho + rho0`
-  the result is `T | matrix`, not a `rho` that must be a matrix. The same holds for a variable nested inside a branch, so
+  branch that is not a plain vector either, so in
+  `if (is.null(L)) rho + rho0 else L %*% rho + rho0` the result is `T | matrix`, not a `rho` that
+  must be a matrix. The same holds for a variable nested inside a branch, so
   `if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)` is
   `list{character[], character[]} | list{T, T}`.
 - A branch whose variable the body has already constrained may unify with the other branch, because
@@ -2361,9 +2363,9 @@ join does not merge or coerce branch types beyond unification; it records the al
 A branch *diverges* when it never falls through to the code after the `if`: `return(...)`,
 `stop(...)`, `break`, or `next`, a block ending in one of those, or an `if ... else` whose branches
 both diverge. The `else` of an `exists("name")` test counts as diverging when `name` is a function
-an attached package ships and the project does not define, because that fallback exists only for
-older versions of R: `if (exists("emptyenv")) emptyenv() else NULL` is `environment`. A probe for a
-name nothing ships keeps both branches. A diverging branch contributes neither its value nor the state of its variables, so
+that a stub of an attached package types and the project does not define, because that fallback
+exists only for older versions: `if (exists("emptyenv")) emptyenv() else NULL` is `environment`.
+A probe for a name no stub types keeps both branches. A diverging branch contributes neither its value nor the state of its variables, so
 `x <- if (c) return(NULL) else 5` gives `x` the type `double`, and a variable written inside a
 diverging branch does not join into the state after the `if`.
 
@@ -2480,14 +2482,17 @@ The details:
 - A test that two values differ in being `NULL` ties them together for the rest of the body. After
   `if (is.null(A) != is.null(b)) stop(...)`, a later `!is.null(A)` also rules `NULL` out of `b`.
   The same holds for `xor(is.null(A), is.null(b))` and for the spelled-out
-  `is.null(A) && !is.null(b) || !is.null(A) && is.null(b)`. A write to either variable ends the tie.
-- A call to a predicate the project defines is remembered on the true edge. A callee whose only
-  `NULL` return is an opening `if (!pred(x)) return(NULL)` on a formal it never rewrites returns
-  without `NULL` when the caller's argument is a variable on which `pred` was already found true.
+  `is.null(A) && !is.null(b) || !is.null(A) && is.null(b)`. A write to either variable, even on one
+  branch, ends the tie.
+- A one-argument call to a function that is not a type test, such as `is_loaded(package)`, is
+  remembered on its true edge. A callee whose only `NULL` return is a statement
+  `if (!pred(x)) return(NULL)` in its body, on a formal it never rewrites and with no other return
+  that may be `NULL`, returns without `NULL` when the caller's argument is a variable on which
+  `pred` was already found true.
   With `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`,
   `if (!is_loaded(package)) stop("not loaded")` followed by `parent.env(ns_env(package))` checks,
-  while the same call without the test is reported. Rewriting the variable after the test forgets
-  it.
+  while the same call without the test is reported. A write to the variable after the test, even
+  on one branch or in a loop, forgets it.
 
 #### Lazy arguments and required formals
 

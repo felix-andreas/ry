@@ -829,7 +829,6 @@ fn classify_non_local_read(
     }
 }
 
-/// Without this, a misspelled type name would silently become an opaque nominal.
 /// An alias whose expansion reaches itself never becomes a type. It is reported at each
 /// declaration on the cycle, including one no annotation uses; a use only compares like
 /// `Unknown`, so the one mistake is reported once, where the fix goes.
@@ -862,6 +861,7 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Without this, a misspelled type name would silently become an opaque nominal.
 fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let references: Vec<&(String, TextRange)> = file_annotation_references(db, file)
         .iter()

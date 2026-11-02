@@ -1095,16 +1095,24 @@ impl<'db> Environment<'db> {
     fn set(&mut self, slot: BindingId, entry: EnvEntry<'db>) {
         let previous = self.entries.insert(slot, entry);
         self.undo.push(Undo::Entry(slot, previous));
-        if self.facts.iter().any(|fact| fact.mentions(slot)) {
-            let undo = &mut self.undo;
-            self.facts.retain(|&fact| {
-                let kept = !fact.mentions(slot);
-                if !kept {
-                    undo.push(Undo::Dropped(fact));
-                }
-                kept
-            });
+        self.forget(slot);
+    }
+
+    /// Drops the facts about `slot`, returning whether there were any. A joined write must
+    /// call it even when the joined entry is unchanged, because the value is a different one.
+    fn forget(&mut self, slot: BindingId) -> bool {
+        if !self.facts.iter().any(|fact| fact.mentions(slot)) {
+            return false;
         }
+        let undo = &mut self.undo;
+        self.facts.retain(|&fact| {
+            let kept = !fact.mentions(slot);
+            if !kept {
+                undo.push(Undo::Dropped(fact));
+            }
+            kept
+        });
+        true
     }
 
     fn establish(&mut self, fact: Fact) {
@@ -4100,33 +4108,6 @@ impl<'db> Checker<'db, '_> {
 
     /// A diverging branch contributes neither its value nor its slot state, so the
     /// surviving edge's refinement persists after the `if` (the early-exit guard idiom).
-    fn probes_a_shipped_function(&self, condition: ExprId) -> bool {
-        let ExpressionKind::Call { callee, arguments } = self.module.kind(condition) else {
-            return false;
-        };
-        if variable_name(self.module, *callee).as_deref() != Some("exists")
-            || self.naming.resolutions.contains_key(callee)
-        {
-            return false;
-        }
-        let [argument] = &self.module[arguments][..] else {
-            return false;
-        };
-        let Some(value) = argument.value.filter(|_| argument.name.is_none()) else {
-            return false;
-        };
-        let ExpressionKind::Literal(LiteralKind::String(text)) = self.module.kind(value) else {
-            return false;
-        };
-        let probed = &self.module[text];
-        self.globals.is_some_and(|globals| {
-            globals
-                .library_candidates(probed)
-                .is_some_and(|candidates| !candidates.is_empty())
-                && !globals.defined_in_project(Symbol::new(probed), false)
-        })
-    }
-
     fn infer_if(
         &mut self,
         condition: ExprId,
@@ -4246,6 +4227,35 @@ impl<'db> Checker<'db, '_> {
                 self.join_branch_values(then_ty, else_ty)
             }
         }
+    }
+
+    /// Whether the condition is `exists("name")` for a function an attached package ships,
+    /// whose `else` is a fallback for an R version ry never presents.
+    fn probes_a_shipped_function(&self, condition: ExprId) -> bool {
+        let ExpressionKind::Call { callee, arguments } = self.module.kind(condition) else {
+            return false;
+        };
+        if variable_name(self.module, *callee).as_deref() != Some("exists")
+            || self.naming.resolutions.contains_key(callee)
+        {
+            return false;
+        }
+        let [argument] = &self.module[arguments][..] else {
+            return false;
+        };
+        let Some(value) = argument.value.filter(|_| argument.name.is_none()) else {
+            return false;
+        };
+        let ExpressionKind::Literal(LiteralKind::String(text)) = self.module.kind(value) else {
+            return false;
+        };
+        let probed = &self.module[text];
+        self.globals.is_some_and(|globals| {
+            globals
+                .library_candidates(probed)
+                .is_some_and(|candidates| !candidates.is_empty())
+                && !globals.defined_in_project(Symbol::new(probed), false)
+        })
     }
 
     /// Each arm checks from the state before the `match`, and the arms that complete join
@@ -8051,14 +8061,18 @@ impl<'db> Checker<'db, '_> {
         let ExpressionKind::Block { statements } = module.kind(strip(body)) else {
             return None;
         };
+        // An open or unchecked member may be instantiated as `NULL` at the call, so it counts.
+        let may_be_null = |member: Ty<'db>| {
+            matches!(
+                member.kind(self.db),
+                TyKind::Null | TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
+            )
+        };
         let has_null = |ty: Ty<'db>| {
             let ty = self.table.resolve(self.db, ty);
             match ty.kind(self.db) {
-                TyKind::Null => true,
-                TyKind::Union(members) => members
-                    .iter()
-                    .any(|member| matches!(member.kind(self.db), TyKind::Null)),
-                _ => false,
+                TyKind::Union(members) => members.iter().any(|&member| may_be_null(member)),
+                _ => may_be_null(ty),
             }
         };
         module[statements].iter().find_map(|&statement| {
@@ -12154,6 +12168,11 @@ impl<'db> Checker<'db, '_> {
         let arena = self.arena;
         let targets: Vec<Option<ArgumentTarget>> =
             argument_targets(db, arena, function, argument_shapes(arena, arguments)).to_vec();
+        // The fold calls the callback with two arguments, so a call that also forwards extra
+        // arguments through `...` keeps the wrapper's ordinary signature.
+        if targets.contains(&Some(ArgumentTarget::Rest)) {
+            return None;
+        }
         let passed = |formal: Name<'db>| {
             let index = function
                 .named
@@ -15772,6 +15791,8 @@ impl<'db> Checker<'db, '_> {
                 && Some(entry) != current
             {
                 self.environment.set(slot, entry);
+                changed.push(slot);
+            } else if self.environment.forget(slot) {
                 changed.push(slot);
             }
         }

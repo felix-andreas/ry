@@ -230,6 +230,27 @@ rewritten <- function(package) {
   package <- paste0(package, "2")
   parent.env(ns_env(package))
 }
+maybe_rewritten <- function(package, flag) {
+  if (!is_loaded(package)) stop("not loaded")
+  if (flag) package <- "other"
+  parent.env(ns_env(package))
+}
+rewritten_in_loop <- function(package, packages) {
+  if (!is_loaded(package)) stop("not loaded")
+  for (other in packages) {
+    parent.env(ns_env(package))
+    package <- other
+  }
+}
+ns_or <- function(package, fallback) {
+  if (!is_loaded(package)) return(NULL)
+  fallback
+}
+generic_fallback <- function(package, flag) {
+  fallback <- if (flag) new.env() else NULL
+  if (!is_loaded(package)) stop("not loaded")
+  parent.env(ns_or(package, fallback))
+}
 #++++
 is_loaded: <T> fn(package: T) -> logical
 ns_env: <T> fn(package: T) -> environment | NULL
@@ -237,8 +258,15 @@ after_stop: <T> fn(package: T) -> environment
 inside: <T> fn(package: T) -> environment | NULL
 unguarded: Unknown
 rewritten: Unknown
+maybe_rewritten: Unknown
+rewritten_in_loop: Unknown
+ns_or: <T, U> fn(package: T, [fallback]: U) -> U | NULL
+generic_fallback: Unknown
 402..417 error[type-mismatch] expected `environment`, found `environment | NULL`
 545..560 error[type-mismatch] expected `environment`, found `environment | NULL`
+699..714 error[type-mismatch] expected `environment`, found `environment | NULL`
+858..873 error[type-mismatch] expected `environment`, found `environment | NULL`
+1143..1167 error[type-mismatch] expected `environment`, found `environment | NULL`
 
 #---- early_exit_narrows
 #: fn(x: integer | NULL) -> integer

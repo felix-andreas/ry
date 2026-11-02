@@ -2181,10 +2181,12 @@ locations <- function(sizes) {
   })
 }
 starts <- function() reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")
+scaled <- function(xs) reduce(xs, function(total, item, scale) total + item * scale, 2, .init = 0)
 #++++
 reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
 locations: <T> fn(sizes: list[T] | T[]) -> list{double} | list[Unknown]
 starts: Unknown
+scaled: fn(xs: list[double] | double[]) -> double
 356..362 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_string_naming_the_reduce_function_is_accepted
