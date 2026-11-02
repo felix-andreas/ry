@@ -2547,7 +2547,7 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
     Ok(result)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Cumulative {
     Sum,
     Product,
@@ -2593,6 +2593,45 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             if overflow {
                 conditions::warning("integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))'")?;
+            }
+            result
+        }
+        (SexpType::Real, Cumulative::Sum) => {
+            let result = alloc(SexpType::Real, count)?;
+            let out = values::reals_mut(result);
+            long_double::running_sums(values::reals(operand), out);
+            // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
+            // first NA on every total is NA, whatever NaN came before it.
+            if out.last().is_some_and(|total| total.is_nan())
+                && let Some(first) = values::reals(operand)
+                    .iter()
+                    .position(|&value| is_na_real(value))
+            {
+                out[first..].fill(NA_REAL);
+            }
+            result
+        }
+        (SexpType::Real, Cumulative::Max | Cumulative::Min) => {
+            let result = alloc(SexpType::Real, count)?;
+            let data = values::reals(operand);
+            let out = values::reals_mut(result);
+            let mut accumulator = if kind == Cumulative::Max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            // From the first NaN on every result is NaN, and from the first NA on it is NA.
+            for (&value, out) in data.iter().zip(out.iter_mut()) {
+                accumulator = if is_na_real(value) || is_na_real(accumulator) {
+                    NA_REAL
+                } else if value.is_nan() || accumulator.is_nan() {
+                    f64::NAN
+                } else if kind == Cumulative::Max {
+                    accumulator.max(value)
+                } else {
+                    accumulator.min(value)
+                };
+                *out = accumulator;
             }
             result
         }

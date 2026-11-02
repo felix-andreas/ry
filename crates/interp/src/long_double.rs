@@ -411,6 +411,23 @@ pub fn add_products(
     })
 }
 
+/// GNU R's `cumsum` of doubles: each running long double total, rounded to double into `out`,
+/// for the shorter of the two. NA and NaN propagate as the x87 unit propagates them, which is
+/// what decides between them in GNU R.
+pub fn running_sums(values: &[f64], out: &mut [f64]) {
+    let count = values.len().min(out.len());
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    x87::running_sums(&values[..count], &mut out[..count]);
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut total = LongDouble::ZERO;
+        for (&value, out) in values[..count].iter().zip(&mut out[..count]) {
+            total += value;
+            *out = total.to_f64();
+        }
+    }
+}
+
 /// GNU R's `rowSums` (`divisor` 1) or `rowMeans` (`divisor` the column count) of a column-major
 /// matrix with `rows` rows: each row's long double total, added column by column, divided by
 /// `divisor` in long double and rounded once to double into `out`. Returns which rows were
@@ -660,6 +677,39 @@ mod x87 {
             );
         }
         total
+    }
+
+    /// `out[i]` is the running total of `values[..=i]`, stored as a double without leaving the
+    /// register. `out` must be as long as `values`.
+    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            values.len(),
+            out.len(),
+            "running sums need an output per value"
+        );
+        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        unsafe {
+            asm!(
+                "fldz",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fadd qword ptr [{data}]",
+                "fst qword ptr [{out}]",
+                "add {data}, 8",
+                "add {out}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp st(0)",
+                data = inout(reg) values.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
     }
 
     /// The rows `block_row_sums` keeps in registers at once: seven totals and one loaded term
@@ -980,6 +1030,13 @@ mod tests {
                 });
                 assert_eq!(value.to_bits(), (total / divisor).to_f64().to_bits());
             }
+        }
+        let mut running = vec![0.0; values.len()];
+        running_sums(&values, &mut running);
+        let mut total = LongDouble::ZERO;
+        for (&value, &out) in values.iter().zip(&running) {
+            total += value;
+            assert_eq!(out.to_bits(), total.to_f64().to_bits());
         }
         let mut out = vec![0.0; 2];
         assert_eq!(
