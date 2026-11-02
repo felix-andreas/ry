@@ -43,6 +43,7 @@ pub struct Symbols {
     pub srcfile: Sexp,
     pub whole_srcref: Sexp,
     pub tmp: Sexp,
+    pub vtmp: Sexp,
     pub value: Sexp,
     pub dot_generic: Sexp,
     pub dot_class: Sexp,
@@ -143,6 +144,7 @@ symbol_table! {
     srcfile = "srcfile",
     whole_srcref = "wholeSrcref",
     tmp = "*tmp*",
+    vtmp = "*vtmp*",
     value = "value",
     dot_generic = ".Generic",
     dot_class = ".Class",
@@ -692,6 +694,23 @@ pub unsafe fn set_elt(object: Sexp, index: usize, value: Sexp) {
     crate::heap().set_element(object, index, value);
 }
 
+/// GNU R's `translateChar` refusal: a builtin that needs the characters of a string cannot read
+/// one declared as bytes, unless it is ASCII. Checks every element of the string vector `strings`.
+pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
+    if strings.kind() != SexpType::String {
+        return Ok(());
+    }
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        if charsxp.has_gp(gp::BYTES) && !charsxp.bytes().is_ascii() {
+            return Err(crate::unwind::error(
+                "translating strings with \"bytes\" encoding is not allowed",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
@@ -725,9 +744,10 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
 /// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
 /// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
 /// character, must survive text processing unchanged. Each byte that is not valid UTF-8 becomes
-/// the private-use character `U+F700 + byte`, which [`mkchar`] and string literals turn back
-/// into the byte. Text that holds those private-use characters itself reads them as the bytes
-/// they stand for.
+/// the private-use character `U+10FF00 + byte`, which [`mkchar`] and string literals turn back
+/// into the byte. A genuine character in `U+10FF80..=U+10FFFF` is therefore read back as a byte
+/// when text holding it is interned again; those code points are the last of the last private-use
+/// plane, so real text does not use them.
 pub fn escape_invalid_bytes(bytes: &[u8]) -> Cow<'_, str> {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return Cow::Borrowed(text);
@@ -736,10 +756,25 @@ pub fn escape_invalid_bytes(bytes: &[u8]) -> Cow<'_, str> {
     for chunk in bytes.utf8_chunks() {
         text.push_str(chunk.valid());
         for &byte in chunk.invalid() {
-            text.push(char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'));
+            text.push(stand_in(byte));
         }
     }
     Cow::Owned(text)
+}
+
+/// The private-use character a byte past ASCII travels as (see [`escape_invalid_bytes`]).
+fn stand_in(byte: u8) -> char {
+    char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}')
+}
+
+/// Whether `text` holds a character in the stand-in range. Each one encodes as `F4 8F BE xx` or
+/// `F4 8F BF xx` in UTF-8, and `F4` leads only the last plane of the code space, so most text is
+/// rejected by the byte scan alone.
+fn holds_stand_in(text: &str) -> bool {
+    text.as_bytes().contains(&0xF4)
+        && text
+            .chars()
+            .any(|character| escaped_byte(character).is_some())
 }
 
 /// Decodes bytes as text with every byte past ASCII as its private-use stand-in (see
@@ -754,14 +789,15 @@ pub fn escape_high_bytes(bytes: &[u8]) -> Cow<'_, str> {
             .iter()
             .map(|&byte| match byte {
                 0..=0x7F => byte as char,
-                _ => char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'),
+                _ => stand_in(byte),
             })
             .collect(),
     )
 }
 
-/// The base of the private-use characters [`escape_invalid_bytes`] maps bytes to.
-const ESCAPED_BYTE_BASE: u32 = 0xF700;
+/// The base of the private-use characters [`escape_invalid_bytes`] maps bytes to. The last code
+/// points of plane 16 are the least likely to occur in real text.
+const ESCAPED_BYTE_BASE: u32 = 0x10FF00;
 
 /// The byte `character` stands for, if [`escape_invalid_bytes`] made it from one.
 pub fn escaped_byte(character: char) -> Option<u8> {
@@ -774,14 +810,8 @@ pub fn escaped_byte(character: char) -> Option<u8> {
 /// `text` with every private-use stand-in turned back into its byte, or `None` when it holds
 /// none.
 pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
-    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8, so ASCII text, the common
-    // case, needs only the vectorized ASCII scan rather than a `memchr`.
-    if text.is_ascii()
-        || !text.as_bytes().contains(&0xEF)
-        || !text
-            .chars()
-            .any(|character| escaped_byte(character).is_some())
-    {
+    // ASCII text, the common case, needs only the vectorized ASCII scan.
+    if text.is_ascii() || !holds_stand_in(text) {
         return None;
     }
     let mut bytes = Vec::with_capacity(text.len());

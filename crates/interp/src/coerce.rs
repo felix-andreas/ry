@@ -704,6 +704,7 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         return Err(error("invalid 'mode' argument"));
     };
     if kind == SexpType::Symbol {
+        values::refuse_bytes(object)?;
         let text = values::as_string_scalar(object)?
             .ok_or_else(|| error("invalid type/length (symbol/0) in vector allocation"))?;
         return values::install(&text);

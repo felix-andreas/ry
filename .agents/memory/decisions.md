@@ -1991,6 +1991,24 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **A replacement call is built as GNU R builds it, with separate arguments.** Each level's call
+  names the symbol `*tmp*` (`` `[<-`(`*tmp*`, i, value = v) ``, getters `` `*tmp*`[["a"]] ``), and
+  `apply_call` receives that call plus a separate argument list of forced promises: the object
+  promise's code is `*tmp*`, the value promise's is the right-hand side at the first level and the
+  value at later ones. So `sys.call()` and `substitute(value)` in a method match GNU R, and
+  `substitute` unwraps a chain of promises. A forced promise deparses as its code; GNU R's
+  bytecode shows the right-hand side expression at every level inside compiled code (`value =
+  vals[[v]]`), which ry's AST form does not copy.
+- **Which call a replacement error names is chosen per message.** `Interp::assignment_call` maps the
+  generated call to the reported one: the whole assignment at the first level, and `` names(x) <-
+  `*vtmp*` `` for a later level, built eagerly because call resolution cannot fail. `error`/
+  `error_in` resolve to it (GNU R's `error()`), while `unwind::errorcall` and `generated_call`
+  keep the generated call, for the messages GNU R raises with `errorcall()`: the out-of-bounds
+  `[<-` matrix subscript, vectorIndex, and "no such index at level N".
+- **Out-of-bounds subscripts are classed conditions.** `subset.rs`'s `out_of_bounds` signals
+  `subscriptOutOfBoundsError` through `conditions::classed_error`, with GNU R's `object`,
+  `subscript` (1-based dimension, `NA` for a vector subscript or a numeric `[` subscript) and
+  `index` (the failing element for `[`, the whole vector of a recursive `[[`) fields.
 - **Top-level task callbacks live in libr's C, behind two interpreter hooks**
   (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
   through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
@@ -4749,7 +4767,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes. On x86_64 the slice loops (`long_double::add_all`, `add_differences`, `add_products`, behind `sum`, `mean`, `var`, `cov`, `cor` and `List.sum`) run on the x87 unit through inline assembly, which rounds identically because System V leaves x87 precision control at 64 bits; the software model is about 10x slower (13 ns an element) and stays the fallback on other targets and on Windows, whose x64 CRT sets x87 precision to 53 bits, and for values outside the x87 exponent range.
 - **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
-- **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change small. It is not lossless: a string that already holds a real U+F780..U+F7FF character is indistinguishable from an invalid byte and prints as `\xNN` (backlog: byte strings).
+- **Invalid UTF-8 bytes** survive text processing as private-use code points (`U+10FF00 + byte`, one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. The heap itself keeps a string's exact bytes and its encoding flag (`gp::BYTES`, `LATIN1`, `UTF8`), so the stand-ins exist only while `interp` handles a string as a Rust `str`. Carrying bytes through every string builtin instead would touch about 230 `char_str`/`string_at` readers, for no observable gain, because the range is the tail of the last private-use plane: a genuine character there is the one thing the scheme misreads (it becomes a byte when text holding it is interned again). The earlier range, `U+F780..U+F7FF`, sat where symbol fonts map glyphs, so it moved.
+- **A string declared as bytes is refused where GNU R translates it.** `values::refuse_bytes` raises "translating strings with \"bytes\" encoding is not allowed" for a non-ASCII bytes string in the builtins whose GNU R code calls `translateChar`: case changes, `chartr`, `sprintf`, `make.names`, `abbreviate`, string `sort`/`order` with more than one element, and `as.vector(mode = "symbol")`. `nchar` raises its own "not computable in \"bytes\" encoding" messages. Functions GNU R runs on the bytes (`paste`, `substr`, `strsplit`, `format`, `useBytes` regex) keep working (`oracle/cases/strings__bytes_encoding.R`).
 - **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
 - **Scripts run as console input**: one top-level expression at a time, with `stdin()` reading the rest of the script, because GNU R's tests read data from their own source that way.
 - **Message sinks and abort restarts**: `sink(type = "message")` diverts every stderr writer, reaching top level invokes an R-level `abort` restart, and messages are cut to `warning.length`.

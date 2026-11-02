@@ -2573,7 +2573,13 @@ pub unsafe fn substitute(expression: Sexp, env: Sexp) -> R<Sexp> {
                 return Ok(expression);
             }
             if value.kind() == SexpType::Promise {
-                return Ok(value.cdr());
+                // A promise whose code is itself a promise, such as a replacement method's
+                // `value`, stands for the innermost promise's code.
+                let mut code = value.cdr();
+                while code.kind() == SexpType::Promise {
+                    code = code.cdr();
+                }
+                return Ok(code);
             }
             if value.kind() == SexpType::Dots {
                 return Ok(expression);
@@ -2998,11 +3004,18 @@ pub unsafe fn complex_assign(
         let previous = *levels.last().unwrap_or(&base);
         let promise = forced_promise(tmp_symbol, previous)?;
         crate::heap().untrack_references(promise);
+        // The call names `*tmp*`, as GNU R's does, while the argument it is evaluated with is
+        // the promise holding the level below.
+        let rest = getter.cdr().cdr();
         let getter_call = values::lcons(
             getter.car(),
-            values::cons_tagged(promise, getter.cdr().cdr(), getter.cdr().tag())?,
+            values::cons_tagged(tmp_symbol, rest, getter.cdr().tag())?,
         )?;
-        let mut level = eval(getter_call, env)?;
+        crate::heap().root(getter_call);
+        let arguments = values::cons_tagged(promise, rest, getter.cdr().tag())?;
+        crate::heap().root(arguments);
+        let function = call_head_function(getter.car(), env)?;
+        let mut level = apply_call(getter_call, function, arguments, env)?;
         if values::maybe_shared(level) || shared {
             shared = true;
             let was_array = level.is_array();
@@ -3015,30 +3028,47 @@ pub unsafe fn complex_assign(
     for (depth, getter) in getters.iter().enumerate() {
         let object = levels[levels.len() - 1 - depth];
         let setter = replacement_function(getter.car(), whole)?;
-        let object_code = if depth + 1 == getters.len() {
-            tmp_symbol
-        } else {
-            getters[depth + 1]
-        };
         // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
         // the replacement function would always see its target as shared and copy it.
-        let object_promise = forced_promise(object_code, object)?;
+        let object_promise = forced_promise(tmp_symbol, object)?;
         crate::heap().untrack_references(object_promise);
+        // The outermost replacement's value promise carries the right-hand side's expression,
+        // which `substitute(value)` returns; an inner one carries the value itself, as in GNU R.
+        let value_code = if depth == 0 {
+            whole.cdr().cdr().car()
+        } else {
+            replacement
+        };
         // GNU R's value promise does not count either, so a replacement that updated its target
         // in place stays uniquely referenced for the next update.
-        let value_promise = forced_promise(replacement, replacement)?;
+        let value_promise = forced_promise(value_code, replacement)?;
         crate::heap().untrack_references(value_promise);
-        let mut items = vec![(nil(), setter), (nil(), object_promise)];
+        let mut call_items = vec![(nil(), setter), (nil(), tmp_symbol)];
+        let mut argument_items = vec![(nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
-            items.push((tag, argument));
+            call_items.push((tag, argument));
+            argument_items.push((tag, argument));
         }
-        items.push((symbols.value, value_promise));
-        let setter_call = values::pairlist(&items, SexpType::Language)?;
+        call_items.push((symbols.value, value_promise));
+        argument_items.push((symbols.value, value_promise));
+        let setter_call = values::pairlist(&call_items, SexpType::Language)?;
+        crate::heap().root(setter_call);
+        let arguments = values::pairlist(&argument_items, SexpType::Pairlist)?;
+        crate::heap().root(arguments);
+        let function = call_head_function(setter, env)?;
+        // A level past the first reports its errors as GNU R does, against the assignment of
+        // that level's target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
+        let reported = if depth == 0 {
+            whole
+        } else {
+            values::call(whole.car(), &[*getter, symbols.vtmp])?
+        };
+        crate::heap().root(reported);
         let frame_depth = interp().frames.len();
         let outer = interp()
             .assignment_call
-            .replace((setter_call, whole, frame_depth));
-        let result = apply_setter(setter_call, whole, env);
+            .replace((setter_call, reported, frame_depth));
+        let result = apply_call(setter_call, function, arguments, env);
         interp().assignment_call = outer;
         replacement = result?;
     }
@@ -3058,73 +3088,16 @@ unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bo
             .any(|(_, part)| contains_assignment(part, symbols))
 }
 
-/// Evaluates one replacement call of a complex assignment. A builtin replacement function
-/// reports its errors and warnings against the whole assignment, as `x[1:2] <- 1:3` and not as
-/// the generated `` `[<-`(`*tmp*`, 1:2, value = 1:3) ``, and so does a dispatching special that
-/// finds no method. S3 dispatch, the other specials (which dispatch from inside) and closures
-/// see the generated call, which is the one `sys.call()` and `match.call()` must return.
-unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
-    let head = setter_call.car();
+/// The function a call's head names: a symbol is looked up as a function, anything else (such
+/// as `pkg::f`) is evaluated.
+unsafe fn call_head_function(head: Sexp, env: Sexp) -> R<Sexp> {
     let function = if head.kind() == SexpType::Symbol {
         find_fun(head, env)?
     } else {
         eval(head, env)?
     };
     crate::heap().root(function);
-    let arguments = setter_call.cdr();
-    match function.kind() {
-        SexpType::Builtin => {
-            let definition = builtin_def(function)?;
-            let args = evaluate_args(arguments, env, definition.keep_missing, setter_call)?;
-            if definition.generic != Generic::None
-                && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, setter_call, function, &args, env)?
-            {
-                return Ok(value);
-            }
-            call_builtin(definition, whole, function, &args, env)
-        }
-        SexpType::Special if builtin_def(function)?.is_dispatch_or_eval() => {
-            let definition = builtin_def(function)?;
-            let mut args = Args::new();
-            match dispatch::dispatch_or_eval(
-                definition,
-                setter_call,
-                function,
-                arguments,
-                env,
-                &mut args,
-            )? {
-                Some(value) => Ok(value),
-                None => call_builtin(definition, whole, function, &args, env),
-            }
-        }
-        SexpType::Closure => {
-            let mut args = Args::new();
-            promise_args_into(arguments, env, &mut args)?;
-            apply_closure(shown_setter_call(setter_call)?, function, &args, env, None)
-        }
-        _ => apply_call(setter_call, function, arguments, env),
-    }
-}
-
-/// The replacement call a closure sees as `sys.call()`: GNU R binds the target to `*tmp*` and
-/// puts the value itself into the call, so the forced promises that stand in for both here are
-/// shown as their expression and their value.
-unsafe fn shown_setter_call(setter_call: Sexp) -> R<Sexp> {
-    let value_tag = symbols().value;
-    let mut items = Vec::new();
-    for (tag, argument) in values::pairlist_items(setter_call) {
-        let shown = if argument.kind() != SexpType::Promise {
-            argument
-        } else if tag == value_tag {
-            argument.car()
-        } else {
-            argument.cdr()
-        };
-        items.push((tag, shown));
-    }
-    values::pairlist(&items, SexpType::Language)
+    Ok(function)
 }
 
 /// The replacement function for a getter: `f<-` for `f`, and `pkg::\`f<-\`` for `pkg::f`.
