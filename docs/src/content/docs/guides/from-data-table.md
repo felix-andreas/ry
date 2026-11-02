@@ -251,11 +251,11 @@ runs on the DataFrame and converts the result back, so the function's callers st
 data.table:
 
 ```r
-top <- function(sales) {
+top <- function(sales: data.table) {
   return(sales[units > 2L])
 }
 # becomes
-top <- function(sales) {
+top <- function(sales: data.table) {
   return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
 }
 ```
