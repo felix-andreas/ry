@@ -2099,7 +2099,10 @@ impl Compiler {
                 // rlang's `trace_back` zaps a frame call's `function` head by poking that slot.
                 let function_call = values::lcons(
                     symbols().function,
-                    values::cons(nil(), values::cons(expression, values::cons(nil(), nil())?)?)?,
+                    values::cons(
+                        nil(),
+                        values::cons(expression, values::cons(nil(), nil())?)?,
+                    )?,
                 )?;
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
@@ -2995,7 +2998,11 @@ unsafe fn step(
                     compiled = compile_promise_arguments(machine.function, call.cdr())?;
                     crate::heap().set_element(constants, operand(2) as usize + 1, compiled);
                 }
-                let arguments = if compiled == nil() { call.cdr() } else { compiled };
+                let arguments = if compiled == nil() {
+                    call.cdr()
+                } else {
+                    compiled
+                };
                 let mut args = eval::Args::new();
                 eval::compiled_args_into(arguments, env, &mut args)?;
                 eval::apply_closure(call, function, &args, env, None)?
