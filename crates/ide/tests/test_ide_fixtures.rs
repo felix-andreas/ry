@@ -172,10 +172,13 @@ fn render_at(
         ),
         None => format!("{label}: none\n"),
     };
-    output.push_str(&render_target(
-        "definition",
-        definition(db, files, file, offset),
-    ));
+    let definitions = definition(db, files, file, offset);
+    if definitions.is_empty() {
+        output.push_str(&render_target("definition", None));
+    }
+    for target in definitions {
+        output.push_str(&render_target("definition", Some(target)));
+    }
     let references = references(db, files, file, offset, true);
     if references.is_empty() {
         output.push_str("references: none\n");

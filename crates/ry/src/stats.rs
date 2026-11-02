@@ -412,7 +412,7 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord]) {
                 .unwrap_or_default();
             // A hover that only says `Unknown` tells the reader nothing.
             let hover = !hover_text.is_empty() && hover_text != "Unknown";
-            let definition = ide::definition(db, files, record.file, offset).is_some();
+            let definition = !ide::definition(db, files, record.file, offset).is_empty();
             tally.hover += usize::from(hover);
             tally.definition += usize::from(definition);
             if !(hover && definition) && tally.misses.len() < COVERAGE_EXAMPLES {

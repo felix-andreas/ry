@@ -2394,14 +2394,20 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let files = ProjectFiles::get(&worker.db);
-            let target = worker
+            let targets = worker
                 .cancellable(|worker| ide::definition(&worker.db, files, file, offset))
                 .unwrap_or_default();
-            Ok(target.and_then(|target| {
-                Some(lsp_types::GotoDefinitionResponse::Scalar(
-                    worker.definition_location(target)?,
-                ))
-            }))
+            let mut locations: Vec<lsp_types::Location> = targets
+                .into_iter()
+                .filter_map(|target| worker.definition_location(target))
+                .collect();
+            Ok(match locations.len() {
+                0 => None,
+                1 => locations
+                    .pop()
+                    .map(lsp_types::GotoDefinitionResponse::Scalar),
+                _ => Some(lsp_types::GotoDefinitionResponse::Array(locations)),
+            })
         })
     }
 

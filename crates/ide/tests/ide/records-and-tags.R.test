@@ -4,9 +4,9 @@ point <- (x = 1, y = "a")
 point$y$0
 #++++
 hover 32..33: y: character
-definition: none
-references: none
-rename: none
+definition 17..18
+references: 17..18*, 32..33
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: Record{x: double, y: character}\n"
@@ -194,9 +194,9 @@ completion (1): radius
 point <- (x$0 = 1, y = "a")
 #++++
 hover 10..11: x: double
-definition: none
-references: none
-rename: none
+definition 10..11
+references: 10..11*
+rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `point`
   edit 0..0 -> "#: Record{x: double, y: character}\n"
@@ -357,9 +357,9 @@ p <- @Point(x = 1, y = 2)
 p$y$0
 #++++
 hover 70..71: y: double
-definition: none
-references: none
-rename: none
+definition 61..62
+references: 61..62*, 70..71
+rename: 2 edit(s)
 signature: none
 completion (1): y
 

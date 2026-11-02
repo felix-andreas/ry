@@ -42,6 +42,7 @@ use {
     },
 };
 
+mod fields;
 pub mod testing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,13 +620,34 @@ fn trim_trailing_trivia(text: &str, range: TextRange) -> TextRange {
     TextRange::new(range.start(), TextSize::from((start + trimmed) as u32))
 }
 
+/// Usually one target. A `$` field read whose receiver can come from several constructions
+/// (the branches of an `if`, or a fallback by name) has one per declaring site.
 pub fn definition(
     db: &dyn Db,
     files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
+) -> Vec<DefinitionTarget> {
+    let Some(target) = target_at(db, files, file, offset) else {
+        return Vec::new();
+    };
+    if let Target::Field(field) = &target {
+        return field
+            .sites
+            .iter()
+            .map(|site| DefinitionTarget::Project(*site))
+            .collect();
+    }
+    single_definition(db, files, target).into_iter().collect()
+}
+
+fn single_definition(
+    db: &dyn Db,
+    files: ProjectFiles,
+    target: Target<'_>,
 ) -> Option<DefinitionTarget> {
-    match target_at(db, files, file, offset)? {
+    match target {
+        Target::Field(_) => None,
         Target::Slot { item, binding } => {
             let info = item_naming(db, item).as_ref()?.bindings.get(&binding)?;
             let item_offset = item_node(db, item)?.text_range().start();
@@ -703,6 +725,7 @@ pub fn rename(
     // type would leave them pointing at nothing.
     match &target {
         Target::Tag(name) if stub_mentions_tag(db, name) => return None,
+        Target::Field(field) if !field.precise => return None,
         _ => {}
     }
     let occurrences = occurrences(db, files, &target);
@@ -5174,6 +5197,7 @@ enum Target<'db> {
     Global(String),
     TypeName(String),
     StubGlobal(String),
+    Field(fields::FieldTarget),
     S4 {
         name: String,
         kind: S4Kind,
@@ -5206,6 +5230,9 @@ fn target_at<'db>(
     let position = position_in_item(db, file, offset)?;
     let naming = item_naming(db, position.item).as_ref()?;
 
+    if let Some(field) = fields::field_at(db, files, position.item, position.relative) {
+        return Some(Target::Field(field));
+    }
     if let Some(hir) = item_hir(db, position.item)
         && let Some(argument) = named_argument_at(hir, position.relative)
     {
@@ -5522,6 +5549,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     let mut result = Vec::new();
     match target {
         Target::StubGlobal(_) => {}
+        Target::Field(field) => result = fields::field_occurrences(db, files, field),
         Target::TypeParameter(occurrences) => result = occurrences.clone(),
         Target::Tag(name) => result = tag_occurrences(db, files, name),
         Target::Slot { item, binding } => {
