@@ -145,7 +145,11 @@ impl<'db> InferenceTable<'db> {
         &self.entries[self.find(var).0 as usize]
     }
 
-    pub fn definition(&self, db: &'db dyn Db, name: Name<'db>) -> Option<&'db NamedDefinition<'db>> {
+    pub fn definition(
+        &self,
+        db: &'db dyn Db,
+        name: Name<'db>,
+    ) -> Option<&'db NamedDefinition<'db>> {
         let table = self.definitions?;
         if let Some(cached) = self.definition_cache.borrow().get(&name) {
             return *cached;

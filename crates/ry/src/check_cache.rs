@@ -211,6 +211,12 @@ pub fn key<'a>(
     description: Option<&str>,
     stubs: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Fingerprint {
+    // The settings name the directory that holds them, which `ry check .` and the server spell
+    // differently.
+    let mut config = config.clone();
+    config.source_directory = config
+        .source_directory
+        .map(|directory| fs::canonicalize(&directory).unwrap_or(directory));
     let mut fingerprinter = Fingerprinter::new();
     fingerprinter
         .text(env!("CARGO_PKG_VERSION"))

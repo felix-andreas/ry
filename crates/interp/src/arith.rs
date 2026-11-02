@@ -983,7 +983,12 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: boo
 
 /// Dimensions, dimension names and names from the operand of the result's length, the left
 /// one first.
-unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp, names_from_right: bool) -> R<()> {
+unsafe fn copy_array_structure(
+    left: Sexp,
+    right: Sexp,
+    result: Sexp,
+    names_from_right: bool,
+) -> R<()> {
     let result_length = length(result);
     for symbol in [symbols().dim, symbols().dimnames] {
         let from_left = get_attr(left, symbol);
@@ -3441,7 +3446,10 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
 /// A `length.out` sequence is integer whenever every element is a whole number in integer
 /// range, whatever the types of `from`, `to` and `by`, as in GNU R.
 unsafe fn whole_sequence(values: &[f64]) -> R<Sexp> {
-    if values.iter().all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64) {
+    if values
+        .iter()
+        .all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64)
+    {
         let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
         return values::integer_vector(&integers);
     }

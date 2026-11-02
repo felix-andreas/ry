@@ -1,0 +1,43 @@
+# Opening a project that `ry check` has checked shows the recorded findings at once, before the
+# server has analysed anything, and never the findings of a file that changed since.
+
+client cold
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file ry.toml
+| [check]
+| typing = true
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) {
+|   width * height
+| }
+file R/report.R
+| report <- function() {
+|   area(2, "wide")
+| }
+file R/summary.R
+| summary_area <- function() {
+|   area(3, "tall")
+| }
+
+run ry check
+expect exit 1
+expect stderr "R/report.R:2:11"
+expect stderr "R/summary.R:2:11"
+
+# Edited after the check: its recorded finding no longer holds.
+file R/summary.R
+| summary_area <- function() {
+|   area(3, "high")
+| }
+
+open R/report.R
+expect early diagnostics R/report.R "type-mismatch"
+expect diagnostics R/report.R "type-mismatch"
+
+open R/summary.R
+expect no early diagnostic R/summary.R "type-mismatch"
+expect diagnostics R/summary.R "type-mismatch"
