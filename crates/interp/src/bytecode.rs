@@ -979,7 +979,12 @@ unsafe fn count_occurrences(expression: Sexp, calls: &[Sexp], occurrences: &mut 
 
 /// Adds the tail updates of `expression` to `calls`: the expression itself when `tail`, and the
 /// arguments of `return` in the statements it runs.
-unsafe fn collect_tail_updates(expression: Sexp, parameter: Sexp, tail: bool, calls: &mut Vec<Sexp>) {
+unsafe fn collect_tail_updates(
+    expression: Sexp,
+    parameter: Sexp,
+    tail: bool,
+    calls: &mut Vec<Sexp>,
+) {
     if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
         return;
     }

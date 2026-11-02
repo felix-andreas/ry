@@ -2008,7 +2008,9 @@ unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     let items = list_elements(call, "list", list)?;
-    if list.is_array() || !crate::heap().is_resizable(list) || list.capacity() as usize <= items.len()
+    if list.is_array()
+        || !crate::heap().is_resizable(list)
+        || list.capacity() as usize <= items.len()
     {
         return Ok(list);
     }
