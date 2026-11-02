@@ -10,7 +10,7 @@ use {
         values::{self, alloc, length, nil, symbols},
     },
     heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    std::cell::RefCell,
+    std::{cell::RefCell, fmt::Write},
     unicode_width::UnicodeWidthChar,
 };
 
@@ -39,17 +39,22 @@ impl Settings {
         } else {
             values::as_integer_scalar(digits).clamp(1, 22) as usize
         };
+        Settings {
+            digits,
+            scipen: Settings::current_scipen(),
+            na_width: 2,
+            nsmall: 0,
+        }
+    }
+
+    /// `options(scipen)` alone. Callers formatting many values read it once, because
+    /// `.Options` can be reassigned from R code, which rules out caching it here.
+    pub unsafe fn current_scipen() -> i32 {
         let scipen = crate::envir::get_option("scipen");
-        let scipen = if scipen == nil() {
+        if scipen == nil() {
             0
         } else {
             values::as_integer_scalar(scipen)
-        };
-        Settings {
-            digits,
-            scipen,
-            na_width: 2,
-            nsmall: 0,
         }
     }
 
@@ -74,20 +79,85 @@ pub struct RealFormat {
 /// negative, its decimal exponent, and how many significant digits it needs.
 pub fn scientific(value: f64, digits: usize) -> (bool, i32, usize) {
     if value == 0.0 {
-        return (value.is_sign_negative() && false, 0, 1);
+        return (false, 0, 1);
     }
     let digits = digits.clamp(1, 22);
-    let text = format!("{:.*e}", digits - 1, value.abs());
-    let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let significant: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
-    let trailing = significant
-        .iter()
-        .rev()
-        .take_while(|&&digit| digit == b'0')
-        .count();
-    let needed = (significant.len() - trailing).max(1);
+    let mut text = StackText::new();
+    // The shortest digits that read back as `value` are what rounding to `digits` significant
+    // digits leaves once its trailing zeros go, whenever they are no longer than `digits`: the
+    // value is within half an ulp of them, far less than half a unit in the last place kept.
+    if digits <= SHORTEST_EXACT_DIGITS
+        && value.is_normal()
+        && write!(text, "{:e}", value.abs()).is_ok()
+        && let Some((needed, exponent)) = mantissa_digits(text.as_str())
+        && needed <= digits
+    {
+        return (value < 0.0, exponent, needed);
+    }
+    text.clear();
+    if write!(text, "{:.*e}", digits - 1, value.abs()).is_err() {
+        return (value < 0.0, 0, digits);
+    }
+    let (needed, exponent) = mantissa_digits(text.as_str()).unwrap_or((digits, 0));
     (value < 0.0, exponent, needed)
+}
+
+/// The most significant digits at which a normal double's shortest round-trip digits, when they
+/// fit, are also its correctly rounded digits. A normal double carries 53 bits, so it lies within
+/// about 1.1e-16 of its shortest digits relative to its size, far inside half a unit in the 15th
+/// digit; a subnormal has fewer bits (`5e-324` is shortest for 4.94065645841247e-324), and at 16
+/// or more digits the half unit is no longer larger than the gap.
+const SHORTEST_EXACT_DIGITS: usize = 15;
+
+/// The significant digits of a `{:e}` rendering without its trailing zeros, and its exponent.
+fn mantissa_digits(text: &str) -> Option<(usize, i32)> {
+    let (mantissa, exponent) = text.split_once('e')?;
+    let exponent: i32 = exponent.parse().ok()?;
+    let digits = mantissa.bytes().filter(u8::is_ascii_digit);
+    let count = digits.clone().count();
+    let trailing = mantissa
+        .bytes()
+        .rev()
+        .filter(u8::is_ascii_digit)
+        .take_while(|&digit| digit == b'0')
+        .count();
+    Some(((count - trailing).max(1), exponent))
+}
+
+/// A short string built on the stack, for the formatting a hot loop does per element.
+struct StackText {
+    bytes: [u8; 64],
+    length: usize,
+}
+
+impl StackText {
+    fn new() -> StackText {
+        StackText {
+            bytes: [0; 64],
+            length: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.length = 0;
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.length]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for StackText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.length + text.len();
+        let slot = self
+            .bytes
+            .get_mut(self.length..end)
+            .ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(text.as_bytes());
+        self.length = end;
+        Ok(())
+    }
 }
 
 /// GNU R's `formatReal`: the shared format of `values`.
@@ -236,9 +306,19 @@ pub fn scientific_text(value: f64, decimals: usize) -> String {
 /// One double formatted on its own at `digits` significant digits, as `as.character` and
 /// `paste` show it (15 digits for those).
 pub fn format_real_alone(value: f64, digits: usize) -> String {
+    format_real_alone_scipen(value, digits, 0)
+}
+
+/// As `format_real_alone`, with a scientific-notation penalty (`options(scipen)`).
+pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> String {
+    if value.is_finite()
+        && let Some(text) = shortest_alone(value, digits, scipen)
+    {
+        return text;
+    }
     let settings = Settings {
         digits,
-        scipen: 0,
+        scipen,
         na_width: 2,
         nsmall: 0,
     };
@@ -246,16 +326,84 @@ pub fn format_real_alone(value: f64, digits: usize) -> String {
     format_real_with(value, format, "NA")
 }
 
-/// As `format_real_alone`, honoring `options(scipen)`.
-pub unsafe fn format_real_alone_scipen(value: f64, digits: usize) -> String {
-    let settings = Settings {
-        digits,
-        scipen: Settings::current().scipen,
-        na_width: 2,
-        nsmall: 0,
+/// `format_real_alone_scipen` for a finite value whose shortest round-trip digits fit in
+/// `digits` (see `SHORTEST_EXACT_DIGITS`), built straight from those digits. Those digits are exactly what `scientific` counts
+/// and what either notation prints, so one shortest conversion replaces the significance pass
+/// and the second, fixed-precision conversion. `None` when the digits do not fit.
+fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
+    if value == 0.0 {
+        return Some("0".into());
+    }
+    if digits > SHORTEST_EXACT_DIGITS || !value.is_normal() {
+        return None;
+    }
+    let mut text = StackText::new();
+    write!(text, "{:e}", value.abs()).ok()?;
+    let (mantissa, exponent) = text.as_str().split_once('e')?;
+    let exponent: i32 = exponent.parse().ok()?;
+    let mut significand = [0u8; 24];
+    let mut count = 0usize;
+    for digit in mantissa.bytes().filter(u8::is_ascii_digit) {
+        *significand.get_mut(count)? = digit;
+        count += 1;
+    }
+    while count > 1 && significand[count - 1] == b'0' {
+        count -= 1;
+    }
+    let significand = significand.get(..count)?;
+    if count == 0 || count > digits {
+        return None;
+    }
+    let negative = value < 0.0;
+    let left = exponent + 1;
+    let right = (count as i32 - left).max(0) as usize;
+    let fixed_width = negative as usize + left.max(1) as usize + right + (right != 0) as usize;
+    let exponent_digits = if exponent.unsigned_abs() >= 100 { 3 } else { 2 };
+    let scientific_width =
+        negative as usize + (count > 1) as usize + (count - 1) + 3 + exponent_digits;
+    let mut out = String::with_capacity(fixed_width.max(scientific_width));
+    if negative {
+        out.push('-');
+    }
+    let push_digits = |out: &mut String, digits: &[u8]| {
+        out.extend(digits.iter().map(|&digit| digit as char));
     };
-    let format = format_real_common(&[value], settings);
-    format_real_with(value, format, "NA")
+    if fixed_width as i64 <= scientific_width as i64 + scipen as i64 {
+        if left <= 0 {
+            out.push_str("0.");
+            out.extend(std::iter::repeat_n('0', left.unsigned_abs() as usize));
+            push_digits(&mut out, significand);
+        } else if count <= left as usize {
+            // Zeros stand in for digits past the shortest ones only while every integer up to
+            // the value is a double, so that the value is exactly the integer they spell; GNU R
+            // prints larger values' exact digits.
+            if left as usize > SHORTEST_EXACT_DIGITS {
+                return None;
+            }
+            push_digits(&mut out, significand);
+            out.extend(std::iter::repeat_n('0', left as usize - count));
+        } else {
+            let (whole, fraction) = significand.split_at(left as usize);
+            push_digits(&mut out, whole);
+            out.push('.');
+            push_digits(&mut out, fraction);
+        }
+    } else {
+        let (first, rest) = significand.split_at(1);
+        push_digits(&mut out, first);
+        if !rest.is_empty() {
+            out.push('.');
+            push_digits(&mut out, rest);
+        }
+        write!(
+            out,
+            "e{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.unsigned_abs()
+        )
+        .ok()?;
+    }
+    Some(out)
 }
 
 pub fn format_integer(value: i32) -> String {

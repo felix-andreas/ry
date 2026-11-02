@@ -128,16 +128,10 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
                 values::mkchar(&value.to_string())
             }
         }
-        SexpType::Real => {
-            let value = values::reals(vector)[index];
-            if is_na_real(value) {
-                Ok(na_string())
-            } else {
-                values::mkchar(&crate::format::localize_decimal(
-                    crate::format::format_real_alone_scipen(value, 15),
-                ))
-            }
-        }
+        SexpType::Real => real_as_charsxp(
+            values::reals(vector)[index],
+            crate::format::Settings::current_scipen(),
+        ),
         SexpType::Complex => {
             let value = values::complexes(vector)[index];
             if is_na_real(value.r) || is_na_real(value.i) {
@@ -169,6 +163,17 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             "cannot coerce type '{}' to vector of type 'character'",
             vector.kind().name()
         ))),
+    }
+}
+
+/// A double as the `CHARSXP` `as.character` gives it, under scientific-notation penalty `scipen`.
+unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
+    if is_na_real(value) {
+        Ok(na_string())
+    } else {
+        values::mkchar(&crate::format::localize_decimal(
+            crate::format::format_real_alone_scipen(value, 15, scipen),
+        ))
     }
 }
 
@@ -534,6 +539,14 @@ pub unsafe fn coerce_atomic(
                         i: NA_REAL,
                     },
                 };
+            }
+        }
+        SexpType::String if source == SexpType::Real => {
+            let object = values::materialize(object)?;
+            let scipen = crate::format::Settings::current_scipen();
+            for index in 0..count {
+                let charsxp = real_as_charsxp(values::reals(object)[index], scipen)?;
+                values::set_elt(result, index, charsxp);
             }
         }
         SexpType::String => {

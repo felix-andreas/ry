@@ -1346,19 +1346,26 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
 struct Cell {
     vector: Sexp,
     levels: Option<Sexp>,
+    scipen: i32,
 }
 
 impl Cell {
     unsafe fn new(vector: Sexp) -> R<Cell> {
         let levels =
             values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
-        Ok(Cell { vector, levels })
+        let scipen = crate::format::Settings::current_scipen();
+        Ok(Cell {
+            vector,
+            levels,
+            scipen,
+        })
     }
 
     /// Element `index` as text, and whether it is a string (which quoting applies to); `None`
     /// for a missing value.
     unsafe fn text(&self, index: usize, decimal: &str) -> R<Option<(String, bool)>> {
         let vector = self.vector;
+        let scipen = self.scipen;
         if index >= length(vector) {
             return Ok(None);
         }
@@ -1399,7 +1406,10 @@ impl Cell {
                 if value.is_nan() {
                     None
                 } else {
-                    Some((with_decimal(format_real_alone_scipen(value, 15)), false))
+                    Some((
+                        with_decimal(format_real_alone_scipen(value, 15, scipen)),
+                        false,
+                    ))
                 }
             }
             SexpType::Complex => {

@@ -2392,6 +2392,15 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     let operand = present(matched[0])
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
     let digits = match present(matched[1]) {
+        Some(digits)
+            if length(digits) > 1
+                && matches!(
+                    operand.kind(),
+                    SexpType::Integer | SexpType::Logical | SexpType::Real
+                ) =>
+        {
+            return round_recycled(operand, digits, significant);
+        }
         Some(digits) => {
             if length(digits) == 0 {
                 return Err(call.error("invalid second argument of length 0"));
@@ -2470,6 +2479,43 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         }
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
+}
+
+/// `round` or `signif` with several `digits`, recycled against `x` as GNU R's binary math
+/// functions recycle; the attributes come from the longer argument.
+unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Sexp> {
+    let operand = values::materialize(operand)?;
+    let digits = coerce_vector(digits, SexpType::Real)?;
+    let (operand_count, digits_count) = (length(operand), length(digits));
+    let count = if operand_count == 0 {
+        0
+    } else {
+        operand_count.max(digits_count)
+    };
+    let result = alloc(SexpType::Real, count)?;
+    for index in 0..count {
+        let x = real_at(operand, index % operand_count);
+        let digit = values::reals(digits)[index % digits_count];
+        values::reals_mut(result)[index] = if digit.is_nan() {
+            NA_REAL
+        } else if x.is_nan() {
+            x
+        } else {
+            let digit = digit.round().clamp(-1e6, 1e6) as i32;
+            if significant {
+                signif_digits(x, digit)
+            } else {
+                round_digits(x, digit)
+            }
+        };
+    }
+    let source = if operand_count >= digits_count {
+        operand
+    } else {
+        digits
+    };
+    values::copy_most_attributes(source, result, true)?;
+    Ok(result)
 }
 
 #[derive(Clone, Copy)]
