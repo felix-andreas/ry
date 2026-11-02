@@ -10547,7 +10547,12 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(&module[text])?,
             _ => return None,
         };
-        let factors = match matched.get(1).copied().flatten().map(|value| module.kind(value)) {
+        let factors = match matched
+            .get(1)
+            .copied()
+            .flatten()
+            .map(|value| module.kind(value))
+        {
             None => false,
             Some(ExpressionKind::Literal(LiteralKind::Logical(flag))) => *flag,
             Some(_) => return None,
