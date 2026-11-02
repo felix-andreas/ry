@@ -2229,9 +2229,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - The fancy-regex backtrack limit is unbounded, so a catastrophic POSIX pattern can hang.
     - `iconv(sub = , "ASCII//TRANSLIT")`.
   - Smaller classes: Bessel's `IJKY.R` (a relative difference of 0.036 between `besselI`
-    results), an F value in nlme's `anova`, seven of data.table's `froll.Rraw` tests (6000.114
-    and neighbours), three tinytest failures in RcppArmadillo and four in RcppSimdJson,
-    and plumber's `test-async.R`.
+    results), an F value in nlme's `anova`, 12 of data.table's `test.data.table()` tests
+    (901.2, 1138.2, 2125.03, 2125.05, 2211.119, 2211.24, 2211.349, 2252.1, 2258.4, 2258.5,
+    2291.1, 2300.4), and four tinytest failures in RcppSimdJson.
   - A process the oracle kills at its deadline leaves an empty `.Rout`, because ry buffers
     stdout; reproduce a hang with `ry run` in the background and `gdb -p` to see where it is.
   - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
