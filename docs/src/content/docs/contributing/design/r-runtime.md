@@ -565,10 +565,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
   only a few dozen times, which made the load slower. A fully typed closure, one with an inline
   type on every formal, compiles on its first entry instead: the declared types seed the type
-  feedback of the instructions that have not run yet, and the guards on them stay. When even the
-  declared types leave an instruction's operand unknown (the result of an untyped builtin such as
-  `sum`, or `v[k]` with a formal `k`), the first-call compile is declined without counting against
-  the body, which then follows the thresholds.
+  feedback of the instructions that have not run yet, and the guards on them stay. A base builtin
+  call or an element-wise operation that has not returned yet takes the type the builtin computes
+  for its argument types (`seq_len(n)` an integer vector, `sum` of doubles a double, `x * y` on
+  double vectors a double vector), checked after the call like any fed-back type. When an
+  operand's type is still unknown (the result of an untyped closure, say), the first-call compile
+  is declined without counting against the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -587,8 +589,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   position without the general matcher. Evaluating early is invisible only if nothing can assign
   what an argument reads before the callee forces it, so the callee must be frame-safe: its body
   and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
-  The call goes through tier 0 instead when a calling handler is established, because a handler
-  could run R code in between. A call of a small closure defined in the same body, which computes a scalar
+  When a calling handler is established, a handler could run R code in between, so compiled code
+  then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
+  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar
   from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
   such a computation, branches, locals and calls of itself or other such closures included, is
   compiled once per argument type to a native function on unboxed values with no frame
@@ -615,8 +618,8 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   allocation and every helper call.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
-  types for builtins and for subscripts, which the early profiles of the next section need to cover
-  more than arithmetic on formals, and freeing the machine code of invalidated bodies.
+  types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
+  bodies.
 
 ### How the static types feed the JIT
 
