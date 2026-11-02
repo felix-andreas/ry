@@ -6175,8 +6175,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   per-item memos and edges were bookkeeping a run that never edits cannot use.
 - **Target shape.**
   - `semantics::with_held_tree` parses a file and parks the tree in a thread-local slot that
-    `parse` serves while the file's syntax-pass work runs; the tracked query is `parse_memo`, which
-    only an incremental host calls. The tree is freed when the worker moves on.
+    `parse` serves while the file's syntax-pass work runs, and the tree is freed when the worker
+    moves on. Any other read goes through the tracked `parse_memo`, which keeps that tree for the
+    run; a full cold check makes none, while partial cached runs, the cache planner and
+    `--annotate` do. `a_one_shot_cold_check_memoizes_no_tree` in `test_incremental.rs` pins it.
   - On a one-shot host `item_syntax` and `item_annotation_syntax` compute their value without a
     memo; on other hosts they go through `item_syntax_memo` and `item_annotation_syntax_memo`, the
     firewalls `test_incremental.rs` pins.

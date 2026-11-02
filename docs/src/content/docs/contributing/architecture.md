@@ -164,13 +164,15 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 ### Syntax trees stay resident in the server, and `ry check` holds one at a time
 
 The server keeps every syntax tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it never memoizes one. Each worker of
+valid. `ry check` reads each tree in its first pass only, so it does not memoize them. Each worker of
 the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
 parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
 tree is freed when the worker moves on. In a one-shot database `item_syntax` and
 `item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
-tree alive past the syntax pass and buys nothing in a run that never edits. A tree read after the
-syntax pass still works, by reparsing that file. Annotation memos (`file_item_annotations`) store
+tree alive past the syntax pass and buys nothing in a run that never edits. A tree read outside a held
+tree still works: it goes through the `parse_memo` query, which then keeps that file's tree for the
+rest of the run. A full cold check never does this, but a partial cached run, the cache planner's
+surface comparison and `--annotate` read some trees that way. Annotation memos (`file_item_annotations`) store
 detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
 annotation never keeps the whole file's tree alive.
 
@@ -190,8 +192,8 @@ file's share of the project-wide maps (`warm_project_folds`), so that no later c
 another file's facts on its own thread. The second names every item, so that two threads
 checking files that reach the same item do not block on one claim, and the third assembles the
 diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
-previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
-once.
+previous tree of every file. `test_incremental.rs` pins that a cold check parses each file once
+and that a one-shot cold check memoizes no tree.
 
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
@@ -377,7 +379,7 @@ binders, read once per reader, instead of a `frame_binder` memo per item and nam
 instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. The item check of a one-shot host leaves out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, because only editor features read them. The language server and a cached `ry check` keep the firewalls and the editor facts.
+per-item answer. The item check of a one-shot host leaves out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, because only editor features read them. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls and the editor facts.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

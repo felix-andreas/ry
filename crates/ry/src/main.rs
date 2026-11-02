@@ -108,7 +108,8 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
 /// same option in `crates/libr/src/libr.rs`.
 ///
-/// The purge delay drops from mimalloc's default of a second to 10 ms. A cold check runs for
+/// The purge delay drops from mimalloc v3's default of a second to 10 ms, which is v2's default
+/// (a workspace build links v2, because `libr` asks for it). A cold check runs for
 /// about a second and frees its parse trees file by file, so with the default delay none of that
 /// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
 /// 300,000-line project at no measurable cost in time.

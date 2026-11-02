@@ -140,7 +140,11 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
 /// inside `work` shares one tree that no memo keeps: the tree is freed when `work` returns,
 /// unless something derived from it holds a window onto it. A one-shot host derives everything
 /// its later passes read from a file's tree inside one call, which bounds the live trees by the
-/// number of threads rather than the number of files.
+/// number of threads rather than the number of files. A one-shot read outside any held tree
+/// falls back to the memo, which then keeps that tree for the rest of the run.
+///
+/// The slot is keyed by file only, so code inside `work` must not parse through a second
+/// one-shot database, whose file ids could coincide with this one's.
 pub fn with_held_tree<T>(db: &dyn Db, file: SourceFile, work: impl FnOnce() -> T) -> T {
     if !db.one_shot() {
         return work();

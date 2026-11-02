@@ -14,6 +14,7 @@ use {
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
+        with_held_tree,
     },
     std::{collections::BTreeMap, thread},
 };
@@ -534,6 +535,35 @@ fn a_cold_check_parses_each_file_once() {
             .any(|diagnostic| diagnostic.code == "object-system"),
         "the bare `setClass` call is still reported"
     );
+}
+
+/// The one-shot cold check holds each file's tree only while it derives that file's facts, so
+/// no tree is memoized and none outlives the syntax pass: a later pass that needed a tree would
+/// show up here as a `parse_memo` execution.
+#[test]
+fn a_one_shot_cold_check_memoizes_no_tree() {
+    let mut db = ProbeDatabase::one_shot();
+    let files = wide_project(&db);
+    let lints = LintConfig::default();
+    for &file in &files {
+        with_held_tree(&db, file, || derive_from_syntax(&db, file, &lints));
+    }
+    db.synthetic_write(Durability::LOW);
+    for &file in &files {
+        for &item in item_tree(&db, file) {
+            item_naming(&db, item);
+        }
+    }
+    report(&mut db, &files, &lints);
+    assert_eq!(
+        db.executions_since(&["parse_memo", "item_syntax_memo"]),
+        [0, 0]
+    );
+    let codes: Vec<&str> = file_diagnostics(&db, files[200])
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect();
+    assert!(codes.contains(&"unused"), "{codes:?}");
 }
 
 #[test]
