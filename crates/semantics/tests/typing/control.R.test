@@ -712,3 +712,31 @@ describe <- function(name, punct) {
 }
 #++++
 describe: <T, U> fn(name: T, [punct]: U) -> T | character
+#---- is_null_on_a_field_rules_out_the_empty_placeholder_after_a_diverging_branch
+#: fn(x: character) -> list{scheme: character, host: character}
+parse <- function(x) list(scheme = x, host = x)
+find <- function(scopes) {
+  url <- list()
+  for (scope in scopes) {
+    if (is.null(url$scheme)) url <- parse(scope)
+  }
+  if (is.null(url$scheme)) stop("no host")
+  url
+}
+#++++
+parse: fn(x: character) -> list{scheme: character, host: character}
+find: <T> fn(scopes: T) -> list{scheme: character, host: character}
+
+#---- is_null_on_a_field_does_not_narrow_without_a_diverging_branch
+#: fn(x: character) -> list{scheme: character, host: character}
+parse <- function(x) list(scheme = x, host = x)
+find <- function(scopes) {
+  url <- list()
+  for (scope in scopes) {
+    if (is.null(url$scheme)) url <- parse(scope)
+  }
+  url
+}
+#++++
+parse: fn(x: character) -> list{scheme: character, host: character}
+find: <T> fn(scopes: T) -> list{} | list{scheme: character, host: character}
