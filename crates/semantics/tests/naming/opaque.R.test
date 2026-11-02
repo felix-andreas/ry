@@ -363,9 +363,11 @@ f <- function(data) data |> undefined_thing
   28..43 undefined_thing -> quiet deferred
 
 #==== formulas
-# A formula quotes both sides: the names in it are model syntax evaluated
-# against the data, so they are not reads at all.
-#---- a_two_sided_formula_reads_neither_side
+# A formula quotes both sides: its names are model syntax evaluated against the
+# data, so they are quiet reads. They never report as unresolved, but a local
+# they name counts as used, because `lm(y ~ x)` finds `x` in the calling frame
+# when the data does not supply it.
+#---- a_two_sided_formula_reads_both_sides_quietly
 f <- function(frame) lm(outcome ~ predictor, data = frame)
 #++++
 # f
@@ -373,11 +375,14 @@ f <- function(frame) lm(outcome ~ predictor, data = frame)
   b1 f top-level 0..1
   0..1 f <- b1
   21..23 lm -> non-local deferred
+  24..31 outcome -> quiet deferred
+  34..43 predictor -> quiet deferred
   52..57 frame -> b0
 
-#---- a_one_sided_formula_reads_nothing_either
+#---- a_one_sided_formula_reads_its_operand_quietly
 f <- function() ~ predictor
 #++++
 # f
   b0 f top-level 0..1
   0..1 f <- b0
+  18..27 predictor -> quiet deferred
