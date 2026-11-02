@@ -60,7 +60,6 @@ f <- function() somepkg::mystery()
 #++++
 f: fn() -> Unknown
 16..32 warning[unresolved] unknown package namespace `somepkg`.
-16..32 error[strict] strict mode: could not determine the type of `mystery`; it has no known type
 
 #---- no_origin_when_types_are_known
 f <- function() {
@@ -115,6 +114,13 @@ f: <T> fn(x: T) -> T
 0..14 error[annotation] Unknown typing directive `loud`. Use `# typing: on`, `# typing: off`, or `# typing: strict`.
 
 #==== masking
+#---- a_directive_may_end_in_a_comment
+# typing: strict  # the payments module is fully typed
+f <- function(x) x
+#++++
+typing mode: Strict
+f: <T> fn(x: T) -> T
+
 #---- data_table_brackets_are_masked
 summarize <- function(dt) {
   dt[, .(m = mean(speed)), by = cyl]

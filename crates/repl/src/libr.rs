@@ -626,7 +626,7 @@ unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
 /// `R_HOME` when set, else what `R RHOME` prints, else the platform's usual installations
 /// (`interp/src/gnu_r_home.rs`), which matter where `R` is rarely on the `PATH`: Windows, and
 /// an editor started from the macOS Dock.
-fn discover_r_home() -> Result<PathBuf, ReplError> {
+pub fn discover_r_home() -> Result<PathBuf, ReplError> {
     if let Ok(home) = env::var("R_HOME")
         && !home.is_empty()
     {

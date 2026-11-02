@@ -88,10 +88,10 @@ c(1.5, 2.5)[[1L]]
 #++++
 double
 
-#---- double_bracket_named_vector_name_nullable
+#---- double_bracket_named_vector_name_is_the_element
 c(foo = 1L)[["foo"]]
 #++++
-integer | NULL
+integer
 
 #---- double_bracket_named_vector_positional
 c(foo = 1L, bar = 2L)[[2L]]

@@ -1,0 +1,9 @@
+[stdout]
+| [1] 4.0 1.0 2.5 2.5
+| [1] 2 3 4 1
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(2L, 3L, 4L, 1L)

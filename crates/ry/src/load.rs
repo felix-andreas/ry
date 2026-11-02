@@ -23,6 +23,7 @@ use {
         path::{Path, PathBuf},
         sync::{LazyLock, Mutex, PoisonError},
         thread,
+        time::Duration,
     },
 };
 
@@ -47,6 +48,16 @@ pub fn embedded_runtime() -> String {
   callers <- .Call("ry_loader_callers", root, paste(names, collapse = "\n"), PACKAGE = "(embedding)")
   if (is.null(callers)) stop("ry's loader panicked; please report this", call. = FALSE)
   if (!nzchar(callers)) character() else strsplit(callers, "\n", fixed = TRUE)[[1L]]
+}
+.ry_wait_edits <- function(root, timeout) {
+  edits <- .Call("ry_loader_wait_edits", root, as.character(round(timeout * 1000)),
+                 PACKAGE = "(embedding)")
+  if (is.null(edits)) stop("ry's loader panicked; please report this", call. = FALSE)
+  if (startsWith(edits, "!")) stop(substring(edits, 2L), call. = FALSE)
+  if (!nzchar(edits)) return(character())
+  edits <- strsplit(edits, "\n", fixed = TRUE)[[1L]]
+  edits[edits == "*"] <- NA_character_
+  edits
 }"#,
     )
 }
@@ -211,6 +222,11 @@ pub fn call_routines() -> Vec<CallRoutine> {
             function: ry_loader_callers as *const (),
             arguments: 2,
         },
+        CallRoutine {
+            name: c"ry_loader_wait_edits",
+            function: ry_loader_wait_edits as *const (),
+            arguments: 2,
+        },
     ]
 }
 
@@ -283,6 +299,49 @@ extern "C" fn ry_loader_callers(root: Sexp, names: Sexp) -> Sexp {
     match callers {
         Ok(Some(callers)) => libr::string_value(&callers),
         Ok(None) => libr::string_value(""),
+        Err(_) => libr::null(),
+    }
+}
+
+/// [`Loader::wait_edits`], with the timeout in milliseconds as text and the edited paths joined
+/// by line breaks. A line `*` means notifications were lost, and a leading `!` marks an error
+/// message instead.
+extern "C" fn ry_loader_wait_edits(root: Sexp, timeout: Sexp) -> Sexp {
+    let edits = catch_unwind(|| {
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let (root, timeout) =
+            unsafe { (libr::string_argument(root), libr::string_argument(timeout)) };
+        let (Some(root), Some(timeout)) = (root, timeout) else {
+            return "!ry_loader_wait_edits needs a root and a timeout".to_owned();
+        };
+        let Ok(milliseconds) = timeout.parse::<u64>() else {
+            return format!("!{timeout} is not a timeout in milliseconds");
+        };
+        let root = match loader::find_package_root(Path::new(&root)) {
+            Ok(root) => root,
+            Err(error) => return format!("!{error}"),
+        };
+        let edits = LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wait_edits(&root, Duration::from_millis(milliseconds));
+        match edits {
+            Ok(edits) => {
+                let mut lines: Vec<String> = edits
+                    .paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                if edits.lost {
+                    lines.push("*".to_owned());
+                }
+                lines.join("\n")
+            }
+            Err(error) => format!("!{error}"),
+        }
+    });
+    match edits {
+        Ok(edits) => libr::string_value(&edits),
         Err(_) => libr::null(),
     }
 }

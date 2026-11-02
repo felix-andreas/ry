@@ -542,7 +542,8 @@ hover 35..39: port: integer
 definition 35..39
 references: 35..39*, 61..65
 rename: 2 edit(s)
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 action: Add inferred type annotation for `config`
   edit 6..6 -> ": list{host: character, port: integer}"
 action: Add inferred type annotations for the whole file
@@ -624,7 +625,8 @@ hover 107..112: count: Unknown
 definition 107..112
 references: 107..112*, 121..126
 rename: 2 edit(s)
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 completion (1): count
 
 #---- field_r6_private
@@ -641,7 +643,8 @@ hover 98..105: balance: Unknown
 definition 98..105
 references: 98..105*, 117..124
 rename: 2 edit(s)
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 completion (1): balance
 
 #---- field_r6_new
@@ -803,7 +806,8 @@ hover 30..31: a: double
 definition 30..31
 references: 30..31*, 47..48*, 56..57
 rename: 3 edit(s)
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 action: Add inferred type annotation for `x`
   edit 1..1 -> ": list{a: double}"
 action: Add inferred type annotations for the whole file
@@ -821,7 +825,8 @@ hover 12..16: port: double
 definition 12..16
 references: 12..16*, 57..61
 rename: none
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 action: Add inferred type annotation for `cfg`
   edit 3..3 -> ": list{port: double}"
 action: Add inferred type annotations for the whole file

@@ -2,9 +2,9 @@
 //! pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and uncaught errors
 //! as transcripts. A seeded simulator plays a client that sends random requests at every stop,
 //! some of them invalid, and holds the session to the protocol's invariants: every request gets
-//! exactly one response, the session always ends, and the interpreter is left clean. Every
-//! failure prints its seed; `DEBUGGER_SEED=<seed>` replays that session, and `FUZZ_ITERS` sets
-//! how many seeds run.
+//! exactly one response, the session always ends, and the interpreter is left clean. Each
+//! session is one seed of [`for_each_seed`], so a failure prints the `FUZZ_SEED` command that
+//! replays it, and `FUZZ_ITERS` sets how many seeds run.
 
 use {
     interp::{
@@ -22,7 +22,7 @@ use {
         path::PathBuf,
         rc::Rc,
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 #[test]
@@ -352,24 +352,20 @@ fn requests_that_need_a_stopped_program_fail_while_it_runs() {
 /// session ends, and the interpreter is left with no frames and no adapter.
 #[test]
 fn simulated_clients_keep_the_protocol() {
-    for seed in seeds() {
-        let outcome = std::panic::catch_unwind(|| simulate(seed));
-        match outcome {
-            Ok(Ok(_)) => {}
-            Ok(Err(failure)) => {
-                panic!("debugger seed {seed} failed; replay with DEBUGGER_SEED={seed}\n{failure}")
-            }
-            Err(_) => panic!("debugger seed {seed} panicked; replay with DEBUGGER_SEED={seed}"),
+    for_each_seed(40, |seed| {
+        if let Err(failure) = simulate(seed) {
+            panic!("{failure}");
         }
-    }
+    });
 }
 
 #[test]
 fn a_seed_replays_the_same_session() {
-    let seed = seeds()[0];
-    let first = simulate(seed).expect("the session keeps the protocol");
-    let second = simulate(seed).expect("the session keeps the protocol");
-    assert_eq!(first, second, "seed {seed} played out differently");
+    for_each_seed(1, |seed| {
+        let first = simulate(seed).expect("the session keeps the protocol");
+        let second = simulate(seed).expect("the session keeps the protocol");
+        assert_eq!(first, second, "seed {seed} played out differently");
+    });
 }
 
 /// The console's socket parses whatever a peer sends: well-framed messages come back in order,
@@ -378,7 +374,7 @@ fn a_seed_replays_the_same_session() {
 #[cfg(unix)]
 #[test]
 fn the_console_framing_survives_arbitrary_bytes() {
-    for seed in seeds() {
+    for_each_seed(40, |seed| {
         let mut entropy = SplitMix64(seed);
         let mut bytes = Vec::new();
         let mut expected = Vec::new();
@@ -415,19 +411,9 @@ fn the_console_framing_survives_arbitrary_bytes() {
         let parsed = interp::console_server::parse_messages(&bytes);
         assert!(
             parsed.len() >= expected.len() && parsed[..expected.len()] == expected[..],
-            "framing seed {seed}: replay with DEBUGGER_SEED={seed}"
+            "framing seed {seed}: the parsed messages lost a well-framed one"
         );
-    }
-}
-
-fn seeds() -> Vec<u64> {
-    if let Some(seed) = std::env::var("DEBUGGER_SEED")
-        .ok()
-        .and_then(|value| value.parse().ok())
-    {
-        return vec![seed];
-    }
-    (0..fuzz_iterations(40) as u64).collect()
+    });
 }
 
 /// Programs that cover loops, recursion, closures, lists, environments, lazy arguments, a caught
@@ -1180,14 +1166,20 @@ fn request(command: &str, arguments: Value) -> Value {
 }
 
 /// Writes `program` to a file of its own, named by its content so each test gets a stable path.
+/// Tests running in parallel can write the same program at once, so each writes a file private
+/// to its thread and renames it into place: a plain write truncates the file another test may
+/// be reading.
 fn program_file(program: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     program.hash(&mut hasher);
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("debugger");
     std::fs::create_dir_all(&directory).expect("the test directory is writable");
-    let path = directory.join(format!("program-{:016x}.R", hasher.finish()));
-    std::fs::write(&path, program).expect("the program file is writable");
+    let name = format!("program-{:016x}.R", hasher.finish());
+    let path = directory.join(&name);
+    let staging = directory.join(format!("{name}.{:?}", std::thread::current().id()));
+    std::fs::write(&staging, program).expect("the program file is writable");
+    std::fs::rename(&staging, &path).expect("the program file can be renamed into place");
     std::fs::canonicalize(&path).expect("the program file exists")
 }
 

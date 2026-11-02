@@ -161,18 +161,20 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident in the server, and `ry check` releases them once
+### Syntax trees stay resident in the server, and `ry check` holds one at a time
 
 The server keeps every syntax tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
-has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
-off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
-zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
-to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
-never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
-check's wall time when the capacities stayed set). The released file trees come back to the
-caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
-all cores. A tree read after the release still works, by reparsing that file.
+valid. `ry check` reads each tree in its first pass only, so it does not memoize them. Each worker of
+the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
+parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
+tree is freed when the worker moves on. In a one-shot database `item_syntax` and
+`item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
+tree alive past the syntax pass and buys nothing in a run that never edits. A tree read outside a held
+tree still works: it goes through the `parse_memo` query, which then keeps that file's tree for the
+rest of the run. A full cold check never does this, but a partial cached run, the cache planner's
+surface comparison and `--annotate` read some trees that way. Annotation memos (`file_item_annotations`) store
+detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
+annotation never keeps the whole file's tree alive.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -190,8 +192,8 @@ file's share of the project-wide maps (`warm_project_folds`), so that no later c
 another file's facts on its own thread. The second names every item, so that two threads
 checking files that reach the same item do not block on one claim, and the third assembles the
 diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
-previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
-once.
+previous tree of every file. `test_incremental.rs` pins that a cold check parses each file once
+and that a one-shot cold check memoizes no tree.
 
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
@@ -237,7 +239,7 @@ persistence feature would need every memo to serialize, including the process-wi
 
 The record has a key fingerprint and, for each file, four facts:
 
-- **Key**: the ry version and binary, the configuration, the project root, the data files,
+- **Key**: the ry version and build, the configuration, the project root, the data files,
   `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
 - **Content fingerprint**: the file's text.
 - **Surface fingerprint**: two parts. The first is the text with the body of each top-level
@@ -255,9 +257,19 @@ The record has a key fingerprint and, for each file, four facts:
 
 A run with no changed file replays every finding without building a tree. A run whose changed
 files all keep their surface checks the changed files and the files whose dependencies include
-one of them. Every surface then matches the record, so the attached set and, when the imports used
-are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
-file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+one of them. Every surface then matches the record, so the attached set comes from the record as
+well, and the `NAMESPACE` findings are recomputed from the imports used, which costs a few
+milliseconds. Any other change checks every file.
+
+A package-only run, such as `ry check R` or the strict check of `ry load`, analyses only the
+package files. Tests and scripts read the package namespace but add nothing to it, so leaving
+them unparsed changes no package finding. They stay in the record: a file the run left unanalysed
+keeps its recorded content, surface, findings and imports used while its text is unchanged. When
+its text did change, the record keeps no surface for it and marks every unanalysed file
+unchecked, so the next run that analyses them checks them all. The `NAMESPACE` findings read only
+the imports the analysed files use, so a package-only run and a full run can disagree on them
+(an import only the tests use is unused to the first and used to the second). A replay therefore
+recomputes them when the package files' imports differ from all files' imports. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
 an edit inside a body rechecks one or two files.
 
 A partial run still parses every file, because the project-wide maps fold every file's items. So
@@ -377,7 +389,7 @@ binders, read once per reader, instead of a `frame_binder` memo per item and nam
 instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. The language server and a cached `ry check` keep the firewalls.
+per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions

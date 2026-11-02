@@ -18,7 +18,7 @@ use {
     crate::{
         hir::{ExpressionKind, Symbol},
         naming::RefClassKey,
-        sorted::SortedSet,
+        sorted::{SortedMap, SortedSet},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
@@ -50,6 +50,14 @@ pub trait Db: salsa::Database {
     fn one_shot(&self) -> bool {
         false
     }
+
+    /// Whether an item's check keeps the per-expression facts that only editor features and
+    /// rewrites read (expression and pattern types, chosen overloads, callee targets). A host
+    /// that only reports diagnostics leaves them out, because resolving every recorded type is a
+    /// large share of a check's cost.
+    fn editor_facts(&self) -> bool {
+        !self.one_shot()
+    }
 }
 
 #[salsa::db]
@@ -59,50 +67,31 @@ pub struct RootDatabase {
     /// Shared across storage-handle clones so fresh handles keep the warm entries.
     splice_cache: Arc<SpliceCache>,
     one_shot: bool,
+    editor_facts: bool,
 }
 
 impl RootDatabase {
     /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
     /// splice caching would only hold a second copy of every text and of recent trees, and no
     /// query needs a firewall ([`Db::one_shot`]).
+    /// It reports diagnostics only, so it leaves out the editor facts ([`Db::editor_facts`]).
     pub fn one_shot() -> RootDatabase {
         RootDatabase {
             storage: salsa::Storage::default(),
             splice_cache: Arc::new(SpliceCache::disabled()),
             one_shot: true,
+            editor_facts: false,
         }
     }
-}
 
-/// Releases every memoized tree of `files` and keeps everything derived from them. A one-shot
-/// check calls it once its syntax pass has derived what later passes read, because the trees
-/// are its largest memos. A later tree read still works, by reparsing that file.
-///
-/// The queries record reads only while their capacity is nonzero, so the capacity is raised for
-/// one single-threaded touch of every tree, which fills the eviction lists, and lowered again
-/// after: recording on every read of a parallel pass queues the threads on one mutex per query.
-/// The file trees come back to the caller, which owns the last reference to every node and can
-/// free them off the critical path.
-pub fn release_trees(db: &mut RootDatabase, files: &[SourceFile]) -> Vec<Parse> {
-    parse::set_lru_capacity(db, 1);
-    item_syntax::set_lru_capacity(db, 1);
-    item_annotation_syntax::set_lru_capacity(db, 1);
-    file_item_annotations::set_lru_capacity(db, 1);
-    let mut trees = Vec::with_capacity(files.len());
-    for &file in files {
-        trees.push(parse(db, file));
-        file_item_annotations(db, file);
-        for &item in item_tree(db, file) {
-            item_syntax(db, item);
-            item_annotation_syntax(db, item);
+    /// A one-shot database for a command that reads editor facts, such as `ry migrate`, whose
+    /// rewrites read expression types.
+    pub fn one_shot_with_editor_facts() -> RootDatabase {
+        RootDatabase {
+            editor_facts: true,
+            ..RootDatabase::one_shot()
         }
     }
-    salsa::Database::trigger_lru_eviction(db);
-    parse::set_lru_capacity(db, 0);
-    item_syntax::set_lru_capacity(db, 0);
-    item_annotation_syntax::set_lru_capacity(db, 0);
-    file_item_annotations::set_lru_capacity(db, 0);
-    trees
 }
 
 #[salsa::db]
@@ -116,6 +105,10 @@ impl Db for RootDatabase {
 
     fn one_shot(&self) -> bool {
         self.one_shot
+    }
+
+    fn editor_facts(&self) -> bool {
+        self.editor_facts || !self.one_shot
     }
 }
 
@@ -150,10 +143,47 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-// Every tree-holding query takes an LRU capacity of 0, which records nothing on a read, so a
-// one-shot host can still release the trees once ([`release_trees`]).
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
+    if db.one_shot()
+        && let Some(parse) = HELD_TREE.with_borrow(|held| {
+            held.as_ref()
+                .filter(|(held, _)| *held == file)
+                .map(|(_, parse)| parse.clone())
+        })
+    {
+        // The read the memo would have recorded.
+        file.text(db);
+        return parse;
+    }
+    parse_memo(db, file)
+}
+
+/// Runs `work` with `file`'s tree held by this thread, so on the one-shot path every read of it
+/// inside `work` shares one tree that no memo keeps: the tree is freed when `work` returns,
+/// unless something derived from it holds a window onto it. A one-shot host derives everything
+/// its later passes read from a file's tree inside one call, which bounds the live trees by the
+/// number of threads rather than the number of files. A one-shot read outside any held tree
+/// falls back to the memo, which then keeps that tree for the rest of the run.
+///
+/// The slot is keyed by file only, so code inside `work` must not parse through a second
+/// one-shot database, whose file ids could coincide with this one's.
+pub fn with_held_tree<T>(db: &dyn Db, file: SourceFile, work: impl FnOnce() -> T) -> T {
+    if !db.one_shot() {
+        return work();
+    }
+    let tree = db.splice_cache().parse(file, file.text(db));
+    let previous = HELD_TREE.replace(Some((file, tree)));
+    let result = work();
+    HELD_TREE.set(previous);
+    result
+}
+
+thread_local! {
+    static HELD_TREE: RefCell<Option<(SourceFile, Parse)>> = const { RefCell::new(None) };
+}
+
+#[salsa::tracked(returns(clone))]
+fn parse_memo(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
 
@@ -279,8 +309,17 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
 /// from it stay item-relative until the rendering edge.
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
+    // A one-shot run never edits, so the firewall buys nothing there, and a memo per item would
+    // keep its file's tree alive after the file's syntax pass ([`with_held_tree`]).
+    if db.one_shot() {
+        return item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())));
+    }
+    item_syntax_memo(db, item)
+}
+
+#[salsa::tracked(returns(clone))]
+fn item_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())))
 }
 
@@ -804,15 +843,24 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
+    if db.one_shot() {
+        return file_item_annotations(db, *item.file(db))
+            .get(&item)
+            .cloned();
+    }
+    item_annotation_syntax_memo(db, item)
+}
+
+#[salsa::tracked(returns(clone))]
+fn item_annotation_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
         .cloned()
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref), lru = 0)]
+#[salsa::tracked(returns(ref))]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -827,7 +875,7 @@ fn file_item_annotations<'db>(
         .filter_map(|(annotation, target)| match target {
             AnnotationTarget::Attached(node) => item_by_range
                 .get(&node.text_range())
-                .map(|&item| (item, ItemSyntax(Arc::new(annotation.subtree())))),
+                .map(|&item| (item, ItemSyntax(Arc::new(annotation.detached_subtree())))),
             _ => None,
         })
         .collect()
@@ -925,8 +973,12 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         if !plain {
             return None;
         }
-        parameters.push(if position < passed {
+        // `if (!missing(pkgname))` lets a developer call the hook by hand without arguments.
+        let optional = formal.has_default || tests_missing(&function, &formal.name);
+        parameters.push(if position < passed && !optional {
             format!("{}: character", formal.name)
+        } else if position < passed {
+            format!("[{}]: character", formal.name)
         } else {
             format!("[{}]: Any", formal.name)
         });
@@ -936,6 +988,24 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         return None;
     }
     stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
+}
+
+/// Whether the function's text contains `missing(name)`.
+fn tests_missing(function: &SyntaxNode, name: &str) -> bool {
+    let tokens: Vec<_> = function
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !token.kind().is_trivia())
+        .collect();
+    tokens.windows(4).any(|window| {
+        let [missing, open, argument, close] = window else {
+            return false;
+        };
+        missing.text() == "missing"
+            && open.text() == "("
+            && argument.text().trim_matches('`') == name
+            && close.text() == ")"
+    })
 }
 
 fn expression_annotations<'db>(
@@ -1186,10 +1256,24 @@ fn normalize_relative_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// The item a sourced file binds `name` with. Per name, so a sourced file's edit re-checks only
-/// the reads whose definition changes; the last sourced file to bind it wins, as at run time.
-#[salsa::tracked]
+/// The item a sourced file binds `name` with; the last sourced file to bind it wins, as at run
+/// time.
 pub fn sourced_definition<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    name: Symbol,
+) -> Option<Item<'db>> {
+    // Most files source nothing, and interning a per-name query for every name such a file
+    // reads costs a check more time and memory than the answer is worth.
+    if sourced_files(db, file).is_empty() {
+        return None;
+    }
+    *sourced_name_definition(db, file, name)
+}
+
+/// Per name, so a sourced file's edit re-checks only the reads whose definition changes.
+#[salsa::tracked]
+fn sourced_name_definition<'db>(
     db: &'db dyn Db,
     file: SourceFile,
     name: Symbol,
@@ -1247,8 +1331,10 @@ pub fn file_typing_directives(
                 else {
                     continue;
                 };
-                // The whole remainder is the value: `typing: on gely` is a typo, not `on`.
-                match rest.trim() {
+                // The whole remainder up to a trailing `# reason` comment is the value:
+                // `typing: on gely` is a typo, not `on`.
+                let value = rest.split_once('#').map_or(rest, |(value, _)| value);
+                match value.trim() {
                     "off" => mode = Some(TypingMode::Off),
                     "on" => mode = Some(TypingMode::On),
                     "strict" => mode = Some(TypingMode::Strict),
@@ -1911,9 +1997,11 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
     };
     naming
         .bindings
-        .values()
-        .filter(|binding| binding.kind == naming::BindingKind::TopLevel)
-        .map(|binding| binding.name)
+        .iter()
+        .filter(|(slot, binding)| {
+            binding.kind == naming::BindingKind::TopLevel || naming.loop_bound_slots.contains(*slot)
+        })
+        .map(|(_, binding)| binding.name)
         .collect()
 }
 
@@ -2692,34 +2780,36 @@ fn unlisted_frame_binder<'db>(
             .get_or_init(|| FrameBinders::of(db, item))
             .binder(name, deferred);
     }
-    frame_binder(db, item, types::Name::new(db, &name), deferred)
+    frame_binder(db, item, types::Name::new(db, name), deferred)
 }
+
+/// Each symbol an item reads from its frame, with its immediate and deferred binders.
+type ItemFrameBinders<'db> = SortedMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
 
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
 /// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
 /// which interned a key and kept a memo, and its value still changes only when a binder of
-/// one of the item's own names does.
-/// Each symbol bound in an item's frame, with its immediate and deferred binders.
-type ItemFrameBinders<'db> = FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
-
+/// one of the item's own names does. The value is an exactly sized sorted array rather than a
+/// hash table, because every item keeps one for the whole run.
 #[salsa::tracked(returns(ref))]
 fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders<'db> {
-    let mut binders = FxHashMap::default();
     let Some(naming) = item_naming(db, item) else {
-        return binders;
+        return SortedMap::default();
     };
     let frame = FrameBinders::of(db, item);
-    let names = naming
+    let mut names: Vec<Symbol> = naming
         .non_locals
         .values()
         .chain(naming.quiet_reads.values())
-        .chain(naming.quiet_operator_reads.iter());
-    for &name in names {
-        binders
-            .entry(name)
-            .or_insert_with(|| (frame.binder(name, false), frame.binder(name, true)));
-    }
-    binders
+        .chain(naming.quiet_operator_reads.iter())
+        .copied()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| (name, (frame.binder(name, false), frame.binder(name, true))))
+        .collect()
 }
 
 /// What every binder lookup of one item reads, fetched once: each salsa read records a
@@ -3037,6 +3127,12 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         *has_untracked_arithmetic_class(self.db, self.file)
     }
 
+    fn defines_dollar_method(&self) -> bool {
+        *file_defines_dollar_method(self.db, self.file)
+            || ProjectFiles::try_get(self.db)
+                .is_some_and(|files| *project_defines_dollar_method(self.db, files))
+    }
+
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
         self.library?.schemes.get(name)?.last().cloned()
     }
@@ -3061,6 +3157,22 @@ fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Str
         }
     }
     classes
+}
+
+#[salsa::tracked]
+fn project_defines_dollar_method(db: &dyn Db, files: ProjectFiles) -> bool {
+    files.files(db).iter().any(|&file| {
+        *file.kind(db) == DocumentKind::Package && *file_defines_dollar_method(db, file)
+    })
+}
+
+#[salsa::tracked]
+fn file_defines_dollar_method(db: &dyn Db, file: SourceFile) -> bool {
+    file_definitions(db, file).iter().any(|(name, _)| {
+        name.as_str()
+            .strip_prefix("$.")
+            .is_some_and(|class| !class.is_empty())
+    })
 }
 
 #[salsa::tracked(returns(ref))]

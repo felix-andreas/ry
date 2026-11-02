@@ -599,7 +599,9 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
         "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "==", "!=", "<", ">", "<=", ">=", "&", "|",
         "!",
     ];
+    // `round` and `signif` count and match their own arguments, as GNU R's do.
     if OPERATORS.contains(&definition.name)
+        || matches!(definition.name, "round" | "signif")
         || (definition.arity >= 0 && args.len() != definition.arity as usize)
     {
         return Ok(());
@@ -1984,13 +1986,100 @@ unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// A loop the tree-walking interpreter runs, which a `break` or `next` evaluated in `env` can
+/// reach.
+#[derive(Clone, Copy)]
+pub struct LoopContext {
+    env: Sexp,
+    /// The number of call frames when the loop started. A jump at the same depth was written
+    /// in the loop's body, or in an `if` or `{` inside it.
+    depth: usize,
+    /// The loop's body, which decides whether a jump from another call, such as
+    /// `eval(quote(break))`, reaches the loop. Such jumps are rare, so the body is only scanned
+    /// when one happens.
+    body: Sexp,
+}
+
 /// Runs a loop of the tree-walking interpreter with its environment on the stack of loops a
 /// `break` or `next` can reach.
 unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Sexp> {
-    interp().loop_envs.push(call.env);
+    let body = call.args.last().map_or(nil(), |arg| arg.value);
+    let context = LoopContext {
+        env: call.env,
+        depth: interp().frames.len(),
+        body,
+    };
+    interp().loops.push(context);
     let result = run(call);
-    interp().loop_envs.pop();
+    interp().loops.pop();
     result
+}
+
+/// Whether `expression` holds a loop, outside nested functions, that GNU R's compiler gives a
+/// context.
+unsafe fn has_loop_context(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        match &*symbol_name(head) {
+            "function" => return false,
+            "for" | "while" | "repeat" => {
+                let mut body = expression.cdr();
+                while body.cdr().kind() == SexpType::Pairlist {
+                    body = body.cdr();
+                }
+                if !skips_loop_context(body.car(), true) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        if has_loop_context(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
+/// Whether a loop with this body runs without a context. GNU R's compiler
+/// (`checkSkipLoopCntxt`) gives a loop a context, which a `break` or `next`
+/// from another call can find, only when the body calls `eval`, `evalq` or `source`, or writes
+/// `break` or `next` inside a call other than `{`, `(` and `if`. Rscript compiles top-level
+/// loops too, so a jump from a called function into a loop without one is an error there, and
+/// ry follows the compiled behavior everywhere.
+unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
+    if expression.kind() != SexpType::Language {
+        return true;
+    }
+    let head = expression.car();
+    let arguments_allow_jumps = if head.kind() == SexpType::Symbol {
+        match &*symbol_name(head) {
+            "break" | "next" if !jumps_allowed => return false,
+            "function" | "for" | "while" | "repeat" => return true,
+            "eval" | "evalq" | "source" => return false,
+            "(" | "{" | "if" => jumps_allowed,
+            _ => false,
+        }
+    } else {
+        if !skips_loop_context(head, false) {
+            return false;
+        }
+        false
+    };
+    let mut cell = expression.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        if !skips_loop_context(cell.car(), arguments_allow_jumps) {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
@@ -2004,18 +2093,24 @@ unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
-/// `try(eval(quote(break)))` catches it. A loop is reachable when the tree-walking interpreter
-/// runs one in `env`, or when `env` is a closure frame: compiled loops run only in closure
-/// bodies, and a jump that leaves a closure frame without meeting a loop is an error there
-/// (`stray_loop_jump`).
+/// `try(eval(quote(break)))` catches it. A loop of the tree-walking interpreter in `env` is
+/// reachable from its own body, and from another call only when it has a context
+/// (`skips_loop_context`). Compiled loops run only in closure bodies and push no context, so a
+/// jump in a closure frame is reachable when it is written directly in the body, or when the
+/// body has a loop with a context. A jump that then leaves the closure frame without meeting a
+/// loop is an error (`stray_loop_jump`).
 unsafe fn reachable_loop(env: Sexp) -> R<()> {
     let state = interp();
-    if state.loop_envs.contains(&env)
-        || state
-            .frames
-            .iter()
-            .any(|frame| frame.env == env && frame.function.kind() == SexpType::Closure)
-    {
+    let depth = state.frames.len();
+    let in_loop = state.loops.iter().any(|context| {
+        context.env == env && (context.depth == depth || !skips_loop_context(context.body, true))
+    });
+    let in_closure_body = state.frames.iter().enumerate().any(|(index, frame)| {
+        frame.env == env
+            && frame.function.kind() == SexpType::Closure
+            && (index + 1 == depth || has_loop_context(bytecode::source_body(frame.function)))
+    });
+    if in_loop || in_closure_body {
         return Ok(());
     }
     Err(error("no loop for break/next, jumping to top level"))
@@ -2676,6 +2771,18 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };
+    // A bare `...` splices like an argument list, of which `substitute` keeps the first
+    // element, or `NULL` when the dots are empty.
+    if expression == symbols().dots {
+        let wrapped = values::pairlist(&[(nil(), expression)], SexpType::Pairlist)?;
+        crate::heap().root(wrapped);
+        let substituted = substitute_list(wrapped, env)?;
+        return Ok(if substituted == nil() {
+            nil()
+        } else {
+            substituted.car()
+        });
+    }
     let result = substitute(expression, env)?;
     Ok(result)
 }
@@ -3127,6 +3234,9 @@ pub unsafe fn complex_assign(
         base = values::shallow_duplicate(base)?;
         base.set_array(was_array);
     }
+    // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
+    // that moves the table's chain counter, which `ls(sorted = FALSE)` order depends on.
+    heap.count_transient_binding(env, symbols.tmp);
     crate::heap().root(base);
     interp().tmp_values.push((env, base));
     let replaced: R<Sexp> = (|| unsafe {

@@ -80,7 +80,7 @@ flag = T
 c(1, 2,)
 #++++
 symbol flag (Value) at "flag"
-token "c" Function
+token "c" LibraryFunction
 fix Change to `<-`: "=" -> "<-"
 fix Change to `TRUE`: "T" -> "TRUE"
 fix Remove the trailing comma: "," -> ""
@@ -126,7 +126,7 @@ f(T, F)
 symbol x (Value) at "x"
 symbol T (Value) at "T"
 symbol y (Value) at "y"
-token "list" Function
+token "list" LibraryFunction
 token "T" Property
 token "f" Function
 fix Change to `FALSE`: "F" -> "FALSE"
@@ -309,3 +309,25 @@ token "double" Type
 token ":" Operator
 token "integer" Type
 fix Change the `#:` comment to `integer`: "double" -> "integer"
+
+#==== frame_columns
+#---- query_columns_are_properties
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+limit <- 1
+totals <- sales[amount > limit, .(total = sum(amount)), by = team]
+sales[, tax := amount * 0.2]
+#++++
+symbol sales (Value) at "sales"
+symbol limit (Value) at "limit"
+symbol totals (Value) at "totals"
+token "DataFrame" LibraryFunction
+token "c" LibraryFunction
+token "c" LibraryFunction
+token "amount" Property
+token "." Function
+token "sum" Function
+token "amount" Property
+token "team" Property
+token "tax" Property
+token "amount" Property
+lens run file at line 3

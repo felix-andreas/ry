@@ -12,7 +12,7 @@ use {
     syntax::{
         SyntaxElement,
         SyntaxKind::{self, *},
-        SyntaxNode, SyntaxToken, TextRange, TextSize, lex, parse,
+        SyntaxNode, SyntaxToken, TextRange, TextSize, parse,
     },
 };
 
@@ -2561,24 +2561,25 @@ fn is_closer(kind: AnnotationTokenKind) -> bool {
 /// Spellings, not just kinds: a wrong source range renames identifiers while
 /// keeping every kind. Braces, `;` and `#:` markers may be added or moved, and
 /// non-raw strings compare by content because the formatter picks the quote.
-fn significant_tokens(text: &str) -> Vec<(SyntaxKind, &str)> {
-    let mut tokens = Vec::new();
-    let mut start = 0usize;
-    for token in lex(text).0 {
-        let end = (start + usize::from(token.len)).min(text.len());
-        let spelling = text.get(start..end).unwrap_or_default();
-        start = end;
-        if token.kind.is_trivia()
-            || matches!(
-                token.kind,
-                L_BRACE | R_BRACE | SEMICOLON | ANNOTATION_MARKER
-            )
-        {
-            continue;
-        }
-        tokens.push((token.kind, comparable_spelling(token.kind, spelling)));
-    }
-    tokens
+/// The tokens of the parsed tree rather than of the lexer, because the parser splits a `[[` that
+/// opens two nested array literals into two `[`, which the formatter may then print apart.
+fn significant_tokens(text: &str) -> Vec<(SyntaxKind, String)> {
+    parse(text)
+        .syntax_node()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            !token.kind().is_trivia()
+                && !matches!(
+                    token.kind(),
+                    L_BRACE | R_BRACE | SEMICOLON | ANNOTATION_MARKER
+                )
+        })
+        .map(|token| {
+            let kind = token.kind();
+            (kind, comparable_spelling(kind, token.text()).to_owned())
+        })
+        .collect()
 }
 
 fn comparable_spelling(kind: SyntaxKind, spelling: &str) -> &str {

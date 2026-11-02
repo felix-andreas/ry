@@ -46,14 +46,14 @@ use {
         num::NonZero,
         path::{Path, PathBuf},
         sync::{
-            LazyLock, Mutex, PoisonError,
+            LazyLock,
             atomic::{AtomicUsize, Ordering},
         },
-        thread,
+        thread::{self, JoinHandle},
         time::{Duration, Instant},
     },
     syntax::{
-        Parse, TextRange,
+        TextRange,
         literate::{is_literate_extension, r_source_of_literate},
     },
 };
@@ -140,7 +140,14 @@ pub fn check(
     let mut n_unsafe_fixable = 0;
     let mut n_annotated = 0;
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+        let mut analysis = analyze_project(
+            &root,
+            &root,
+            config.clone(),
+            &requested,
+            cache,
+            Purpose::Diagnostics,
+        )?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -148,14 +155,28 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(
+                    &root,
+                    &root,
+                    config.clone(),
+                    &requested,
+                    cache,
+                    Purpose::Diagnostics,
+                )?;
             }
         }
         if annotate {
             let annotated = write_inferred_annotations(&analysis)?;
             if annotated > 0 {
                 n_annotated += annotated;
-                analysis = analyze_project(&root, &root, config.clone(), &requested, cache)?;
+                analysis = analyze_project(
+                    &root,
+                    &root,
+                    config.clone(),
+                    &requested,
+                    cache,
+                    Purpose::Diagnostics,
+                )?;
             }
         }
         n_failures += analysis.failures;
@@ -262,7 +283,14 @@ pub fn migrate_data_table(
     let mut n_rewrites = 0;
     let mut n_files = 0;
     for (root, config, requested) in project_groups(maybe_files)? {
-        let analysis = analyze_project(&root, &root, config, &requested, CacheUse::Off)?;
+        let analysis = analyze_project(
+            &root,
+            &root,
+            config,
+            &requested,
+            CacheUse::Off,
+            Purpose::Rewrites,
+        )?;
         if analysis.failures > 0 {
             return Err(CommandError);
         }
@@ -468,6 +496,14 @@ impl ProjectAnalysis {
     }
 }
 
+/// What a project analysis is for, which decides whether its item checks keep the facts only
+/// editor features and rewrites read ([`semantics::Db::editor_facts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Diagnostics,
+    Rewrites,
+}
+
 /// Analyzes the R files under `walk` as one project rooted at `root`, whose `ry.toml`, stubs,
 /// `DESCRIPTION` and `NAMESPACE` apply, and checks the files under `requested`.
 pub(crate) fn analyze_project(
@@ -476,15 +512,17 @@ pub(crate) fn analyze_project(
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
+    purpose: Purpose,
 ) -> Result<ProjectAnalysis, CommandError> {
     let cache = match check_cache::is_project(root) {
         true => cache,
         false => CacheUse::Off,
     };
-    let (analysis, reused) = analyze_project_with(root, walk, config.clone(), requested, cache)?;
+    let (analysis, reused) =
+        analyze_project_with(root, walk, config.clone(), requested, cache, purpose)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
-        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off)?.0;
+        let fresh = analyze_project_with(root, walk, config, requested, CacheUse::Off, purpose)?.0;
         let source_files = |analysis: &ProjectAnalysis| -> Vec<SourceFile> {
             analysis.files.iter().map(|file| file.file).collect()
         };
@@ -531,7 +569,13 @@ fn analyze_project_with(
     config: config::Config,
     requested: &[PathBuf],
     cache: CacheUse,
+    purpose: Purpose,
 ) -> Result<(ProjectAnalysis, bool), CommandError> {
+    // Hashing the ry binary for the record's key takes as long as reading the sources, so the
+    // two overlap.
+    let build = (cache == CacheUse::ReadWrite).then(|| {
+        thread::spawn(|| check_cache::build_identity(&env::current_exe().unwrap_or_default()))
+    });
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
     let mut paths = collect_r_files(walk, exclude.as_ref())?;
@@ -542,7 +586,10 @@ fn analyze_project_with(
         }
     }
 
-    let mut db = RootDatabase::one_shot();
+    let mut db = match purpose {
+        Purpose::Diagnostics => RootDatabase::one_shot(),
+        Purpose::Rewrites => RootDatabase::one_shot_with_editor_facts(),
+    };
     let ProjectEnvironment {
         metadata,
         namespace_source,
@@ -580,18 +627,36 @@ fn analyze_project_with(
     let order = project_order(root, &collate);
     let mut ordered: Vec<usize> = (0..checked.len()).collect();
     ordered.sort_by_cached_key(|&index| order(&checked[index].0));
+    let kinds: Vec<DocumentKind> = checked
+        .iter()
+        .map(|(path, _, _)| document_kind(path, root))
+        .collect();
+    // Tests and scripts read the package namespace but add nothing to it, so nothing in them can
+    // change a package file's findings. A run asked only about package files, as `ry load`'s
+    // strict check is, leaves them out of the project and never parses them.
+    let package_only = reported
+        .iter()
+        .zip(&kinds)
+        .all(|(&asked_about, &kind)| !asked_about || kind == DocumentKind::Package);
+    let reached: Vec<bool> = kinds
+        .iter()
+        .map(|&kind| !package_only || kind == DocumentKind::Package)
+        .collect();
     let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
     let mut project = Vec::with_capacity(checked.len());
     let mut source_paths = BTreeMap::new();
     for index in ordered {
         let (path, source, _) = &mut checked[index];
-        let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
-        let file = SourceFile::builder(mem::take(source), kind)
+        let file = SourceFile::builder(mem::take(source), kinds[index])
             .durability(Durability::HIGH)
             .new(&db);
         files[index] = Some(file);
-        project.push(file);
+        if reached[index] {
+            project.push(file);
+        }
+        // A file a package-only run leaves unanalysed can still be sourced by name, and then
+        // the check reads it as a fresh one would.
         if let Some(relative) = relative_source_path(path, root) {
             source_paths.insert(relative, file);
         }
@@ -606,9 +671,13 @@ fn analyze_project_with(
     // Hashing the binary and every source only pays when a record is read or written.
     let (key, contents) = match cache {
         CacheUse::ReadWrite => {
-            let executable = env::current_exe().unwrap_or_default();
+            let build = match build.map(JoinHandle::join) {
+                Some(Ok(build)) => build,
+                Some(Err(panic)) => std::panic::resume_unwind(panic),
+                None => String::new(),
+            };
             let key = check_cache::key(
-                &executable,
+                &build,
                 &config,
                 root,
                 &data_files,
@@ -633,16 +702,46 @@ fn analyze_project_with(
     let mut plan = match cache {
         CacheUse::Off => Plan::Fresh,
         CacheUse::ReadWrite => {
-            check_cache::plan(check_cache::load(root), key, &paths, &contents, |index| {
-                let file = files[index];
-                check_cache::surface(
-                    file.text(&db),
-                    &semantics::parse(&db, file).syntax_node(),
-                    &project_fold_shares(&db, file),
-                )
-            })
+            let analysed = |index: usize| reached.get(index).copied().unwrap_or(true);
+            check_cache::plan(
+                check_cache::load(root),
+                key,
+                &paths,
+                &contents,
+                analysed,
+                |index| {
+                    let file = files[index];
+                    check_cache::surface(
+                        file.text(&db),
+                        &semantics::parse(&db, file).syntax_node(),
+                        &project_fold_shares(&db, file),
+                    )
+                },
+            )
         }
     };
+    // The NAMESPACE verdict reads the tokens of the files a run analyses, so a package-only run
+    // and a full one disagree on it when the files outside the package use a name the package
+    // does not. The record does not say which kind of run wrote it, so such a record's verdict
+    // is recomputed while every file's findings are still replayed.
+    if let Plan::Replay(record) = &plan {
+        let tokens_of = |only_package: bool| -> FxHashSet<&str> {
+            (0..files.len())
+                .filter(|&index| !only_package || kinds[index] == DocumentKind::Package)
+                .flat_map(|index| record.tokens(index).unwrap_or_default())
+                .map(String::as_str)
+                .collect()
+        };
+        if tokens_of(true) != tokens_of(false)
+            && let Plan::Replay(record) = mem::replace(&mut plan, Plan::Fresh)
+        {
+            let stale = vec![false; files.len()];
+            plan = Plan::Partial {
+                previous: record,
+                stale,
+            };
+        }
+    }
     if let Plan::Replay(record) = &plan {
         let per_file: Option<Vec<Vec<Diagnostic>>> = (0..files.len())
             .map(|index| record.diagnostics(index, |index| files.get(index).copied()))
@@ -693,7 +792,7 @@ fn analyze_project_with(
     let checked_order: Vec<usize> = by_size
         .iter()
         .copied()
-        .filter(|&index| stale(index))
+        .filter(|&index| stale(index) && reached[index])
         .collect();
     let previous = match &plan {
         Plan::Partial { previous, .. } => Some(previous),
@@ -709,36 +808,58 @@ fn analyze_project_with(
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut file_tokens: Vec<FxHashSet<&str>> = vec![FxHashSet::default(); files.len()];
-    let mut surfaces = vec![Fingerprint::default(); files.len()];
+    let mut surfaces: Vec<Option<Fingerprint>> = vec![None; files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
-        // A file that is not checked contributes only its share of the project-wide maps.
-        if checked(index) {
-            derive_from_syntax(db, file, &config.lint);
-        } else {
-            semantics::diagnostics::warm_project_folds(db, file);
-            semantics::metadata::file_attached_namespaces(db, file);
-        }
-        let root = semantics::parse(db, file).syntax_node();
-        let mut tokens = FxHashSet::default();
-        if want_tokens {
-            namespace::collect_used_tokens(&root, &imported, &mut tokens);
-        }
-        // A partial plan exists only when every surface matches the record.
-        let surface = match (cache, previous) {
-            (CacheUse::ReadWrite, None) => {
-                check_cache::surface(file.text(db), &root, &project_fold_shares(db, file))
+        semantics::with_held_tree(db, file, || {
+            // A file that is not checked contributes only its share of the project-wide maps.
+            if checked(index) {
+                derive_from_syntax(db, file, &config.lint);
+            } else {
+                semantics::diagnostics::warm_project_folds(db, file);
+                semantics::metadata::file_attached_namespaces(db, file);
             }
-            (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => Fingerprint::default(),
-        };
-        (tokens, surface)
+            let root = semantics::parse(db, file).syntax_node();
+            let mut tokens = FxHashSet::default();
+            if want_tokens {
+                namespace::collect_used_tokens(&root, &imported, &mut tokens);
+            }
+            // A partial plan exists only when every recorded surface matches, so only a file
+            // recorded without one needs its surface computed.
+            let surface = match (cache, previous) {
+                (CacheUse::ReadWrite, None) => Some(check_cache::surface(
+                    file.text(db),
+                    &root,
+                    &project_fold_shares(db, file),
+                )),
+                (CacheUse::ReadWrite, Some(previous)) if previous.surface(index).is_none() => Some(
+                    check_cache::surface(file.text(db), &root, &project_fold_shares(db, file)),
+                ),
+                (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => None,
+            };
+            (tokens, surface)
+        })
     }) {
         file_tokens[index] = tokens;
         surfaces[index] = surface;
     }
+    // An unanalysed file whose text changed loses its surface, and the findings of every file of
+    // its kind, which the next run that analyses them checks again (see `check_cache`).
+    let unreached_changed = previous.is_some_and(|previous| {
+        (0..files.len())
+            .any(|index| !reached[index] && previous.content(index) != contents.get(index).copied())
+    });
     if let Some(previous) = previous {
         for index in 0..files.len() {
-            surfaces[index] = previous.surface(index).unwrap_or_default();
+            let changed = previous.content(index) != contents.get(index).copied();
+            if let Some(surface) = previous.surface(index)
+                && (reached[index] || !changed)
+            {
+                surfaces[index] = Some(surface);
+            }
+            if unreached_changed && !reached[index] {
+                recorded[index] = None;
+            }
             if !stale(index) {
                 file_tokens[index] = previous
                     .tokens(index)
@@ -755,31 +876,27 @@ fn analyze_project_with(
         let reused: Vec<usize> = by_size
             .iter()
             .copied()
-            .filter(|&index| !stale(index))
+            .filter(|&index| !stale(index) && reached[index])
             .collect();
         in_parallel(&db, workers, &reused, |db, index| {
             semantics::diagnostics::warm_project_folds(db, files[index]);
+            semantics::metadata::file_attached_namespaces(db, files[index]);
         });
     }
-    let used_tokens: FxHashSet<&str> = file_tokens.iter().flatten().copied().collect();
+    // A package-only run judges NAMESPACE by the package alone, as a fresh one would, so the
+    // recorded tokens of the files it leaves unanalysed stay in the record but out of the verdict.
+    let used_tokens: FxHashSet<&str> = file_tokens
+        .iter()
+        .zip(&reached)
+        .filter(|(_, reached)| **reached)
+        .flat_map(|(tokens, _)| tokens.iter().copied())
+        .collect();
     // Attach calls are part of every file's surface, so a partial run attaches what the
     // recorded run did.
     let attached = match previous {
-        Some(previous) => previous.attached(),
-        None => attached_union(&db, project),
+        Some(previous) if previous.analysed_every_file() => previous.attached(),
+        Some(_) | None => attached_union(&db, project),
     };
-    // Freeing a million tree nodes takes longer than naming the first files, so each naming
-    // worker frees the tree of the file it is about to name, across all cores. A partial run
-    // keeps its trees: releasing them walks every item of every file on one thread.
-    let mut trees: Vec<Mutex<Option<Parse>>> = (0..files.len()).map(|_| Mutex::new(None)).collect();
-    if previous.is_none() {
-        for (index, tree) in semantics::release_trees(&mut db, &files)
-            .into_iter()
-            .enumerate()
-        {
-            trees[index] = Mutex::new(Some(tree));
-        }
-    }
     if !attached.is_empty() {
         metadata.set_attached(&mut db).to(attached.clone());
     }
@@ -794,9 +911,6 @@ fn analyze_project_with(
     // interface edges follow for the same reason, and because the walk that finds the project's
     // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
-        if let Some(tree) = trees.get(index) {
-            drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
-        }
         if !checked(index) {
             return;
         }
@@ -831,20 +945,7 @@ fn analyze_project_with(
     }
     // Computed last so the `unused-import` lint sees the whole package.
     let mut namespace = None;
-    // The NAMESPACE findings read the project's declarations, which a partial plan leaves
-    // unchanged, and the imports the files use.
-    let recorded_namespace = previous
-        .filter(|previous| {
-            let recorded: FxHashSet<&str> = (0..files.len())
-                .flat_map(|index| previous.tokens(index).unwrap_or_default())
-                .map(String::as_str)
-                .collect();
-            recorded == used_tokens
-        })
-        .and_then(|previous| previous.namespace(|index| files.get(index).copied()));
-    if let (Some(namespace_source), Some(problems)) = (&namespace_source, recorded_namespace) {
-        namespace = problems.map(|problems| (namespace_path, namespace_source.clone(), problems));
-    } else if let Some(namespace_source) = &namespace_source {
+    if let Some(namespace_source) = &namespace_source {
         let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
@@ -1540,12 +1641,14 @@ pub(crate) fn collect_r_files(
         .filter_map(|entry| match entry {
             Ok(entry) => {
                 let path = entry.into_path();
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension == "R" || extension == "r" || is_literate_extension(extension)
-                    })
-                    .then_some(Ok(path))
+                (is_package_source(&path)
+                    || path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extension == "R" || extension == "r" || is_literate_extension(extension)
+                        }))
+                .then_some(Ok(path))
             }
             Err(err) => {
                 error(&err.to_string());
@@ -1553,6 +1656,29 @@ pub(crate) fn collect_r_files(
             }
         })
         .collect()
+}
+
+/// R CMD INSTALL sources every `.R`, `.r`, `.S`, `.s` and `.q` file directly in a package's `R/`
+/// directory, the one beside `DESCRIPTION`, and Hmisc, VGAM and boot keep code in the S-era
+/// extensions. Elsewhere, such as in `src/` or a vendored `src/R/`, a `.s` file is assembly, so
+/// only the package's `R/` widens the set.
+pub(crate) fn is_package_source(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let Some(directory) = path
+        .parent()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "R"))
+    else {
+        return false;
+    };
+    match extension {
+        "R" | "r" => true,
+        "S" | "s" | "q" => directory
+            .parent()
+            .is_some_and(|package| package.join("DESCRIPTION").is_file()),
+        _ => false,
+    }
 }
 
 /// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).
@@ -2808,25 +2934,22 @@ mod tests {
         );
     }
 
-    /// Seeded edits to a small package, each followed by a cached run. Invariants are on, so
+    /// Seeded edits to a small package, each followed by a cached run of the whole project or of
+    /// `R/` alone. Invariants are on, so
     /// every run that reuses recorded findings is compared with a fresh run and panics on any
-    /// difference. `CACHE_SEED=<seed>` replays one sequence; `FUZZ_ITERS` sets how many run.
+    /// difference. Each sequence is one seed of `for_each_seed`, so `FUZZ_SEED` replays it and
+    /// `FUZZ_ITERS` sets how many run; `CACHE_SEED=<seed>` is the same as `FUZZ_SEED=<seed>`.
     #[test]
     fn cached_checks_match_fresh_checks_across_seeded_edits() {
         syntax::testing::enable_invariants();
-        let seeds: Vec<u64> = match env::var("CACHE_SEED")
+        if let Some(seed) = env::var("CACHE_SEED")
             .ok()
             .and_then(|seed| seed.parse().ok())
         {
-            Some(seed) => vec![seed],
-            None => (0..syntax::testing::fuzz_iterations(3) as u64).collect(),
-        };
-        for seed in seeds {
-            let outcome = std::panic::catch_unwind(|| simulate_cached_checks(seed, 24));
-            if outcome.is_err() {
-                panic!("check cache seed {seed} failed; replay with CACHE_SEED={seed}");
-            }
+            simulate_cached_checks(seed, 24);
+            return;
         }
+        syntax::testing::for_each_seed(3, |seed| simulate_cached_checks(seed, 24));
     }
 
     struct SimulatedFunction {
@@ -2898,12 +3021,19 @@ mod tests {
                 }
             }
             let config = config::Config::discover(&root).expect("the simulated ry.toml");
+            // Some runs ask about `R/` alone, as `ry load` does, and leave the scripts
+            // unanalysed in the record the next full run plans against.
+            let requested = match random.below(3) {
+                0 => root.join("R"),
+                _ => root.clone(),
+            };
             let analysis = analyze_project(
                 &root,
                 &root,
                 config,
-                std::slice::from_ref(&root),
+                std::slice::from_ref(&requested),
                 CacheUse::ReadWrite,
+                Purpose::Diagnostics,
             );
             assert!(
                 analysis.is_ok(),

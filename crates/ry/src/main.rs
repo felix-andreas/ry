@@ -1,5 +1,6 @@
 use {
     clap::Parser,
+    loader::package_cache_path,
     ry::{
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
@@ -96,24 +97,42 @@ unsafe impl GlobalAlloc for Allocator {
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
+/// `mi_option_purge_delay` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant either.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
 /// zeroing cost a cold check more time than parsing did. The first arena is reserved before
 /// `main`, so the option is set from a constructor, as a default that
 /// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
 /// same option in `crates/libr/src/libr.rs`.
+///
+/// The purge delay drops from mimalloc v3's default of a second to 10 ms, which is v2's default
+/// (a workspace build links v2, because `libr` asks for it). A cold check runs for
+/// about a second and frees its parse trees file by file, so with the default delay none of that
+/// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
+/// 300,000-line project at no measurable cost in time.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static LAZY_ARENA_COMMIT: extern "C" fn() = {
-    extern "C" fn lazy_arena_commit() {
+static ALLOCATOR_OPTIONS: extern "C" fn() = {
+    extern "C" fn allocator_options() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe {
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, 10);
+        }
     }
-    lazy_arena_commit
+    allocator_options
 };
 
 fn main() -> ExitCode {
+    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
+    if rcmd::front_end::invoked_as_front_end() {
+        return rcmd::front_end::main(env::args().skip(1).collect());
+    }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(
@@ -149,7 +168,7 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(path, expressions, file.as_deref(), *runtime);
+        return run_load(path, "", expressions, file.as_deref(), *runtime);
     }
 
     if let Command::Test {
@@ -167,6 +186,34 @@ fn main() -> ExitCode {
             *watch,
             *runtime,
         );
+    }
+
+    if let Command::Document {
+        path,
+        roclets,
+        runtime,
+    } = &cli.command
+    {
+        return run_document(path, roclets, *runtime);
+    }
+
+    if let Command::Build {
+        path,
+        output,
+        no_vignettes,
+        runtime,
+    } = &cli.command
+    {
+        return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
+    }
+
+    if let Command::Install {
+        path,
+        library,
+        runtime,
+    } = &cli.command
+    {
+        return run_install(path, library.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -254,6 +301,9 @@ fn main() -> ExitCode {
         | Command::Repl { .. }
         | Command::Load { .. }
         | Command::Test { .. }
+        | Command::Document { .. }
+        | Command::Build { .. }
+        | Command::Install { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -265,6 +315,59 @@ fn main() -> ExitCode {
         .expect("command thread should spawn")
         .join()
         .expect("command thread should not panic")
+}
+
+/// Drops this executable's resident code pages once the script's check is done. The check runs
+/// the analysis core, whose code is most of what the executable has resident (about 6 MB), and
+/// the script then runs in `libR` without returning to it. The pages are file-backed and
+/// unmodified, so dropping them loses nothing: the few the runtime's callbacks into the
+/// executable touch, and the check of a strict package the script loads, fault back in from the
+/// file. Under a debugger the pages may hold breakpoints written into private copies, which
+/// dropping would erase, so a traced process keeps them.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn release_executable_code() {
+    let traced = fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("TracerPid:"))
+            .is_some_and(|pid| pid.trim() != "0")
+    });
+    if traced {
+        return;
+    }
+    unsafe extern "C" fn release(
+        info: *mut libc::dl_phdr_info,
+        _size: libc::size_t,
+        _data: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        // SAFETY: the loader passes a valid description of one loaded object, and the first one
+        // it passes is the executable.
+        let info = unsafe { &*info };
+        let headers = unsafe { std::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum.into()) };
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        for header in headers {
+            if header.p_type != libc::PT_LOAD || header.p_flags & libc::PF_X == 0 {
+                continue;
+            }
+            let start = (info.dlpi_addr + header.p_vaddr).next_multiple_of(page);
+            let end = (info.dlpi_addr + header.p_vaddr + header.p_filesz) / page * page;
+            if start < end {
+                // A failure leaves the pages resident, which is only a missed saving.
+                // SAFETY: the range is the executable's read-only, file-backed code.
+                unsafe {
+                    libc::madvise(
+                        start as *mut std::ffi::c_void,
+                        (end - start) as usize,
+                        libc::MADV_DONTNEED,
+                    )
+                };
+            }
+        }
+        1
+    }
+    // SAFETY: the callback only reads the loader's description and advises on its pages.
+    unsafe { libc::dl_iterate_phdr(Some(release), std::ptr::null_mut()) };
 }
 
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
@@ -285,17 +388,16 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
+    let flags = runtime_flags(preflight.config());
+    drop(preflight);
     match runtime {
-        Runtime::Ry => runtime_exit(checking_loads().and_then(|()| {
-            repl::run_on_ry_runtime(
-                Some(file),
-                None,
-                &arguments,
-                runtime_flags(preflight.config()),
-                None,
-                None,
-            )
-        })),
+        Runtime::Ry => {
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            release_executable_code();
+            runtime_exit(checking_loads().and_then(|()| {
+                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+            }))
+        }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],
@@ -416,8 +518,6 @@ fn run_debug_adapter() -> ExitCode {
     runtime_exit(debug_adapter::run(runtime_flags(preflight.config())))
 }
 
-/// Loads the package at `path` into a fresh session, runs `expressions` and then `file` against
-/// it, and exits with the session's status.
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
 fn run_test(
     path: &Path,
@@ -442,11 +542,176 @@ fn run_test(
         reporter = argument(reporter),
         watch = if watch { "TRUE" } else { "FALSE" },
     );
-    run_load(path, &[run], None, runtime)
+    run_load(path, "", &[run], None, runtime)
 }
 
+/// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
+fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> ExitCode {
+    let root = match load::package_root(path) {
+        Ok(root) => root,
+        Err(error) => {
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    let roclets = if roclets.is_empty() {
+        "NULL".to_owned()
+    } else {
+        let quoted: Vec<String> = roclets
+            .iter()
+            .map(|roclet| load::r_string(roclet))
+            .collect();
+        format!("c({})", quoted.join(", "))
+    };
+    let cache = package_cache_path(&root, "roxygen").map_or_else(
+        || "NULL".to_owned(),
+        |path| load::r_string(&path.to_string_lossy()),
+    );
+    let run = format!(
+        "({driver})({root}, {roclets}, {cache})",
+        driver = include_str!("document.R").trim_end(),
+        root = load::r_string(&root.to_string_lossy()),
+    );
+    // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
+    run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+}
+
+/// `ry build`: writes the package's source tarball to `output`, or beside the package.
+fn run_build(
+    path: &Path,
+    output: Option<&Path>,
+    vignettes: bool,
+    runtime: Option<Runtime>,
+) -> ExitCode {
+    let built = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let output = match output {
+                Some(output) => std::path::absolute(output)
+                    .map_err(|error| format!("cannot resolve {}: {error}", output.display()))?,
+                None => root
+                    .parent()
+                    .ok_or_else(|| format!("{} has no parent directory", root.display()))?
+                    .to_path_buf(),
+            };
+            build_tarball(&home, &root, &output, vignettes)
+        });
+    match built {
+        Ok(tarball) => {
+            println!("{}", tarball.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `ry install`: builds the package into a private directory without rebuilding its vignettes,
+/// as `devtools::install()` does, and installs the tarball with the home's `R CMD INSTALL`.
+fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+    let installed = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
+            fs::create_dir_all(&staging)
+                .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
+            let result = build_tarball(&home, &root, &staging, false).and_then(|tarball| {
+                let mut command = std::process::Command::new(home.join("bin").join("R"));
+                command.args(["CMD", "INSTALL"]);
+                if let Some(library) = library {
+                    fs::create_dir_all(library)
+                        .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
+                    command.arg("-l").arg(library);
+                }
+                let status = command
+                    .arg(&tarball)
+                    .status()
+                    .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("installing {} failed", root.display()))
+                }
+            });
+            // The tarball is a by-product; a leftover in the temporary directory harms nothing.
+            if let Err(error) = fs::remove_dir_all(&staging) {
+                tracing::debug!("cannot remove {}: {error}", staging.display());
+            }
+            result
+        });
+    match installed {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The R home whose `bin/R` runs the chosen runtime: ry's own home, or GNU R's.
+fn r_home(runtime: Option<Runtime>) -> Result<PathBuf, String> {
+    let runtime_variable = env::var("RY_RUNTIME").ok();
+    let home = match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
+        Runtime::Ry => repl::ry_r_home(),
+        Runtime::GnuR => repl::libr::discover_r_home(),
+    };
+    home.map_err(|error| error.to_string())
+}
+
+/// Runs the home's `R CMD build` on `root` in `output` with `devtools::build()`'s options, and
+/// returns the tarball it wrote.
+fn build_tarball(
+    home: &Path,
+    root: &Path,
+    output: &Path,
+    vignettes: bool,
+) -> Result<PathBuf, String> {
+    let description_path = root.join("DESCRIPTION");
+    let description = rcmd::Description::parse(
+        &fs::read_to_string(&description_path)
+            .map_err(|error| format!("cannot read {}: {error}", description_path.display()))?,
+    );
+    let field = |name: &str| {
+        description
+            .get(name)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} has no {name} field", description_path.display()))
+    };
+    let tarball = output.join(format!(
+        "{}_{}.tar.gz",
+        field("Package")?,
+        field("Version")?
+    ));
+    fs::create_dir_all(output)
+        .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
+    let mut command = std::process::Command::new(home.join("bin").join("R"));
+    command.args(["CMD", "build", "--no-resave-data", "--no-manual"]);
+    if !vignettes {
+        command.arg("--no-build-vignettes");
+    }
+    let status = command
+        .arg(root)
+        .current_dir(output)
+        .status()
+        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+    if !status.success() {
+        return Err(format!("building {} failed", root.display()));
+    }
+    if !tarball.is_file() {
+        return Err(format!("R CMD build did not write {}", tarball.display()));
+    }
+    Ok(tarball)
+}
+
+/// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
+/// `file` against it, and exits with the session's status.
 fn run_load(
     path: &Path,
+    prelude: &str,
     expressions: &[String],
     file: Option<&Path>,
     runtime: Option<Runtime>,
@@ -459,7 +724,7 @@ fn run_load(
         }
     };
     // A new session has nothing loaded, so its first load is always a full one.
-    let mut input = load::load_statement(&root, false);
+    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
     for expression in expressions {
         input.push('\n');
         input.push_str(expression);

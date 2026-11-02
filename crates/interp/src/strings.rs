@@ -27,7 +27,10 @@ use {
         strings::Encoding,
     },
     memchr::memmem,
-    pcre2::bytes::{Regex as PerlRegex, RegexBuilder as PerlRegexBuilder},
+    pcre2::bytes::{
+        CaptureLocations as PerlCaptureLocations, Regex as PerlRegex,
+        RegexBuilder as PerlRegexBuilder,
+    },
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{borrow::Cow, cell::RefCell, rc::Rc},
@@ -123,7 +126,11 @@ unsafe fn paste(
     let recycle_zero = flag(recycle_zero);
     let mut columns = Vec::with_capacity(length(list));
     for index in 0..length(list) {
-        columns.push(as_character(list.element(index), call.env)?);
+        // Every element of a column is read, so a deferred column converts in one batch.
+        columns.push(values::materialize(as_character(
+            list.element(index),
+            call.env,
+        )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
     let mut count = lengths.iter().copied().max().unwrap_or(0);
@@ -268,6 +275,11 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "keepNA"])?;
+    // The empty symbol, as `lapply` hands over an empty argument taken from a call, evaluates to
+    // `R_MissingArg`, which GNU R coerces to `""` rather than reporting a missing argument.
+    if matched[0] == Some(values::missing_arg()) {
+        return values::scalar_logical(0);
+    }
     let x = require(matched[0], "x")?;
     let keep_na = matched[1].is_some_and(|value| flag(value));
     if values::inherits(x, "factor") {
@@ -307,9 +319,22 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
             return Err(error("invalid substring arguments"));
         }
         let mut memo = values::StringMemo::default();
+        // Recycling by counters rather than `index % len` keeps two divisions out of every
+        // element, which on short strings cost as much as the extraction.
+        let (mut start_at, mut stop_at) = (0, 0);
         for index in 0..count {
-            let start = starts[index % starts.len()];
-            let stop = stops[index % stops.len()];
+            let start = starts[start_at];
+            let stop = stops[stop_at];
+            start_at = if start_at + 1 == starts.len() {
+                0
+            } else {
+                start_at + 1
+            };
+            stop_at = if stop_at + 1 == stops.len() {
+                0
+            } else {
+                stop_at + 1
+            };
             let charsxp = x.element(index);
             if charsxp == na_string() || start == NA_INTEGER || stop == NA_INTEGER {
                 set_elt(result, index, na_string());
@@ -445,6 +470,8 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     let count = length(x);
     let result = alloc(SexpType::List, count)?;
     let mut pieces: Vec<(usize, usize)> = Vec::new();
+    // Pieces repeat (a code or a suffix of each id), so ASCII ones go through the call's memo.
+    let mut memo = values::StringMemo::default();
     for index in 0..count {
         let Some(text) = subject_at(x, index, use_bytes) else {
             set_elt(result, index, values::scalar_string_charsxp(na_string())?);
@@ -476,10 +503,13 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
         for (position, &(start, end)) in pieces.iter().enumerate() {
             // With `useBytes`, the text carries a stand-in character for each byte past ASCII,
             // which `regex_result` turns back into the byte.
+            let piece = &text.as_bytes()[start..end];
             let charsxp = if use_bytes {
                 regex_result(&text[start..end], forced_bytes)?
+            } else if piece.is_ascii() {
+                memo.mk_char(piece)?
             } else {
-                heap.mk_char(&text.as_bytes()[start..end], Encoding::Utf8)?
+                heap.mk_char(piece, Encoding::Utf8)?
             };
             heap.set_element(vector, position, charsxp);
         }
@@ -1575,30 +1605,31 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(error("'sep' must be a character string")),
     };
-    let original: Vec<String> = strings(names)
-        .into_iter()
-        .map(|name| name.unwrap_or_else(|| "NA".to_owned()))
-        .collect();
-    let mut taken: FxHashSet<String> = original.iter().cloned().collect();
-    let mut seen: FxHashSet<&str> = FxHashSet::default();
-    let mut counters: FxHashMap<&str, usize> = FxHashMap::default();
-    let mut made = Vec::with_capacity(original.len());
+    // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA, and
+    // a repeat is made unique from the text "NA", as in GNU R.
+    let original: Vec<Option<String>> = strings(names);
+    let mut taken: FxHashSet<String> = original.iter().flatten().cloned().collect();
+    let mut seen: FxHashSet<Option<&str>> = FxHashSet::default();
+    let mut counters: FxHashMap<Option<&str>, usize> = FxHashMap::default();
+    let mut made: Vec<Option<String>> = Vec::with_capacity(original.len());
     for name in &original {
-        if seen.insert(name.as_str()) {
+        let key = name.as_deref();
+        if seen.insert(key) {
             made.push(name.clone());
             continue;
         }
-        let counter = counters.entry(name.as_str()).or_insert(1);
-        let mut candidate = format!("{name}{separator}{counter}");
+        let text = key.unwrap_or("NA");
+        let counter = counters.entry(key).or_insert(1);
+        let mut candidate = format!("{text}{separator}{counter}");
         while taken.contains(&candidate) {
             *counter += 1;
-            candidate = format!("{name}{separator}{counter}");
+            candidate = format!("{text}{separator}{counter}");
         }
         *counter += 1;
         taken.insert(candidate.clone());
-        made.push(candidate);
+        made.push(Some(candidate));
     }
-    string_vector(&made)
+    values::string_vector_na(&made)
 }
 
 unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
@@ -1701,7 +1732,18 @@ unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
                 _ => char::from_u32(point as u32).map(String::from),
             })
             .collect();
-        return string_vector_na(&texts);
+        let result = alloc(SexpType::String, texts.len())?;
+        crate::heap().root(result);
+        for (index, text) in texts.iter().enumerate() {
+            match text {
+                Some(text) => {
+                    let charsxp = values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?;
+                    values::set_elt(result, index, charsxp);
+                }
+                None => values::set_elt(result, index, na_string()),
+            }
+        }
+        return Ok(result);
     }
     let mut text = String::with_capacity(points.len());
     let mut index = 0;
@@ -1727,7 +1769,9 @@ unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
             None => return values::scalar_string_charsxp(na_string()),
         }
     }
-    scalar_string(&text)
+    // The code points are the text, so one in the range that stands in for a byte elsewhere
+    // (`values::escape_invalid_bytes`) stays that character rather than turning into the byte.
+    values::scalar_string_charsxp(values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?)
 }
 
 unsafe fn do_char_to_raw(call: &Call<'_>) -> R<Sexp> {
@@ -1885,19 +1929,22 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
         options,
         CompileErrors::for_text(&pattern, text, use_bytes),
     )?;
-    let mut hits = Vec::with_capacity(count);
-    for index in 0..count {
+    let hit = |index: usize| -> R<bool> {
         let found = match subject_at(text, index, use_bytes) {
             Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
             None => false,
         };
-        hits.push(found != invert);
-    }
+        Ok(found != invert)
+    };
     if logical {
-        let hits: Vec<i32> = hits.into_iter().map(i32::from).collect();
-        return values::logical_vector(&hits);
+        let result = values::alloc_uninit(SexpType::Logical, count)?;
+        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+            *slot = i32::from(hit(index)?);
+        }
+        return Ok(result);
     }
+    let hits = (0..count).map(hit).collect::<R<Vec<bool>>>()?;
     let selected: Vec<usize> = (0..count).filter(|&index| hits[index]).collect();
     if !value {
         let indices: Vec<i32> = selected.iter().map(|&index| index as i32 + 1).collect();
@@ -2226,7 +2273,7 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         }
         None
     } else {
-        let text = translate_regex(&String::from_utf8_lossy(&needle));
+        let text = translate_byte_regex(&String::from_utf8_lossy(&needle));
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
         let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
             call.error(format!(
@@ -2641,7 +2688,8 @@ impl CompileErrors {
 enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
     Literal(Box<memmem::Finder<'static>>),
-    Pattern(Rc<Regex>),
+    /// `fresh_start` as in [`Translation`], here and in `Automaton`.
+    Pattern { regex: Rc<Regex>, fresh_start: bool },
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
     /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
     /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
@@ -2649,16 +2697,22 @@ enum Matcher {
     /// starts where the leftmost-first match does, and `longest` (which reports every match end)
     /// searched anchored at that start finds where the longest one ends.
     ///
-    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`),
-    /// and its capture groups come from `first` searched over exactly that span.
+    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`), or
+    /// with groups the leftmost-first match, whose capture groups come from `first`.
     Automaton {
         regex: Rc<Regex>,
         first: meta::Regex,
         longest: meta::Regex,
         shortest: bool,
+        fresh_start: bool,
     },
-    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
-    Perl(Rc<PerlRegex>),
+    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does. Every match reuses `locations`,
+    /// because fresh capture locations carry fresh match data, and with it a JIT stack of the
+    /// 64 MB maximum, which made `gsub` with groups about 40 times slower than GNU R.
+    Perl {
+        regex: Rc<PerlRegex>,
+        locations: Rc<RefCell<PerlCaptureLocations>>,
+    },
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2726,11 +2780,18 @@ impl Matcher {
                         first,
                         longest,
                         shortest: translated.minimal,
+                        fresh_start: translated.fresh_start,
                     },
-                    _ => Matcher::Pattern(regex),
+                    _ => Matcher::Pattern {
+                        regex,
+                        fresh_start: translated.fresh_start,
+                    },
                 }
             }
-            Ok(regex) => Matcher::Pattern(Rc::new(regex)),
+            Ok(regex) => Matcher::Pattern {
+                regex: Rc::new(regex),
+                fresh_start: translated.fresh_start,
+            },
             Err(reason) => {
                 return Err(match errors {
                     CompileErrors::Quoted => {
@@ -2752,11 +2813,34 @@ impl Matcher {
 
     /// The first match at or after byte `from`, as a byte range.
     fn find_at(&self, text: &str, from: usize) -> R<Option<(usize, usize)>> {
+        if from > 0 && self.fresh_start() {
+            let found = self.find_at(&text[from..], 0)?;
+            return Ok(found.map(|(start, end)| (start + from, end + from)));
+        }
         match self {
-            Matcher::Literal(finder) => Ok(finder
-                .find(&text.as_bytes()[from..])
-                .map(|start| (from + start, from + start + finder.needle().len()))),
-            Matcher::Pattern(regex) => regex
+            Matcher::Literal(finder) => {
+                let haystack = &text.as_bytes()[from..];
+                let needle = finder.needle();
+                // R strings are mostly short, where the searcher's setup outweighs its scan and
+                // comparing at each candidate first byte is several times faster.
+                let start = if haystack.len() < 64 {
+                    match needle.split_first() {
+                        Some((&first, rest)) => {
+                            haystack.iter().enumerate().position(|(start, &byte)| {
+                                byte == first
+                                    && haystack
+                                        .get(start + 1..start + needle.len())
+                                        .is_some_and(|tail| tail == rest)
+                            })
+                        }
+                        None => Some(0),
+                    }
+                } else {
+                    finder.find(haystack)
+                };
+                Ok(start.map(|start| (from + start, from + start + needle.len())))
+            }
+            Matcher::Pattern { regex, .. } => regex
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
@@ -2778,7 +2862,7 @@ impl Matcher {
                     .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
-            Matcher::Perl(regex) => regex
+            Matcher::Perl { regex, .. } => regex
                 .find_at(text.as_bytes(), from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(perl_matching_error),
@@ -2787,6 +2871,15 @@ impl Matcher {
 
     /// The first match at or after byte `from` with its capture groups; group 0 is the match.
     fn captures_at(&self, text: &str, from: usize) -> R<Option<Groups>> {
+        if from > 0 && self.fresh_start() {
+            let groups = self.captures_at(&text[from..], 0)?;
+            return Ok(groups.map(|groups| {
+                groups
+                    .into_iter()
+                    .map(|group| group.map(|(start, end)| (start + from, end + from)))
+                    .collect()
+            }));
+        }
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
             Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
@@ -2811,7 +2904,7 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
                     .captures_from_pos(text, from)
                     .map_err(matching_error)?
@@ -2828,10 +2921,20 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Perl(regex) => {
-                let mut locations = regex.capture_locations();
+            Matcher::Perl { regex, locations } => {
+                // Matching never re-enters itself, so the shared locations are always free; a
+                // fresh set keeps a surprise re-entry correct rather than a panic.
+                let mut fresh;
+                let mut shared = locations.try_borrow_mut();
+                let locations = match shared.as_deref_mut() {
+                    Ok(locations) => locations,
+                    Err(_) => {
+                        fresh = regex.capture_locations();
+                        &mut fresh
+                    }
+                };
                 let found = regex
-                    .captures_read_at(&mut locations, text.as_bytes(), from)
+                    .captures_read_at(locations, text.as_bytes(), from)
                     .map_err(perl_matching_error)?;
                 Ok(found.map(|_| {
                     (0..locations.len())
@@ -2842,14 +2945,23 @@ impl Matcher {
         }
     }
 
+    fn fresh_start(&self) -> bool {
+        match self {
+            Matcher::Pattern { fresh_start, .. } | Matcher::Automaton { fresh_start, .. } => {
+                *fresh_start
+            }
+            Matcher::Literal(_) | Matcher::Perl { .. } => false,
+        }
+    }
+
     /// The number of capture groups, not counting the whole match.
     fn group_count(&self) -> usize {
         match self {
             Matcher::Literal(_) => 0,
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
-            Matcher::Perl(regex) => regex.captures_len().saturating_sub(1),
+            Matcher::Perl { regex, .. } => regex.captures_len().saturating_sub(1),
         }
     }
 
@@ -2857,12 +2969,12 @@ impl Matcher {
     fn group_names(&self) -> Vec<String> {
         match self {
             Matcher::Literal(_) => Vec::new(),
-            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => regex
+            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => regex
                 .capture_names()
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
                 .collect(),
-            Matcher::Perl(regex) => regex
+            Matcher::Perl { regex, .. } => regex
                 .capture_names()
                 .iter()
                 .skip(1)
@@ -2894,7 +3006,10 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
         // long subject such as 5,000 repeats of `(a|b)+`.
         .max_jit_stack_size(Some(64 * 1024 * 1024));
     match builder.build(pattern) {
-        Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
+        Ok(regex) => Ok(Matcher::Perl {
+            locations: Rc::new(RefCell::new(regex.capture_locations())),
+            regex: Rc::new(regex),
+        }),
         Err(failure) => {
             // The crate prefixes PCRE2's message with its own text, which GNU R does not print.
             // GNU R prints the message and the rest of the pattern from the error's byte offset.
@@ -2928,16 +3043,39 @@ fn perl_matching_error(failure: pcre2::Error) -> crate::unwind::Unwind {
 pub(crate) struct Translation {
     pub(crate) pattern: String,
     pub(crate) problem: Option<&'static str>,
-    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`). TRE then ends a match at the
-    /// first end it reaches, so the whole match is the shortest one at the leftmost start, and
-    /// even a greedy `.*` in such a pattern matches as little as it can.
+    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`) outside every capture group,
+    /// with no capture group opening after it. TRE then ends a match at the first end it
+    /// reaches, so the whole match is the shortest one at the leftmost start, and even a greedy
+    /// `.*` in such a pattern matches as little as it can: `a.*?b.*` and `(a).*?b.*` match `aXb`
+    /// of `aXbXb`. A minimal repetition inside a capture group, or followed by one, runs on
+    /// TRE's tagged matcher, which follows the leftmost-first rule: `a(.*?)b.*` and `a.*?(b).*`
+    /// match all of it.
     minimal: bool,
+    /// Whether every search after the first should see its start as the start of the text, which
+    /// is how TRE runs the follow-on searches of `gsub` and `gregexpr`: `\b`, `\B`, `\<` and `\>`
+    /// then see no character before that start (`gsub("\\b", "|", "ab")` is `"|a|b|"`), while
+    /// `^` still cannot match there. Only patterns without `^` qualify, since searching from a
+    /// fresh start would let `^` match too.
+    fresh_start: bool,
 }
 
 pub(crate) fn translate(pattern: &str) -> Translation {
+    translate_classes(pattern, true)
+}
+
+/// A pattern for `grepRaw`, which GNU R compiles with TRE's byte interface, so its classes
+/// cover ASCII only.
+pub fn translate_byte_regex(pattern: &str) -> String {
+    translate_classes(pattern, false).pattern
+}
+
+/// Translates a POSIX pattern whose classes (`\s`, `[[:space:]]`) follow Unicode, or only ASCII.
+fn translate_classes(pattern: &str, unicode: bool) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
     let mut problem = None;
     let mut minimal = false;
+    let mut word_assertion = false;
+    let mut start_anchor = false;
     let mut output = String::with_capacity(pattern.len() + 8);
     // In POSIX syntax `.` matches a newline too.
     output.push_str("(?s)");
@@ -2946,8 +3084,8 @@ pub(crate) fn translate(pattern: &str) -> Translation {
     let approximate = (0..chars.len()).any(|index| {
         (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
     });
-    // Where each open group starts in `output`.
-    let mut groups: Vec<usize> = Vec::new();
+    // Where each open group starts in `output`, and whether it captures.
+    let mut groups: Vec<(usize, bool)> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
@@ -2956,14 +3094,32 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         let character = chars[index];
         let start = output.len();
         match character {
+            // TRE reads `\Q...\E` as literal text, each character its own atom, so a quantifier
+            // after `\E` repeats the last one.
+            '\\' if chars.get(index + 1) == Some(&'Q') => {
+                index += 2;
+                atom = None;
+                while index < chars.len() {
+                    if chars[index] == '\\' && chars.get(index + 1) == Some(&'E') {
+                        index += 2;
+                        break;
+                    }
+                    atom = Some(output.len());
+                    output.push_str(&regex::escape(chars[index].encode_utf8(&mut [0; 4])));
+                    index += 1;
+                }
+                quantified = false;
+                continue;
+            }
             '\\' => {
-                index = translate_escape(&chars, index, &mut output, &mut problem);
+                word_assertion |= matches!(chars.get(index + 1), Some('b' | 'B' | '<' | '>'));
+                index = translate_escape(&chars, index, unicode, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
             }
             '[' => {
-                index = translate_class(&chars, index, &mut output, &mut problem);
+                index = translate_class(&chars, index, unicode, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
@@ -2984,7 +3140,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
                         if close == ':' {
-                            groups.push(start);
+                            groups.push((start, false));
                         }
                         atom = None;
                         quantified = false;
@@ -2993,7 +3149,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                     }
                     _ => {
                         problem.get_or_insert("Invalid regexp");
-                        groups.push(start);
+                        groups.push((start, false));
                         output.push('(');
                         atom = None;
                         quantified = false;
@@ -3001,7 +3157,8 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 }
             }
             '(' => {
-                groups.push(start);
+                groups.push((start, true));
+                minimal = false;
                 output.push('(');
                 atom = None;
                 quantified = false;
@@ -3009,7 +3166,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
             // TRE takes a `)` that closes no group as a literal.
             ')' => {
                 match groups.pop() {
-                    Some(group_start) => {
+                    Some((group_start, _)) => {
                         output.push(')');
                         atom = Some(group_start);
                     }
@@ -3033,7 +3190,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                     quantified = true;
                     if chars.get(index + 1) == Some(&'?') {
                         if !approximate {
-                            minimal = true;
+                            minimal |= !groups.iter().any(|&(_, capturing)| capturing);
                             output.push('?');
                         }
                         index += 1;
@@ -3064,7 +3221,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                     index = next;
                     if chars.get(index) == Some(&'?') {
                         if !approximate {
-                            minimal = true;
+                            minimal |= !groups.iter().any(|&(_, capturing)| capturing);
                             output.push('?');
                         }
                         index += 1;
@@ -3093,6 +3250,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
                 quantified = false;
             }
             '^' | '$' => {
+                start_anchor |= character == '^';
                 output.push(character);
                 atom = None;
             }
@@ -3108,6 +3266,7 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         pattern: output,
         problem,
         minimal,
+        fresh_start: word_assertion && !start_anchor,
     }
 }
 
@@ -3119,12 +3278,15 @@ const POSIX_BLANK: &str = r"\t \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F
 const WORD: &str = r"\p{Alphabetic}\p{Nd}_";
 /// TRE's `\d` is ASCII even though its other classes follow the locale.
 const DIGIT: &str = "0-9";
+const ASCII_WORD: &str = "0-9A-Za-z_";
+const ASCII_SPACE: &str = r"\t\n\x0B\f\r ";
 
 /// Translates the escape at `index` (outside a bracket expression) and returns the index after
 /// it.
 fn translate_escape(
     chars: &[char],
     index: usize,
+    unicode: bool,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3135,14 +3297,25 @@ fn translate_escape(
         return index + 1;
     };
     let next = index + 2;
-    if let Some(class) = escape_class(escaped) {
+    if let Some(class) = escape_class(escaped, unicode) {
         output.push('[');
         output.push_str(&class);
         output.push(']');
         return next;
     }
     match escaped {
-        'b' | 'B' | 'n' | 't' | 'r' | 'f' | 'v' | '1'..='9' | '<' | '>' => {
+        // TRE's `\b` matches at the start and the end of the subject whatever the characters
+        // there are, so `regexpr("\\b", " ")` is 1.
+        'b' => {
+            output.push_str(r"(?:\A|\z|\b)");
+            next
+        }
+        // Its `\B` never matches at either end.
+        'B' => {
+            output.push_str(r"(?:(?!\A)(?!\z)\B)");
+            next
+        }
+        'n' | 't' | 'r' | 'f' | 'v' | '1'..='9' | '<' | '>' => {
             output.push('\\');
             output.push(escaped);
             next
@@ -3160,6 +3333,18 @@ fn translate_escape(
             output.push_str(&format!(r"\x{{{point:X}}}"));
             end
         }
+        // TRE quotes `\Q...\E` as PCRE does.
+        'Q' => {
+            let mut cursor = next;
+            while cursor < chars.len() {
+                if chars[cursor] == '\\' && chars.get(cursor + 1) == Some(&'E') {
+                    return cursor + 2;
+                }
+                output.push_str(&regex::escape(chars[cursor].encode_utf8(&mut [0; 4])));
+                cursor += 1;
+            }
+            cursor
+        }
         character => {
             output.push_str(&regex::escape(character.encode_utf8(&mut [0; 4])));
             next
@@ -3168,11 +3353,13 @@ fn translate_escape(
 }
 
 /// The class contents an escape such as `\d` stands for, written to sit inside brackets.
-fn escape_class(escaped: char) -> Option<String> {
-    let contents = match escaped.to_ascii_lowercase() {
-        'd' => DIGIT,
-        'w' => WORD,
-        's' => POSIX_SPACE,
+fn escape_class(escaped: char, unicode: bool) -> Option<String> {
+    let contents = match (escaped.to_ascii_lowercase(), unicode) {
+        ('d', _) => DIGIT,
+        ('w', true) => WORD,
+        ('w', false) => ASCII_WORD,
+        ('s', true) => POSIX_SPACE,
+        ('s', false) => ASCII_SPACE,
         _ => return None,
     };
     Some(if escaped.is_ascii_uppercase() {
@@ -3219,6 +3406,7 @@ fn hex_escape(chars: &[char], start: usize) -> (u32, usize) {
 fn translate_class(
     chars: &[char],
     index: usize,
+    unicode: bool,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3235,12 +3423,12 @@ fn translate_class(
             return cursor + 1;
         }
         first = false;
-        let (item, next) = class_item(chars, cursor, problem);
+        let (item, next) = class_item(chars, cursor, unicode, problem);
         let range_end = match item {
             ClassItem::Literal(_) if chars.get(next) == Some(&'-') => chars
                 .get(next + 1)
                 .filter(|&&end| end != ']')
-                .map(|_| class_item(chars, next + 1, problem)),
+                .map(|_| class_item(chars, next + 1, unicode, problem)),
             _ => None,
         };
         match (item, range_end) {
@@ -3273,13 +3461,14 @@ enum ClassItem {
 fn class_item(
     chars: &[char],
     index: usize,
+    unicode: bool,
     problem: &mut Option<&'static str>,
 ) -> (ClassItem, usize) {
     let character = chars[index];
     if character == '['
         && let Some((kind, name, end)) = bracket_term(chars, index)
     {
-        let set = match (kind, posix_class(&name)) {
+        let set = match (kind, posix_class(&name, unicode)) {
             (':', Some(set)) => set,
             (':', None) => {
                 problem.get_or_insert("Unknown character class name");
@@ -3317,14 +3506,18 @@ fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
 }
 
 /// The class contents for `[:name:]`, or `None` for an unknown name. The classes follow the
-/// Unicode properties, as glibc's do in a UTF-8 locale.
-fn posix_class(name: &str) -> Option<String> {
+/// Unicode properties, as glibc's do in a UTF-8 locale, or are ASCII, which the `regex`
+/// crate's own `[:name:]` classes match.
+fn posix_class(name: &str, unicode: bool) -> Option<String> {
     const NAMES: &[&str] = &[
         "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
         "upper", "xdigit", "word",
     ];
     if !NAMES.contains(&name) {
         return None;
+    }
+    if !unicode {
+        return Some(format!("[:{name}:]"));
     }
     Some(
         match name {

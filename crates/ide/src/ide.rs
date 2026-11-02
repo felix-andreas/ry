@@ -11,8 +11,8 @@ use {
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId,
-            PatternKind, Symbol,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
+            NameSite, PatId, PatternKind, Symbol, UnaryOperator,
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
@@ -25,8 +25,8 @@ use {
             stub_declaration, stubs,
         },
         types::{
-            Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
-            contains_inference_var,
+            Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
+            contains_inference_var, union_of,
         },
     },
     std::{
@@ -47,6 +47,8 @@ use {
 };
 
 mod fields;
+mod refactor;
+pub use refactor::refactors;
 mod migrate;
 pub mod testing;
 
@@ -1409,6 +1411,7 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
     // cannot tell.
     let mut parameter_reads: HashSet<TextSize> = HashSet::new();
     let mut library_reads: HashSet<TextSize> = HashSet::new();
+    let mut column_reads: HashSet<TextSize> = HashSet::new();
     let files = ProjectFiles::try_get(db);
     // R6 members and S4 slots are named by call arguments, so the outline's reading of those
     // calls decides them, which keeps one definition of what a member is.
@@ -1450,6 +1453,11 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 library_reads.insert(hir.range(*expression).start() + offset);
             }
         }
+        column_reads.extend(
+            frame_column_reads(db, item, hir, naming)
+                .into_iter()
+                .map(|range| range.start() + offset),
+        );
     }
     // Tokens arrive in order, so one region's binders serve all of its tokens.
     let mut current_region: Option<(SyntaxNode, Vec<String>)> = None;
@@ -1495,6 +1503,8 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 let start = token.text_range().start();
                 if token.kind() == IDENT && parameter_reads.contains(&start) {
                     Some(SemanticClass::Parameter)
+                } else if token.kind() == IDENT && column_reads.contains(&start) {
+                    Some(SemanticClass::Property)
                 } else if let Some(class) = member_names.get(&start) {
                     Some(*class)
                 } else {
@@ -1519,6 +1529,97 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
         }
     }
     spans
+}
+
+/// The bare names inside a frame query's brackets, `x[i, j, by]`, that read a column of `x` or
+/// name one the query writes with `:=`. A name the code binds itself is a variable, and only an
+/// item that has such a query pays for its type check.
+fn frame_column_reads(
+    db: &dyn Db,
+    item: Item<'_>,
+    hir: &Module,
+    naming: &ItemNaming,
+) -> Vec<TextRange> {
+    let queries: Vec<(ExprId, ExprId, Vec<TextRange>)> = hir
+        .expressions()
+        .enumerate()
+        .filter_map(|(index, expression)| match &expression.kind {
+            ExpressionKind::Index {
+                double: false,
+                target,
+                arguments,
+            } => {
+                let ranges: Vec<TextRange> = hir[arguments]
+                    .iter()
+                    .filter_map(|argument| argument.value.map(|value| hir.range(value)))
+                    .collect();
+                Some((ExprId::new(index), *target, ranges))
+            }
+            _ => None,
+        })
+        .collect();
+    let candidates: Vec<(ExprId, &str)> = hir
+        .expressions()
+        .enumerate()
+        .filter_map(|(index, expression)| match &expression.kind {
+            ExpressionKind::NameRef(name) => Some((ExprId::new(index), name.as_str())),
+            _ => None,
+        })
+        .filter(|(id, _)| !naming.resolutions.contains_key(id))
+        .filter(|(id, _)| {
+            let range = hir.range(*id);
+            queries.iter().any(|(_, _, arguments)| {
+                arguments
+                    .iter()
+                    .any(|argument| argument.contains_range(range))
+            })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let callees: HashSet<ExprId> = hir
+        .expressions()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Call { callee, .. } => Some(*callee),
+            _ => None,
+        })
+        .collect();
+    let Some(check) = item_check(db, item) else {
+        return Vec::new();
+    };
+    let columns_of = |expression: ExprId| -> Vec<&str> {
+        match check
+            .expression_types
+            .get(&expression)
+            .map(|ty| ty.kind(db))
+        {
+            Some(TyKind::Frame(_, Some(columns))) => {
+                columns.iter().map(|column| column.name.text(db)).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    let mut reads = Vec::new();
+    for (query, target, arguments) in &queries {
+        let mut columns = columns_of(*target);
+        if columns.is_empty() {
+            continue;
+        }
+        columns.extend(columns_of(*query));
+        for &(id, name) in &candidates {
+            let range = hir.range(id);
+            if !callees.contains(&id)
+                && columns.contains(&name)
+                && arguments
+                    .iter()
+                    .any(|argument| argument.contains_range(range))
+            {
+                reads.push(range);
+            }
+        }
+    }
+    reads
 }
 
 /// The package `pkg` of the name token in `pkg::name` or `pkg:::name`.
@@ -1743,7 +1844,14 @@ pub fn signature_help_with(
             .get(callee)
             .copied()
             .filter(|ty| matches!(ty.kind(db), TyKind::Function(_)));
-        let schemes = callee_name(hir, *callee).and_then(|name| stubs(db)?.schemes.get(&name));
+        let name = callee_name(hir, *callee).map(|name| {
+            if name == "." && is_query_list(db, position.item, hir, *id, *callee) {
+                "list".to_owned()
+            } else {
+                name
+            }
+        });
+        let schemes = name.and_then(|name| stubs(db)?.schemes.get(&name));
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));
@@ -2098,6 +2206,27 @@ fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
     }
 }
 
+/// data.table's `.(...)`, which means `list(...)` inside a query's brackets: `.` is not bound
+/// anywhere the code can see, and the call sits in an argument of a single-bracket index.
+fn is_query_list(db: &dyn Db, item: Item<'_>, hir: &Module, call: ExprId, callee: ExprId) -> bool {
+    let free = item_naming(db, item)
+        .as_ref()
+        .is_some_and(|naming| !naming.resolutions.contains_key(&callee));
+    let call_range = hir.range(call);
+    free && hir.expression_ids().any(|id| match hir.kind(id) {
+        ExpressionKind::Index {
+            double: false,
+            arguments,
+            ..
+        } => hir[arguments].iter().any(|argument| {
+            argument
+                .value
+                .is_some_and(|value| hir.range(value).contains_range(call_range))
+        }),
+        _ => false,
+    })
+}
+
 /// A non-function declaration still occupies its slot, so the committed index stays aligned
 /// with the declared set.
 fn scheme_signature(
@@ -2261,13 +2390,13 @@ pub fn completion_with(
 
     let usage = Usage::of(db, files, file, offset);
     if let Some(items) = tag_completions(db, files, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
     if let Some(items) = pattern_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
     if let Some(items) = literal_field_completions(db, file, offset, &query) {
-        return finish_completions(items, &query, &usage, false);
+        return finish_completions(items, &query, &usage, false, &|_| false);
     }
 
     // Resolving a scheme can type-check its item, so call shapes are filled in only for the
@@ -2415,7 +2544,51 @@ pub fn completion_with(
         .chars()
         .next()
     }) == Some('(');
-    let mut result = finish_completions(items, &query, &usage, called)?;
+    let expected = expected_type(db, file, offset);
+    let global_items: HashMap<&str, Option<Item<'_>>> = match expected {
+        Some(_) => {
+            let mut first_writers = HashMap::with_capacity(globals.len());
+            for &(name, item) in &globals {
+                first_writers.entry(name).or_insert(item);
+            }
+            first_writers
+        }
+        None => HashMap::new(),
+    };
+    let mismatches = |item: &CompletionItem| {
+        let Some(expected) = expected else {
+            return false;
+        };
+        let name = item.label.trim_matches('`');
+        let candidates: Vec<Ty<'_>> = match item.source {
+            CompletionSource::Global => match global_items.get(name) {
+                Some(Some(item)) => vec![global_scheme(db, *item).body],
+                _ => return false,
+            },
+            CompletionSource::Stdlib => {
+                match stubs(db).and_then(|library| library.schemes.get(name)) {
+                    Some(schemes) => schemes.iter().map(|scheme| scheme.body).collect(),
+                    None => return false,
+                }
+            }
+            _ => return false,
+        };
+        // A name is pushed down only when no reading of it fits: no overload, and for a function
+        // neither the function itself nor, since accepting it writes the call, its result.
+        candidates
+            .iter()
+            .all(|&candidate| match candidate.kind(db) {
+                // An inferred result is how the body happens to end, too loose to rule a name out.
+                TyKind::Function(function) if function.inferred => false,
+                TyKind::Function(function) => {
+                    type_mismatch(db, function.ret, expected)
+                        && (called || type_mismatch(db, candidate, expected))
+                }
+                _ if called => false,
+                _ => type_mismatch(db, candidate, expected),
+            })
+    };
+    let mut result = finish_completions(items, &query, &usage, called, &mismatches)?;
     let mut unresolved: HashMap<&str, usize> = result
         .items
         .iter()
@@ -2462,6 +2635,11 @@ pub enum CodeActionKind {
     /// Makes an unresolved name reach the package that exports it: `pkg::` before the name, or
     /// in a script a `library(pkg)` call.
     ImportName,
+    ExtractVariable,
+    ExtractFunction,
+    InlineVariable,
+    /// Moves a binding's or function's types between a `#:` comment and inline syntax.
+    ConvertAnnotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3301,7 +3479,7 @@ fn nested_functions(function: &SyntaxNode) -> Vec<DocumentSymbol> {
             && let Some(value) = binary.rhs().filter(|rhs| rhs.kind() == FUNCTION_DEF)
         {
             found.push(DocumentSymbol {
-                name: display_name_text(&name.text().to_string()),
+                name: display_name_text(name.text()),
                 kind: DocumentSymbolKind::Function,
                 detail: function_detail(&value),
                 range: node.text_range(),
@@ -3942,29 +4120,54 @@ pub struct WorkspaceSymbol {
 }
 
 pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<WorkspaceSymbol> {
+    // A non-syntactic name is listed by its plain spelling, so a backquoted query still finds it.
+    let query = query.trim_matches('`');
     let mut symbols: Vec<(MatchScore, WorkspaceSymbol)> = Vec::new();
     for &file in files.files(db) {
-        for symbol in document_symbols(db, file) {
-            symbols.extend(once(&symbol).chain(&symbol.children).filter_map(|entry| {
-                Some((
-                    search_match(&entry.name, query)?,
-                    WorkspaceSymbol {
-                        name: entry.name.clone(),
-                        kind: entry.kind,
-                        target: NavigationTarget {
-                            file,
-                            range: entry.selection,
-                        },
+        symbols.extend(searchable_symbols(db, file).iter().filter_map(|symbol| {
+            Some((
+                search_match(&symbol.name, query)?,
+                WorkspaceSymbol {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind,
+                    target: NavigationTarget {
+                        file,
+                        range: symbol.selection,
                     },
-                ))
-            }));
-        }
+                },
+            ))
+        }));
     }
     symbols.sort_by_cached_key(|(score, symbol)| {
         (*score, symbol.name.to_lowercase(), symbol.name.clone())
     });
     symbols.truncate(COMPLETION_LIMIT);
     symbols.into_iter().map(|(_, symbol)| symbol).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchableSymbol {
+    name: String,
+    kind: DocumentSymbolKind,
+    selection: TextRange,
+}
+
+/// A file's outline entries and their direct children, flattened. Memoized because a workspace
+/// search reads every file on each keystroke in the search box, and rebuilding every outline took
+/// about half a second at 300,000 lines.
+#[salsa::tracked(returns(ref))]
+fn searchable_symbols(db: &dyn Db, file: SourceFile) -> Vec<SearchableSymbol> {
+    let mut symbols = Vec::new();
+    for symbol in document_symbols(db, file) {
+        for entry in once(&symbol).chain(&symbol.children) {
+            symbols.push(SearchableSymbol {
+                name: entry.name.clone(),
+                kind: entry.kind,
+                selection: entry.selection,
+            });
+        }
+    }
+    symbols
 }
 
 struct AnnotationTypeCursor {
@@ -4668,7 +4871,7 @@ fn string_subscript_completion(
             )
         })
         .collect();
-    finish_completions(items, query, &Usage::none(), false)
+    finish_completions(items, query, &Usage::none(), false, &|_| false)
 }
 
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
@@ -4801,7 +5004,7 @@ fn annotation_completion(
                 ..CompletionItem::new(label, CompletionKind::Variable, source)
             }),
     );
-    finish_completions(items, query, &Usage::none(), false)
+    finish_completions(items, query, &Usage::none(), false, &|_| false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4985,6 +5188,8 @@ struct SpelledNames {
     namespace: Vec<(String, String)>,
     /// Sorted by name.
     uses: Vec<(String, u32)>,
+    /// How often the file calls each name, `f` in `f(x)` or `pkg::f(x)`. Sorted by name.
+    calls: Vec<(String, u32)>,
 }
 
 /// Memoized per file, so completion does not re-walk every syntax tree in the project.
@@ -4995,9 +5200,11 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         dollar: Vec::new(),
         namespace: Vec::new(),
         uses: Vec::new(),
+        calls: Vec::new(),
     };
     let root = semantics::parse(db, file).syntax_node();
     let mut uses: HashMap<&str, u32> = HashMap::new();
+    let mut calls: HashMap<&str, u32> = HashMap::new();
     let tokens: Vec<SyntaxToken> = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -5005,12 +5212,17 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         .collect();
     for token in &tokens {
         *uses.entry(token.text()).or_default() += 1;
+        if token.kind() == IDENT && is_called_name(token) {
+            *calls.entry(token.text()).or_default() += 1;
+        }
     }
-    spelled.uses = uses
-        .into_iter()
-        .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
-        .collect();
-    spelled.uses.sort_unstable();
+    for (counts, sorted) in [(uses, &mut spelled.uses), (calls, &mut spelled.calls)] {
+        *sorted = counts
+            .into_iter()
+            .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
+            .collect();
+        sorted.sort_unstable();
+    }
     for node in root.descendants() {
         // The lhs is an expression node, so the last bare NAME child is the spelled name.
         let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
@@ -5044,29 +5256,67 @@ const USE_CHUNK_FILES: usize = 32;
 /// A keystroke changes its file's counts, so a single project-wide sum would be redone over
 /// every file on every completion; a chunk is redone over its own files only, and a lookup adds
 /// up one count per chunk.
+/// `with_tests` false leaves out testthat files ([`Usage::calls`] says why).
 #[salsa::tracked(returns(ref))]
-fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize) -> NameUses {
-    let mut uses: HashMap<String, u32> = HashMap::new();
+fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize, with_tests: bool) -> NameUses {
+    let mut uses = NameUses {
+        spelled: HashMap::new(),
+        called: HashMap::new(),
+    };
     for &file in files
         .files(db)
         .iter()
         .skip(chunk * USE_CHUNK_FILES)
         .take(USE_CHUNK_FILES)
+        .filter(|file| with_tests || !is_test_kind(*file.kind(db)))
     {
-        for (name, count) in &spelled_names(db, file).uses {
-            match uses.get_mut(name.as_str()) {
-                Some(total) => *total += count,
-                None => {
-                    uses.insert(name.clone(), *count);
+        let names = spelled_names(db, file);
+        for (totals, counts) in [
+            (&mut uses.spelled, &names.uses),
+            (&mut uses.called, &names.calls),
+        ] {
+            for (name, count) in counts {
+                match totals.get_mut(name.as_str()) {
+                    Some(total) => *total += count,
+                    None => {
+                        totals.insert(name.clone(), *count);
+                    }
                 }
             }
         }
     }
-    NameUses(uses)
+    uses
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
-struct NameUses(HashMap<String, u32>);
+struct NameUses {
+    spelled: HashMap<String, u32>,
+    called: HashMap<String, u32>,
+}
+
+/// `f` in `f(x)` or in `pkg::f(x)`.
+fn is_called_name(token: &SyntaxToken) -> bool {
+    let Some(name) = token.parent().filter(|name| name.kind() == NAME) else {
+        return false;
+    };
+    let head = match name.parent() {
+        // `pkg` in `pkg::f()` is not called; `f` is.
+        Some(parent) if parent.kind() == NAMESPACE_EXPR => {
+            if parent
+                .children()
+                .filter(|child| child.kind() == NAME)
+                .last()
+                != Some(name)
+            {
+                return false;
+            }
+            parent
+        }
+        _ => name,
+    };
+    head.parent()
+        .is_some_and(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&head))
+}
 
 fn dollar_completions(
     db: &dyn Db,
@@ -5922,15 +6172,25 @@ fn package_completions(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<Com
 /// first [`COMPLETION_LIMIT`] are selected and sorted, without allocating a key per candidate.
 ///
 /// Within a match tier and a [`CompletionSource::group`], names the project spells more often
-/// rank first, counting the current file twice: in R a call to `return` or `is.null` is far more
-/// likely than the alphabetically first global that shares the prefix.
+/// rank first, counting nearer uses more: in R a call to `return` or `is.null` is far more
+/// likely than the alphabetically first global that shares the prefix. When a `(` follows the
+/// cursor, how often the project calls a name ranks first, because the names a project spells
+/// most are its data (`req`, `resp`), which it seldom calls. Ahead of those counts, a name whose
+/// type `mismatches` the place it is typed sorts after the names that fit; that is judged only
+/// for the names that survive truncation.
 fn finish_completions(
     items: Vec<CompletionItem>,
     query: &str,
     usage: &Usage<'_>,
     called: bool,
+    mismatches: &dyn Fn(&CompletionItem) -> bool,
 ) -> Option<CompletionResult> {
-    let mut ranked: Vec<(Option<MatchScore>, u8, Reverse<u32>, usize)> = {
+    let labels: HashSet<&str> = if called {
+        items.iter().map(|item| item.label.as_str()).collect()
+    } else {
+        HashSet::new()
+    };
+    let mut ranked: Vec<(Option<MatchScore>, u8, bool, UseRank, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
         items
             .iter()
@@ -5946,23 +6206,31 @@ fn finish_completions(
                 {
                     return None;
                 }
-                let uses = usage.count(name);
+                let calls = if called { usage.call_count(name) } else { 0 };
+                // A project function named `generic.class` beside a `generic` is an S3 method,
+                // which code calls through its generic, not by name.
+                let method = called
+                    && item.source == CompletionSource::Global
+                    && name
+                        .match_indices('.')
+                        .any(|(dot, _)| labels.contains(&name[..dot]));
                 Some((
                     search_match(&item.label, query),
                     item.source.group(called),
-                    Reverse(uses),
+                    false,
+                    (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
                 ))
             })
             .collect()
     };
-    let order = |left: &(Option<MatchScore>, u8, Reverse<u32>, usize),
-                 right: &(Option<MatchScore>, u8, Reverse<u32>, usize)| {
-        let (Some(left_item), Some(right_item)) = (items.get(left.3), items.get(right.3)) else {
-            return left.3.cmp(&right.3);
+    let order = |left: &(Option<MatchScore>, u8, bool, UseRank, usize),
+                 right: &(Option<MatchScore>, u8, bool, UseRank, usize)| {
+        let (Some(left_item), Some(right_item)) = (items.get(left.4), items.get(right.4)) else {
+            return left.4.cmp(&right.4);
         };
-        (left.0, left.1, left.2)
-            .cmp(&(right.0, right.1, right.2))
+        (left.0, left.1, left.2, left.3)
+            .cmp(&(right.0, right.1, right.2, right.3))
             .then(left_item.source.cmp(&right_item.source))
             .then_with(|| {
                 left_item
@@ -5978,11 +6246,16 @@ fn finish_completions(
         ranked.select_nth_unstable_by(COMPLETION_LIMIT, order);
         ranked.truncate(COMPLETION_LIMIT);
     }
+    // Judging a candidate's type can type-check its item, so only the names that survive
+    // truncation are judged.
+    for entry in &mut ranked {
+        entry.2 = items.get(entry.4).is_some_and(mismatches);
+    }
     ranked.sort_by(order);
     let mut slots: Vec<Option<CompletionItem>> = items.into_iter().map(Some).collect();
     let items: Vec<CompletionItem> = ranked
         .into_iter()
-        .filter_map(|(_, _, _, index)| slots.get_mut(index).and_then(Option::take))
+        .filter_map(|(_, _, _, _, index)| slots.get_mut(index).and_then(Option::take))
         .collect();
     (!items.is_empty()).then_some(CompletionResult {
         items,
@@ -5990,11 +6263,206 @@ fn finish_completions(
     })
 }
 
+/// S3 methods last, then calls and spellings, both descending.
+type UseRank = (bool, Reverse<u32>, Reverse<u32>);
+
+/// The type the expression being typed at `offset` should have, where the code around it says:
+/// the condition of an `if` or `while` and an operand of `!`, `&&` or `||` take a logical, and an
+/// argument takes the type its global or library callee declares, in an annotation or a stub, for
+/// the parameter it fills.
+/// The expression is the name the cursor is in or, when that name is called, the call.
+fn expected_type<'db>(db: &'db dyn Db, file: SourceFile, offset: TextSize) -> Option<Ty<'db>> {
+    let position = position_in_item(db, file, offset)?;
+    let hir = item_hir(db, position.item).as_ref()?;
+    let name = hir
+        .expression_ids()
+        .filter(|&id| {
+            matches!(hir.kind(id), ExpressionKind::NameRef(_))
+                && hir.range(id).contains_inclusive(position.relative)
+        })
+        .min_by_key(|&id| hir.range(id).len())?;
+    let target = hir
+        .expression_ids()
+        .find(|&id| matches!(hir.kind(id), ExpressionKind::Call { callee, .. } if *callee == name))
+        .unwrap_or(name);
+    let logical = || Some(Ty::new(db, TyKind::Scalar(Atomic::Logical)));
+    for id in hir.expression_ids() {
+        match hir.kind(id) {
+            ExpressionKind::If { condition, .. } | ExpressionKind::While { condition, .. }
+                if *condition == target =>
+            {
+                return logical();
+            }
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } if *operand == target => return logical(),
+            ExpressionKind::Binary {
+                operator: BinaryOperator::And2 | BinaryOperator::Or2,
+                lhs,
+                rhs,
+                ..
+            } if *lhs == target || *rhs == target => return logical(),
+            ExpressionKind::Call { callee, arguments } => {
+                let arguments = &hir[arguments];
+                let Some(index) = arguments
+                    .iter()
+                    .position(|argument| argument.value == Some(target))
+                else {
+                    continue;
+                };
+                // The declared schemes, not the call's instance: the instance already took its
+                // parameter types from the argument being typed. Every overload counts, since the
+                // argument picks the overload only once it is written.
+                let naming = item_naming(db, position.item).as_ref()?;
+                if !naming.non_locals.contains_key(callee) {
+                    return None;
+                }
+                let name = callee_name(hir, *callee)?;
+                let schemes = match declaring_item(db, ProjectFiles::try_get(db)?, &name) {
+                    Some(item) => vec![global_scheme(db, item)],
+                    None => stubs(db)?.schemes.get(name.as_str())?.to_vec(),
+                };
+                let names: Vec<Option<Symbol>> = arguments
+                    .iter()
+                    .map(|argument| hir.argument_name(argument))
+                    .collect();
+                let shapes: Vec<ArgumentShape> = names
+                    .iter()
+                    .map(|name| ArgumentShape {
+                        name: name.as_deref(),
+                        forwards_dots: false,
+                    })
+                    .collect();
+                let arena = Bump::new();
+                let mut expected = Vec::with_capacity(schemes.len());
+                for scheme in &schemes {
+                    let TyKind::Function(function) = scheme.body.kind(db) else {
+                        return None;
+                    };
+                    // An inferred parameter type says how the body uses the value, not what
+                    // callers pass.
+                    if function.inferred {
+                        return None;
+                    }
+                    let parameter =
+                        match argument_targets(db, &arena, function, &shapes).get(index)? {
+                            Some(ArgumentTarget::Positional(slot)) => {
+                                function.positional.get(*slot).copied()
+                            }
+                            Some(ArgumentTarget::Named(slot)) => {
+                                function.named.get(*slot).map(|parameter| parameter.ty)
+                            }
+                            Some(ArgumentTarget::Rest) => {
+                                function.variadic.as_ref().map(|rest| rest.element)
+                            }
+                            _ => None,
+                        };
+                    expected.push(parameter?);
+                }
+                return match expected.as_slice() {
+                    [single] => Some(*single),
+                    _ => Some(union_of(db, expected)),
+                };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether `actual` is known not to fit `expected`, compared by kind of value only: a logical,
+/// integer, double, character, complex or raw vector, a list, a function, a table, ry's native
+/// values, or a named type. R widens logical to integer to double to complex, and an expected
+/// logical accepts any integer or double (R reads a number as a condition or a flag), so those
+/// fit. Anything the comparison cannot see through, such as a type variable or a named type
+/// against a different kind, is not a mismatch.
+fn type_mismatch<'db>(db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
+    let (mut actual_shapes, mut expected_shapes) = (Vec::new(), Vec::new());
+    if !value_shapes(db, actual, &mut actual_shapes)
+        || !value_shapes(db, expected, &mut expected_shapes)
+    {
+        return false;
+    }
+    let fits = |actual: ValueShape, expected: ValueShape| match (actual, expected) {
+        (ValueShape::Atomic(actual), ValueShape::Atomic(expected)) => {
+            actual == expected
+                || matches!(
+                    (actual, expected),
+                    (
+                        Atomic::Logical,
+                        Atomic::Integer | Atomic::Double | Atomic::Complex
+                    ) | (
+                        Atomic::Integer,
+                        Atomic::Double | Atomic::Complex | Atomic::Logical
+                    ) | (Atomic::Double, Atomic::Complex | Atomic::Logical)
+                )
+        }
+        (ValueShape::Frame, ValueShape::List) => true,
+        (actual, expected) => actual == expected,
+    };
+    let fits_one = actual_shapes.iter().any(|&actual| {
+        expected_shapes
+            .iter()
+            .any(|&expected| fits(actual, expected))
+    });
+    !fits_one
+        && !actual_shapes
+            .iter()
+            .chain(&expected_shapes)
+            .any(|shape| matches!(shape, ValueShape::Named(_) | ValueShape::Null))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueShape<'db> {
+    Atomic(Atomic),
+    List,
+    Function,
+    Null,
+    Frame,
+    Native,
+    Named(Name<'db>),
+}
+
+/// Pushes the kinds of value `ty` may be, and returns false when one of them is not known.
+fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'db>>) -> bool {
+    let shape = match ty.kind(db) {
+        TyKind::Scalar(atomic) => ValueShape::Atomic(*atomic),
+        TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
+            TyKind::Scalar(atomic) => ValueShape::Atomic(*atomic),
+            _ => return false,
+        },
+        TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
+            ValueShape::List
+        }
+        TyKind::NativeTuple(_) | TyKind::NativeRecord(_) | TyKind::Tag(..) | TyKind::OtherTags => {
+            ValueShape::Native
+        }
+        TyKind::Frame(..) => ValueShape::Frame,
+        TyKind::Function(_) => ValueShape::Function,
+        TyKind::Null => ValueShape::Null,
+        TyKind::Named(name, _) => ValueShape::Named(*name),
+        TyKind::Union(members) => {
+            return members
+                .iter()
+                .all(|member| value_shapes(db, *member, shapes));
+        }
+        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => return false,
+    };
+    shapes.push(shape);
+    true
+}
+
 /// How often a name is spelled, for ranking: across the project, in the current file, and in
 /// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the
 /// names it has just used.
 struct Usage<'db> {
     project: Vec<&'db NameUses>,
+    /// The project's uses that count for calls: outside `tests/`, test files are left out,
+    /// because testthat's `expect_*` are called in every test and never in package code. Test
+    /// files still count for spellings, which also rank `pkg::` members, where tests show which
+    /// of a package's functions the project uses.
+    calls: Vec<&'db NameUses>,
     file: Option<&'db SpelledNames>,
     item: HashMap<String, u32>,
 }
@@ -6019,9 +6487,13 @@ impl<'db> Usage<'db> {
                 }
             }
         }
+        let chunks = files.files(db).len().div_ceil(USE_CHUNK_FILES);
         Usage {
-            project: (0..files.files(db).len().div_ceil(USE_CHUNK_FILES))
-                .map(|chunk| chunk_uses(db, files, chunk))
+            project: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, true))
+                .collect(),
+            calls: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, is_test_kind(*file.kind(db))))
                 .collect(),
             file: Some(spelled_names(db, file)),
             item,
@@ -6031,6 +6503,7 @@ impl<'db> Usage<'db> {
     fn none() -> Usage<'static> {
         Usage {
             project: Vec::new(),
+            calls: Vec::new(),
             file: None,
             item: HashMap::new(),
         }
@@ -6039,8 +6512,29 @@ impl<'db> Usage<'db> {
     fn project_count(&self, name: &str) -> u32 {
         self.project
             .iter()
-            .filter_map(|uses| uses.0.get(name))
+            .filter_map(|uses| uses.spelled.get(name))
             .sum()
+    }
+
+    /// Calls weigh like [`Usage::count`]'s spellings: the project, then the file, three times.
+    fn call_count(&self, name: &str) -> u32 {
+        let project: u32 = self
+            .calls
+            .iter()
+            .filter_map(|uses| uses.called.get(name))
+            .sum();
+        let file = self
+            .file
+            .and_then(|spelled| {
+                spelled
+                    .calls
+                    .binary_search_by(|(called, _)| called.as_str().cmp(name))
+                    .ok()
+                    .and_then(|index| spelled.calls.get(index))
+                    .map(|(_, count)| *count)
+            })
+            .unwrap_or(0);
+        project.saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
     }
 
     fn count(&self, name: &str) -> u32 {
@@ -6060,6 +6554,10 @@ impl<'db> Usage<'db> {
             .saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
             .saturating_add(item.saturating_mul(ITEM_USE_WEIGHT))
     }
+}
+
+fn is_test_kind(kind: DocumentKind) -> bool {
+    matches!(kind, DocumentKind::Test | DocumentKind::TestHelper)
 }
 
 const FILE_USE_WEIGHT: u32 = 3;
@@ -7207,13 +7705,12 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                     namespace.children().filter(|child| child.kind() == NAME);
                                 let package = names.next()?;
                                 let used = names.next()?;
-                                (used.text() == name.as_str()
-                                    && is_own_package(db, &package.text().to_string()))
-                                .then(|| Occurrence {
-                                    file,
-                                    range: used.text_range(),
-                                    is_declaration: false,
-                                })
+                                (used.text() == name.as_str() && is_own_package(db, package.text()))
+                                    .then(|| Occurrence {
+                                        file,
+                                        range: used.text_range(),
+                                        is_declaration: false,
+                                    })
                             }),
                     );
                     let Some(naming) = item_naming(db, item) else {

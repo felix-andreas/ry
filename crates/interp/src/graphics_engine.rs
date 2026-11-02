@@ -28,6 +28,7 @@ use {
         cell::RefCell,
         ffi::{CString, c_char, c_int, c_uint, c_void},
         ptr::{self, null_mut},
+        sync::atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -306,6 +307,9 @@ pub struct EngineDevice {
     /// its argument pairlist.
     ops: Vec<Sexp>,
     args: Vec<Sexp>,
+    /// Stamped from [`DISPLAY_LIST_STAMPS`] whenever the display list changes, so a reader can
+    /// tell a drawing it has not seen, even on a device that took a closed one's slot.
+    stamp: u64,
 }
 
 struct Engine {
@@ -506,7 +510,9 @@ unsafe fn open_default_device() -> R<()> {
     crate::heap().root(function);
     eval::apply(nil(), function, &[], values::global_env())?;
     if no_devices() {
-        return Err(error("no active or default device"));
+        return Err(error(
+            "no active device and default getOption(\"device\") is invalid",
+        ));
     }
     Ok(())
 }
@@ -535,6 +541,7 @@ pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
         synced_ask: c_int::from(ask),
         ops: Vec::new(),
         args: Vec::new(),
+        stamp: next_stamp(),
     });
     let dd = Box::into_raw(device);
     sync_ask(dd.cast());
@@ -1058,7 +1065,7 @@ pub const LINE_TYPES: [(&str, c_int); 7] = [
     ("dotted", 0x31),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
-    ("twodash", 0x2262),
+    ("twodash", 0x2622),
 ];
 
 /// The line end and join names with their engine codes. A number picks from the first two
@@ -2671,7 +2678,13 @@ pub unsafe fn symbol(
                 }
                 _ => {}
             }
-            polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            // GNU R starts pch 23 at its bottom vertex and the others at their left one, and
+            // the starting vertex moves where an antialiased outline closes.
+            if pch == 23 {
+                polygon(&[x, x + xc, x, x - xc], &[y - yc, y, y + yc, y], gc, dd)
+            } else {
+                polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            }
         }
         7 => {
             let (xc, yc) = half(SYMBOL_RADIUS);
@@ -2801,30 +2814,14 @@ pub fn pretty_axis(low: &mut f64, high: &mut f64, divisions: &mut c_int) -> R<()
     Ok(())
 }
 
-// Mathematical annotation. ry does not lay out plotmath yet: an expression is measured and
-// drawn as the plain text of its deparse.
-
-unsafe fn expression_text(expression: Sexp) -> String {
-    let expression = if expression.kind() == SexpType::Expression && length(expression) > 0 {
-        expression.element(0)
-    } else {
-        expression
-    };
-    match expression.kind() {
-        SexpType::String => {
-            values::first_string(expression).map_or_else(String::new, |text| text.into_owned())
-        }
-        SexpType::Symbol => values::symbol_name(expression).into_owned(),
-        _ => crate::deparse::deparse_one_line(expression),
-    }
-}
+// Mathematical annotation, laid out by the plotmath port.
 
 pub unsafe fn expression_width(expression: Sexp, gc: &GEContext, dd: *mut GEDevDesc) -> R<f64> {
-    str_width(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_width(expression, gc, dd)
 }
 
 pub unsafe fn expression_height(expression: Sexp, gc: &GEContext, dd: *mut GEDevDesc) -> R<f64> {
-    str_height(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_height(expression, gc, dd)
 }
 
 pub unsafe fn expression_metric(
@@ -2832,7 +2829,7 @@ pub unsafe fn expression_metric(
     gc: &GEContext,
     dd: *mut GEDevDesc,
 ) -> R<[f64; 3]> {
-    str_metric(&expression_text(expression), gc, dd)
+    crate::plotmath::expression_metric(expression, gc, dd)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2846,7 +2843,7 @@ pub unsafe fn math_text(
     gc: &GEContext,
     dd: *mut GEDevDesc,
 ) -> R<()> {
-    text(x, y, &expression_text(expression), xc, yc, rotation, gc, dd)
+    crate::plotmath::math_text(x, y, expression, xc, yc, rotation, gc, dd)
 }
 
 // The display list.
@@ -2861,14 +2858,31 @@ pub unsafe fn init_display_list(dd: *mut GEDevDesc) -> R<()> {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     Ok(())
 }
 
-/// `GErecordGraphicOperation`.
+/// `GErecordGraphicOperation`: a no-op while the display list is off, which it is from the start
+/// on a file device such as `png()` or `pdf()` until `dev.control("enable")`.
 pub unsafe fn record_operation(op: Sexp, args: Sexp, dd: *mut GEDevDesc) {
+    if (*dd).display_list_on == 0 {
+        return;
+    }
     let device = engine_device(dd);
     (*device).ops.push(op);
     (*device).args.push(args);
+    (*device).stamp = next_stamp();
+}
+
+/// A stamp that differs from every earlier one whenever `dd`'s display list changed.
+pub unsafe fn display_list_stamp(dd: *mut GEDevDesc) -> u64 {
+    (*engine_device(dd)).stamp
+}
+
+static DISPLAY_LIST_STAMPS: AtomicU64 = AtomicU64::new(1);
+
+fn next_stamp() -> u64 {
+    DISPLAY_LIST_STAMPS.fetch_add(1, Ordering::Relaxed)
 }
 
 pub unsafe fn display_list_is_empty(dd: *mut GEDevDesc) -> bool {
@@ -2892,6 +2906,7 @@ unsafe fn set_display_list(dd: *mut GEDevDesc, list: Sexp) {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     let mut cell = list;
     while cell.kind() == SexpType::Pairlist {
         let entry = cell.car();
@@ -2973,6 +2988,7 @@ pub unsafe fn copy_display_list(from: usize) -> R<()> {
     let device = engine_device(dd);
     (*device).ops = ops;
     (*device).args = args;
+    (*device).stamp = next_stamp();
     notify_systems(source, Event::CopyState, nil())?;
     play_display_list(dd)?;
     if (*dd).display_list_on == 0 {

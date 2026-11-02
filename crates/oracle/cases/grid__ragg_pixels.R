@@ -1,3 +1,4 @@
+# oracle: requires ragg
 # Grid and base graphics drawn on a ragg device, compared pixel for pixel through a checksum
 # of the captured raster. ragg rasterizes, so equal pixels mean the engine handed it the same
 # shapes, coordinates, clipping and graphical parameters as GNU R's engine does.
@@ -72,4 +73,22 @@ shot(function() {
   xspline(c(0, 1, 2, 3), c(1, 3, 1, 3), shape = -1, border = "blue")
   grid.bezier(c(0.1, 0.4, 0.6, 0.9), c(0.1, 0.9, 0.1, 0.9))
   grid.xspline(c(0.1, 0.5, 0.9), c(0.5, 0.2, 0.5), shape = 1, gp = gpar(col = "darkgreen"))
+})
+shot(function() {
+  par(mar = c(1, 1, 1, 1))
+  plot(rep(1:5, 6)[1:26], rep(6:1, each = 5)[1:26], pch = 0:25, cex = 2, bg = "gold",
+       axes = FALSE, ann = FALSE, xlim = c(0.5, 5.5), ylim = c(0.5, 6.5))
+})
+shot(function() {
+  par(mar = c(4, 4, 4, 4), las = 1)
+  plot.new()
+  box()
+  for (side in 1:4) mtext(paste("side", side), side = side, line = 1)
+  par(las = 2)
+  for (side in 1:4) mtext("x", side = side, line = 2.5)
+  mtext("outer", side = 3, line = -1, outer = TRUE)
+})
+shot(function() {
+  par(mfrow = c(3, 1), mar = c(1, 3, 0.5, 1), tck = 0.02)
+  for (panel in 1:3) plot(sin(1:40 / panel), type = "l", ann = FALSE)
 })

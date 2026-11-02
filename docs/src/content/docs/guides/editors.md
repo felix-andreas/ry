@@ -18,7 +18,11 @@ You get:
   argument names a call still accepts (`second = `), also for R6 methods and untyped package
   functions; a package without a stub completes the exports listed in its installed `NAMESPACE`;
   among equally good matches, a call's argument names come first, then the enclosing function's
-  own variables (unless a `(` already follows the cursor), then names you use often in the project
+  own variables (unless a `(` already follows the cursor), then names you use often in the project;
+  before a `(`, the functions the project calls most come first; a name whose type cannot fit
+  where you are typing goes after the ones that can, such as a function that returns `character`
+  in an `if` condition, or as an argument to a parameter that an annotation or a stub declares
+  `logical` (an inferred function type never pushes a name down, since it only says how a body ends)
 - go-to-definition, find references, rename, and a call hierarchy that lists the callers and
   callees of a project function, across files; `pkg::name` goes to the package's stub or, for your
   own package, to the definition
@@ -28,7 +32,8 @@ You get:
 - navigation into installed packages that have no stub: go-to-definition opens the package's R
   code, read from your R library, and hover shows its help page
 - signature help with each parameter's type and default, also for an untyped function from an
-  installed package and for a method of an R6 class called through `self$` or an instance
+  installed package, for a method of an R6 class called through `self$` or an instance, and for
+  data.table's `.()`, which inside a query's brackets is `list()`
 - inlay hints for assignments, loop variables, the inferred types of a function's parameters and
   result (`function<T>(x: T) -> T`), and parameter names in calls with two or more positional
   arguments (`grow(principal = 100, years = 2)`)
@@ -38,13 +43,19 @@ You get:
 - for a name no attached package defines but a package exports (one ry has types for, or an
   installed one the project already uses), a fix that qualifies it as `pkg::name` and, outside a package's own code, one that adds `library(pkg)` after
   the `library` calls above the name
+- refactorings: extract the selection into a variable or into a function (its parameters are the
+  variables it reads, and a variable it assigns that later code reads becomes the result), inline
+  a variable, and move a function's or a binding's types between a `#:` comment and inline syntax
 - an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
-  functions and sections under the function that defines them, lists R6 members, S4 slots and a
-  type definition's tags under their class or type, plus workspace symbol search
+  functions and sections under the function that defines them, and lists R6 members, S4 slots and a
+  type definition's tags under their class or type
+- workspace symbol search over every file's outline entries, where a backquoted name such as
+  `` `pluck<-` `` finds its definition
 - folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
   from a name to its argument, call, statement and block
 - semantic highlighting of parameters, called functions, package namespaces and member names
-  (`x$field`, `x@slot`, `x$method()`, record and pattern fields, R6 members and S4 slots), which an
+  (`x$field`, `x@slot`, `x$method()`, record and pattern fields, R6 members, S4 slots, and the
+  columns a `DataFrame` query such as `sales[amount > 0, .(total = sum(amount))]` reads), which an
   R grammar cannot tell apart, with functions from packages and base R marked as library functions
 - formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
   (a line break lays out the line you finished, and `}` the block it closes, when your editor
@@ -83,6 +94,21 @@ R's own library. A package
 installed with `options(keep.source.pkgs = TRUE)` shows its original source with comments,
 otherwise the code is deparsed. Base R's primitive functions, such as `sum` and `c`, have no R
 code, so they show only their arguments.
+
+A refactoring is offered only where it keeps what the code does. Extracting a variable evaluates
+the expression once, before its statement, so it is not offered where the statement would evaluate
+it repeatedly, conditionally, later or not at all: in the body of a loop or a function written
+inside that statement, in an `if` branch or a `switch` case, on the right of `&&` or `||`, inside
+`tryCatch()` and other calls that handle conditions, after an earlier call in the same statement,
+or in code that is not evaluated as written (a formula, `quote()`, a `dplyr` verb or `with()`, or
+the index of a `[`, where data.table reads columns). Extracting a function is not offered for code
+that uses `return()`, `<<-`, `...`, or a function that inspects its caller's frame, such as
+`missing()` or `parent.frame()`. Inlining is refused when a name the value reads is reassigned
+before the last use, and when the value assigns. A value with a call is inlined only into a single
+use that the next statement evaluates first, so the call still runs once, at the same point.
+Inlining adds parentheses only where R's precedence needs them: `fee * n` inlines into
+`total - value` as `total - fee * n`, but `fee + n` inlines into `total * value` as
+`total * (fee + n)`.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
@@ -123,13 +149,18 @@ The VS Code extension runs your code on ry's runtime.
   the rows where some cell contains the text, ignoring case. Both apply to the whole table in the
   console, not only to the rows on screen; missing values sort first and match no filter, and each
   row keeps its original row name or number.
+- **Plots**: a plot drawn in the console opens in an "R Plot" panel beside the editor, and each
+  command that changes it (a new `plot()`, or `points()` added to the last one) replaces the
+  picture. The console draws to a device that writes no file, and the panel shows it as svg, so it
+  scales with the panel. A device you open yourself, such as `png("out.png")`, keeps writing its
+  file and is not shown.
 
 While a console runs in the workspace, hover and completion also use its live values: hovering
 `df` shows its class and size, and `df$` completes the columns of the data frame you actually
 loaded, which the type checker cannot know when the data comes from a file.
 
-On Windows, the console has no editor connection yet, so attaching, `View()` and live values
-are not available there.
+On Windows, the console has no editor connection yet, so attaching, `View()`, the plot panel and
+live values are not available there.
 
 Other editors can launch the same debugger as `ry debug-adapter`, a
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) server on standard

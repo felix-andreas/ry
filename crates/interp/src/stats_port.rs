@@ -4,22 +4,23 @@
 //! The R code talks to these routines through two work vectors, `iv` and `v`, which the
 //! routines modify in place: `port_ivset` writes the defaults that the `control` list then
 //! overrides, and the minimizers write their result back (`iv[1]` the convergence code,
-//! `iv[6]` and `iv[30]` the evaluation counts, `iv[31]` the iterations, `v[10]` the final
-//! objective). Only that interface follows PORT. The minimizer is ry's own: a trust-region
-//! method in the scaled variables `D x`, whose steps solve `(H + mu D^2) s = -g` over the
-//! variables not held at a bound and are then projected back into the box. `H` is the
-//! analytic Hessian when `nlminb` has one, a BFGS approximation otherwise, and the
-//! Gauss-Newton matrix `J'J` for least squares. The convergence codes keep PORT's meanings, so
-//! a run converges or fails for the same reasons, but iterates and evaluation counts are not
-//! PORT's.
+//! `iv[6]` and `iv[30]` the evaluation counts, `iv[31]` the iterations, `v[1]` the scaled
+//! gradient norm and `v[10]` the final objective).
+//!
+//! `nlminb` runs PORT's own drivers from [`crate::stats_port_minimizer`], so its iterates,
+//! counts, codes and trace match GNU R's. `nls(algorithm = "port")` still runs ry's own
+//! least-squares method: a trust-region method in the scaled variables `D x`, whose steps
+//! solve `(J'J + mu D^2) s = -J'r` over the variables not held at a bound and are then
+//! projected back into the box. Its convergence codes keep PORT's meanings, but its iterates
+//! and evaluation counts are not PORT's.
 
 use {
     crate::{
         builtin_libraries::NativeCall,
         coerce::coerce_vector,
         eval,
-        format::c_general,
         stats::real_values,
+        stats_port_minimizer::{print_trace, Derivatives, Minimizer, Settings},
         unwind::R,
         values::{self, length},
     },
@@ -52,6 +53,12 @@ pub unsafe fn port_ivset(call: &NativeCall<'_>) -> R<Sexp> {
 /// `port_nlminb(objective, gradient, hessian, rho, lower, upper, d, iv, v)`. The three
 /// function arguments are calls evaluated in `rho`, where `.par` holds the current point;
 /// `lower` and `upper` are empty when the problem is unconstrained.
+///
+/// The loop mirrors GNU R's driver: it asks PORT for the next request and then evaluates the
+/// gradient (and Hessian) when PORT asks for it and a gradient exists, and the objective in
+/// every other case, until PORT returns a final code. That evaluates the objective once more
+/// at the final point, uncounted, which leaves `.par` there and runs any side effects of the
+/// objective one extra time, as in GNU R.
 pub unsafe fn port_nlminb(call: &NativeCall<'_>) -> R<Sexp> {
     let rho = call.arg(3);
     if rho.kind() != SexpType::Environment {
@@ -61,30 +68,76 @@ pub unsafe fn port_nlminb(call: &NativeCall<'_>) -> R<Sexp> {
     let par = eval::find_var_in_frame(par_symbol, rho)?;
     let start = real_values(coerce_vector(par, SexpType::Real)?)?;
     let n = start.len();
-    let scale = scale_vector(call, call.arg(6), n)?;
-    let (lower, upper) = bounds(call, call.arg(4), call.arg(5), n)?;
-    let (iv, v) = work_vectors(call, call.arg(7), call.arg(8))?;
-    if let Some(position) = out_of_range_control(values::reals(v)) {
-        values::ints_mut(iv)[0] = position;
-        return Ok(values::nil());
+    let scale = real_values(coerce_vector(call.arg(6), SexpType::Real)?)?;
+    if n == 0 {
+        return Err(call.error("'d' must be a nonempty numeric vector"));
     }
-    let controls = controls(values::ints(iv), values::reals(v));
+    if scale.len() != n {
+        return Err(call.error(format!("'d' must be a numeric vector of length {n}")));
+    }
+    let lower = real_values(coerce_vector(call.arg(4), SexpType::Real)?)?;
+    let upper = real_values(coerce_vector(call.arg(5), SexpType::Real)?)?;
+    let bounds = match (lower.len(), upper.len()) {
+        (0, 0) => None,
+        (low, high) if low == n && high == n => Some((lower.as_slice(), upper.as_slice())),
+        _ => {
+            return Err(call.error(format!(
+                "'lower' and 'upper' must be numeric vectors of length {n}"
+            )));
+        }
+    };
+    let (iv, v) = work_vectors(call, call.arg(7), call.arg(8))?;
+    let settings = {
+        let integers = values::ints(iv);
+        let mut tolerances = [0.0; 25];
+        tolerances.copy_from_slice(&values::reals(v)[18..43]);
+        Settings {
+            mxfcal: integers[16],
+            mxiter: integers[17],
+            outlev: integers[18],
+            inith: integers[24],
+            tolerances,
+        }
+    };
     let gradient = call.arg(1);
     let hessian = call.arg(2);
-    let mut model = Objective {
+    let derivatives = match (gradient != values::nil(), hessian != values::nil()) {
+        (false, _) => Derivatives::None,
+        (true, false) => Derivatives::Gradient,
+        (true, true) => Derivatives::Hessian,
+    };
+    let objective = Objective {
         call,
         rho,
         par_symbol,
         names: values::names(par),
-        objective: call.arg(0),
-        gradient: (gradient != values::nil()).then_some(gradient),
-        hessian: (hessian != values::nil()).then_some(hessian),
         n,
     };
-    let outcome = minimize(&mut model, &start, &scale, &lower, &upper, &controls)?;
-    model.assign(&outcome.x)?;
-    write_outcome(iv, v, &outcome);
-    Ok(values::nil())
+    let mut minimizer = Minimizer::new(&settings, derivatives, &start, &scale, bounds);
+    loop {
+        let request = minimizer.advance();
+        if request == 2 && derivatives != Derivatives::None {
+            objective.assign(&minimizer.x)?;
+            minimizer.g = objective.gradient(gradient)?;
+            if derivatives == Derivatives::Hessian {
+                objective.hessian(hessian, &mut minimizer.h)?;
+            }
+        } else {
+            objective.assign(&minimizer.x)?;
+            minimizer.fx = objective.value(call.arg(0))?;
+        }
+        if request >= 3 {
+            let integers = values::ints_mut(iv);
+            integers[0] = request;
+            integers[5] = minimizer.function_evaluations();
+            integers[29] = minimizer.gradient_evaluations();
+            integers[30] = minimizer.iterations();
+            let reals = values::reals_mut(v);
+            reals[0] = minimizer.gradient_norm();
+            reals[9] = minimizer.objective();
+            return Ok(values::nil());
+        }
+    }
 }
 
 /// `port_nlsb(m, d, gradient, iv, v, lower, upper)`: least squares for an `nlsModel` `m`,
@@ -282,16 +335,6 @@ unsafe fn write_outcome(iv: Sexp, v: Sexp, outcome: &Outcome) {
     reals[9] = outcome.value;
 }
 
-/// What the minimizer needs from a problem: the objective, and its gradient with either an
-/// exact Hessian or none (in which case the minimizer keeps a BFGS approximation).
-trait Model {
-    /// The objective at `x`, or `None` where it cannot be computed.
-    unsafe fn value(&mut self, x: &[f64]) -> R<Option<f64>>;
-    /// The gradient at `x`, where `value` was last evaluated, with the Hessian (column-major,
-    /// `n * n`) when the problem supplies it.
-    unsafe fn derivatives(&mut self, x: &[f64], value: f64) -> R<(Vec<f64>, Option<Vec<f64>>)>;
-}
-
 struct Outcome {
     x: Vec<f64>,
     value: f64,
@@ -314,7 +357,7 @@ mod code {
 }
 
 unsafe fn minimize(
-    model: &mut dyn Model,
+    model: &mut LeastSquares<'_>,
     start: &[f64],
     scale: &[f64],
     lower: &[f64],
@@ -351,17 +394,8 @@ unsafe fn minimize(
     let Some(mut value) = model.value(&x)? else {
         return Ok(finish(x, f64::NAN, &[], code::BAD_START, 0, evaluations, 0));
     };
-    let (mut gradient, exact) = model.derivatives(&x, value)?;
+    let (mut gradient, mut hessian) = model.derivatives(&x)?;
     gradient_evaluations += 1;
-    let quasi_newton = exact.is_none();
-    let mut hessian = exact.unwrap_or_else(|| {
-        let mut identity = vec![0.0; n * n];
-        for i in 0..n {
-            identity[i * n + i] = scale[i] * scale[i];
-        }
-        identity
-    });
-    let mut first_update = true;
     let mut radius = controls.initial_radius;
     if controls.trace > 0 {
         print_trace(0, value, &x);
@@ -417,7 +451,7 @@ unsafe fn minimize(
         }
         iterations += 1;
         // Shrink the trust region until a step decreases the objective enough.
-        let (step, newton_step, new_x, new_value) = loop {
+        let (newton_step, new_x, new_value) = loop {
             if evaluations >= controls.evaluation_limit {
                 return Ok(finish(
                     x,
@@ -452,7 +486,7 @@ unsafe fn minimize(
                 } else if ratio < 0.25 {
                     radius = 0.5 * length;
                 }
-                break (step, newton_step, new_x, new_value);
+                break (newton_step, new_x, new_value);
             }
             if relative_step(&x, &new_x, scale) <= controls.false_tolerance || length == 0.0 {
                 // No step can make progress. That is convergence when the model predicts
@@ -485,16 +519,8 @@ unsafe fn minimize(
         };
         let reduction = value - new_value;
         let x_converged = newton_step && relative_step(&x, &new_x, scale) <= controls.x_tolerance;
-        let old_gradient = std::mem::take(&mut gradient);
-        let (new_gradient, exact) = model.derivatives(&new_x, new_value)?;
+        (gradient, hessian) = model.derivatives(&new_x)?;
         gradient_evaluations += 1;
-        gradient = new_gradient;
-        if let Some(exact) = exact {
-            hessian = exact;
-        } else if quasi_newton {
-            let change: Vec<f64> = (0..n).map(|i| gradient[i] - old_gradient[i]).collect();
-            bfgs_update(&mut hessian, &step, &change, n, &mut first_update);
-        }
         x = new_x;
         value = new_value;
         if controls.trace > 0 && iterations % controls.trace == 0 {
@@ -670,40 +696,6 @@ fn trust_region_step(
     (step, newton && shrink == 1.0)
 }
 
-fn bfgs_update(hessian: &mut [f64], step: &[f64], change: &[f64], n: usize, first: &mut bool) {
-    let curvature = dot(step, change);
-    let step_norm = dot(step, step).sqrt();
-    let change_norm = dot(change, change).sqrt();
-    if curvature <= f64::EPSILON.sqrt() * step_norm * change_norm {
-        return;
-    }
-    if *first {
-        // Scale the initial matrix so that its size matches the observed curvature.
-        let factor = dot(change, change) / curvature;
-        let current = quadratic_form(hessian, step, n) / dot(step, step).max(f64::MIN_POSITIVE);
-        if current > 0.0 {
-            let ratio = factor / current;
-            for entry in hessian.iter_mut() {
-                *entry *= ratio;
-            }
-        }
-        *first = false;
-    }
-    let product: Vec<f64> = (0..n)
-        .map(|i| (0..n).map(|j| hessian[j * n + i] * step[j]).sum())
-        .collect();
-    let form = dot(step, &product);
-    if form <= 0.0 {
-        return;
-    }
-    for j in 0..n {
-        for i in 0..n {
-            hessian[j * n + i] +=
-                change[i] * change[j] / curvature - product[i] * product[j] / form;
-        }
-    }
-}
-
 /// Factors a symmetric column-major matrix in place into its lower Cholesky factor `L`,
 /// returning false when the matrix is not numerically positive definite.
 fn cholesky(matrix: &mut [f64], size: usize) -> bool {
@@ -780,52 +772,48 @@ fn relative_step(x: &[f64], new_x: &[f64], scale: &[f64]) -> f64 {
     if size > 0.0 { change / size } else { 0.0 }
 }
 
-/// One line of the `trace` output: the iteration, the objective and the parameters.
-fn print_trace(iteration: i32, value: f64, x: &[f64]) {
-    let mut line = format!("{iteration:>3}:{:>14}:", c_general(value, 8, true));
-    for entry in x {
-        line.push_str(&format!(" {:>8}", c_general(*entry, 6, true)));
-    }
-    line.push('\n');
-    crate::write_console(line.as_bytes(), false);
-}
-
-/// `nlminb`'s objective: R calls evaluated in `rho` after `.par` is set to the point.
+/// `nlminb`'s objective, gradient and Hessian: R calls evaluated in `rho` after `.par` is set
+/// to the point.
 struct Objective<'a> {
     call: &'a NativeCall<'a>,
     rho: Sexp,
     par_symbol: Sexp,
     names: Sexp,
-    objective: Sexp,
-    gradient: Option<Sexp>,
-    hessian: Option<Sexp>,
     n: usize,
 }
 
 impl Objective<'_> {
     unsafe fn assign(&self, x: &[f64]) -> R<()> {
-        let par = values::real_vector(x)?;
-        if self.names != values::nil() {
-            values::set_attr(par, values::install("names")?, self.names)?;
-        }
-        eval::define(self.par_symbol, par, self.rho)
+        crate::scope(|| {
+            let par = values::real_vector(x)?;
+            if self.names != values::nil() {
+                values::set_attr(par, values::install("names")?, self.names)?;
+            }
+            eval::define(self.par_symbol, par, self.rho)
+        })
     }
 
-    unsafe fn evaluate_numbers(
-        &self,
-        expression: Sexp,
-        what: &str,
-        size: Option<usize>,
-    ) -> R<Vec<f64>> {
-        let numbers = crate::scope(|| {
+    /// The objective as `asReal` reads it, its first element. PORT cannot take a missing
+    /// value, so `NA` and `NaN` become `Inf` with a warning, which PORT treats as a failed
+    /// step.
+    unsafe fn value(&self, expression: Sexp) -> R<f64> {
+        let value = crate::scope(|| {
             let result = eval::eval(expression, self.rho)?;
-            if !matches!(
-                result.kind(),
-                SexpType::Real | SexpType::Integer | SexpType::Logical
-            ) {
-                return Err(self
-                    .call
-                    .error(format!("{what} must return a numeric vector")));
+            Ok(values::as_real_scalar(result))
+        })?;
+        if value.is_nan() {
+            self.call.warning("NA/NaN function evaluation")?;
+            return Ok(f64::INFINITY);
+        }
+        Ok(value)
+    }
+
+    unsafe fn gradient(&self, expression: Sexp) -> R<Vec<f64>> {
+        let n = self.n;
+        let gradient = crate::scope(|| {
+            let result = eval::eval(expression, self.rho)?;
+            if !result.kind().is_atomic() {
+                return Ok(ValueVector(Vec::new()));
             }
             Ok(ValueVector(real_values(coerce_vector(
                 result,
@@ -833,89 +821,50 @@ impl Objective<'_> {
             )?)?))
         })?
         .0;
-        match size {
-            Some(size) if numbers.len() != size => Err(self
-                .call
-                .error(format!("{what} must return a vector of length {size}"))),
-            _ => Ok(numbers),
+        if gradient.len() != n {
+            return Err(self.call.error(format!(
+                "gradient function must return a numeric vector of length {n}"
+            )));
         }
-    }
-}
-
-impl Model for Objective<'_> {
-    unsafe fn value(&mut self, x: &[f64]) -> R<Option<f64>> {
-        crate::scope(|| {
-            self.assign(x)?;
-            let result = eval::eval(self.objective, self.rho)?;
-            if length(result) != 1 {
-                return Err(self.call.error(format!(
-                    "objective function in nlminb evaluates to length {} not 1",
-                    length(result)
-                )));
-            }
-            let value = values::as_real_scalar(result);
-            Ok(value.is_finite().then_some(value))
-        })
+        if gradient.iter().any(|value| value.is_nan()) {
+            return Err(self.call.error("NA/NaN gradient evaluation"));
+        }
+        Ok(gradient)
     }
 
-    unsafe fn derivatives(&mut self, x: &[f64], value: f64) -> R<(Vec<f64>, Option<Vec<f64>>)> {
+    /// Stores the Hessian's lower triangle in `packed`, by rows, which is how PORT keeps a
+    /// symmetric matrix.
+    unsafe fn hessian(&self, expression: Sexp, packed: &mut [f64]) -> R<()> {
         let n = self.n;
-        let Some(gradient_call) = self.gradient else {
-            return Ok((self.difference_gradient(x, value)?, None));
-        };
-        self.assign(x)?;
-        let gradient = self.evaluate_numbers(gradient_call, "gradient function", Some(n))?;
-        let Some(hessian_call) = self.hessian else {
-            return Ok((gradient, None));
-        };
-        let numbers = self.evaluate_numbers(hessian_call, "Hessian function", None)?;
-        let mut hessian = vec![0.0; n * n];
-        if numbers.len() == n * n {
-            hessian.copy_from_slice(&numbers);
-        } else if numbers.len() == n * (n + 1) / 2 {
-            // The lower triangle, packed by rows.
-            let mut position = 0;
-            for i in 0..n {
-                for j in 0..=i {
-                    hessian[j * n + i] = numbers[position];
-                    hessian[i * n + j] = numbers[position];
-                    position += 1;
-                }
+        let matrix = crate::scope(|| {
+            let result = eval::eval(expression, self.rho)?;
+            let square = result.kind().is_atomic()
+                && values::dims(result).is_some_and(|dims| dims == [n, n]);
+            if !square {
+                return Ok(None);
             }
-        } else {
+            Ok(Some(ValueVector(real_values(coerce_vector(
+                result,
+                SexpType::Real,
+            )?)?)))
+        })?;
+        let Some(ValueVector(matrix)) = matrix else {
             return Err(self.call.error(format!(
                 "Hessian function must return a square numeric matrix of order {n}"
             )));
+        };
+        let mut position = 0;
+        for i in 0..n {
+            for j in 0..=i {
+                let value = matrix[i + j * n];
+                if value.is_nan() {
+                    return Err(self.call.error("NA/NaN Hessian evaluation"));
+                }
+                packed[position] = value;
+                position += 1;
+            }
         }
-        Ok((gradient, Some(hessian)))
-    }
-}
-
-impl crate::unwind::Rooted for Option<f64> {}
-
-impl Objective<'_> {
-    /// Central differences with steps of `eps^(1/3) * max(|x|, 1)`, which keep the gradient
-    /// accurate enough to drive the objective to its minimum to full precision, falling back to
-    /// a one-sided difference where one side cannot be evaluated.
-    unsafe fn difference_gradient(&mut self, x: &[f64], value: f64) -> R<Vec<f64>> {
-        let mut gradient = vec![0.0; x.len()];
-        let mut point = x.to_vec();
-        for i in 0..x.len() {
-            let step = f64::EPSILON.cbrt() * x[i].abs().max(1.0);
-            point[i] = x[i] + step;
-            let forward = self.value(&point)?;
-            point[i] = x[i] - step;
-            let backward = self.value(&point)?;
-            gradient[i] = match (forward, backward) {
-                (Some(forward), Some(backward)) => (forward - backward) / (2.0 * step),
-                (Some(forward), None) => (forward - value) / step,
-                (None, Some(backward)) => (value - backward) / step,
-                (None, None) => 0.0,
-            };
-            point[i] = x[i];
-        }
-        self.assign(x)?;
-        Ok(gradient)
+        Ok(())
     }
 }
 
@@ -953,13 +902,8 @@ impl LeastSquares<'_> {
         })
         .map(|values| values.0)
     }
-}
 
-struct ValueVector(Vec<f64>);
-
-impl crate::unwind::Rooted for ValueVector {}
-
-impl Model for LeastSquares<'_> {
+    /// Half the residual sum of squares at `x`, or `None` where it is not finite.
     unsafe fn value(&mut self, x: &[f64]) -> R<Option<f64>> {
         self.set(x)?;
         let residuals = self.residuals()?;
@@ -967,7 +911,8 @@ impl Model for LeastSquares<'_> {
         Ok(value.is_finite().then_some(value))
     }
 
-    unsafe fn derivatives(&mut self, x: &[f64], _value: f64) -> R<(Vec<f64>, Option<Vec<f64>>)> {
+    /// The gradient and the Gauss-Newton Hessian (column-major, `n * n`) at `x`.
+    unsafe fn derivatives(&mut self, x: &[f64]) -> R<(Vec<f64>, Vec<f64>)> {
         self.set(x)?;
         let residuals = self.residuals()?;
         let rows = residuals.len();
@@ -996,6 +941,11 @@ impl Model for LeastSquares<'_> {
                 hessian[k * n + j] = product;
             }
         }
-        Ok((gradient, Some(hessian)))
+        Ok((gradient, hessian))
     }
 }
+
+struct ValueVector(Vec<f64>);
+
+impl crate::unwind::Rooted for ValueVector {}
+impl crate::unwind::Rooted for Option<ValueVector> {}

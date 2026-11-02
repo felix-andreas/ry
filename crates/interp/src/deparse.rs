@@ -28,6 +28,7 @@ pub mod options {
     pub const QUOTE_EXPRESSIONS: u32 = 2;
     pub const SHOW_ATTRIBUTES: u32 = 4;
     pub const USE_SOURCE: u32 = 8;
+    pub const WARN_INCOMPLETE: u32 = 16;
     pub const KEEP_NA: u32 = 64;
     pub const HEX_NUMERIC: u32 = 256;
     pub const DIGITS17: u32 = 512;
@@ -51,10 +52,36 @@ pub unsafe fn deparse_lines_with(
     opts: u32,
     backtick: bool,
 ) -> Vec<String> {
+    deparse_checked(object, cutoff, opts, backtick).0
+}
+
+/// Deparses, and also reports whether the text cannot reparse to the object because it holds
+/// an environment, pointer, or other value with no source form.
+unsafe fn deparse_checked(
+    object: Sexp,
+    cutoff: usize,
+    opts: u32,
+    backtick: bool,
+) -> (Vec<String>, bool) {
     let mut deparser = Deparser::new(cutoff, opts);
     deparser.backtick = backtick;
     deparser.deparse(object);
-    deparser.finish()
+    let incomplete = deparser.incomplete;
+    (deparser.finish(), incomplete)
+}
+
+/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks.
+unsafe fn deparse_warning(
+    object: Sexp,
+    cutoff: usize,
+    opts: u32,
+    backtick: bool,
+) -> R<Vec<String>> {
+    let (lines, incomplete) = deparse_checked(object, cutoff, opts, backtick);
+    if incomplete && opts & options::WARN_INCOMPLETE != 0 {
+        crate::conditions::warning("deparse may be incomplete")?;
+    }
+    Ok(lines)
 }
 
 /// The first line of a deparse, as GNU R's `deparse1s` gives it to error and warning messages.
@@ -208,6 +235,7 @@ struct Deparser {
     /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
     /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
     left_of: Option<u8>,
+    incomplete: bool,
 }
 
 impl Deparser {
@@ -225,6 +253,7 @@ impl Deparser {
             backtick: true,
             depth: 0,
             left_of: None,
+            incomplete: false,
         }
     }
 
@@ -306,12 +335,12 @@ impl Deparser {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
                 let name = symbol_name(object);
-                if self.opts & options::QUOTE_EXPRESSIONS != 0 {
+                if name.is_empty() {
+                    // The empty symbol, `R_MissingArg`, prints as nothing even when quoted.
+                } else if self.opts & options::QUOTE_EXPRESSIONS != 0 {
                     self.print("quote(");
                     self.print(&quote_name(&name));
                     self.print(")");
-                } else if name.is_empty() {
-                    // The empty symbol, `R_MissingArg`.
                 } else if self.backtick {
                     self.print(&quote_name(&name));
                 } else {
@@ -324,7 +353,10 @@ impl Deparser {
                 let name = values::primitive_name(object);
                 self.print(&format!(".Primitive(\"{name}\")"));
             }
-            SexpType::Environment => self.print("<environment>"),
+            SexpType::Environment => {
+                self.incomplete = true;
+                self.print("<environment>")
+            }
             // A forced promise in a call, such as a replacement call's `value`, shows its value as
             // GNU R's does; deparsing never forces one, so an unforced promise shows its code.
             SexpType::Promise => {
@@ -336,11 +368,27 @@ impl Deparser {
                 self.left_of = left_of;
                 self.deparse(shown);
             }
-            SexpType::ExternalPtr => self.print("<pointer: 0x0>"),
-            SexpType::WeakRef => self.print("<weak reference>"),
-            SexpType::Bytecode => self.print("<bytecode>"),
+            SexpType::ExternalPtr => {
+                self.incomplete = true;
+                self.print(&crate::print::pointer_text(object))
+            }
+            SexpType::WeakRef => {
+                self.incomplete = true;
+                self.print("<weak reference>")
+            }
+            SexpType::Bytecode => {
+                self.incomplete = true;
+                self.print("<bytecode>")
+            }
             SexpType::Char => self.print(&format::encode_element(object, Some('"'))),
-            SexpType::Language => self.language(object, left_of),
+            SexpType::Language => {
+                // A call's attributes, a formula's class and environment among them, have no
+                // source form.
+                if object.attrib() != nil() {
+                    self.incomplete = true;
+                }
+                self.language(object, left_of)
+            }
             SexpType::Pairlist | SexpType::Dots => {
                 // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
                 let mut has_missing = false;
@@ -1143,7 +1191,7 @@ impl Deparser {
     unsafe fn list(&mut self, list: Sexp, opener: &str) {
         let count = length(list);
         let names = get_attr(list, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(list, self.opts);
         self.print(opener);
         let mut broken = false;
         for index in 0..count {
@@ -1170,7 +1218,7 @@ impl Deparser {
     unsafe fn name_prefix(&mut self, names: Sexp, index: usize) {
         let name = names.element(index);
         if name == values::na_string() {
-            self.print("`NA` = ");
+            self.print("\"NA\" = ");
             return;
         }
         let text = char_str(name);
@@ -1209,7 +1257,7 @@ impl Deparser {
             return;
         }
         let names = get_attr(vector, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector);
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector, self.opts);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
         if is_integer_run(vector) {
@@ -1363,7 +1411,7 @@ impl Deparser {
             let skip_names = tag == symbols().names
                 && self.opts & options::NICE_NAMES != 0
                 && !matches!(object.kind(), SexpType::Language)
-                && nice_names_ok(object);
+                && nice_names_ok(object, self.opts);
             if !skip_names && tag != symbols().srcref {
                 self.print(", ");
                 let name = symbol_name(tag);
@@ -1426,7 +1474,7 @@ pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
 }
 
 /// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.
-unsafe fn nice_names_ok(object: Sexp) -> bool {
+unsafe fn nice_names_ok(object: Sexp, opts: u32) -> bool {
     let names = get_attr(object, symbols().names);
     if names.kind() != SexpType::String {
         return false;
@@ -1434,7 +1482,8 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
     if !object.kind().is_vector() || length(names) != length(object) {
         return false;
     }
-    // All-empty names, or an `NA` name, need the attribute form.
+    // All-empty names need the attribute form, and so does an `NA` name when attributes are
+    // shown, because only `structure()` can bring the `NA` back; without them it is written `"NA"`.
     let any_named = (0..length(names)).any(|index| !values::is_blank(names.element(index)));
     let any_na = (0..length(names)).any(|index| names.element(index) == values::na_string());
     // In `c(...)` these names would match `c()`'s own arguments instead of naming elements.
@@ -1446,7 +1495,10 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
             )
         });
     // A run deparses as `from:to`, which has no room for names.
-    any_named && !any_na && !names_an_argument && !is_integer_run(object)
+    any_named
+        && !(any_na && opts & options::SHOW_ATTRIBUTES != 0)
+        && !names_an_argument
+        && !is_integer_run(object)
 }
 
 /// A run of at least two consecutive integers, increasing or decreasing, which deparses as
@@ -1538,7 +1590,8 @@ unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
             cell = cell.cdr();
             continue;
         }
-        if tag != symbols().names || !nice_names || !nice_names_ok(object) {
+        if tag != symbols().names || !nice_names || !nice_names_ok(object, options::SHOW_ATTRIBUTES)
+        {
             return true;
         }
         cell = cell.cdr();
@@ -1698,7 +1751,7 @@ unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
     let nlines = values::as_integer_scalar(call.arg(4));
     let backtick = values::as_logical_scalar(call.arg(2)) == 1;
-    let mut lines = deparse_lines_with(object, cutoff, opts, backtick);
+    let mut lines = deparse_warning(object, cutoff, opts, backtick)?;
     if nlines > 0 && (nlines as usize) < lines.len() {
         lines.truncate(nlines as usize);
     }
@@ -1732,7 +1785,7 @@ unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
         }
         text.push_str(&quote_name(&name));
         text.push_str(" <-\n");
-        for line in deparse_lines(value, 60, opts) {
+        for line in deparse_warning(value, 60, opts, true)? {
             text.push_str(&line);
             text.push('\n');
         }
@@ -1746,7 +1799,7 @@ unsafe fn do_dput(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let file = call.arg(1);
     let opts = values::as_integer_scalar(call.arg(2)).max(0) as u32;
-    let lines = deparse_lines(object, 60, opts);
+    let lines = deparse_warning(object, 60, opts, true)?;
     let mut text = lines.join("\n");
     text.push('\n');
     crate::connections::write_text(file, &text)?;

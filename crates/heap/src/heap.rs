@@ -39,7 +39,15 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
+    std::{
+        alloc::Layout,
+        cell::Cell,
+        ffi::c_void,
+        fmt,
+        ptr::NonNull,
+        rc::Rc,
+        time::{Duration, Instant},
+    },
 };
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
@@ -234,6 +242,13 @@ pub struct GcPolicy {
     pub stress: GcStress,
     /// Checks the write barrier's invariant before every minor collection (`RY_GC_VERIFY`).
     pub verify: bool,
+    /// Adds each collection's processor and elapsed time to the statistics, which `gc.time()`
+    /// turns on.
+    pub timing: bool,
+    /// Receives [`Heap::report`]'s text after each collection, which `gcinfo(TRUE)` asks for.
+    /// It runs while collection is still inhibited, so an allocation it makes cannot collect
+    /// under an allocation that was in progress.
+    pub reporter: Option<unsafe fn(&str)>,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -245,7 +260,43 @@ pub struct GcStats {
     pub live_bytes: u64,
     pub pages: u64,
     pub large_objects: u64,
+    /// The live objects' vector data in 8-byte cells, GNU R's `Vcells`. A major collection
+    /// counts it afresh, and a minor one adds what it marked, since only young objects are
+    /// unmarked when a minor collection starts and old objects die only in a major one.
+    pub live_vector_cells: u64,
+    /// The most objects and vector cells live after any collection since the last reset.
+    pub max_live_objects: u64,
+    pub max_vector_cells: u64,
+    /// Processor time in user and system mode and elapsed time spent collecting while
+    /// [`GcPolicy::timing`] was on.
+    pub user_time: Duration,
+    pub system_time: Duration,
+    pub elapsed_time: Duration,
 }
+
+/// What `gc()` reports, in GNU R's units: objects for its `Ncells` and 8-byte cells of vector
+/// data for its `Vcells`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Usage {
+    pub objects: u64,
+    pub vector_cells: u64,
+    /// Megabytes held by the objects themselves, apart from their vector data.
+    pub object_megabytes: f64,
+    pub vector_megabytes: f64,
+    /// The usage at which the next major collection runs. The heap triggers one on its total
+    /// bytes, so each count is scaled by the ratio of that limit to the bytes in use.
+    pub object_trigger: u64,
+    pub vector_trigger: u64,
+    pub object_trigger_megabytes: f64,
+    pub vector_trigger_megabytes: f64,
+    pub max_objects: u64,
+    pub max_vector_cells: u64,
+    pub max_object_megabytes: f64,
+    pub max_vector_megabytes: f64,
+}
+
+/// GNU R's `MAXIDSIZE`: the longest symbol name, in bytes.
+pub const MAX_SYMBOL_BYTES: usize = 10_000;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HeapError {
@@ -427,6 +478,70 @@ impl Heap {
 
     pub fn stats(&self) -> GcStats {
         self.stats
+    }
+
+    /// The live objects as of the last collection, in `gc()`'s units.
+    pub fn usage(&self) -> Usage {
+        const MEGABYTE: f64 = 1024.0 * 1024.0;
+        let stats = &self.stats;
+        let vector_bytes = stats.live_vector_cells * 8;
+        let object_bytes = stats.live_bytes.saturating_sub(vector_bytes);
+        let scale = self.policy.old_limit as f64 / (stats.live_bytes.max(1) as f64);
+        let scale = scale.max(1.0);
+        let megabytes = |bytes: f64| (bytes / MEGABYTE * 10.0).ceil() / 10.0;
+        // Each object's share of the bytes beside its vector data, for the peak's megabytes.
+        let per_object = object_bytes as f64 / stats.live_objects.max(1) as f64;
+        Usage {
+            objects: stats.live_objects,
+            vector_cells: stats.live_vector_cells,
+            object_megabytes: megabytes(object_bytes as f64),
+            vector_megabytes: megabytes(vector_bytes as f64),
+            object_trigger: (stats.live_objects as f64 * scale).ceil() as u64,
+            vector_trigger: (stats.live_vector_cells as f64 * scale).ceil() as u64,
+            object_trigger_megabytes: megabytes(object_bytes as f64 * scale),
+            vector_trigger_megabytes: megabytes(vector_bytes as f64 * scale),
+            max_objects: stats.max_live_objects,
+            max_vector_cells: stats.max_vector_cells,
+            max_object_megabytes: megabytes(stats.max_live_objects as f64 * per_object),
+            max_vector_megabytes: megabytes(stats.max_vector_cells as f64 * 8.0),
+        }
+    }
+
+    /// Sets the peak usage to the current one, as `gc(reset = TRUE)` does.
+    pub fn reset_max_usage(&mut self) {
+        self.stats.max_live_objects = self.stats.live_objects;
+        self.stats.max_vector_cells = self.stats.live_vector_cells;
+    }
+
+    /// The report `gcinfo(TRUE)` prints after a collection, in GNU R's wording: the number of
+    /// collections, split into minor and major ones (GNU R's levels 0 and 2; ry has no level
+    /// 1), the level of the last one, and the megabytes in use against the next trigger.
+    pub fn report(&self, last: Collection) -> String {
+        let stats = &self.stats;
+        let usage = self.usage();
+        let percent = |used: f64, trigger: f64| {
+            if trigger > 0.0 {
+                (100.0 * used / trigger).round() as u64
+            } else {
+                0
+            }
+        };
+        format!(
+            "Garbage collection {} = {}+0+{} (level {}) ... \n\
+             {:.1} Mbytes of cons cells used ({}%)\n\
+             {:.1} Mbytes of vectors used ({}%)\n",
+            stats.minor_collections + stats.major_collections,
+            stats.minor_collections,
+            stats.major_collections,
+            match last {
+                Collection::Minor => 0,
+                Collection::Major => 2,
+            },
+            usage.object_megabytes,
+            percent(usage.objects as f64, usage.object_trigger as f64),
+            usage.vector_megabytes,
+            percent(usage.vector_cells as f64, usage.vector_trigger as f64),
+        )
     }
 
     pub fn policy(&self) -> &GcPolicy {
@@ -984,7 +1099,7 @@ impl Heap {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
-        self.strings.insert(hash, object);
+        self.strings.insert(hash, object, &mut self.space);
         Ok(object)
     }
 
@@ -999,7 +1114,7 @@ impl Heap {
 
     /// The interned symbol named `name`, which `Rf_install` returns.
     pub unsafe fn install(&mut self, name: &[u8]) -> HeapResult<Sexp> {
-        if name.len() > 10_000 {
+        if name.len() > MAX_SYMBOL_BYTES {
             return Err(HeapError::SymbolTooLong);
         }
         if name.is_empty() {
@@ -1013,6 +1128,9 @@ impl Heap {
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
         if let Some(&symbol) = self.symbols.get(&name) {
             return Ok(symbol);
+        }
+        if name.length() as usize > MAX_SYMBOL_BYTES {
+            return Err(HeapError::SymbolTooLong);
         }
         let nil = self.known.nil;
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;
@@ -1438,6 +1556,17 @@ impl Heap {
         unsafe { (*env.frame_ptr()).hash_profile() }
     }
 
+    /// Counts a binding of `symbol` that `env` holds only for the length of one operation, as
+    /// GNU R's complex assignment binds `*tmp*`, in the table that orders a hashed frame. The
+    /// binding itself is never visible, but its insert and removal move GNU R's chain counter
+    /// and so can grow the table, which changes the order the frame lists in.
+    pub unsafe fn count_transient_binding(&mut self, env: Sexp, symbol: Sexp) {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return;
+        }
+        unsafe { (*env.frame_ptr()).count_transient(symbol) }
+    }
+
     /// Marks the bindings of a closure frame made so far as its formals.
     pub unsafe fn mark_frame_formals(&mut self, env: Sexp) {
         (*env.frame_ptr()).mark_formals();
@@ -1758,6 +1887,11 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        let started = self
+            .policy
+            .timing
+            .then(|| (Instant::now(), process_times()));
+        self.space.marked_vector_cells = 0;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1793,8 +1927,9 @@ impl Heap {
             if escaped_strings {
                 // Every CHARSXP but the rooted `NA_STRING` is interned, so the young ones are
                 // the strings interned since the last collection.
-                for index in 0..self.strings.young().len() {
-                    let string = self.strings.young()[index];
+                self.space.mark_young_interned();
+                for index in 0..self.strings.young_large().len() {
+                    let string = self.strings.young_large()[index];
                     self.mark(string);
                 }
             }
@@ -1830,6 +1965,22 @@ impl Heap {
         self.young_bytes = 0;
         self.young_large_bytes = 0;
         self.refresh_small_trigger();
+        let stats = &mut self.stats;
+        stats.live_vector_cells = match kind {
+            Collection::Minor => stats.live_vector_cells + self.space.marked_vector_cells,
+            Collection::Major => self.space.marked_vector_cells,
+        };
+        stats.max_live_objects = stats.max_live_objects.max(stats.live_objects);
+        stats.max_vector_cells = stats.max_vector_cells.max(stats.live_vector_cells);
+        if let Some((elapsed, (user, system))) = started {
+            let (user_now, system_now) = process_times();
+            stats.user_time += user_now.saturating_sub(user);
+            stats.system_time += system_now.saturating_sub(system);
+            stats.elapsed_time += elapsed.elapsed();
+        }
+        if let Some(reporter) = self.policy.reporter {
+            reporter(&self.report(kind));
+        }
         self.inhibit -= 1;
     }
 
@@ -2358,6 +2509,8 @@ impl Default for GcPolicy {
                 _ => GcStress::Off,
             },
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),
+            timing: false,
+            reporter: None,
         }
     }
 }
@@ -2519,6 +2672,57 @@ fn memory_ceiling() -> usize {
 #[cfg(not(target_os = "linux"))]
 fn memory_ceiling() -> usize {
     usize::MAX
+}
+
+/// The process's processor time so far in user and in system mode.
+#[cfg(unix)]
+fn process_times() -> (Duration, Duration) {
+    // SAFETY: `getrusage` only writes the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return (Duration::ZERO, Duration::ZERO);
+    }
+    let duration = |time: libc::timeval| {
+        Duration::new(
+            time.tv_sec.max(0) as u64,
+            (time.tv_usec.max(0) as u32) * 1000,
+        )
+    };
+    (duration(usage.ru_utime), duration(usage.ru_stime))
+}
+
+/// The process's processor time so far in user and in system mode.
+#[cfg(windows)]
+fn process_times() -> (Duration, Duration) {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let empty = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut creation, mut exit, mut kernel, mut user) = (empty, empty, empty, empty);
+    // SAFETY: `GetProcessTimes` only writes the four structs it is given.
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return (Duration::ZERO, Duration::ZERO);
+    }
+    // A FILETIME counts 100-nanosecond intervals.
+    let duration = |time: FILETIME| {
+        Duration::from_nanos(
+            ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) * 100,
+        )
+    };
+    (duration(user), duration(kernel))
 }
 
 unsafe fn bump_symbol_epoch(symbol: Sexp) {

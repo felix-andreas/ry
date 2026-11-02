@@ -111,6 +111,40 @@ pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
     .map(|(table, _)| table)
 }
 
+/// `check_csv_input` on fuzzer bytes, which the coverage-guided `fuzz/` target passes straight
+/// through. The first four bytes choose the read's options and slice size, and the rest is the
+/// text. Bit 0 of the flags reads factors, bit 1 reads only the first rows, bit 2 reads the
+/// sniffed columns the mask selects, bit 3 lists them backwards, and bit 4 adds a column the
+/// text lacks.
+pub fn check_csv_bytes(data: &[u8]) {
+    let [flags, slice, rows, mask, text @ ..] = data else {
+        check_csv_input(data, &ReadOptions::default(), 16);
+        return;
+    };
+    let columns = (flags & 4 != 0).then(|| {
+        let mut names: Vec<PlSmallStr> = sniff::sniff(text)
+            .columns
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << (index % 8)) != 0)
+            .map(|(_, column)| column.name.as_str().into())
+            .collect();
+        if flags & 8 != 0 {
+            names.reverse();
+        }
+        if flags & 16 != 0 {
+            names.push("absent".into());
+        }
+        names
+    });
+    let options = ReadOptions {
+        columns,
+        rows: (flags & 2 != 0).then_some(usize::from(*rows)),
+        factors: flags & 1 != 0,
+    };
+    check_csv_input(text, &options, 1 + usize::from(*slice));
+}
+
 /// The reader's contract on any bytes, read with `options` in slices of about `slice_bytes`.
 /// Nothing panics, and the bytes either fail to read or read into the columns the sniffer
 /// promised, in its order. Each number and character column keeps its sniffed type unless a value

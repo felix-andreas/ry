@@ -82,6 +82,24 @@ file's results 0.7 to 1.5 s later, where running `devtools::test()` again takes 
 `--watch` of the whole suite, the one affected file reran 1.2 s after the save, ahead of the other
 501.
 
+## Writing documentation
+
+`ry document` runs roxygen2 against the loaded package, as `devtools::document()` does, and writes
+the same `man/*.Rd` files and `NAMESPACE`, byte for byte:
+
+```sh
+ry document                      # every roclet the package configures
+ry document --roclet namespace   # only NAMESPACE
+```
+
+It keeps each file's parsed documentation between runs, so after an edit it parses only the files
+you changed, and it replaces the steps of roxygen2 that slow down with thousands of topics by
+equivalent linear ones.
+
+On finbench documented with roxygen2 (22,000 Rd files), `devtools::document()` takes 24 minutes
+from scratch and 21 minutes after a one-file edit. `ry document` takes 6.7 minutes on its first
+run and about 2 minutes after the edit. What remains is roxygen2's own work for each topic.
+
 ## Controlling reloads
 
 In the console, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from

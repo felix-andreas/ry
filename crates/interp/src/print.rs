@@ -172,7 +172,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out(&format!("{line}\n"));
             }
         }
-        SexpType::ExternalPtr => out("<pointer: 0x0>\n"),
+        SexpType::ExternalPtr => out(&format!("{}\n", pointer_text(value))),
         SexpType::WeakRef => out("<weak reference>\n"),
         SexpType::Bytecode => out("<bytecode>\n"),
         SexpType::Object => {
@@ -339,13 +339,20 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
         vector,
         options,
     );
+    let measures = measure_items(subset, &items, options.quote);
     if names != nil() {
-        print_named_vector(&items, names, vector.kind() == SexpType::Complex, options);
+        print_named_vector(
+            &items,
+            &measures,
+            names,
+            vector.kind() == SexpType::Complex,
+            options,
+        );
     } else {
         let right = vector.kind() != SexpType::String || options.right;
-        let width = items
+        let width = measures
             .iter()
-            .map(|item| display_width(item))
+            .map(|measure| measure.column)
             .max()
             .unwrap_or(0);
         let labels = label_width(shown);
@@ -361,7 +368,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
                 used = labels;
             }
             line.push_str(&" ".repeat(options.gap));
-            line.push_str(&pad(item, width, right));
+            line.push_str(&pad_measured(item, measures[index], width, right));
             used += width + options.gap;
         }
         line.push('\n');
@@ -376,16 +383,22 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     Ok(())
 }
 
-unsafe fn print_named_vector(items: &[String], names: Sexp, complex: bool, options: &PrintOptions) {
+unsafe fn print_named_vector(
+    items: &[String],
+    measures: &[Measure],
+    names: Sexp,
+    complex: bool,
+    options: &PrintOptions,
+) {
     let name_texts: Vec<String> = (0..items.len())
         .map(|index| match values::string_at(names, index) {
             Some(text) => text.into_owned(),
             None => "<NA>".to_owned(),
         })
         .collect();
-    let width = items
+    let width = measures
         .iter()
-        .map(|item| display_width(item))
+        .map(|measure| measure.column)
         .chain(name_texts.iter().map(|name| display_width(name)))
         .max()
         .unwrap_or(0);
@@ -403,8 +416,8 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, complex: bool, optio
             // without a trailing gap.
             text.push_str(&items[chunk_start..chunk_end].join(&" ".repeat(options.gap)));
         } else {
-            for item in &items[chunk_start..chunk_end] {
-                text.push_str(&pad(item, width, true));
+            for index in chunk_start..chunk_end {
+                text.push_str(&pad_measured(&items[index], measures[index], width, true));
                 text.push_str(&" ".repeat(options.gap));
             }
         }
@@ -420,7 +433,7 @@ unsafe fn matrix_columns(
     shown: usize,
     cols: usize,
     options: &PrintOptions,
-) -> R<Vec<Vec<String>>> {
+) -> R<Vec<Vec<(String, Measure)>>> {
     let na = if matrix.kind() == SexpType::String && !options.quote {
         &options.na_string_noquote
     } else {
@@ -434,7 +447,9 @@ unsafe fn matrix_columns(
         let column = crate::subset::select_elements(matrix, &indices)?;
         let mut items = format::format_vector(column, options.settings, options.quote, na)?;
         items.truncate(shown);
-        columns.push(escape_unquoted(items, matrix, options));
+        let items = escape_unquoted(items, matrix, options);
+        let measures = measure_items(column, &items, options.quote);
+        columns.push(items.into_iter().zip(measures).collect());
     }
     Ok(columns)
 }
@@ -448,6 +463,65 @@ unsafe fn escape_unquoted(items: Vec<String>, vector: Sexp, options: &PrintOptio
         .into_iter()
         .map(|item| encode_string(&item, None))
         .collect()
+}
+
+/// The columns GNU R counts for a printed element: the width its column must have, and the
+/// width its padding assumes it takes. Both are the display width, except for a "bytes" string.
+/// GNU R measures one by its `\xNN` spelling before backslashes are escaped, so it prints wider
+/// than it counts, and its padding counts an escaped quote as two columns where its column
+/// width counts one.
+#[derive(Clone, Copy)]
+struct Measure {
+    column: usize,
+    counted: usize,
+}
+
+unsafe fn measure_items(vector: Sexp, items: &[String], quote: bool) -> Vec<Measure> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let element = match vector.kind() {
+                SexpType::String => Some(vector.element(index)),
+                _ => None,
+            };
+            match element.filter(|element| element.has_gp(gp::BYTES)) {
+                Some(element) => {
+                    let bytes = element.bytes();
+                    let spelling: usize = bytes
+                        .iter()
+                        .map(|&byte| if (0x20..0x80).contains(&byte) { 1 } else { 4 })
+                        .sum();
+                    let quotes = if quote { 2 } else { 0 };
+                    let escaped_quotes = match quote {
+                        true => bytes.iter().filter(|&&byte| byte == b'"').count(),
+                        false => 0,
+                    };
+                    Measure {
+                        column: spelling + quotes,
+                        counted: spelling + quotes + escaped_quotes,
+                    }
+                }
+                None => {
+                    let width = display_width(item);
+                    Measure {
+                        column: width,
+                        counted: width,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Pads `text` to `width` columns as though it took `measure.counted` of them.
+fn pad_measured(text: &str, measure: Measure, width: usize, left: bool) -> String {
+    let padding = " ".repeat(width.saturating_sub(measure.counted));
+    if left {
+        padding + text
+    } else {
+        text.to_owned() + &padding
+    }
 }
 
 pub unsafe fn print_matrix(
@@ -525,8 +599,9 @@ unsafe fn print_matrix_rows(
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
     // GNU R sizes numbered labels by the digits of one past the last row, so nine rows already
-    // reserve two digits and no rows reserve one.
-    let numbered_width = if numbered_rows {
+    // reserve two digits and no rows reserve one. A matrix without rows reserves that width
+    // even when it has (empty) row names.
+    let numbered_width = if numbered_rows || rows == 0 {
         format!("[{},]", rows + 1).len()
     } else {
         0
@@ -578,7 +653,7 @@ unsafe fn print_matrix_rows(
         .map(|col| {
             columns[col]
                 .iter()
-                .map(|item| display_width(item))
+                .map(|(_, measure)| measure.column)
                 .max()
                 .unwrap_or(0)
                 .max(display_width(&col_labels[col]))
@@ -605,7 +680,8 @@ unsafe fn print_matrix_rows(
     while start < cols {
         let mut end = start;
         let mut used = row_label_width;
-        while end < cols && (end == start || used + widths[end] + options.gap <= options.width) {
+        // GNU R starts a new block once a line would reach the full width, not only exceed it.
+        while end < cols && (end == start || used + widths[end] + options.gap < options.width) {
             used += widths[end] + options.gap;
             end += 1;
         }
@@ -626,7 +702,8 @@ unsafe fn print_matrix_rows(
             text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
-                text.push_str(&pad(&columns[col][row], widths[col], right));
+                let (item, measure) = &columns[col][row];
+                text.push_str(&pad_measured(item, *measure, widths[col], right));
             }
             text.push('\n');
         }
@@ -785,15 +862,25 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         } else {
             None
         };
-        match name {
-            Some(name) if !name.is_empty() => {
-                if deparse::is_syntactic(&name) {
-                    tag.push_str(&format!("${name}"));
-                } else {
-                    tag.push_str(&format!("$`{name}`"));
+        // GNU R's tag holds 256 bytes: a name that would overflow it becomes `$...`, and
+        // nothing more is added once it is past that length.
+        const TAG_LIMIT: usize = 256;
+        if saved <= TAG_LIMIT {
+            match name {
+                Some(name) if !name.is_empty() => {
+                    let piece = if deparse::is_syntactic(&name) {
+                        format!("${name}")
+                    } else {
+                        format!("$`{name}`")
+                    };
+                    if saved + piece.len() <= TAG_LIMIT {
+                        tag.push_str(&piece);
+                    } else {
+                        tag.push_str("$...");
+                    }
                 }
+                Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
             }
-            Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
         }
         out(&format!("{tag}\n"));
         if element.is_object() {
@@ -942,4 +1029,15 @@ unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
         _ => print_value(function, &options, &mut String::new())?,
     }
     Ok(function)
+}
+
+/// An external pointer as GNU R prints it, through C's `%p`: glibc writes a null pointer as
+/// `(nil)`.
+pub unsafe fn pointer_text(object: Sexp) -> String {
+    let address = object.external_address();
+    if address.is_null() {
+        "<pointer: (nil)>".to_owned()
+    } else {
+        format!("<pointer: {address:p}>")
+    }
 }

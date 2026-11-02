@@ -16,6 +16,8 @@ use {
             self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
         },
         graphics_render::{self, Format, Paper, Rect, Stroke},
+        plotmath::adobe_symbol_code,
+        sort::rsort_with_index,
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -115,9 +117,9 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_box", do_box),
     ("C_clip", do_clip),
     ("C_contour", do_contour),
-    ("C_dend", do_draw),
+    ("C_dend", do_dend),
     ("C_erase", do_erase),
-    ("C_filledcontour", do_draw),
+    ("C_filledcontour", do_filled_contour),
     ("C_image", do_image),
     ("C_mtext", do_mtext),
     ("C_path", do_path),
@@ -154,8 +156,10 @@ struct Device {
     /// The state the device's display list starts from, which a redraw restores before it
     /// replays the list, and which a snapshot records.
     saved: Saved,
-    /// The region `clip()` set, until the next `plot.new`.
-    clip: Option<Rect>,
+    /// The region `clip()` set and the `xpd` in force then. Like GNU R's `GClip`, which
+    /// resets the device clip only when `xpd` differs from the last value it clipped for, the
+    /// region holds until `plot.new` or until something draws under a different `xpd`.
+    clip: Option<(Rect, i32)>,
 }
 
 /// What a snapshot of base graphics holds.
@@ -174,7 +178,11 @@ struct Pars {
     ann: bool,
     bg: Colour,
     bty: char,
+    /// `par("cex")`, GNU R's `cexbase`: the scale every text and symbol size starts from.
     cex: f64,
+    /// An inline `cex` argument, GNU R's current `cex`. Most routines size text from `cex`
+    /// and their own argument instead, so this scales only the dendrogram's labels.
+    inline_cex: f64,
     cex_axis: f64,
     cex_lab: f64,
     cex_main: f64,
@@ -213,6 +221,11 @@ struct Pars {
     tck: f64,
     tcl: f64,
     usr: [f64; 4],
+    /// The plot region, in figure fractions, that `usr` was mapped onto when it was last set
+    /// (GNU R's `win2fig`). User coordinates go through it rather than the current plot
+    /// region, so changing the margins or the layout after `plot.window` moves the plot region
+    /// without moving what is drawn in user coordinates until the next `plot.window`.
+    window: [f64; 4],
     xaxp: [f64; 3],
     xaxs: char,
     xaxt: char,
@@ -339,14 +352,15 @@ const WHITE: Colour = 0xFFFF_FFFF;
 /// The line type codes: four bits per dash length, the first dash in the low bits.
 const LTY_BLANK: u32 = u32::MAX;
 const LTY_SOLID: u32 = 0;
+const LTY_DOTTED: u32 = 0x31;
 const LINE_TYPES: [(&str, u32); 7] = [
     ("blank", LTY_BLANK),
     ("solid", LTY_SOLID),
     ("dashed", 0x44),
-    ("dotted", 0x31),
+    ("dotted", LTY_DOTTED),
     ("dotdash", 0x3431),
     ("longdash", 0x37),
-    ("twodash", 0x2262),
+    ("twodash", 0x2622),
 ];
 
 impl Pars {
@@ -357,6 +371,7 @@ impl Pars {
             bg,
             bty: 'o',
             cex: 1.0,
+            inline_cex: 1.0,
             cex_axis: 1.0,
             cex_lab: 1.0,
             cex_main: 1.2,
@@ -395,6 +410,7 @@ impl Pars {
             tck: values::na_real(),
             tcl: -0.5,
             usr: [0.0, 1.0, 0.0, 1.0],
+            window: [0.0, 1.0, 0.0, 1.0],
             xaxp: [0.0, 1.0, 5.0],
             xaxs: 'r',
             xaxt: 's',
@@ -1439,12 +1455,6 @@ unsafe fn no_events(_: &NativeCall<'_>) -> R<Sexp> {
     Err(error("graphics device does not support graphics events"))
 }
 
-/// The routines that only draw: they need a started plot and return `NULL`.
-unsafe fn do_draw(_: &NativeCall<'_>) -> R<Sexp> {
-    with_plot(|_| Ok(()))?;
-    Ok(nil())
-}
-
 /// The routines that change a device's state without drawing: they need a device.
 unsafe fn do_device_noop(_: &NativeCall<'_>) -> R<Sexp> {
     with_device(|_| Ok(()))?;
@@ -2080,6 +2090,9 @@ unsafe fn set_par(
         pars.margin_cex = pars.cex;
         pars.square = pars.pty == 's';
     }
+    if name == "usr" {
+        device.pars.window = device.plot_region();
+    }
     Ok(())
 }
 
@@ -2161,6 +2174,7 @@ unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
         {
             return Err(error("plot region too large"));
         }
+        let window = device.plot_region();
         let pars = &mut device.pars;
         pars.xlog = false;
         pars.ylog = false;
@@ -2168,6 +2182,7 @@ unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
         let (x, xaxp) = scale_axis([0.0, 1.0], pars.xaxs, false, lab[0]);
         let (y, yaxp) = scale_axis([0.0, 1.0], pars.yaxs, false, lab[1]);
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
     }
@@ -2281,10 +2296,12 @@ unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let (x, xaxp) = scale_axis(x, xaxs, xlog, lab[0]);
         let (y, yaxp) = scale_axis(y, yaxs, ylog, lab[1]);
+        let window = device.plot_region();
         let pars = &mut device.pars;
         pars.xlog = xlog;
         pars.ylog = ylog;
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
         Ok(())
@@ -2475,8 +2492,12 @@ unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
             length(result)
         )));
     }
-    draw_axis(call, side, values::reals(result))?;
-    Ok(result)
+    // GNU R's `C_axis` returns `NULL` for an axis that `xaxt` or `yaxt` suppresses.
+    if draw_axis(call, side, values::reals(result))? {
+        Ok(result)
+    } else {
+        Ok(nil())
+    }
 }
 
 // graphics: text metrics and coordinate conversion.
@@ -2927,12 +2948,19 @@ const HELVETICA_BOLD_KERNING: [(u8, u8, i16); 203] = [
     (122, 101, 10),
 ];
 
-/// The height of a capital letter in Helvetica, in thousandths of the font size.
-const HELVETICA_CAP_HEIGHT: f64 = 718.0;
-
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
+    if font == 5 {
+        let total: i32 = line
+            .chars()
+            .map(|character| {
+                let unicode = character as u32;
+                i32::from(symbol_metrics(adobe_symbol_code(unicode).unwrap_or(unicode))[0])
+            })
+            .sum();
+        return f64::from(total) / 1000.0;
+    }
     let (widths, kerning): (&[u16; 95], &[(u8, u8, i16)]) = if font == 2 || font == 4 {
         (&HELVETICA_BOLD_WIDTHS, &HELVETICA_BOLD_KERNING)
     } else {
@@ -2958,35 +2986,115 @@ pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
     f64::from(total) / 1000.0
 }
 
-/// The lines of each label of a `strwidth` or `text` argument: strings line by line, other
-/// atomic values as text, and plotmath expressions by their deparsed source.
-unsafe fn label_lines(labels: Sexp) -> R<Vec<Vec<String>>> {
-    let split = |text: &str| text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+/// The Symbol font's metrics for Adobe Symbol codes 32 to 255, in thousandths of the font
+/// size, from GNU R's `afm/Symbol.afm`: the width, the top of the glyph above the baseline,
+/// and how far it reaches below. Codes the font lacks are 0.
+const SYMBOL_WIDTHS: [u16; 224] = [
+    250, 333, 713, 500, 549, 833, 778, 439, 333, 333, 500, 549, 250, 549, 250, 278, 500, 500, 500,
+    500, 500, 500, 500, 500, 500, 500, 278, 278, 549, 549, 549, 444, 549, 722, 667, 722, 612, 611,
+    763, 603, 722, 333, 631, 722, 686, 889, 722, 722, 768, 741, 556, 592, 611, 690, 439, 768, 645,
+    795, 611, 333, 863, 333, 658, 500, 500, 631, 549, 549, 494, 439, 521, 411, 603, 329, 603, 549,
+    549, 576, 521, 549, 549, 521, 549, 603, 439, 576, 713, 686, 493, 686, 494, 480, 200, 480, 549,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 750, 620, 247, 549, 167, 713, 500, 753, 753, 753, 753, 1042, 987, 603, 987, 603, 400, 549,
+    411, 549, 549, 713, 494, 460, 549, 549, 549, 549, 1000, 603, 1000, 658, 823, 686, 795, 987,
+    768, 768, 823, 768, 768, 713, 713, 713, 713, 713, 713, 713, 768, 713, 790, 790, 890, 823, 549,
+    250, 713, 603, 603, 1042, 987, 603, 987, 603, 494, 329, 790, 790, 786, 713, 384, 384, 384, 384,
+    384, 384, 494, 494, 494, 494, 0, 329, 274, 686, 686, 686, 384, 384, 384, 384, 384, 384, 494,
+    494, 494, 0,
+];
+const SYMBOL_ASCENTS: [i16; 224] = [
+    0, 672, 705, 673, 707, 655, 661, 500, 673, 673, 551, 533, 104, 288, 95, 646, 685, 673, 685,
+    685, 685, 690, 685, 673, 685, 685, 460, 460, 522, 390, 522, 686, 475, 673, 673, 673, 688, 673,
+    673, 673, 673, 673, 689, 673, 688, 673, 673, 685, 673, 685, 673, 673, 673, 673, 500, 688, 673,
+    684, 673, 674, 487, 674, 674, -75, 917, 500, 741, 499, 740, 502, 673, 499, 514, 503, 499, 501,
+    739, 500, 507, 499, 487, 690, 499, 500, 500, 507, 583, 500, 766, 500, 756, 673, 707, 673, 307,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 685, 685, 735, 639, 677, 404, 686, 533, 550, 532, 548, 511, 511, 910, 511, 888, 685, 645,
+    737, 639, 524, 404, 746, 473, 456, 549, 443, 394, 95, 1010, 276, 629, 658, 740, 734, 573, 673,
+    675, 719, 509, 492, 470, 470, 540, 470, 470, 468, 555, 673, 718, 673, 675, 673, 751, 917, 310,
+    288, 454, 477, 510, 513, 911, 508, 890, 745, 746, 670, 675, 673, 752, 926, 925, 926, 926, 925,
+    926, 925, 935, 935, 935, 0, 746, 916, 920, 975, 921, 926, 925, 926, 926, 925, 926, 925, 935,
+    935, 0,
+];
+const SYMBOL_DESCENTS: [i16; 224] = [
+    0, 17, 0, 16, 0, 36, 18, 17, 191, 191, -134, 0, 152, -233, 17, 18, 14, 0, 0, 14, 0, 14, 14, 16,
+    14, 18, 17, 152, 0, -141, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 0, 0, 0, 8, 17, 0, 17, 0, 0,
+    0, 0, 233, 0, 0, 0, 0, 155, 0, 155, 0, 125, -881, 18, 223, 231, 19, 19, 224, 225, 202, 17, 224,
+    0, 17, 223, 16, 19, 19, 17, 230, 21, 19, 18, 18, 17, 224, 228, 225, 183, 293, 183, -203, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    12, 0, -459, 0, 12, -124, 193, 26, 36, 33, 36, 15, 15, 0, 15, 22, -385, 0, -459, 0, -8, -123,
+    20, -113, -71, 25, -82, -135, 17, 120, -220, 16, 18, 53, 15, 211, 17, 15, 24, 0, 17, 0, 125,
+    70, 0, 125, 0, 58, 0, 19, 17, 15, -293, 101, 38, -210, 0, 0, 0, 20, 15, -2, 20, 19, 0, 198, 20,
+    15, -293, 108, 293, 85, 293, 80, 79, 80, 85, 85, 75, 85, 0, 198, 107, 88, 88, 87, 293, 85, 293,
+    80, 79, 80, 85, 85, 75, 0,
+];
+
+/// The Symbol font's bounding box as ascent, descent and width, what a device reports for
+/// character 0 in the symbol face.
+pub(crate) const SYMBOL_BOX: [i16; 3] = [1010, 293, 1270];
+
+/// The width, ascent and descent of the glyph with Adobe Symbol code `code` in the symbol
+/// face (`font` 5), in thousandths of the font size. Plotmath measures a glyph by its code; a
+/// string reaches the device as the Unicode characters the codes translate to.
+pub(crate) fn symbol_metrics(code: u32) -> [i16; 3] {
+    match usize::try_from(code)
+        .ok()
+        .and_then(|code| code.checked_sub(32))
+    {
+        Some(index) if index < SYMBOL_WIDTHS.len() => [
+            SYMBOL_WIDTHS[index] as i16,
+            SYMBOL_ASCENTS[index],
+            SYMBOL_DESCENTS[index],
+        ],
+        _ => [0, 0, 0],
+    }
+}
+
+/// One label of a text argument: lines of plain text, or a plotmath expression.
+#[derive(Clone)]
+enum Label {
+    Lines(Vec<String>),
+    Math(Sexp),
+}
+
+impl Label {
+    fn is_empty(&self) -> bool {
+        matches!(self, Label::Lines(lines) if lines.is_empty())
+    }
+
+    /// The label as plain text, an expression by its deparsed source.
+    unsafe fn text(&self) -> String {
+        match self {
+            Label::Lines(lines) => lines.join(" "),
+            Label::Math(expression) => crate::deparse::deparse_one_line(*expression),
+        }
+    }
+}
+
+/// The labels of a `strwidth`, `text`, `mtext`, `title` or `axis` argument: strings line by
+/// line, other atomic values as text, and each element of an expression vector, or a lone
+/// call or symbol, as plotmath.
+unsafe fn labels_of(labels: Sexp) -> R<Vec<Label>> {
+    let split = |text: &str| Label::Lines(text.split('\n').map(str::to_owned).collect());
     match labels.kind() {
         SexpType::Nil => Ok(Vec::new()),
-        SexpType::Expression => {
-            let mut result = Vec::with_capacity(length(labels));
-            for index in 0..length(labels) {
-                result.push(vec![crate::deparse::deparse_one_line(values::list_elt(
-                    labels, index,
-                ))]);
-            }
-            Ok(result)
-        }
-        SexpType::Language | SexpType::Symbol => {
-            Ok(vec![vec![crate::deparse::deparse_one_line(labels)]])
-        }
+        SexpType::Expression => Ok((0..length(labels))
+            .map(|index| Label::Math(values::list_elt(labels, index)))
+            .collect()),
+        SexpType::Language | SexpType::Symbol => Ok(vec![Label::Math(labels)]),
         SexpType::String => Ok((0..length(labels))
             .map(|index| match values::string_at(labels, index) {
                 Some(text) => split(&text),
-                None => Vec::new(),
+                None => Label::Lines(Vec::new()),
             })
             .collect()),
         _ => {
             let strings = coerce_vector(labels, SexpType::String)?;
             Ok((0..length(strings))
                 .map(|index| {
-                    values::string_at(strings, index).map_or_else(Vec::new, |text| split(&text))
+                    values::string_at(strings, index)
+                        .map_or_else(|| Label::Lines(Vec::new()), |text| split(&text))
                 })
                 .collect())
         }
@@ -2996,7 +3104,7 @@ unsafe fn label_lines(labels: Sexp) -> R<Vec<Vec<String>>> {
 /// `strwidth` and `strheight`: `(s, units, cex, font, vfont, ...)`, with units 1 for user
 /// coordinates, 2 for the figure and 3 for inches.
 unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
-    let labels = label_lines(call.arg(0))?;
+    let labels = labels_of(call.arg(0))?;
     let units = values::as_integer_scalar(call.arg(1));
     if !(1..=3).contains(&units) {
         return Err(error("invalid units"));
@@ -3023,10 +3131,6 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
             } else {
                 1.0
             };
-        let unrounded = f64::from(pars.ps) * cex;
-        // Fonts come in whole point sizes, so the glyphs are measured at the nearest one.
-        let points = unrounded.round().max(1.0);
-        let line_inches = 1.2 * unrounded / 72.0 * pars.lheight;
         let (plot_inches, figure_inches, user_range) = if height {
             (
                 device.plot_size()[1],
@@ -3041,16 +3145,11 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
             )
         };
         let mut sizes = Vec::with_capacity(labels.len());
-        for lines in &labels {
+        for label in &labels {
             let inches = if height {
-                let extra = lines.len().saturating_sub(1) as f64 * line_inches;
-                extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
+                label_height_inches(device, label, cex, font)?
             } else {
-                let mut widest: f64 = 0.0;
-                for line in lines {
-                    widest = widest.max(text_inches(device, line, cex, font)?);
-                }
-                widest
+                label_inches(device, label, cex, font)?
             };
             sizes.push(match units {
                 1 => inches / plot_inches * user_range,
@@ -3108,6 +3207,7 @@ struct AxisFrames {
     inner: [f64; 2],
     figure: [f64; 2],
     plot: [f64; 2],
+    window: [f64; 2],
     usr: [f64; 2],
     log: bool,
     device: [f64; 2],
@@ -3125,6 +3225,7 @@ fn axis_frames(device: &Device, vertical: bool) -> AxisFrames {
         inner: pick(device.inner_region()),
         figure: pick(device.figure_region()),
         plot: pick(device.plot_region()),
+        window: pick(device.pars.window),
         usr: pick(device.pars.usr),
         log: if vertical {
             device.pars.ylog
@@ -3158,7 +3259,7 @@ fn to_ndc(device: &Device, value: f64, unit: i32, vertical: bool) -> f64 {
         8 => figure_to_ndc(value),
         13 => {
             let value = if frames.log { value.log10() } else { value };
-            figure_to_ndc(lerp(frames.plot, unlerp(frames.usr, value)))
+            figure_to_ndc(lerp(frames.window, unlerp(frames.usr, value)))
         }
         14 => value / frames.size,
         15 => figure_to_ndc(value * frames.line_inches / frames.figure_inches),
@@ -3176,7 +3277,7 @@ fn from_ndc(device: &Device, ndc: f64, unit: i32, vertical: bool) -> f64 {
         7 => unlerp(frames.inner, ndc),
         8 => ndc_to_figure(ndc),
         13 => {
-            let value = lerp(frames.usr, unlerp(frames.plot, ndc_to_figure(ndc)));
+            let value = lerp(frames.usr, unlerp(frames.window, ndc_to_figure(ndc)));
             if frames.log { 10f64.powf(value) } else { value }
         }
         14 => ndc * frames.size,
@@ -3242,36 +3343,105 @@ fn rotation(degrees: f64, about_y: bool) -> Matrix4 {
     matrix
 }
 
-/// `persp(x, y, z, xlim, ylim, zlim, theta, phi, r, d, scale, expand, ...)`: the viewing
-/// transformation `persp` documents, which maps the box of the limits, scaled to a cube about
-/// the origin, through the rotations and the perspective projection. The plot window fits the
-/// projected box at aspect ratio 1.
+/// `C_persp(x, y, z, xlim, ylim, zlim, theta, phi, r, d, scale, expand, col, border, ltheta,
+/// lphi, shade, box, axes, nticks, ticktype, xlab, ylab, zlab, ...)`: draws the surface `z`
+/// over the grid `x` by `y` as GNU R does. The limits' box, scaled to a cube about the origin,
+/// goes through the rotations and the perspective projection; the plot window fits the
+/// projected box at aspect ratio 1. The facets are drawn back to front, so nearer ones cover
+/// farther ones, between the box's hidden edges and its visible ones. Returns the viewing
+/// transformation.
 unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
-    let limits = |index: usize| -> R<[f64; 2]> {
-        let reals = coerce_vector(call.arg(index), SexpType::Real)?;
-        let reals = values::reals(reals);
-        if reals.len() != 2 || reals.iter().any(|limit| !limit.is_finite()) {
-            return Err(error("invalid 'x', 'y' or 'z' limits"));
-        }
-        Ok([reals[0], reals[1]])
+    let reals = |index: usize| -> R<Vec<f64>> {
+        Ok(values::reals(coerce_vector(call.arg(index), SexpType::Real)?).to_vec())
     };
-    let boxes = [limits(3)?, limits(4)?, limits(5)?];
+    let x = reals(0)?;
+    if x.len() < 2 {
+        return Err(error("invalid 'x' argument"));
+    }
+    let y = reals(1)?;
+    if y.len() < 2 {
+        return Err(error("invalid 'y' argument"));
+    }
+    let z = reals(2)?;
+    if values::dims(call.arg(2)).as_deref() != Some(&[x.len(), y.len()][..]) {
+        return Err(error("invalid 'z' argument"));
+    }
+    let mut boxes = [[0.0; 2]; 3];
+    for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+        let limits = reals(3 + axis)?;
+        let [low, high] = limits[..] else {
+            return Err(error(format!("invalid '{name}lim' argument")));
+        };
+        boxes[axis] = [low, high];
+    }
+    let mut centre = [0.0; 3];
+    let mut half = [0.0; 3];
+    for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+        let [low, high] = boxes[axis];
+        if !low.is_finite() || !high.is_finite() || low >= high {
+            return Err(error(format!("invalid '{name}' limits")));
+        }
+        centre[axis] = (low + high) / 2.0;
+        half[axis] = (high - low) / 2.0;
+    }
     let scalar = |index: usize| values::as_real_scalar(call.arg(index));
     let (theta, phi, distance, viewing) = (scalar(6), scalar(7), scalar(8), scalar(9));
-    let scale = values::as_logical_scalar(call.arg(10)) == 1;
+    let scale = values::as_logical_scalar(call.arg(10));
     let expand = scalar(11);
-    if viewing.is_nan() || viewing <= 0.0 || !distance.is_finite() || !expand.is_finite() {
-        return Err(error("invalid viewing parameters"));
+    let (col, border) = (call.arg(12), call.arg(13));
+    let (light_theta, light_phi) = (scalar(14), scalar(15));
+    let mut shade = scalar(16);
+    let draw_box = values::as_logical_scalar(call.arg(17)) == 1;
+    let draw_axes = values::as_logical_scalar(call.arg(18)) == 1;
+    let ticks = values::as_integer_scalar(call.arg(19));
+    let tick_type = values::as_integer_scalar(call.arg(20));
+    let mut labels = Vec::with_capacity(3);
+    for (index, name) in ["xlab", "ylab", "zlab"].into_iter().enumerate() {
+        let label = call.arg(21 + index);
+        if label.kind() != SexpType::String || length(label) < 1 {
+            return Err(error(format!(
+                "'{name}' must be a character vector of length 1"
+            )));
+        }
+        labels
+            .push(values::string_at(label, 0).map_or_else(String::new, |label| label.into_owned()));
     }
-    let centre = boxes.map(|limits| (limits[0] + limits[1]) / 2.0);
-    let mut half = boxes.map(|limits| (limits[1] - limits[0]) / 2.0);
-    if !scale {
-        let largest = half.iter().copied().fold(0.0, f64::max);
+    if shade.is_finite() && shade <= 0.0 {
+        shade = 1.0;
+    }
+    let mut lighting = light_theta.is_finite() && light_phi.is_finite() && shade.is_finite();
+    // GNU R equalizes the axes only for `scale = FALSE`; NA keeps them scaled.
+    if scale == 0 {
+        let largest = half.iter().copied().fold(f64::MIN, f64::max);
         half = [largest; 3];
     }
-    if half.contains(&0.0) {
-        return Err(error("invalid 'x', 'y' or 'z' limits"));
+    if !theta.is_finite()
+        || !phi.is_finite()
+        || !distance.is_finite()
+        || !viewing.is_finite()
+        || viewing < 0.0
+        || distance < 0.0
+    {
+        return Err(error("invalid viewing parameters"));
     }
+    if !expand.is_finite() || expand < 0.0 {
+        return Err(error("invalid 'expand' value"));
+    }
+    if ticks == i32::MIN || ticks < 0 {
+        return Err(error("invalid 'nticks' value"));
+    }
+    if tick_type == i32::MIN || !(1..=2).contains(&tick_type) {
+        return Err(error("invalid 'ticktype' value"));
+    }
+    let light = if lighting {
+        let steps = [rotation(-light_phi, false), z_rotation(light_theta)];
+        let transform = steps
+            .iter()
+            .fold(identity(), |product, step| multiply(&product, step));
+        transform_point([0.0, -1.0, 0.0, 1.0], &transform)
+    } else {
+        [0.0; 4]
+    };
     let mut perspective = identity();
     perspective[2][3] = -1.0 / viewing;
     let steps = [
@@ -3286,28 +3456,158 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     let transform = steps
         .iter()
         .fold(identity(), |product, step| multiply(&product, step));
-    let mut projected_x = [f64::INFINITY, f64::NEG_INFINITY];
-    let mut projected_y = [f64::INFINITY, f64::NEG_INFINITY];
-    for corner in 0..8 {
-        let point = [
-            boxes[0][corner & 1],
-            boxes[1][(corner >> 1) & 1],
-            boxes[2][(corner >> 2) & 1],
-            1.0,
-        ];
-        let image: Vec<f64> = (0..4)
-            .map(|column| (0..4).map(|row| point[row] * transform[row][column]).sum())
-            .collect();
-        let (x, y) = (image[0] / image[3], image[1] / image[3]);
-        projected_x = [projected_x[0].min(x), projected_x[1].max(x)];
-        projected_y = [projected_y[0].min(y), projected_y[1].max(y)];
-    }
-    with_device(|device| {
-        if !device.started {
-            return Err(error("plot.new has not been called yet"));
+    let project = |point: [f64; 3]| {
+        let image = transform_point([point[0], point[1], point[2], 1.0], &transform);
+        [image[0] / image[3], image[1] / image[3]]
+    };
+    let window = with_inline_pars(call, 24, |device| {
+        let background = device.pars.bg;
+        let colours = if length(col) == 0 {
+            vec![background]
+        } else {
+            (0..length(col))
+                .map(|index| colour_at(col, index, background, background))
+                .collect::<R<Vec<Colour>>>()?
+        };
+        if colours[0] >> 24 != 0xFF {
+            lighting = false;
         }
-        set_window(device, projected_x, projected_y, 1.0);
-        device.pars.new = false;
+        let edge = colour_at(border, 0, device.pars.fg, background)?;
+        if length(border) > 1 {
+            device.pars.fg = edge;
+        }
+        device.pars.xlog = false;
+        device.pars.ylog = false;
+        // The window is symmetric about the projected origin and holds every corner of the box.
+        let mut extent = [[0.0f64; 2]; 2];
+        for corner in 0..8 {
+            let point = project([
+                boxes[0][corner >> 2 & 1],
+                boxes[1][corner >> 1 & 1],
+                boxes[2][corner & 1],
+            ]);
+            for axis in 0..2 {
+                extent[axis] = [
+                    extent[axis][0].min(point[axis]),
+                    extent[axis][1].max(point[axis]),
+                ];
+            }
+        }
+        let pin = device.plot_size();
+        let delta = extent.map(|range| (range[1] - range[0]).abs());
+        let fit = (pin[0] / delta[0]).min(pin[1] / delta[1]);
+        let plot_region = device.plot_region();
+        let pars = &mut device.pars;
+        let pad = [0, 1].map(|axis| 0.5 * (pin[axis] / fit - delta[axis]));
+        let (x_window, xaxp) = scale_axis(
+            [extent[0][0] - pad[0], extent[0][1] + pad[0]],
+            pars.xaxs,
+            false,
+            pars.lab[0],
+        );
+        let (y_window, yaxp) = scale_axis(
+            [extent[1][0] - pad[1], extent[1][1] + pad[1]],
+            pars.yaxs,
+            false,
+            pars.lab[1],
+        );
+        pars.usr = [x_window[0], x_window[1], y_window[0], y_window[1]];
+        pars.window = plot_region;
+        pars.xaxp = xaxp;
+        pars.yaxp = yaxp;
+        let window = (pars.usr, pars.window, xaxp, yaxp);
+        let pars = device.pars.clone();
+        let [x_axis, y_axis] = user_axes(device);
+        let inches = |point: [f64; 2]| [x_axis.inches(point[0]), y_axis.inches(point[1])];
+        let clip = clip_rect(device);
+        let mut edges_done = [false; 12];
+        if draw_box {
+            persp_box(device, clip, &boxes, &project, false, &mut edges_done)?;
+            if draw_axes {
+                let figure = region_rect(device, 8);
+                let axes = PerspAxes {
+                    boxes: &boxes,
+                    project: &project,
+                    ticks,
+                    detailed: tick_type == 2,
+                    clip: figure,
+                };
+                draw_persp_axes(device, &axes, &labels)?;
+            }
+        }
+        let rows = x.len();
+        let columns = y.len();
+        let mut order: Vec<(f64, usize)> = Vec::with_capacity((rows - 1) * (columns - 1));
+        for j in 0..columns - 1 {
+            for i in 0..rows - 1 {
+                // The depth ignores z, which would make facets of steep surfaces flicker
+                // in front of their neighbours.
+                let mut farthest = f64::MIN;
+                for (di, dj) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let point = [x[i + di], y[j + dj], 0.0, 1.0];
+                    if point[0].is_finite() && point[1].is_finite() {
+                        farthest = farthest.max(transform_point(point, &transform)[3]);
+                    }
+                }
+                order.push((-farthest, i + j * (rows - 1)));
+            }
+        }
+        rsort_with_index(&mut order);
+        let stroke = par_stroke(&pars, edge);
+        let scales = [1.0 / half[0], 1.0 / half[1], expand / half[2]];
+        for (_, facet) in order {
+            let i = facet % (rows - 1);
+            let j = facet / (rows - 1);
+            let at = |di: usize, dj: usize| z[i + di + (j + dj) * rows];
+            let mut fill = colours[facet % colours.len()];
+            if lighting {
+                let u = [
+                    scales[0] * (x[i + 1] - x[i]),
+                    scales[1] * (y[j] - y[j + 1]),
+                    scales[2] * (at(1, 0) - at(0, 1)),
+                ];
+                let v = [
+                    scales[0] * (x[i + 1] - x[i]),
+                    scales[1] * (y[j + 1] - y[j]),
+                    scales[2] * (at(1, 1) - at(0, 0)),
+                ];
+                let factor = facet_shade(u, v, light, shade);
+                if !factor.is_finite() {
+                    continue;
+                }
+                let channel =
+                    |shift: u32| ((factor * f64::from(fill >> shift & 0xFF)) as u32) & 0xFF;
+                fill = channel(0) | channel(8) << 8 | channel(16) << 16 | 0xFF00_0000;
+            }
+            let corners: Vec<[f64; 2]> = [(0, 0), (1, 0), (1, 1), (0, 1)]
+                .into_iter()
+                .map(|(di, dj)| [x[i + di], y[j + dj], at(di, dj)])
+                .filter(|point| point.iter().all(|value| value.is_finite()))
+                .map(|point| inches(project(point)))
+                .collect();
+            if corners.len() > 2 {
+                push_shape(
+                    device,
+                    clip,
+                    Shape::Path {
+                        points: corners,
+                        closed: true,
+                        fill,
+                        stroke: Some(stroke),
+                    },
+                )?;
+            }
+        }
+        if draw_box {
+            persp_box(device, clip, &boxes, &project, true, &mut edges_done)?;
+        }
+        Ok(window)
+    })?;
+    with_device(|device| {
+        let pars = &mut device.pars;
+        (pars.usr, pars.window, pars.xaxp, pars.yaxp) = window;
+        pars.xlog = false;
+        pars.ylog = false;
         Ok(())
     })?;
     let result = alloc(SexpType::Real, 16)?;
@@ -3322,62 +3622,523 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The plot window over linear limits with aspect ratio `asp` and the current axis styles.
-fn set_window(device: &mut Device, xlim: [f64; 2], ylim: [f64; 2], asp: f64) {
-    let pin = device.plot_size();
-    let (x_range, y_range) = ((xlim[1] - xlim[0]).abs(), (ylim[1] - ylim[0]).abs());
-    let x_needed = pin[0] * y_range / (asp * pin[1]);
-    let (x_range, y_range) = if x_needed >= x_range {
-        (x_needed, y_range)
-    } else {
-        (x_range, x_range * asp * pin[1] / pin[0])
+/// A row vector times a transformation.
+fn transform_point(point: [f64; 4], transform: &Matrix4) -> [f64; 4] {
+    let mut image = [0.0; 4];
+    for (column, cell) in image.iter_mut().enumerate() {
+        *cell = (0..4).map(|row| point[row] * transform[row][column]).sum();
+    }
+    image
+}
+
+/// A rotation of row vectors by `degrees` about the z axis.
+fn z_rotation(degrees: f64) -> Matrix4 {
+    let (sine, cosine) = degrees.to_radians().sin_cos();
+    let mut matrix = identity();
+    matrix[0][0] = cosine;
+    matrix[1][0] = -sine;
+    matrix[1][1] = cosine;
+    matrix[0][1] = sine;
+    matrix
+}
+
+/// How brightly the facet spanned by the diagonals `u` and `v` reflects the light from
+/// direction `light`, between 0 and 1, sharpened by the power `shade`.
+fn facet_shade(u: [f64; 3], v: [f64; 3], light: [f64; 4], shade: f64) -> f64 {
+    let mut normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let mut size = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if size == 0.0 {
+        size = 1.0;
+    }
+    for value in &mut normal {
+        *value /= size;
+    }
+    let lit = 0.5 * (normal[0] * light[0] + normal[1] * light[1] + normal[2] * light[2] + 1.0);
+    lit.powf(shade)
+}
+
+/// The corners of the box, as which end of the x, y and z limits each takes.
+const BOX_VERTICES: [[usize; 3]; 8] = [
+    [0, 0, 0],
+    [0, 0, 1],
+    [0, 1, 0],
+    [0, 1, 1],
+    [1, 0, 0],
+    [1, 0, 1],
+    [1, 1, 0],
+    [1, 1, 1],
+];
+
+/// The box's faces, as the corners met tracing each one.
+const BOX_FACES: [[usize; 4]; 6] = [
+    [0, 1, 5, 4],
+    [2, 6, 7, 3],
+    [0, 2, 3, 1],
+    [4, 5, 7, 6],
+    [0, 4, 6, 2],
+    [1, 3, 7, 5],
+];
+
+/// The box's edges, numbered so that an edge two faces share is drawn only once, in the order
+/// tracing each face meets them.
+const BOX_EDGES: [[usize; 4]; 6] = [
+    [0, 1, 2, 3],
+    [4, 5, 6, 7],
+    [8, 7, 9, 0],
+    [2, 10, 5, 11],
+    [3, 11, 4, 8],
+    [9, 6, 10, 1],
+];
+
+/// Draws the edges of the box's faces that face away from the eye, solid, or with `front`
+/// the remaining edges of the faces toward it, dotted. Drawing the far ones before the
+/// surface and the near ones after hides the edges behind it.
+fn persp_box(
+    device: &mut Device,
+    clip: Rect,
+    boxes: &[[f64; 2]; 3],
+    project: &dyn Fn([f64; 3]) -> [f64; 2],
+    front: bool,
+    edges_done: &mut [bool; 12],
+) -> R<()> {
+    let pars = device.pars.clone();
+    let stroke = stroke_with(
+        &pars,
+        pars.col,
+        if front { LTY_DOTTED } else { LTY_SOLID },
+        pars.lwd,
+    );
+    let [x_axis, y_axis] = user_axes(device);
+    for (face, edges) in BOX_FACES.iter().zip(BOX_EDGES) {
+        let corners = face.map(|vertex| {
+            let [i, j, k] = BOX_VERTICES[vertex];
+            project([boxes[0][i], boxes[1][j], boxes[2][k]])
+        });
+        let d = [corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]];
+        let e = [corners[2][0] - corners[1][0], corners[2][1] - corners[1][1]];
+        let nearby = d[0] * e[1] - d[1] * e[0] < 0.0;
+        if nearby != front {
+            continue;
+        }
+        for (side, edge) in edges.into_iter().enumerate() {
+            if std::mem::replace(&mut edges_done[edge], true) {
+                continue;
+            }
+            let ends = [corners[side], corners[(side + 1) % 4]]
+                .map(|point| [x_axis.inches(point[0]), y_axis.inches(point[1])]);
+            push_line(device, clip, ends.to_vec(), stroke)?;
+        }
+    }
+    Ok(())
+}
+
+/// What the axes of a perspective plot are drawn from.
+struct PerspAxes<'a> {
+    boxes: &'a [[f64; 2]; 3],
+    project: &'a dyn Fn([f64; 3]) -> [f64; 2],
+    ticks: i32,
+    detailed: bool,
+    clip: Rect,
+}
+
+/// The corner each candidate axis starts from: axes 0 to 3 run along the bottom of the box,
+/// 4 to 7 up its vertical edges.
+const AXIS_STARTS: [usize; 8] = [0, 0, 2, 4, 0, 4, 2, 6];
+
+/// The direction each candidate axis's ticks point, away from the box.
+const AXIS_TICKS: [[f64; 3]; 8] = [
+    [0.0, -1.0, -1.0],
+    [-1.0, 0.0, -1.0],
+    [0.0, 1.0, -1.0],
+    [1.0, 0.0, -1.0],
+    [-1.0, -1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0],
+];
+
+/// Labels the x and y axes along the bottom edges that meet at the lowest projected corner
+/// of the box's floor, and the z axis up the edge at its leftmost corner.
+unsafe fn draw_persp_axes(device: &mut Device, axes: &PerspAxes<'_>, labels: &[String]) -> R<()> {
+    let boxes = axes.boxes;
+    let floor = [
+        (axes.project)([boxes[0][0], boxes[1][0], boxes[2][0]]),
+        (axes.project)([boxes[0][1], boxes[1][0], boxes[2][0]]),
+        (axes.project)([boxes[0][0], boxes[1][1], boxes[2][0]]),
+        (axes.project)([boxes[0][1], boxes[1][1], boxes[2][0]]),
+    ];
+    let lowest = |coordinate: usize| {
+        (0..4).find(|&corner| {
+            (0..4).all(|other| floor[corner][coordinate] <= floor[other][coordinate])
+        })
     };
-    let pars = &mut device.pars;
-    let (x, xaxp) = scale_axis(centred(xlim, x_range), pars.xaxs, false, pars.lab[0]);
-    let (y, yaxp) = scale_axis(centred(ylim, y_range), pars.yaxs, false, pars.lab[1]);
-    pars.xlog = false;
-    pars.ylog = false;
-    pars.usr = [x[0], x[1], y[0], y[1]];
-    pars.xaxp = xaxp;
-    pars.yaxp = yaxp;
+    let (x_axis, y_axis) = match lowest(1) {
+        Some(0) => (0, 1),
+        Some(1) => (0, 3),
+        Some(2) => (2, 1),
+        Some(3) => (2, 3),
+        _ => {
+            crate::conditions::warning("Axis orientation not calculated".to_owned())?;
+            (0, 0)
+        }
+    };
+    draw_persp_axis(device, axes, x_axis, 0, &labels[0])?;
+    draw_persp_axis(device, axes, y_axis, 1, &labels[1])?;
+    let z_axis = match lowest(0) {
+        Some(corner) => corner + 4,
+        None => {
+            crate::conditions::warning("Axis orientation not calculated".to_owned())?;
+            0
+        }
+    };
+    draw_persp_axis(device, axes, z_axis, 2, &labels[2])
+}
+
+/// Draws one axis of a perspective plot: candidate `axis` along dimension `dimension`, its
+/// label beside its middle, and either an arrow showing which way values grow or ticks with
+/// labels at pretty values.
+unsafe fn draw_persp_axis(
+    device: &mut Device,
+    axes: &PerspAxes<'_>,
+    axis: usize,
+    dimension: usize,
+    label: &str,
+) -> R<()> {
+    const TICK_LENGTH: f64 = 0.03;
+    let boxes = axes.boxes;
+    let range = boxes[dimension];
+    let (mut low, mut high) = (range[0], range[1]);
+    let slack = 0.1 * (high - low);
+    let mut intervals = (axes.ticks - 1).max(1);
+    let mut tries = intervals;
+    graphics_engine::pretty_axis(&mut low, &mut high, &mut intervals)?;
+    // A pretty range rarely reaches far past the limits; when it does, ask for more steps.
+    while (low < range[0] - slack || range[1] + slack < high) && tries < 20 {
+        tries += 1;
+        intervals = tries;
+        low = range[0];
+        high = range[1];
+        graphics_engine::pretty_axis(&mut low, &mut high, &mut intervals)?;
+    }
+    let start = BOX_VERTICES[AXIS_STARTS[axis]];
+    let along = |value: f64| {
+        let mut point = [0, 1, 2].map(|dimension| boxes[dimension][start[dimension]]);
+        point[dimension] = value;
+        point
+    };
+    let outward = |point: [f64; 3], steps: f64| {
+        [0, 1, 2].map(|dimension| {
+            point[dimension]
+                + steps
+                    * TICK_LENGTH
+                    * (boxes[dimension][1] - boxes[dimension][0])
+                    * AXIS_TICKS[axis][dimension]
+        })
+    };
+    let first = outward(along(low), 1.0);
+    let mut last = first;
+    last[dimension] = high;
+    let mut middle = outward(first, if axes.detailed { 2.5 } else { 1.0 });
+    middle[dimension] = (low + high) / 2.0;
+    let pars = device.pars.clone();
+    let [x_axis, y_axis] = user_axes(device);
+    let inches = |point: [f64; 3]| {
+        let projected = (axes.project)(point);
+        [x_axis.inches(projected[0]), y_axis.inches(projected[1])]
+    };
+    let (from, to) = ((axes.project)(first), (axes.project)(last));
+    let across = (to[0] - from[0]).abs();
+    let rise = if to[0] > from[0] {
+        to[1] - from[1]
+    } else {
+        from[1] - to[1]
+    };
+    let angle = if across == 0.0 {
+        if rise > 0.0 { 90.0 } else { 270.0 }
+    } else {
+        rise.atan2(across).to_degrees()
+    };
+    push_text(
+        device,
+        axes.clip,
+        inches(middle),
+        &[label.to_owned()],
+        angle,
+        0.5,
+        0.5,
+        pars.cex * pars.cex_lab,
+        pars.font_lab,
+        pars.col,
+    )?;
+    let stroke = par_stroke(&pars, pars.col);
+    let cex = pars.cex * pars.cex_axis;
+    if !axes.detailed {
+        let (tail, tip) = (inches(first), inches(last));
+        push_line(device, axes.clip, vec![tail, tip], stroke)?;
+        let direction = (tip[1] - tail[1]).atan2(tip[0] - tail[0]);
+        let back = direction + std::f64::consts::PI;
+        let spread = 10f64.to_radians();
+        let barb = |turn: f64| {
+            [
+                tip[0] + 0.1 * (back + turn).cos(),
+                tip[1] + 0.1 * (back + turn).sin(),
+            ]
+        };
+        if (tip[0] - tail[0]).hypot(tip[1] - tail[1]) >= 1e-3 {
+            push_line(
+                device,
+                axes.clip,
+                vec![barb(spread), tip, barb(-spread)],
+                stroke,
+            )?;
+        }
+        return Ok(());
+    }
+    let at = at_vector([low, high, f64::from(intervals)], range, 7, false);
+    let tick_labels = axis_labels(nil(), &at)?.unwrap_or_default();
+    for (value, text) in at.iter().zip(tick_labels) {
+        let base = along(*value);
+        let tick = outward(base, 1.0);
+        push_line(device, axes.clip, vec![inches(base), inches(tick)], stroke)?;
+        push_label(
+            device,
+            axes.clip,
+            inches(outward(base, 2.0)),
+            &text,
+            0.0,
+            0.5,
+            0.5,
+            cex,
+            pars.font_axis,
+            pars.col,
+        )?;
+    }
+    Ok(())
 }
 
 /// `C_dendwindow(n, merge, height, hang, labels, ...)`: the plot window of a dendrogram of
 /// `n` merges, its leaves at 1 to `n + 1` and its heights from the lowest hanging leaf to the
-/// root. GNU R also leaves room below for the leaf labels, which ry does not measure.
+/// root, with room below for the longest leaf label, measured as GNU R measures it.
 unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
-    let leaves = values::as_integer_scalar(call.arg(0)).max(0) + 1;
-    let heights = coerce_vector(call.arg(2), SexpType::Real)?;
-    let heights: Vec<f64> = values::reals(heights)
-        .iter()
-        .copied()
-        .filter(|height| height.is_finite())
-        .collect();
-    let hang = values::as_real_scalar(call.arg(3));
-    let top = heights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let bottom = heights.iter().copied().fold(f64::INFINITY, f64::min);
-    let (bottom, top) = if top.is_finite() {
-        (bottom, top)
-    } else {
-        (0.0, 1.0)
-    };
-    let bottom = if hang.is_finite() && hang >= 0.0 {
-        bottom - hang * (top - bottom)
-    } else {
-        0.0_f64.min(bottom)
-    };
+    let tree = dendrogram_arguments(call, false)?;
+    let merges = tree.heights.len();
+    let ymin = with_inline_pars(call, 5, |device| {
+        let cex = device.pars.cex * device.pars.inline_cex;
+        let font = device.pars.font;
+        let offset = text_inches(device, "m", cex, font)?;
+        let label_inches = (0..=merges)
+            .map(|leaf| match values::string_at(tree.labels, leaf) {
+                Some(label) => Ok(text_inches(device, &label, cex, font)? + offset),
+                None => Ok(0.0),
+            })
+            .collect::<R<Vec<f64>>>()?;
+        let plot = region_rect(device, 17);
+        let pin = plot.y1 - plot.y0;
+        let ymax = tree.heights.iter().copied().fold(tree.heights[0], f64::max);
+        let mut ymin = tree.heights.iter().copied().fold(tree.heights[0], f64::min);
+        // The scale leaves room below the tree for the label that reaches lowest, assuming
+        // the tree itself fills the plot region.
+        let yrange;
+        let mut deepest = 0usize;
+        let mut depth = f64::MIN;
+        if tree.hang >= 0.0 {
+            ymin = ymax - (1.0 + tree.hang) * (ymax - ymin);
+            yrange = ymax - ymin;
+            let mut leaf_heights = vec![0.0; merges + 1];
+            for (merge, height) in tree.heights.iter().enumerate() {
+                for child in [tree.left[merge], tree.right[merge]] {
+                    if child < 0
+                        && let Some(slot) = leaf_heights.get_mut((-child - 1) as usize)
+                    {
+                        *slot = *height;
+                    }
+                }
+            }
+            for (leaf, height) in leaf_heights.iter().enumerate() {
+                let reach = (ymax - height) / yrange * pin + label_inches[leaf];
+                if reach > depth {
+                    depth = reach;
+                    deepest = leaf;
+                }
+            }
+        } else {
+            yrange = ymax;
+            for (leaf, inches) in label_inches.iter().enumerate() {
+                if pin + inches > depth {
+                    depth = pin + inches;
+                    deepest = leaf;
+                }
+            }
+        }
+        Ok(ymax - pin / (pin - label_inches[deepest]) * yrange)
+    })?;
+    let ymax = tree.heights.iter().copied().fold(tree.heights[0], f64::max);
     with_started_plot(|device| {
+        let window = device.plot_region();
         let pars = &mut device.pars;
-        let (x, xaxp) = scale_axis([1.0, f64::from(leaves)], pars.xaxs, false, pars.lab[0]);
-        let (y, yaxp) = scale_axis([bottom, top], pars.yaxs, false, pars.lab[1]);
+        let (x, xaxp) = scale_axis([1.0, (merges + 1) as f64], pars.xaxs, false, pars.lab[0]);
+        let (y, yaxp) = scale_axis([ymin, ymax], pars.yaxs, false, pars.lab[1]);
         pars.xlog = false;
         pars.ylog = false;
         pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.window = window;
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
         Ok(())
     })?;
     Ok(nil())
+}
+
+/// The tree `plot.hclust` hands `C_dend` and `C_dendwindow`: for each merge its two children
+/// (a leaf as minus its number, a cluster as its merge's number) and height, the leaves'
+/// labels, and `hang`. `C_dend` also takes the leaves' positions along the axis.
+struct DendrogramTree {
+    left: Vec<i32>,
+    right: Vec<i32>,
+    heights: Vec<f64>,
+    positions: Vec<f64>,
+    hang: f64,
+    labels: Sexp,
+}
+
+unsafe fn dendrogram_arguments(call: &NativeCall<'_>, positioned: bool) -> R<DendrogramTree> {
+    let invalid = || error("invalid dendrogram input");
+    let merges = values::as_integer_scalar(call.arg(0));
+    if merges == NA_INTEGER || merges < 2 {
+        return Err(invalid());
+    }
+    let merges = merges as usize;
+    let merge = call.arg(1);
+    let heights = call.arg(2);
+    if merge.kind() != SexpType::Integer || length(merge) != 2 * merges {
+        return Err(invalid());
+    }
+    if heights.kind() != SexpType::Real || length(heights) != merges {
+        return Err(invalid());
+    }
+    let merge = values::ints(merge);
+    let mut next = 3;
+    let positions = if positioned {
+        let order = call.arg(next);
+        next += 1;
+        if length(order) != merges + 1 {
+            return Err(invalid());
+        }
+        reals_of(order)?
+    } else {
+        Vec::new()
+    };
+    let hang = values::as_real_scalar(call.arg(next));
+    let labels = call.arg(next + 1);
+    if !hang.is_finite() || labels.kind() != SexpType::String || length(labels) != merges + 1 {
+        return Err(invalid());
+    }
+    Ok(DendrogramTree {
+        left: merge[..merges].to_vec(),
+        right: merge[merges..].to_vec(),
+        heights: values::reals(heights).to_vec(),
+        positions,
+        hang,
+        labels,
+    })
+}
+
+/// `C_dend(n, merge, height, order, hang, labels, ...)`: draws a vertical dendrogram, each
+/// leaf's label hanging below it, as `plot.hclust` asks.
+unsafe fn do_dend(call: &NativeCall<'_>) -> R<Sexp> {
+    let mut tree = dendrogram_arguments(call, true)?;
+    let merges = tree.heights.len();
+    tree.hang *= tree.heights[merges - 1] - tree.heights[0];
+    with_inline_pars(call, 6, |device| {
+        let pars = device.pars.clone();
+        let cex = pars.cex * pars.inline_cex;
+        let [x_axis, y_axis] = user_axes(device);
+        let offset = text_inches(device, "m", cex, pars.font)? / y_axis.scale;
+        // Like titles, the tree may draw into the figure region but not beyond it.
+        let clip = if pars.xpd == 2 {
+            device_rect(device)
+        } else {
+            region_rect(device, 8)
+        };
+        let style = DendrogramStyle {
+            x_axis,
+            y_axis,
+            offset,
+            clip,
+            cex,
+            stroke: par_stroke(&pars, pars.col),
+        };
+        draw_dendrogram(device, &tree, &style, merges)?;
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+struct DendrogramStyle {
+    x_axis: UserAxis,
+    y_axis: UserAxis,
+    offset: f64,
+    clip: Rect,
+    cex: f64,
+    stroke: Stroke,
+}
+
+/// Draws the subtree under merge `node` (numbered from 1) and returns where its stem meets
+/// the merge above, in user coordinates.
+unsafe fn draw_dendrogram(
+    device: &mut Device,
+    tree: &DendrogramTree,
+    style: &DendrogramStyle,
+    node: usize,
+) -> R<[f64; 2]> {
+    let invalid = || error("invalid dendrogram input");
+    let height = *tree.heights.get(node - 1).ok_or_else(invalid)?;
+    let mut ends = [[0.0; 2]; 2];
+    for (end, child) in ends
+        .iter_mut()
+        .zip([tree.left[node - 1], tree.right[node - 1]])
+    {
+        *end = if child > 0 {
+            draw_dendrogram(device, tree, style, child as usize)?
+        } else {
+            let leaf = (-child - 1) as usize;
+            let x = *tree.positions.get(leaf).ok_or_else(invalid)?;
+            let y = if tree.hang >= 0.0 {
+                height - tree.hang
+            } else {
+                0.0
+            };
+            if let Some(label) = values::string_at(tree.labels, leaf) {
+                let anchor = [
+                    style.x_axis.inches(x),
+                    style.y_axis.inches(y - style.offset),
+                ];
+                let (font, colour) = (device.pars.font, device.pars.col);
+                push_text(
+                    device,
+                    style.clip,
+                    anchor,
+                    &[label.into_owned()],
+                    90.0,
+                    1.0,
+                    0.3,
+                    style.cex,
+                    font,
+                    colour,
+                )?;
+            }
+            [x, y]
+        };
+    }
+    let [[xl, yl], [xr, yr]] = ends;
+    let points = [[xl, yl], [xl, height], [xr, height], [xr, yr]]
+        .map(|[x, y]| [style.x_axis.inches(x), style.y_axis.inches(y)]);
+    push_line(device, style.clip, points.to_vec(), style.stroke)?;
+    Ok([0.5 * (xl + xr), height])
 }
 
 /// `xspline(x, y, shape, open, repEnds, draw, col, border, ...)`: draws the X-spline, or
@@ -3499,6 +4260,18 @@ unsafe fn with_inline_pars<T>(
             if READ_ONLY_PARS.contains(&name.as_ref()) {
                 continue;
             }
+            // GNU R's inline `cex` sets the current scale but not `par("cex")`, which titles,
+            // axes and text size from.
+            if name == "cex" {
+                match par_positive(arg.value, "cex") {
+                    Ok(cex) => device.pars.inline_cex = cex,
+                    Err(failure) => {
+                        outcome = Err(failure);
+                        break;
+                    }
+                }
+                continue;
+            }
             if let Err(failure) = set_par(device, &name, arg.value, &mut warnings) {
                 outcome = Err(failure);
                 break;
@@ -3537,9 +4310,11 @@ fn device_rect(device: &Device) -> Rect {
 
 /// Where drawing is clipped: the region `clip()` set, or else the plot region, the figure or
 /// the whole device as `xpd` is `FALSE`, `TRUE` or `NA`.
-fn clip_rect(device: &Device) -> Rect {
-    if let Some(clip) = device.clip {
-        return clip;
+fn clip_rect(device: &mut Device) -> Rect {
+    match device.clip {
+        Some((clip, xpd)) if xpd == device.pars.xpd => return clip,
+        Some(_) => device.clip = None,
+        None => {}
     }
     match device.pars.xpd {
         0 => region_rect(device, 17),
@@ -3575,7 +4350,7 @@ fn user_axes(device: &Device) -> [UserAxis; 2] {
         let ndc = |fraction: f64| {
             lerp(
                 frames.inner,
-                lerp(frames.figure, lerp(frames.plot, fraction)),
+                lerp(frames.figure, lerp(frames.window, fraction)),
             )
         };
         let size = device.size()[usize::from(vertical)];
@@ -3692,14 +4467,14 @@ fn push_rect(
     clip: Rect,
     [x0, y0, x1, y1]: [f64; 4],
     fill: Colour,
-    stroke: &Stroke,
+    stroke: Option<&Stroke>,
 ) -> R<()> {
     let dd = device.dd;
     let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
     let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
     let [x0, y0] = device.to_device([x0, y0]);
     let [x1, y1] = device.to_device([x1, y1]);
-    let mut gc = shape_context(device, Some(stroke), fill);
+    let mut gc = shape_context(device, stroke, fill);
     // SAFETY: base graphics' state lives as long as its device.
     unsafe {
         graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
@@ -3759,12 +4534,6 @@ fn push_line(device: &mut Device, clip: Rect, points: Vec<[f64; 2]>, stroke: Str
     Ok(())
 }
 
-/// The size of text at character expansion `cex` in points, rounded to a whole point as the
-/// fonts are.
-fn text_points(pars: &Pars, cex: f64) -> f64 {
-    (f64::from(pars.ps) * cex).round().max(1.0)
-}
-
 /// Records the lines of a label anchored at `anchor`. `hadj` places the anchor along each
 /// line, 0 at its start and 1 at its end; `yadj` places it across the block of lines, 0 on
 /// the last line's baseline and 1 at the top of the first line's capitals, and when it is
@@ -3787,7 +4556,8 @@ fn push_text(
     let [x1, y1] = device.to_device([clip.x1, clip.y1]);
     let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
     gc.col = colour as c_int;
-    gc.ps = text_points(&device.pars, cex);
+    gc.ps = f64::from(device.pars.ps);
+    gc.cex = cex;
     gc.fontface = font;
     gc.lineheight = device.pars.lheight;
     let [x, y] = device.to_device(anchor);
@@ -3798,12 +4568,94 @@ fn push_text(
     }
 }
 
+/// Records `label` like [`push_text`], laying a plotmath expression out with the plotmath
+/// port, which centres it vertically when `yadj` is not finite.
+#[allow(clippy::too_many_arguments)]
+fn push_label(
+    device: &mut Device,
+    clip: Rect,
+    anchor: [f64; 2],
+    label: &Label,
+    rotation: f64,
+    hadj: f64,
+    yadj: f64,
+    cex: f64,
+    font: i32,
+    colour: Colour,
+) -> R<()> {
+    let expression = match label {
+        Label::Lines(lines) => {
+            return push_text(
+                device, clip, anchor, lines, rotation, hadj, yadj, cex, font, colour,
+            );
+        }
+        Label::Math(expression) => *expression,
+    };
+    let dd = device.dd;
+    let [x0, y0] = device.to_device([clip.x0, clip.y0]);
+    let [x1, y1] = device.to_device([clip.x1, clip.y1]);
+    let mut gc = text_context(device, cex, font);
+    gc.col = colour as c_int;
+    gc.lineheight = device.pars.lheight;
+    let [x, y] = device.to_device(anchor);
+    // SAFETY: base graphics' state lives as long as its device, and the expression belongs
+    // to the protected call being evaluated.
+    unsafe {
+        graphics_engine::set_clip(x0, y0, x1, y1, dd)?;
+        graphics_engine::math_text(x, y, expression, hadj, yadj, rotation, &gc, dd)
+    }
+}
+
+/// The width of a label in inches: its widest line, or its plotmath box.
+fn label_inches(device: &Device, label: &Label, cex: f64, font: i32) -> R<f64> {
+    match label {
+        Label::Lines(lines) => {
+            let mut widest: f64 = 0.0;
+            for line in lines {
+                widest = widest.max(text_inches(device, line, cex, font)?);
+            }
+            Ok(widest)
+        }
+        Label::Math(expression) => {
+            let gc = text_context(device, cex, font);
+            // SAFETY: as in `push_label`.
+            unsafe {
+                let width = graphics_engine::expression_width(*expression, &gc, device.dd)?;
+                Ok(graphics_engine::from_device_width(
+                    width,
+                    Unit::Inches,
+                    device.dd,
+                ))
+            }
+        }
+    }
+}
+
+/// The height of a label in inches, as `strheight` measures it: for text the ascent of a
+/// capital plus a line for each line break, for plotmath its box's height and depth.
+fn label_height_inches(device: &Device, label: &Label, cex: f64, font: i32) -> R<f64> {
+    match label {
+        Label::Lines(lines) if lines.is_empty() => Ok(0.0),
+        Label::Lines(lines) => text_height_inches(device, &lines.join("\n"), cex, font),
+        Label::Math(expression) => {
+            let gc = text_context(device, cex, font);
+            // SAFETY: as in `push_label`.
+            unsafe {
+                let height = graphics_engine::expression_height(*expression, &gc, device.dd)?;
+                Ok(graphics_engine::from_device_height(
+                    height,
+                    Unit::Inches,
+                    device.dd,
+                ))
+            }
+        }
+    }
+}
+
 /// The width of a line of text in inches, measured by the device as GNU R's `GStrWidth` does,
 /// so a device with its own fonts (ragg) lays labels out by the glyphs it will draw.
 fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
-    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
-    gc.ps = text_points(&device.pars, cex);
-    gc.fontface = font;
+    let gc = text_context(device, cex, font);
     // SAFETY: base graphics' state lives as long as its device.
     unsafe {
         let width = graphics_engine::str_width(line, &gc, device.dd)?;
@@ -3813,6 +4665,31 @@ fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
             device.dd,
         ))
     }
+}
+
+/// The height of `line` in inches, as `strheight` measures it: the ascent of a capital plus
+/// a line for each line break.
+fn text_height_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
+    let gc = text_context(device, cex, font);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        let height = graphics_engine::str_height(line, &gc, device.dd)?;
+        Ok(graphics_engine::from_device_height(
+            height,
+            Unit::Inches,
+            device.dd,
+        ))
+    }
+}
+
+/// The context text at expansion `cex` is measured in. Like GNU R, the point size and the
+/// expansion stay separate, so a device that rounds the size to whole points does so itself.
+fn text_context(device: &Device, cex: f64, font: i32) -> GEContext {
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.ps = f64::from(device.pars.ps);
+    gc.cex = cex;
+    gc.fontface = font;
+    gc
 }
 
 /// Places a label in a margin as `mtext` and `axis` do: on line `line` of side `side` at
@@ -3826,7 +4703,7 @@ fn push_margin_text(
     line: f64,
     outer: bool,
     along: f64,
-    lines: &[String],
+    label: &Label,
     las: i32,
     hadj: f64,
     padj: f64,
@@ -3855,10 +4732,9 @@ fn push_margin_text(
     } else {
         [across, along]
     };
-    push_text(
-        device, clip, anchor, lines, rotation, hadj, padj, cex, font, colour,
-    )?;
-    Ok(())
+    push_label(
+        device, clip, anchor, label, rotation, hadj, padj, cex, font, colour,
+    )
 }
 
 /// The elements of a vector argument, recycled: `default` when it is `NULL` or empty.
@@ -4001,22 +4877,28 @@ fn push_symbol(
 ) -> R<()> {
     let code = match pch {
         Pch::Text(text) if text == "." => {
-            let half = 0.005 * cex;
-            let square = vec![
-                [centre[0] - half, centre[1] - half],
-                [centre[0] + half, centre[1] - half],
-                [centre[0] + half, centre[1] + half],
-                [centre[0] - half, centre[1] + half],
-            ];
-            push_shape(
+            // A 0.01 inch square, but at least a device unit across, so that a dot stays
+            // visible on a raster device.
+            let scaled = 0.005 * cex * device.pars.cex;
+            // SAFETY: base graphics' state lives as long as its device.
+            let least = unsafe {
+                [
+                    graphics_engine::from_device_width(0.5, Unit::Inches, device.dd).abs(),
+                    graphics_engine::from_device_height(0.5, Unit::Inches, device.dd).abs(),
+                ]
+            };
+            let (half_x, half_y) = if scaled > 0.0 {
+                (scaled.max(least[0]), scaled.max(least[1]))
+            } else {
+                (scaled, scaled)
+            };
+            let [x, y] = centre;
+            push_rect(
                 device,
                 clip,
-                Shape::Path {
-                    points: square,
-                    closed: true,
-                    fill: colour,
-                    stroke: None,
-                },
+                [x - half_x, y - half_y, x + half_x, y + half_y],
+                colour,
+                None,
             )?;
             return Ok(());
         }
@@ -4051,149 +4933,19 @@ fn push_symbol(
         push_symbol(device, clip, centre, &pch, size, cex, colour, fill, lwd)?;
         return Ok(());
     }
+    // The shapes are GNU R's `GESymbol`, which sizes each symbol in device units.
     let stroke = stroke_with(&device.pars, colour, LTY_SOLID, lwd);
-    let radius = 0.375 * size;
-    let [x, y] = centre;
-    let square_half = radius * std::f64::consts::PI.sqrt() / 2.0;
-    let triangle_radius = radius * (4.0 * std::f64::consts::PI / (3.0 * 3f64.sqrt())).sqrt();
-    let diamond_half = radius * (std::f64::consts::PI / 2.0).sqrt();
-    let square = |half: f64| {
-        vec![
-            [x - half, y - half],
-            [x + half, y - half],
-            [x + half, y + half],
-            [x - half, y + half],
-        ]
-    };
-    // An equilateral triangle about the centre, its apex up or down.
-    let triangle = |up: bool| {
-        let r = if up {
-            triangle_radius
-        } else {
-            -triangle_radius
-        };
-        let half_base = triangle_radius * 3f64.sqrt() / 2.0;
-        vec![
-            [x, y + r],
-            [x + half_base, y - r / 2.0],
-            [x - half_base, y - r / 2.0],
-        ]
-    };
-    let diamond = |half: f64| vec![[x, y - half], [x + half, y], [x, y + half], [x - half, y]];
-    let polygon = |points: Vec<[f64; 2]>, fill: Colour, stroke: Option<Stroke>| Shape::Path {
-        points,
-        closed: true,
-        fill,
-        stroke,
-    };
-    let circle = |radius: f64, fill: Colour, stroke: Option<Stroke>| Shape::Circle {
-        centre,
-        radius,
-        fill,
-        stroke,
-    };
-    let plus = |half: f64| {
-        [
-            vec![[x - half, y], [x + half, y]],
-            vec![[x, y - half], [x, y + half]],
-        ]
-    };
-    let cross = |half: f64| {
-        [
-            vec![[x - half, y - half], [x + half, y + half]],
-            vec![[x - half, y + half], [x + half, y - half]],
-        ]
-    };
-    let none = TRANSPARENT_WHITE;
-    let mut shapes: Vec<Shape> = Vec::new();
-    let mut lines: Vec<Vec<[f64; 2]>> = Vec::new();
-    match code {
-        0 => shapes.push(polygon(square(square_half), none, Some(stroke))),
-        1 => shapes.push(circle(radius, none, Some(stroke))),
-        2 => shapes.push(polygon(triangle(true), none, Some(stroke))),
-        3 => lines.extend(plus(radius * std::f64::consts::SQRT_2)),
-        4 => lines.extend(cross(radius)),
-        5 => shapes.push(polygon(diamond(diamond_half), none, Some(stroke))),
-        6 => shapes.push(polygon(triangle(false), none, Some(stroke))),
-        7 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.extend(cross(radius));
-        }
-        8 => {
-            lines.extend(plus(radius * std::f64::consts::SQRT_2));
-            lines.extend(cross(radius));
-        }
-        9 => {
-            shapes.push(polygon(
-                diamond(radius * std::f64::consts::SQRT_2),
-                none,
-                Some(stroke),
-            ));
-            lines.extend(plus(radius * std::f64::consts::SQRT_2));
-        }
-        10 => {
-            shapes.push(circle(radius, none, Some(stroke)));
-            lines.extend(plus(radius));
-        }
-        11 => {
-            let r = triangle_radius;
-            let half_base = r * 3f64.sqrt() / 2.0;
-            let shift = r / 4.0;
-            shapes.push(polygon(
-                vec![
-                    [x, y + r - shift],
-                    [x + half_base, y - r / 2.0 - shift],
-                    [x - half_base, y - r / 2.0 - shift],
-                ],
-                none,
-                Some(stroke),
-            ));
-            shapes.push(polygon(
-                vec![
-                    [x, y - r + shift],
-                    [x + half_base, y + r / 2.0 + shift],
-                    [x - half_base, y + r / 2.0 + shift],
-                ],
-                none,
-                Some(stroke),
-            ));
-        }
-        12 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.extend(plus(radius));
-        }
-        13 => {
-            shapes.push(circle(radius, none, Some(stroke)));
-            lines.extend(cross(radius));
-        }
-        14 => {
-            shapes.push(polygon(square(radius), none, Some(stroke)));
-            lines.push(vec![
-                [x - radius, y - radius],
-                [x, y + radius],
-                [x + radius, y - radius],
-            ]);
-        }
-        15 => shapes.push(polygon(square(square_half), colour, None)),
-        16 => shapes.push(circle(radius, colour, None)),
-        17 => shapes.push(polygon(triangle(true), colour, None)),
-        18 => shapes.push(polygon(diamond(radius), colour, None)),
-        19 => shapes.push(circle(radius, colour, Some(stroke))),
-        20 => shapes.push(circle(radius * 2.0 / 3.0, colour, Some(stroke))),
-        21 => shapes.push(circle(radius, fill, Some(stroke))),
-        22 => shapes.push(polygon(square(square_half), fill, Some(stroke))),
-        23 => shapes.push(polygon(diamond(diamond_half), fill, Some(stroke))),
-        24 => shapes.push(polygon(triangle(true), fill, Some(stroke))),
-        25 => shapes.push(polygon(triangle(false), fill, Some(stroke))),
-        _ => {}
+    let mut gc = shape_context(device, Some(&stroke), fill);
+    let dd = device.dd;
+    let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
+    let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
+    let [x, y] = device.to_device(centre);
+    let size = size / device.unit_inches();
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
+        graphics_engine::symbol(x, y, code, size, &mut gc, dd)
     }
-    for shape in shapes {
-        push_shape(device, clip, shape)?;
-    }
-    for line in lines {
-        push_line(device, clip, line, stroke)?;
-    }
-    Ok(())
 }
 
 /// Half the character height in inches at the parameters' `cex`, the unit symbols scale by.
@@ -4251,9 +5003,9 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                 }
             }
             'b' | 'c' => {
-                // Each segment stops short of its points by half a character width, leaving
-                // room for the symbols.
-                let gap = device.char_inches()[0] / 2.0 * pars.cex;
+                // Each segment stops short of its points by half a character, which GNU R
+                // measures in character heights (`CHARS` units) on both axes.
+                let gap = device.char_inches()[1] / 2.0 * pars.cex;
                 for run in runs() {
                     for pair in run.windows(2) {
                         let [from, to] = [pair[0], pair[1]];
@@ -4341,7 +5093,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// The labels of an axis: `at` formatted together as GNU R prints numbers, or the given labels
 /// as text.
-unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Vec<String>>>> {
+unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Label>>> {
     match labels.kind() {
         SexpType::Logical | SexpType::Nil => {
             if labels != nil() && values::as_logical_scalar(labels) == 0 {
@@ -4357,22 +5109,22 @@ unsafe fn axis_labels(labels: Sexp, at: &[f64]) -> R<Option<Vec<Vec<String>>>> {
             Ok(Some(
                 at.iter()
                     .map(|value| {
-                        vec![
+                        Label::Lines(vec![
                             crate::format::format_real_with(*value, format, "NA")
                                 .trim()
                                 .to_owned(),
-                        ]
+                        ])
                     })
                     .collect(),
             ))
         }
-        _ => Ok(Some(label_lines(labels)?)),
+        _ => Ok(Some(labels_of(labels)?)),
     }
 }
 
 /// Draws `axis(side, at, labels, tick, line, pos, outer, font, lty, lwd, lwd.ticks, col,
 /// col.ticks, hadj, padj, gap.axis, ...)` for ticks `at` in user coordinates.
-unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
+unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<bool> {
     let labels = axis_labels(call.arg(2), at)?;
     let tick = values::as_logical_scalar(call.arg(3)) != 0;
     let line = values::as_real_scalar(call.arg(4));
@@ -4392,6 +5144,10 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
     with_inline_pars(call, 16, |device| {
         let pars = device.pars.clone();
         let horizontal = side % 2 == 1;
+        // `xaxt = "n"` or `yaxt = "n"`, set globally or inline, suppresses the whole axis.
+        if (if horizontal { pars.xaxt } else { pars.yaxt }) == 'n' {
+            return Ok(false);
+        }
         let [x_axis, y_axis] = user_axes(device);
         let axis = if horizontal { x_axis } else { y_axis };
         let usr = if horizontal {
@@ -4455,14 +5211,18 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                     stroke_with(&pars, axis_colour, axis_lty, axis_lwd),
                 )?;
             }
-            // Ticks point outwards for negative `tcl`; `tck`, when set, is a fraction of the
-            // plot region's height or width instead.
+            // Ticks point outwards for negative `tcl`. `tck`, when set, is a fraction of the
+            // plot region instead: above 0.5 of its extent across the axis (a grid), otherwise
+            // of its shorter side, so ticks stay short on a wide, flat panel.
             let plot = region_rect(device, 17);
             let length = if pars.tck.is_finite() {
-                let extent = if horizontal {
-                    plot.y1 - plot.y0
+                let (width, height) = (plot.x1 - plot.x0, plot.y1 - plot.y0);
+                let extent = if pars.tck <= 0.5 {
+                    width.min(height)
+                } else if horizontal {
+                    height
                 } else {
-                    plot.x1 - plot.x0
+                    width
                 };
                 pars.tck * extent
             } else {
@@ -4487,7 +5247,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             }
         }
         let Some(labels) = labels else {
-            return Ok(());
+            return Ok(true);
         };
         let perpendicular = match side {
             1 | 3 => pars.las == 2 || pars.las == 3,
@@ -4514,12 +5274,8 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
         } else {
             label_font
         };
-        let label_colour = text_colour_at(col, 0, pars.col_axis, pars.bg)?;
-        let label_colour = if col == nil() || length(col) == 0 {
-            pars.col_axis
-        } else {
-            label_colour
-        };
+        // GNU R's `C_axis` draws labels in `col.axis`; `col` colours only the line and ticks.
+        let label_colour = pars.col_axis;
         // A label that would come within `gap.axis` widths of "m" of the last one drawn is
         // left out.
         let gap = if gap_axis.is_finite() {
@@ -4539,21 +5295,20 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             ordered.reverse();
         }
         for (index, along) in ordered {
-            let Some(lines) = labels.get(index % labels.len().max(1)) else {
+            let Some(label) = labels.get(index % labels.len().max(1)) else {
                 continue;
             };
-            if lines.is_empty() {
+            if label.is_empty() {
                 continue;
             }
-            let extent = if perpendicular {
-                let line_height = 1.2 * f64::from(pars.ps) * label_cex / 72.0;
-                line_height * lines.len() as f64
-            } else {
-                let mut widest: f64 = 0.0;
-                for line in lines {
-                    widest = widest.max(text_inches(device, line, label_cex, label_font)?);
+            let extent = match label {
+                Label::Lines(lines) if perpendicular => {
+                    1.2 * f64::from(pars.ps) * label_cex / 72.0 * lines.len() as f64
                 }
-                widest
+                Label::Math(_) if perpendicular => {
+                    label_height_inches(device, label, label_cex, label_font)?
+                }
+                _ => label_inches(device, label, label_cex, label_font)?,
             };
             let start = along - extent * if perpendicular { 0.5 } else { hadj };
             if start < last_end + gap {
@@ -4567,7 +5322,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 label_line,
                 outer,
                 along,
-                lines,
+                label,
                 pars.las,
                 hadj,
                 padj,
@@ -4576,7 +5331,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 label_colour,
             )?;
         }
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -4632,13 +5387,20 @@ unsafe fn do_box(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// The lines of the first label of an annotation argument, or `None` when there is none.
-unsafe fn annotation(value: Sexp) -> R<Option<Vec<String>>> {
+/// The label of an annotation argument, or `None` when there is none: the first element of
+/// an expression vector, or every string's lines in turn.
+unsafe fn annotation(value: Sexp) -> R<Option<Label>> {
     if value == nil() || length(value) == 0 {
         return Ok(None);
     }
-    let lines: Vec<String> = label_lines(value)?.into_iter().flatten().collect();
-    Ok((!lines.is_empty()).then_some(lines))
+    let mut lines = Vec::new();
+    for label in labels_of(value)? {
+        match label {
+            Label::Math(_) => return Ok(Some(label)),
+            Label::Lines(more) => lines.extend(more),
+        }
+    }
+    Ok((!lines.is_empty()).then_some(Label::Lines(lines)))
 }
 
 /// `title(main, sub, xlab, ylab, line, outer, ...)`.
@@ -4660,44 +5422,54 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
         let region = region_rect(device, if outer { 7 } else { 17 });
         let along_x = lerp([region.x0, region.x1], pars.adj);
         let along_y = lerp([region.y0, region.y1], pars.adj);
-        if let Some(lines) = main {
+        if let Some(label) = main {
             let cex = pars.cex_main * pars.cex;
-            if line.is_finite() {
-                push_margin_text(
-                    device,
-                    clip,
-                    3,
-                    line,
-                    outer,
-                    along_x,
-                    &lines,
-                    0,
-                    pars.adj,
-                    0.0,
-                    cex,
-                    pars.font_main,
-                    pars.col_main,
-                )?;
+            // GNU R sets a main title's lines from line `line` of the top margin, bottom
+            // aligned, or centres them on the margin's middle line when `line` is not given.
+            let (position, yadj) = if line.is_finite() {
+                (line, 0.0)
             } else {
-                // The main title is centred on the middle line of the top margin.
                 let margin = if outer {
                     device.outer_inches()[2]
                 } else {
                     device.margin_inches()[2]
                 };
-                let anchor = [along_x, region.y1 + margin / 2.0];
-                push_text(
-                    device,
-                    clip,
-                    anchor,
-                    &lines,
-                    0.0,
-                    pars.adj,
-                    0.5,
-                    cex,
-                    pars.font_main,
-                    pars.col_main,
-                )?;
+                (margin / 2.0 / (device.pars.mex * device.line_inches()), 0.5)
+            };
+            match &label {
+                Label::Math(_) => {
+                    let anchor = [along_x, margin_line(device, 3, position, outer)];
+                    push_label(
+                        device,
+                        clip,
+                        anchor,
+                        &label,
+                        0.0,
+                        pars.adj,
+                        0.5,
+                        cex,
+                        pars.font_main,
+                        pars.col_main,
+                    )?;
+                }
+                Label::Lines(lines) => {
+                    let first = 0.5 * (lines.len() as f64 - 1.0) + position;
+                    for (index, text) in lines.iter().enumerate() {
+                        let anchor = [along_x, margin_line(device, 3, first - index as f64, outer)];
+                        push_text(
+                            device,
+                            clip,
+                            anchor,
+                            std::slice::from_ref(text),
+                            0.0,
+                            pars.adj,
+                            yadj,
+                            cex,
+                            pars.font_main,
+                            pars.col_main,
+                        )?;
+                    }
+                }
             }
         }
         if let Some(lines) = sub {
@@ -4766,7 +5538,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
 /// `text(xy, labels, adj, pos, offset, vfont, cex, col, font, ...)`.
 unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
     let (x, y) = xy_of(call.arg(0))?;
-    let labels = label_lines(call.arg(1))?;
+    let labels = labels_of(call.arg(1))?;
     let adj = reals_of(call.arg(2))?;
     let pos = call.arg(3);
     let offset = values::as_real_scalar(call.arg(4));
@@ -4780,7 +5552,8 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
         } else {
             x.len().max(labels.len())
         };
-        let char_width = device.char_inches()[0] * pars.cex;
+        // GNU R converts the offset from `CHARS` units, which are character heights.
+        let char_width = device.char_inches()[1] * pars.cex;
         let offset = if offset.is_finite() { offset } else { 0.5 } * char_width;
         for index in 0..count {
             if x.is_empty() {
@@ -4817,16 +5590,18 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
             let mut yadj = adj.get(1).copied().unwrap_or(f64::NAN);
             let mut anchor = point;
             let position = real_at(pos, index, f64::NAN);
+            // GNU R's `C_text` aligns sideways labels on the device's character
+            // addressing offset, not on the label's middle.
             if position.is_finite() {
                 match position as i32 {
                     1 => {
                         hadj = 0.5;
-                        yadj = 1.0;
+                        yadj = 1.0 - (0.5 - device.dev().y_char_offset);
                         anchor[1] -= offset;
                     }
                     2 => {
                         hadj = 1.0;
-                        yadj = 0.5;
+                        yadj = device.dev().y_char_offset;
                         anchor[0] -= offset;
                     }
                     3 => {
@@ -4836,13 +5611,13 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                     }
                     4 => {
                         hadj = 0.0;
-                        yadj = 0.5;
+                        yadj = device.dev().y_char_offset;
                         anchor[0] += offset;
                     }
                     _ => return Err(error("invalid 'pos' value")),
                 }
             }
-            push_text(
+            push_label(
                 device, clip, anchor, lines, pars.srt, hadj, yadj, label_cex, label_font, colour,
             )?;
         }
@@ -4854,7 +5629,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
 /// `mtext(text, side, line, outer, at, adj, padj, cex, col, font, ...)`, every argument
 /// recycled to the longest.
 unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
-    let labels = label_lines(call.arg(0))?;
+    let labels = labels_of(call.arg(0))?;
     let arguments: Vec<Sexp> = (1..10).map(|index| call.arg(index)).collect();
     let count = arguments
         .iter()
@@ -4867,12 +5642,9 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
     }
     with_inline_pars(call, 10, |device| {
         let pars = device.pars.clone();
-        let clip = clip_rect(device);
-        let clip = if pars.xpd == 0 {
-            region_rect(device, 8)
-        } else {
-            clip
-        };
+        // GNU R's `C_mtext` tests the `outer` argument vector itself rather than its value, so
+        // every margin label, outer or not, clips to the device.
+        let clip = device_rect(device);
         for index in 0..count {
             let Some(lines) = labels.get(index % labels.len()) else {
                 continue;
@@ -4883,22 +5655,45 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             }
             let line = real_at(arguments[1], index, 0.0);
             let outer = real_at(arguments[2], index, 0.0) == 1.0;
-            let adj = real_at(arguments[4], index, pars.adj);
-            let adj = if adj.is_finite() { adj } else { pars.adj };
-            let at = real_at(arguments[3], index, f64::NAN);
-            let along = if at.is_finite() {
-                along_side(device, side, at, outer)
-            } else {
-                let region = region_rect(device, if outer { 7 } else { 17 });
-                if side % 2 == 1 {
-                    lerp([region.x0, region.x1], adj)
-                } else {
-                    lerp([region.y0, region.y1], adj)
-                }
-            };
             let perpendicular = match side {
                 1 | 3 => pars.las == 2 || pars.las == 3,
                 _ => pars.las == 1 || pars.las == 2,
+            };
+            // A missing `adj` defaults by orientation, as GNU R's `ComputeAdjValue` does: text
+            // reading away from the plot starts at it, and parallel text centres.
+            let adj = real_at(arguments[4], index, f64::NAN);
+            let adj = if adj.is_finite() {
+                adj
+            } else {
+                match (pars.las, side) {
+                    (1, 2) | (2, 1 | 2) | (3, 1) => 1.0,
+                    (1, 4) | (2, 3 | 4) | (3, 3) => 0.0,
+                    _ => 0.5,
+                }
+            };
+            // A missing `at` follows `adj` along a side the text runs parallel to and centres
+            // on one it stands perpendicular to (`ComputeAtValue`).
+            let at = real_at(arguments[3], index, f64::NAN);
+            let fraction = if perpendicular { 0.5 } else { adj };
+            let along = if at.is_finite() {
+                along_side(device, side, at, outer)
+            } else if outer {
+                let region = region_rect(device, 7);
+                if side % 2 == 1 {
+                    lerp([region.x0, region.x1], fraction)
+                } else {
+                    lerp([region.y0, region.y1], fraction)
+                }
+            } else {
+                // GNU R interpolates `usr` here, so the label follows the window user
+                // coordinates go through, not a plot region changed since `plot.window`.
+                let [x_axis, y_axis] = user_axes(device);
+                let (axis, usr) = if side % 2 == 1 {
+                    (x_axis, [pars.usr[0], pars.usr[1]])
+                } else {
+                    (y_axis, [pars.usr[2], pars.usr[3]])
+                };
+                axis.origin + axis.scale * lerp(usr, fraction)
             };
             let padj = real_at(arguments[5], index, f64::NAN);
             let padj = if padj.is_finite() {
@@ -4908,8 +5703,14 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 0.0
             };
+            // Unlike other text, a margin label ignores the shrinking `mfrow` and `mfcol`
+            // apply through `par("cex")`.
             let cex = real_at(arguments[6], index, 1.0);
-            let cex = if cex.is_finite() { cex } else { 1.0 } * pars.cex;
+            let cex = if cex.is_finite() {
+                cex
+            } else {
+                pars.inline_cex
+            };
             let colour = text_colour_at(arguments[7], index, pars.col, pars.bg)?;
             let font = real_at(arguments[8], index, f64::from(pars.font));
             let font = if font.is_finite() {
@@ -4917,7 +5718,6 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 pars.font
             };
-            let clip = if outer { device_rect(device) } else { clip };
             push_margin_text(
                 device, clip, side, line, outer, along, lines, pars.las, adj, padj, cex, font,
                 colour,
@@ -4958,7 +5758,7 @@ unsafe fn do_rect(call: &NativeCall<'_>) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            push_rect(device, clip, [x0, y0, x1, y1], fill, &stroke)?;
+            push_rect(device, clip, [x0, y0, x1, y1], fill, Some(&stroke))?;
         }
         Ok(())
     })?;
@@ -5224,6 +6024,138 @@ unsafe fn do_abline(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `.filled.contour(x, y, z, levels, col)`: fills the band between each pair of adjacent
+/// levels in every grid cell with that band's colour, clipped to the plot region.
+unsafe fn do_filled_contour(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = reals_of(call.arg(0))?;
+    let y = reals_of(call.arg(1))?;
+    if x.len() < 2 || y.len() < 2 {
+        return Err(error("insufficient 'x' or 'y' values"));
+    }
+    let matrix = call.arg(2);
+    if values::dims(matrix).as_deref() != Some(&[x.len(), y.len()][..]) {
+        return Err(error("dimension mismatch"));
+    }
+    let z = reals_of(matrix)?;
+    let levels = reals_of(call.arg(3))?;
+    if levels.is_empty() {
+        return Err(error("no contour values"));
+    }
+    let col = call.arg(4);
+    let ascending = |values: &[f64]| {
+        values[0].is_finite()
+            && values
+                .windows(2)
+                .all(|pair| pair[1].is_finite() && pair[1] > pair[0])
+    };
+    if !ascending(&x) || !ascending(&y) {
+        return Err(error("invalid x / y values or limits"));
+    }
+    if !ascending(&levels) {
+        return Err(error("invalid contour levels: must be strictly increasing"));
+    }
+    let colours: Vec<Colour> = (0..length(col).max(1))
+        .map(|index| colour_at(col, index, TRANSPARENT_WHITE, TRANSPARENT_WHITE))
+        .collect::<R<_>>()?;
+    with_plot(|device| {
+        let saved_xpd = device.pars.xpd;
+        device.pars.xpd = 0;
+        let clip = clip_rect(device);
+        device.pars.xpd = saved_xpd;
+        let [x_axis, y_axis] = user_axes(device);
+        let rows = x.len();
+        let mut corners = Vec::with_capacity(8);
+        for i in 1..rows {
+            for j in 1..y.len() {
+                let cell = [
+                    z[i - 1 + (j - 1) * rows],
+                    z[i + (j - 1) * rows],
+                    z[i - 1 + j * rows],
+                    z[i + j * rows],
+                ];
+                for band in 1..levels.len() {
+                    let (low, high) = (levels[band - 1], levels[band]);
+                    corners.clear();
+                    let [z11, z21, z12, z22] = cell;
+                    let (x1, x2, y1, y2) = (x[i - 1], x[i], y[j - 1], y[j]);
+                    band_cut_points(low, high, [x1, y1, z11], [x2, z21], false, &mut corners);
+                    band_cut_points(low, high, [y1, x2, z21], [y2, z22], true, &mut corners);
+                    band_cut_points(low, high, [x2, y2, z22], [x1, z12], false, &mut corners);
+                    band_cut_points(low, high, [y2, x1, z12], [y1, z11], true, &mut corners);
+                    if corners.len() > 2 {
+                        let points = corners
+                            .iter()
+                            .map(|[x, y]| [x_axis.inches(*x), y_axis.inches(*y)])
+                            .collect();
+                        push_shape(
+                            device,
+                            clip,
+                            Shape::Path {
+                                points,
+                                closed: true,
+                                fill: colours[(band - 1) % colours.len()],
+                                stroke: None,
+                            },
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// The corners of one band's polygon along one side of a grid cell, from `[a1, b, z1]` to
+/// `[a2, z2]` where `a` varies along the side and `b` is fixed: the side's start when it lies
+/// in the band and the points where the side crosses the band's edges. `swapped` sides run
+/// along y. Infinite values put the crossing at the far corner. GNU R's `FindCutPoints`.
+fn band_cut_points(
+    low: f64,
+    high: f64,
+    [a1, b, z1]: [f64; 3],
+    [a2, z2]: [f64; 2],
+    swapped: bool,
+    corners: &mut Vec<[f64; 2]>,
+) {
+    let mut push = |a: f64| corners.push(if swapped { [b, a] } else { [a, b] });
+    if z1 > z2 {
+        if z2 > high || z1 < low {
+            return;
+        }
+        if z1 < high {
+            push(a1);
+        } else if z1 == f64::INFINITY {
+            push(a2);
+        } else {
+            push(a1 + (z1 - high) / (z1 - z2) * (a2 - a1));
+        }
+        if z2 == f64::NEG_INFINITY {
+            push(a1);
+        } else if z2 <= low {
+            push(a2 - (z2 - low) / (z2 - z1) * (a2 - a1));
+        }
+    } else if z1 < z2 {
+        if z2 < low || z1 > high {
+            return;
+        }
+        if z1 > low {
+            push(a1);
+        } else if z1 == f64::NEG_INFINITY {
+            push(a2);
+        } else {
+            push(a1 + (z1 - low) / (z1 - z2) * (a2 - a1));
+        }
+        if z2 == f64::INFINITY {
+            push(a1);
+        } else if z2 >= high {
+            push(a2 - (z2 - high) / (z2 - z1) * (a2 - a1));
+        }
+    } else if low <= z1 && z1 <= high {
+        push(a1);
+    }
+}
+
 /// `image(x, y, zi, col)`: the cells between the `x` and `y` breaks filled with the colours
 /// `zi` indexes from 0; missing indices leave a cell empty.
 unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
@@ -5257,16 +6189,9 @@ unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
                 if [x0, x1, y0, y1].iter().any(|value| !value.is_finite()) {
                     continue;
                 }
-                push_shape(
-                    device,
-                    clip,
-                    Shape::Path {
-                        points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                        closed: true,
-                        fill,
-                        stroke: None,
-                    },
-                )?;
+                // Each cell is a device rectangle, as in GNU R, so a device that snaps
+                // borderless rectangles to its pixel grid (ragg) leaves no seams.
+                push_rect(device, clip, [x0, y0, x1, y1], fill, None)?;
             }
         }
         Ok(())
@@ -5381,9 +6306,9 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
             })
             .collect()
     } else {
-        label_lines(call.arg(4))?
-            .into_iter()
-            .map(|lines| lines.join(" "))
+        labels_of(call.arg(4))?
+            .iter()
+            .map(|label| label.text())
             .collect()
     };
     let (col, lty, lwd) = (call.arg(9), call.arg(10), call.arg(11));
@@ -5414,7 +6339,12 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
             y: &y,
             z: &z,
         };
-        let mut placed: Vec<Rect> = Vec::new();
+        let method = values::as_integer_scalar(call.arg(7));
+        if !(1..=3).contains(&method) {
+            return Err(error("invalid 'method' value"));
+        }
+        let usr = pars.usr;
+        let mut placed: Vec<LabelBox> = Vec::new();
         for (index, level) in levels.iter().enumerate() {
             let colour = colour_at(col, index, pars.col, pars.bg)?;
             let stroke = stroke_with(
@@ -5434,27 +6364,104 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     continue;
                 };
                 let width = text_inches(device, label, labcex, 1)?;
-                let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex) / 72.0;
-                match flattest_window(&points, width, height, &placed) {
-                    Some(window) => {
-                        placed.push(window.bounds);
-                        push_line(device, clip, window.before, stroke)?;
-                        push_line(device, clip, window.after, stroke)?;
-                        push_text(
-                            device,
-                            clip,
-                            window.centre,
-                            &[label.to_owned()],
-                            window.angle,
-                            0.5,
-                            0.5,
-                            labcex,
-                            1,
-                            colour,
-                        )?;
-                    }
-                    None => push_line(device, clip, points, stroke)?,
+                let height = text_height_inches(device, label, labcex, 1)?;
+                if width <= 0.0 {
+                    continue;
                 }
+                let [device_width, device_height] = device.size();
+                let placement = ContourLabelling {
+                    user: &line,
+                    inches: &points,
+                    usr,
+                    width,
+                    height,
+                    device: [device_width, device_height],
+                };
+                if method == 1 {
+                    let at = if placement.use_start() {
+                        0
+                    } else {
+                        points.len() - 1
+                    };
+                    push_line(device, clip, points.clone(), stroke)?;
+                    push_text(
+                        device,
+                        clip,
+                        points[at],
+                        &[label.to_owned()],
+                        0.0,
+                        0.5,
+                        0.5,
+                        labcex,
+                        1,
+                        colour,
+                    )?;
+                    continue;
+                }
+                let found = if method == 2 {
+                    placement.at_edge(&placed)
+                } else {
+                    placement.flattest(&placed)
+                };
+                let (start, range) = found.unwrap_or((0, 0));
+                let count = points.len();
+                if start > 0 {
+                    push_line(device, clip, points[..=start].to_vec(), stroke)?;
+                }
+                if count > 1 + start + range {
+                    push_line(device, clip, points[start + range..].to_vec(), stroke)?;
+                }
+                if found.is_none() {
+                    continue;
+                }
+                let (from, to) = (points[start], points[start + range]);
+                placed.push(placement.corners(from, to));
+                let closest_to_end = placement.closest_to_end(start, range);
+                let span = (to[0] - from[0]).hypot(to[1] - from[1]);
+                let fraction = width / span;
+                // The label may not fill the gap the line leaves for it, so GNU R draws the
+                // rest of the gap's chord on the side away from the nearest plot edge.
+                let gap_end = if closest_to_end {
+                    let gap_end = [
+                        to[0] - (to[0] - from[0]) * fraction,
+                        to[1] - (to[1] - from[1]) * fraction,
+                    ];
+                    if fraction < 1.0 {
+                        push_line(device, clip, vec![from, gap_end], stroke)?;
+                    }
+                    gap_end
+                } else {
+                    let gap_end = [
+                        from[0] + (to[0] - from[0]) * fraction,
+                        from[1] + (to[1] - from[1]) * fraction,
+                    ];
+                    if fraction < 1.0 {
+                        push_line(device, clip, vec![gap_end, to], stroke)?;
+                    }
+                    gap_end
+                };
+                let (anchor, toward) = match (line[start].0 < line[start + range].0, closest_to_end)
+                {
+                    (true, true) => (gap_end, to),
+                    (true, false) => (from, gap_end),
+                    (false, true) => (to, gap_end),
+                    (false, false) => (gap_end, from),
+                };
+                // GNU R converts radians with 180 / 3.14, not 180 / pi.
+                #[allow(clippy::approx_constant)]
+                let angle = (180.0 / 3.14) * (toward[1] - anchor[1]).atan2(toward[0] - anchor[0]);
+                push_text(
+                    device,
+                    clip,
+                    anchor,
+                    &[label.to_owned()],
+                    angle,
+                    0.0,
+                    0.5,
+                    labcex,
+                    1,
+                    colour,
+                )?;
             }
         }
         Ok(())
@@ -5462,121 +6469,181 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// Where a contour label goes: the line split around it, its centre and angle, and the box
-/// it covers.
-struct LabelWindow {
-    before: Vec<[f64; 2]>,
-    after: Vec<[f64; 2]>,
-    centre: [f64; 2],
-    angle: f64,
-    bounds: Rect,
-}
+/// The four corners of a contour label's box, in inches, in GNU R's order: two along the
+/// line's start, then two along its end.
+type LabelBox = [[f64; 2]; 4];
 
-/// The stretch of `points`, `width` inches long along the line, that strays least from its
-/// chord, as long as the label it would carry keeps clear of the labels already `placed`.
-fn flattest_window(
-    points: &[[f64; 2]],
+/// One contour polyline being labelled, the way GNU R's `contour` places labels: its points
+/// in user coordinates (which the edge tests compare against `usr`) and in inches, and the
+/// label's size in inches.
+struct ContourLabelling<'a> {
+    user: &'a [(f64, f64)],
+    inches: &'a [[f64; 2]],
+    usr: [f64; 4],
     width: f64,
     height: f64,
-    placed: &[Rect],
-) -> Option<LabelWindow> {
-    let mut arc = Vec::with_capacity(points.len());
-    let mut total = 0.0;
-    for (index, point) in points.iter().enumerate() {
-        if index > 0 {
-            let previous = points[index - 1];
-            total += (point[0] - previous[0]).hypot(point[1] - previous[1]);
-        }
-        arc.push(total);
+    device: [f64; 2],
+}
+
+impl ContourLabelling<'_> {
+    fn distance_from_edge(&self, index: usize) -> f64 {
+        let (x, y) = self.user[index];
+        let usr = self.usr;
+        (x - usr[0])
+            .min(usr[1] - x)
+            .min((y - usr[2]).min(usr[3] - y))
     }
-    if total <= width || points.len() < 2 {
-        return None;
+
+    fn use_start(&self) -> bool {
+        self.distance_from_edge(0) < self.distance_from_edge(self.user.len() - 1)
     }
-    let point_at = |distance: f64| -> ([f64; 2], usize) {
-        let segment = arc
-            .iter()
-            .position(|length| *length >= distance)
-            .unwrap_or(points.len() - 1)
-            .max(1);
-        let (start, end) = (points[segment - 1], points[segment]);
-        let span = arc[segment] - arc[segment - 1];
-        let fraction = if span > 0.0 {
-            (distance - arc[segment - 1]) / span
+
+    fn chord(&self, from: usize, to: usize) -> f64 {
+        let (a, b) = (self.inches[from], self.inches[to]);
+        (b[0] - a[0]).hypot(b[1] - a[1])
+    }
+
+    /// The label at whichever end of the line lies nearer a plot edge (method "edge"): the
+    /// first run of points from that end whose chord is as long as the label.
+    fn at_edge(&self, placed: &[LabelBox]) -> Option<(usize, usize)> {
+        let count = self.inches.len();
+        let (start, range) = if self.use_start() {
+            let mut range = 0;
+            let mut distance = 0.0;
+            while range + 1 < count && distance < self.width {
+                distance = self.chord(0, range + 1);
+                range += 1;
+            }
+            (distance >= self.width).then_some((0, range))?
         } else {
-            0.0
+            let mut range = 0;
+            let mut distance = 0.0;
+            while range + 1 < count && distance < self.width {
+                distance = self.chord(count - 2 - range, count - 1);
+                range += 1;
+            }
+            (distance >= self.width).then_some((count - 1 - range, range))?
         };
-        (
-            [
-                start[0] + fraction * (end[0] - start[0]),
-                start[1] + fraction * (end[1] - start[1]),
-            ],
-            segment,
-        )
-    };
-    let mut best: Option<(f64, LabelWindow)> = None;
-    for (index, start_distance) in arc.iter().enumerate() {
-        if start_distance + width > total {
-            break;
-        }
-        let (start, _) = point_at(*start_distance);
-        let (end, end_segment) = point_at(start_distance + width);
-        let chord = [end[0] - start[0], end[1] - start[1]];
-        let length = chord[0].hypot(chord[1]);
-        if length <= 0.0 {
-            continue;
-        }
-        let straying = points[index..end_segment]
-            .iter()
-            .map(|point| {
-                ((point[0] - start[0]) * chord[1] - (point[1] - start[1]) * chord[0]).abs() / length
-            })
-            .fold(0.0, f64::max);
-        if best.as_ref().is_some_and(|(score, _)| *score <= straying) {
-            continue;
-        }
-        let centre = [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0];
-        let mut angle = chord[1].atan2(chord[0]).to_degrees();
-        if angle > 90.0 {
-            angle -= 180.0;
-        } else if angle <= -90.0 {
-            angle += 180.0;
-        }
-        let (sin, cos) = angle.to_radians().sin_cos();
-        let half = [
-            (width * cos.abs() + height * sin.abs()) / 2.0,
-            (width * sin.abs() + height * cos.abs()) / 2.0,
-        ];
-        let bounds = Rect {
-            x0: centre[0] - half[0],
-            x1: centre[0] + half[0],
-            y0: centre[1] - half[1],
-            y1: centre[1] + half[1],
-        };
-        let overlaps = placed.iter().any(|other| {
-            bounds.x0 < other.x1
-                && other.x0 < bounds.x1
-                && bounds.y0 < other.y1
-                && other.y0 < bounds.y1
-        });
-        if overlaps {
-            continue;
-        }
-        let mut before = points[..index].to_vec();
-        before.push(start);
-        let mut after = vec![end];
-        after.extend_from_slice(&points[end_segment..]);
-        best = Some((
-            straying,
-            LabelWindow {
-                before,
-                after,
-                centre,
-                angle,
-                bounds,
-            },
-        ));
+        self.fits(start, range, placed).then_some((start, range))
     }
-    best.map(|(_, window)| window)
+
+    /// The label where the line's gradients vary least over the label's length (method
+    /// "flattest"). GNU R accumulates the gradients into a running sum and squares that sum,
+    /// not each gradient, and this keeps its choice.
+    fn flattest(&self, placed: &[LabelBox]) -> Option<(usize, usize)> {
+        let count = self.inches.len();
+        let mut best: Option<(f64, usize, usize)> = None;
+        for start in 0..count {
+            let (mut distance, mut gradient_sum, mut square_sum) = (0.0, 0.0, 0.0);
+            let mut range = 0;
+            let mut next = start + 1;
+            while next + 1 < count && distance < self.width {
+                distance = self.chord(start, next);
+                let delta_x = self.user[next].0 - self.user[next - 1].0;
+                let delta_y = self.user[next].1 - self.user[next - 1].1;
+                let delta_x = if delta_x == 0.0 { 1.0 } else { delta_x };
+                gradient_sum += delta_y / delta_x;
+                square_sum += gradient_sum * gradient_sum;
+                next += 1;
+                range += 1;
+            }
+            if distance < self.width {
+                break;
+            }
+            if !self.fits(start, range, placed) {
+                continue;
+            }
+            let samples = range as f64;
+            let variance = (square_sum - gradient_sum * gradient_sum / samples) / samples;
+            if best.is_none_or(|(lowest, _, _)| variance < lowest) && variance < 9999999.0 {
+                best = Some((variance, start, range));
+            }
+        }
+        best.map(|(_, start, range)| (start, range))
+    }
+
+    /// Whether a label over `start..=start + range` stays on the device and clear of every
+    /// label already placed.
+    fn fits(&self, start: usize, range: usize, placed: &[LabelBox]) -> bool {
+        let corners = self.corners(self.inches[start], self.inches[start + range]);
+        let inside = corners
+            .iter()
+            .all(|[x, y]| (0.0..=self.device[0]).contains(x) && (0.0..=self.device[1]).contains(y));
+        inside && !placed.iter().any(|other| boxes_cross(&corners, other))
+    }
+
+    /// GNU R's `FindCorners`: the box along the chord from `from` to `to`, as wide on each
+    /// side as the label's height scaled by the chord over the label's width.
+    fn corners(&self, from: [f64; 2], to: [f64; 2]) -> LabelBox {
+        let ratio = self.height / self.width;
+        let offset_y = (to[0] - from[0]) * ratio;
+        let offset_x = (to[1] - from[1]) * ratio;
+        [
+            [from[0] + offset_x, from[1] - offset_y],
+            [from[0] - offset_x, from[1] + offset_y],
+            [to[0] - offset_x, to[1] + offset_y],
+            [to[0] + offset_x, to[1] - offset_y],
+        ]
+    }
+
+    /// Whether the label's far end (`start + range`) is the one nearer a plot edge, decided
+    /// in user coordinates the way GNU R decides it.
+    fn closest_to_end(&self, start: usize, range: usize) -> bool {
+        let usr = self.usr;
+        let (x1, y1) = self.user[start];
+        let (x2, y2) = self.user[start + range];
+        let dx1 = (x1 - usr[0]).min(usr[1] - x1);
+        let dx2 = (usr[1] - x2).min(x2 - usr[0]);
+        let (mut closest, mut nearest) = if dx1 < dx2 { (false, dx1) } else { (true, dx2) };
+        let dy1 = (y1 - usr[2]).min(usr[3] - y1);
+        if closest && dy1 < nearest {
+            closest = false;
+            nearest = dy1;
+        } else if dy1 < nearest {
+            nearest = dy1;
+        }
+        let dy2 = (usr[3] - y2).min(y2 - usr[2]);
+        if !closest && dy2 < nearest {
+            closest = true;
+        }
+        closest
+    }
+}
+
+/// GNU R's `TestLabelIntersection`: whether any edge of one label box meets an edge of the
+/// other. It solves each pair of edges as lines and checks both parameters, so a box wholly
+/// inside another does not count.
+fn boxes_cross(first: &LabelBox, second: &LabelBox) -> bool {
+    for i in 0..4 {
+        let [ax_, ay_] = first[i];
+        let [bx_, by_] = first[(i + 1) % 4];
+        for j in 0..4 {
+            let [ax, ay] = second[j];
+            let [bx, by] = second[(j + 1) % 4];
+            let dom = bx_ * by - bx_ * ay - ax_ * by + ax_ * ay - bx * by_ + bx * ay_ + ax * by_
+                - ax * ay_;
+            let (along_first, along_second) = if dom == 0.0 {
+                (-1.0, -1.0)
+            } else {
+                let along_first =
+                    (bx * ay_ - ax * ay_ - ay * bx - ax_ * by + ax_ * ay + by * ax) / dom;
+                let along_second = if bx - ax == 0.0 {
+                    if by - ay == 0.0 {
+                        -1.0
+                    } else {
+                        (ay_ + (by_ - ay_) * along_first - ay) / (by - ay)
+                    }
+                } else {
+                    (ax_ + (bx_ - ax_) * along_first - ax) / (bx - ax)
+                };
+                (along_first, along_second)
+            };
+            if (0.0..=1.0).contains(&along_first) && (0.0..=1.0).contains(&along_second) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `symbols(x, y, type, data, inches, bg, fg, ...)` for circles (type 1), squares (2) and
@@ -5681,12 +6748,16 @@ unsafe fn do_clip(call: &NativeCall<'_>) -> R<Sexp> {
         let [x_axis, y_axis] = user_axes(device);
         let (x0, x1) = (x_axis.inches(bounds[0]), x_axis.inches(bounds[1]));
         let (y0, y1) = (y_axis.inches(bounds[2]), y_axis.inches(bounds[3]));
-        device.clip = Some(Rect {
-            x0: x0.min(x1),
-            x1: x0.max(x1),
-            y0: y0.min(y1),
-            y1: y0.max(y1),
-        });
+        let xpd = device.pars.xpd;
+        device.clip = Some((
+            Rect {
+                x0: x0.min(x1),
+                x1: x0.max(x1),
+                y0: y0.min(y1),
+                y1: y0.max(y1),
+            },
+            xpd,
+        ));
         Ok(())
     })?;
     Ok(nil())

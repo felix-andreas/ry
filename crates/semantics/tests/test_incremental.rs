@@ -14,6 +14,7 @@ use {
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
+        with_held_tree,
     },
     std::{collections::BTreeMap, thread},
 };
@@ -407,7 +408,7 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
     assert_eq!(
-        db.validations_since(&["parse", "item_syntax"]),
+        db.validations_since(&["parse_memo", "item_syntax_memo"]),
         [0, 0],
         "the untouched files' trees sit below memos that verify by durability alone"
     );
@@ -511,7 +512,7 @@ fn a_cold_check_parses_each_file_once() {
     let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
-    assert_eq!(db.executions_since(&["parse"]), [files.len()]);
+    assert_eq!(db.executions_since(&["parse_memo"]), [files.len()]);
     let codes = |file: SourceFile| -> Vec<&'static str> {
         file_diagnostics(&db, file)
             .iter()
@@ -536,6 +537,35 @@ fn a_cold_check_parses_each_file_once() {
     );
 }
 
+/// The one-shot cold check holds each file's tree only while it derives that file's facts, so
+/// no tree is memoized and none outlives the syntax pass: a later pass that needed a tree would
+/// show up here as a `parse_memo` execution.
+#[test]
+fn a_one_shot_cold_check_memoizes_no_tree() {
+    let mut db = ProbeDatabase::one_shot();
+    let files = wide_project(&db);
+    let lints = LintConfig::default();
+    for &file in &files {
+        with_held_tree(&db, file, || derive_from_syntax(&db, file, &lints));
+    }
+    db.synthetic_write(Durability::LOW);
+    for &file in &files {
+        for &item in item_tree(&db, file) {
+            item_naming(&db, item);
+        }
+    }
+    report(&mut db, &files, &lints);
+    assert_eq!(
+        db.executions_since(&["parse_memo", "item_syntax_memo"]),
+        [0, 0]
+    );
+    let codes: Vec<&str> = file_diagnostics(&db, files[200])
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect();
+    assert!(codes.contains(&"unused"), "{codes:?}");
+}
+
 #[test]
 fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     let mut db = ProbeDatabase::default();
@@ -548,7 +578,7 @@ fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     db.edit(files[0], edited);
     report(&mut db, &files, &lints);
     assert_eq!(
-        db.executions_since(&["parse", "file_syntax_lints", "item_check"]),
+        db.executions_since(&["parse_memo", "file_syntax_lints", "item_check"]),
         [1, 1, 1]
     );
 }
@@ -940,4 +970,29 @@ fn a_reference_class_edit_rechecks_only_methods_whose_member_answers_change() {
     );
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["Sheet", "Workbook"]);
+}
+
+#[test]
+fn an_edit_that_keeps_the_dollar_methods_rechecks_no_dollar_reader() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "helper <- function() 1L\n`$.vs` <- function(x, name) name\n",
+        "weights <- function() c(1L, 2L)$weight\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(
+        files[0],
+        "helper <- function() 2L\n`$.vs` <- function(x, name) name\n".to_owned(),
+    );
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["helper"]);
+
+    db.edit(files[0], "helper <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    assert!(
+        db.checked_since().contains(&"weights".to_owned()),
+        "removing the last `$` method rechecks a reader of `$` on an atomic vector"
+    );
 }

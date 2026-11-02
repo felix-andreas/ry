@@ -45,7 +45,7 @@ use {
         ColumnType, Schema, Table,
         convert::{self, RVector},
         polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
-        query::{self, Output, Query, Rows, Select},
+        query::{self, Comparison, Output, Query, Roll, Rows, Select},
     },
 };
 
@@ -53,6 +53,8 @@ use {
 /// they are only called once a data.table exists.
 const HELPERS: &str = r#"
 .datatable_caller <- function(env) {
+  # data.table rounds the last bytes of doubles when it groups and joins, unless rounding is off.
+  if (data.table::getNumericRounding() != 0L) return(0L)
   ns <- topenv(env)
   if (!isNamespace(ns)) return(1L)
   if (getNamespaceName(ns) == "data.table") return(2L)
@@ -170,12 +172,28 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
+    // A table without columns has no height of its own: data.table's `:=` takes it from the
+    // first column it adds.
+    if columns.is_empty() {
+        return Ok(None);
+    }
     let schema = Schema::new(
         columns
             .iter()
             .map(|column| (column.name.clone(), column.kind)),
     );
+    // data.table rejects grouping a table that has a column named like one of its special
+    // symbols, and rejects `by` together with `keyby`; both are errors only it words.
+    if grouping_conflicts(call, &columns) {
+        return Ok(None);
+    }
     let mut parts = frame::parse_parts(call, env, true)?;
+    // `by = .EACHI` without `i` is an error only data.table words, and so is a non-equi join on
+    // a table with the column data.table reserves for it.
+    if (parts.each_i && parts.i.is_none()) || columns.iter().any(|column| column.name == "_nqgrp_")
+    {
+        return Ok(None);
+    }
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
     {
@@ -197,6 +215,15 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         .as_ref()
         .and_then(Piece::expression)
         .is_some_and(|j| is_call(j, ":="));
+    // data.table evaluates a grouped `j` once on an empty table, which can warn.
+    if grouped && height == 0 {
+        return Ok(None);
+    }
+    // `keyby` with `:=` sets the key on `x` afterwards, or is an error when `i` is given, and
+    // data.table warns that it ignores `nomatch` with `:=`.
+    if assigning && (parts.keyed || parts.nomatch.is_some()) {
+        return Ok(None);
+    }
     // Inside data.table, only grouped aggregations are worth the engine (`dcast` aggregates this
     // way). Its internal row and column picks are vector copies its C does faster.
     if internal && (!grouped || assigning || parts.each_i) {
@@ -219,6 +246,42 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     };
     // Without `on =`, data.table joins on the key, and a keyed subject declines.
     if matches!(rows, Rows::Join(_)) && parts.on.is_none() {
+        return Ok(None);
+    }
+    // A non-equi join fills `x`'s join columns with `i`'s bounds but keeps `x`'s column types,
+    // and the engine would take `i`'s.
+    if let Rows::Join(join) = &rows
+        && join.on.iter().any(|on| on.op != Comparison::Equal)
+        && {
+            let other = join.other.schema();
+            join.on
+                .iter()
+                .any(|on| schema.column(&on.x) != other.column(&on.i))
+        }
+    {
+        return Ok(None);
+    }
+    // At a tie, `roll = "nearest"` takes the earlier row in data.table and the later one in the
+    // engine's as-of join.
+    if let Rows::Join(join) = &rows
+        && join.roll == Roll::Nearest
+    {
+        return Ok(None);
+    }
+    // data.table's `.EACHI` over a non-equi join reports the bounds of `i` in the join columns,
+    // and a join column read in its `j` is not the matched rows' values; both differ from the
+    // engine's answer.
+    if let Rows::Join(join) = &rows
+        && join.each_i
+        && (join.on.iter().any(|on| on.op != Comparison::Equal) || {
+            let read = Query {
+                select: select.clone(),
+                ..Query::default()
+            };
+            query::referenced_columns(&read)
+                .is_none_or(|read| join.on.iter().any(|on| read.contains(&on.x)))
+        })
+    {
         return Ok(None);
     }
     let query = Query {
@@ -289,6 +352,60 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     Ok(Some(value))
 }
 
+unsafe fn grouping_conflicts(call: Sexp, columns: &[SubjectColumn]) -> bool {
+    const SPECIAL: [&str; 7] = [".N", ".I", ".SD", ".BY", ".GRP", ".NGRP", ".EACHI"];
+    let mut by = None;
+    let mut keyby = None;
+    let items = values::pairlist_items(call.cdr().cdr());
+    // `x[i, j, by]` passes the grouping as the positional argument after `i` and `j`, so its
+    // position depends on how many of those two are named.
+    let named_before = items
+        .iter()
+        .filter(|(tag, _)| {
+            tag.kind() == SexpType::Symbol
+                && matches!(values::symbol_name(*tag).as_ref(), "i" | "j")
+        })
+        .count();
+    let mut position = 0;
+    for (tag, value) in items {
+        if tag.kind() != SexpType::Symbol {
+            position += 1;
+            if position + named_before == 3 {
+                by = Some(value);
+            }
+            continue;
+        }
+        match values::symbol_name(tag).as_ref() {
+            "by" => by = Some(value),
+            "keyby" => keyby = Some(value),
+            _ => {}
+        }
+    }
+    if by.is_some() && keyby.is_some() {
+        return true;
+    }
+    let Some(grouping) = by.or(keyby) else {
+        return false;
+    };
+    // `by = "a,b"` names two columns in data.table.
+    columns
+        .iter()
+        .any(|column| SPECIAL.contains(&column.name.as_str()))
+        || mentions_comma(grouping)
+}
+
+unsafe fn mentions_comma(expression: Sexp) -> bool {
+    match expression.kind() {
+        SexpType::String => (0..values::length(expression)).any(|index| {
+            values::string_at(expression, index).is_some_and(|text| text.contains(','))
+        }),
+        SexpType::Language => values::pairlist_items(expression.cdr())
+            .into_iter()
+            .any(|(_, argument)| mentions_comma(argument)),
+        _ => false,
+    }
+}
+
 /// Whether data.table answers `x[i]` through an index on the compared columns, which it creates
 /// on `x` the first time: `i` is `col == value`, `col %in% values` or `col %chin% values`, or an
 /// `&` of such comparisons. Leaving these to data.table keeps `x`'s `index` attribute exactly
@@ -327,6 +444,7 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
     let term_agrees = |function: &str, column: ColumnType, extra: bool| match function {
         "median" | "var" | "sd" | "prod" => false,
         "mean" => !(extra && column == ColumnType::Double),
+        "min" | "max" => column != ColumnType::Factor,
         _ => true,
     };
     if gforce && let Some(terms) = gforce_terms(j, schema) {
@@ -498,6 +616,19 @@ unsafe fn reduces(expression: Sexp, schema: &Schema) -> bool {
     match frame::call_head(expression).as_deref() {
         Some("sum") if sums_exactly(expression, schema) => return false,
         Some("sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply") => return true,
+        // data.table orders an ordered factor by its levels and rejects an unordered one,
+        // and the engine keeps no such distinction.
+        Some("min" | "max")
+            if values::pairlist_items(expression.cdr())
+                .first()
+                .is_some_and(|(_, argument)| {
+                    argument.kind() == SexpType::Symbol
+                        && schema.column(&values::symbol_name(*argument))
+                            == Some(ColumnType::Factor)
+                }) =>
+        {
+            return true;
+        }
         _ => {}
     }
     reduces(expression.car(), schema)

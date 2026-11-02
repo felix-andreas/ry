@@ -58,9 +58,12 @@ mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
+// The fork routines exist only on Unix, as in GNU R, whose Windows build of parallel has none.
+#[cfg(unix)]
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
+pub mod plotmath;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -80,6 +83,7 @@ pub mod stats_models;
 pub mod stats_nlm;
 pub mod stats_optimize;
 pub mod stats_port;
+pub mod stats_port_minimizer;
 pub mod stats_spline;
 pub mod stats_tests;
 pub mod strings;
@@ -99,7 +103,10 @@ use {
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
-    heap::{Heap, Marker, RootSource, object::Sexp},
+    heap::{
+        Heap, Marker, RootSource,
+        object::{Sexp, SexpType},
+    },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
 };
@@ -134,6 +141,17 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
+    /// A compact sequence (GNU R's `compact_intseq` or `compact_realseq`) of an integer or
+    /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
+    /// host has no compact sequences.
+    pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
+    /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
+    /// when the class has none. A class may expand into storage it keeps, as compact sequences
+    /// do, so repeated reads do not copy the vector each time.
+    pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
+    /// `as.character` of an integer or double vector without attributes as a vector that
+    /// converts each element when it is read, or `None` when the host has no such class.
+    pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -214,8 +232,8 @@ pub struct Interp {
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
     /// adds a binding nor invalidates the lookup caches.
     pub tmp_values: Vec<(Sexp, Sexp)>,
-    /// The environments of the loops the tree-walking interpreter is running, innermost last.
-    pub loop_envs: Vec<Sexp>,
+    /// The loops the tree-walking interpreter is running, innermost last.
+    pub loops: Vec<eval::LoopContext>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -251,6 +269,7 @@ pub struct Interp {
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
+    pub method_cache: dispatch::MethodCache,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -259,6 +278,7 @@ pub struct Interp {
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
+    #[cfg(unix)]
     pub forks: parallel::Forks,
 }
 
@@ -345,7 +365,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         returned_values: Vec::new(),
         assignment_call: None,
         tmp_values: Vec::new(),
-        loop_envs: Vec::new(),
+        loops: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
@@ -365,9 +385,11 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
+        method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
+        #[cfg(unix)]
         forks: parallel::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
@@ -389,6 +411,9 @@ pub fn default_hooks() -> Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        compact_sequence: |_, _, _, _| Ok(None),
+        altrep_dataptr: |_| Ok(None),
+        defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),

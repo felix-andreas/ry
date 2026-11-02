@@ -1,0 +1,13 @@
+[stdout]
+| [1] 61 6f fb 74 0a e9 6c 0a
+|  [1] 61 6f c3 bb 74 0a c3 a9 6c 0a
+| <pointer: (nil)>
+| [1] "<pointer: (nil)>"
+|  int [1:3] 1 2 3
+| [1] -3
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| -3L

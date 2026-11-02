@@ -9,8 +9,8 @@ use {
         Installed, PackageTarget, call_hierarchy_item, code_actions, code_lenses, completion,
         completion_with, data_table_rewrites, definition, diagnostic_fixes, document_symbols,
         folding_ranges, hover, import_fixes, incoming_calls, inlay_hints, outgoing_calls,
-        references, rename, selection_ranges, semantic_tokens, signature_help, signature_help_with,
-        type_definition, workspace_symbols,
+        refactors, references, rename, selection_ranges, semantic_tokens, signature_help,
+        signature_help_with, type_definition, workspace_symbols,
     },
     salsa::Setter,
     semantics::{
@@ -22,7 +22,7 @@ use {
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_data_project, with_fixture_project},
     },
-    std::{path::Path, sync::Arc},
+    std::{cmp::Reverse, path::Path, sync::Arc},
     syntax::{
         TextRange, TextSize,
         testing::{run_fixture_suite, split_files},
@@ -526,6 +526,54 @@ fn ide_fixtures() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
         &render,
     );
+}
+
+#[test]
+fn refactor_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/refactor"),
+        &render_refactors,
+    );
+}
+
+/// `$0` starts the selection and `$1`, when present, ends it. Each refactoring renders as its
+/// title and the whole file after its edits, so an expectation shows exactly what the editor
+/// would leave behind.
+fn render_refactors(source: &str) -> String {
+    let start = source.find("$0").unwrap_or(0);
+    let mut text = source.replacen("$0", "", 1);
+    let end = text.find("$1").unwrap_or(start);
+    text = text.replacen("$1", "", 1);
+    let selection = TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32));
+    with_fixture_project(
+        vec![(text.clone(), DocumentKind::Package)],
+        |db, sources| {
+            let mut output = String::new();
+            for action in refactors(db, sources[0], selection) {
+                output.push_str(&format!("action {}\n", action.title));
+                let mut edited = text.clone();
+                let mut edits = action.edits.clone();
+                edits.sort_by_key(|edit| Reverse(edit.range.start()));
+                for edit in edits {
+                    edited.replace_range(
+                        usize::from(edit.range.start())..usize::from(edit.range.end()),
+                        &edit.replacement,
+                    );
+                }
+                for line in edited.lines() {
+                    if line.is_empty() {
+                        output.push('\n');
+                    } else {
+                        output.push_str(&format!("  {line}\n"));
+                    }
+                }
+            }
+            if output.is_empty() {
+                output.push_str("no refactors\n");
+            }
+            output
+        },
+    )
 }
 
 #[test]

@@ -1,5 +1,5 @@
-# nlminb and nls(algorithm = "port") run ry's own trust-region method behind PORT's interface,
-# so results are rounded and only convergence codes and messages are compared exactly.
+# nls(algorithm = "port") runs ry's own trust-region method behind PORT's interface, so results
+# are rounded and only convergence codes and messages are compared exactly.
 x <- c(1.2, 3.4, 2.2, 5.1, 3.3, 4.8, 2.9, 4.1)
 nll <- function(p) -sum(dnorm(x, p[1], exp(p[2]), log = TRUE))
 fit <- nlminb(c(0, 0), nll)

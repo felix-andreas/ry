@@ -34,11 +34,11 @@ complete.cases : @pure fn(...: Any) -> logical
 # data, so results stay `Any` — but the fitters' subjects are checkable: the formula comes first
 # positionally, `data`/`family` are real named formals, and every other keyword is absorbed by the
 # rest parameter (R forwards them to the fitting method).
-lm : fn(formula, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
+lm : fn(formula: formula, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
 # A family object is a list of link and variance functions; its fields depend on the family.
 binomial : @pure fn([link]: Any) -> Any
-glm : fn(formula, [family]: Any, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
-nls : fn(formula, [data]: Any, [start]: Any, [control]: Any, [algorithm]: character, [trace]: logical, ...: Any) -> Any
+glm : fn(formula: formula, [family]: Any, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
+nls : fn(formula: formula, [data]: Any, [start]: Any, [control]: Any, [algorithm]: character, [trace]: logical, ...: Any) -> Any
 loess : Any
 aov : Any
 anova : Any

@@ -178,6 +178,58 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
     },
+    /// Generate a package's documentation with roxygen2, as `devtools::document()` does
+    ///
+    /// The package is loaded lazily, as `ry load` does, so roxygen2 reads the code without a
+    /// full load. The output files are the ones `devtools::document()` writes.
+    Document {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// A roxygen2 roclet to run, such as `rd` or `namespace` (repeatable; default: the
+        /// package's own, which are `collate`, `namespace` and `rd` unless it sets them)
+        #[arg(long = "roclet")]
+        roclets: Vec<String>,
+        /// `gnu-r` runs on GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
+    /// Build a package's source tarball, as `devtools::build()` does
+    ///
+    /// The tarball is the one `R CMD build` makes, run on ry's runtime with the options
+    /// `devtools::build()` passes: vignettes are rebuilt, data is not re-saved, and no PDF
+    /// manual is made. It is written beside the package directory unless `--output` names
+    /// another directory.
+    Build {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// The directory to write the tarball to (default: the package directory's parent)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Ship the vignettes as they are instead of rebuilding them
+        #[arg(long, default_value_t = false)]
+        no_vignettes: bool,
+        /// `gnu-r` builds with GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
+    /// Install a package from source, as `devtools::install()` does
+    ///
+    /// The package is built into a tarball, as `ry build --no-vignettes` does, and installed
+    /// from it with ry's `R CMD INSTALL`, into the first library of `.libPaths()` unless
+    /// `--library` names another. The package's dependencies must already be installed.
+    Install {
+        /// The package, or any path inside it
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// The library to install into
+        #[arg(long, short)]
+        library: Option<PathBuf>,
+        /// `gnu-r` installs with GNU R instead of ry's runtime
+        #[arg(long, value_enum, hide = true)]
+        runtime: Option<Runtime>,
+    },
     /// Run a debugger for editors: the Debug Adapter Protocol on stdin and stdout
     ///
     /// The client launches an R script, which runs on ry's runtime with breakpoints,

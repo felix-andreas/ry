@@ -322,3 +322,7 @@ Str.walk_utf8_with_index
 Str.with_ascii_lowercased
 Str.with_ascii_uppercased
 Str.with_prefix
+DataFrame.pivot
+Expr.over
+Expr.rank
+LazyFrame.pivot

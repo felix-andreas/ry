@@ -1,0 +1,6 @@
+ll <- readLines(system.file("data/morley.tab", package = "datasets")); tf <- tempfile()
+writeLines(ll, con <- xzfile(tf, compression = -9)); close(con); print(file.info(tf)$size)
+writeLines(ll, con <- xzfile(tf)); close(con); print(file.info(tf)$size); print(identical(readLines(tf), ll))
+print(readBin(tf, "raw", 8))
+print(length(memCompress(charToRaw(paste(ll, collapse = "\n")), "xz")))
+print(identical(rawToChar(memDecompress(memCompress(charToRaw("hello"), "xz"), "xz")), "hello"))

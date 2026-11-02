@@ -108,7 +108,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("getNamespaceValue", 3, |call| unsafe {
         let name = values::require_string(call.arg(1), "name")?;
         let exported = values::as_logical_scalar(call.arg(2)) == 1;
-        namespace_lookup(call.arg(0), &name, exported, call.env)
+        namespace_lookup(call.arg(0), &name, exported)
     }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
@@ -971,15 +971,25 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let position = values::as_integer_scalar(call.arg(1)).max(2) as usize;
     let name = call.arg(2);
-    let env = if what.kind() == SexpType::Environment {
-        what
-    } else {
-        let env = new_env(empty_env())?;
-        if what.kind() == SexpType::List {
-            fill_env(env, what)?;
+    // An attached environment is a copy of `what`'s bindings, as in GNU R, so attaching a
+    // namespace leaves its own parent, the imports, in place.
+    let env = new_env(empty_env())?;
+    if what.kind() == SexpType::List {
+        fill_env(env, what)?;
+    } else if what.kind() == SexpType::Environment {
+        let heap = crate::heap();
+        for symbol in env_symbols(what, true, false) {
+            if let Some(cell) = heap.frame_cell(what, symbol) {
+                heap.define(env, symbol, cell.cdr())?;
+                // An active binding stays active, so reading the copy still calls its function.
+                if cell.has_gp(gp::ACTIVE_BINDING)
+                    && let Some(copy) = heap.frame_cell(env, symbol)
+                {
+                    copy.set_gp_bits(gp::ACTIVE_BINDING, true);
+                }
+            }
         }
-        env
-    };
+    }
     let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();
@@ -1246,7 +1256,8 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             crate::format::set_output_decimal(&mark);
             Ok(value)
         }
-        "scipen" | "deparse.cutoff" => {
+        // GNU R keeps `scipen` as given and reads it as an integer where it is used.
+        "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {
@@ -1420,10 +1431,13 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
     for index in 0..length(arguments) {
         let tag = if names != nil() {
             let name = names.element(index);
-            if name.bytes().is_empty() || name == values::na_string() {
+            // An NA name tags its argument `NA`, as GNU R's `install` of the NA string does.
+            if name.bytes().is_empty() {
                 nil()
+            } else if name == values::na_string() {
+                values::install("NA")?
             } else {
-                crate::heap().install_char(name)?
+                values::install_charsxp(name)?
             }
         } else {
             nil()
@@ -1483,7 +1497,11 @@ unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
     if !list.kind().is_vector() || list.is_object() {
         return Ok(None);
     }
-    crate::subset::subset2(list, &[i], Some(true), element).map(Some)
+    let value = crate::subset::subset2(list, &[i], Some(true), element)?;
+    // An empty argument taken from a call, as in `lapply(as.list(quote(f(a, ))), FUN)`, reaches
+    // `FUN` as a promise whose value is the empty symbol, which `FUN` can inspect; bound
+    // directly, it would make `FUN`'s argument missing.
+    Ok((value != values::missing_arg()).then_some(value))
 }
 
 /// What every element [`plain_element`] takes from `list` is known to share: its storage type,
@@ -1889,7 +1907,7 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
                     {
                         let mut code = dot_value;
                         while code.kind() == SexpType::Promise {
-                            code = code.cdr();
+                            code = crate::bytecode::source_of_body(code.cdr());
                         }
                         let value = match code.kind() {
                             SexpType::Symbol | SexpType::Language => {
@@ -1962,7 +1980,7 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     let package = colon_name(call.arg(0))?;
     let name = colon_name(call.arg(1))?;
     let package_value = values::scalar_string(&package)?;
-    namespace_lookup(package_value, &name, exported, call.env)
+    namespace_lookup(package_value, &name, exported)
 }
 
 /// Looks `name` up in a package's namespace (a namespace environment or a package name),
@@ -1970,7 +1988,7 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
 /// which maps it to the internal name, from the namespace outward, because a package may export
 /// a function it imports, as graphics does with base's `plot`; lazy data comes last. An
 /// internal name (`:::`) must be bound in the namespace itself.
-unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
+unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool) -> R<Sexp> {
     let symbol = values::install(name)?;
     let namespace = if package.kind() == SexpType::Environment {
         package
@@ -1979,8 +1997,15 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     } else if let Some(loaded) = loaded_namespace(package)? {
         loaded
     } else {
-        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
-        eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
+        // GNU R evaluates `loadNamespace(x)` with `x` bound to the name, so an error from a
+        // missing package names that call.
+        let frame = values::new_env(base_namespace())?;
+        let x = values::install("x")?;
+        eval::define(x, package, frame)?;
+        eval::eval(
+            values::call(values::install("loadNamespace")?, &[x])?,
+            frame,
+        )?
     };
     if namespace == base_namespace() || !exported {
         let value = find_var_in_frame(symbol, namespace)?;

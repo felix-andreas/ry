@@ -1,0 +1,54 @@
+# A package author pulls an expression out into a variable and a function, inlines a variable,
+# and moves a function's types from a `#:` comment to inline syntax, all through the server.
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file NAMESPACE
+| export(balance)
+file ry.toml
+| [check]
+| typing = true
+file R/balance.R
+| #: fn(amounts: double[], fee: double) -> double
+| balance <- function(amounts, fee) {
+|   total <- sum(amounts)
+|   net <- total - fee * length(amounts)
+|   net
+| }
+
+open R/balance.R
+expect diagnostics R/balance.R none
+
+# An editor's refactor menu asks for one kind at a time, and gets only that kind.
+expect action R/balance.R "fee * length(amounts)" refactor.extract "Extract into variable"
+expect action R/balance.R "fee * length(amounts)" refactor.extract "Extract into function"
+expect no action R/balance.R "fee * length(amounts)" refactor.inline "Extract into variable"
+expect no action R/balance.R "fee * length(amounts)" quickfix "Extract into function"
+expect action R/balance.R "total" refactor.inline "Inline variable `total`"
+expect no action R/balance.R "total" refactor.extract "Inline variable `total`"
+expect action R/balance.R "#: fn" refactor.rewrite "Convert to inline annotation"
+expect no action R/balance.R "#: fn" refactor.extract "Convert to inline annotation"
+
+# Extracting a variable names the value and evaluates it once, before its statement.
+refactor R/balance.R "fee * length(amounts)" "Extract into variable"
+expect buffer R/balance.R "value <- fee * length(amounts)"
+expect buffer R/balance.R "net <- total - value"
+expect diagnostics R/balance.R none
+
+# Inlining puts the value back where it was read.
+refactor R/balance.R "value" "Inline variable `value`"
+expect buffer R/balance.R "net <- total - fee * length(amounts)"
+expect buffer R/balance.R lacks "value <-"
+
+# Extracting a function takes the variables the selection reads as its parameters.
+refactor R/balance.R "fee * length(amounts)" "Extract into function"
+expect buffer R/balance.R "extracted <- function(fee, amounts)"
+expect buffer R/balance.R "net <- total - extracted(fee, amounts)"
+expect diagnostics R/balance.R none
+
+# The types move from the comment into the signature, and the checker still accepts them.
+refactor R/balance.R "#: fn" "Convert to inline annotation"
+expect buffer R/balance.R lacks "#: fn(amounts"
+expect buffer R/balance.R "amounts: double[]"
+expect diagnostics R/balance.R none

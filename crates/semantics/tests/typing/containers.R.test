@@ -83,13 +83,13 @@ f <- function(i) {
 #++++
 f: <T> fn(i: T) -> integer | character
 
-#---- named_vector_by_name_is_nullable
+#---- named_vector_by_name_is_the_element
 f <- function() {
   v <- c(a = 1L)
   v[["a"]]
 }
 #++++
-f: fn() -> integer | NULL
+f: fn() -> integer
 
 #---- slice_is_a_sub_list
 f <- function() {
@@ -270,6 +270,19 @@ f <- function() {
 #++++
 f: Unknown
 46..51 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
+
+#---- a_short_field_name_missing_one_character_gets_a_suggestion
+# A record field is matched exactly, unlike a list's partially matched `$`. A name under four
+# characters is suggested only the name it is one insertion away from.
+person <- (name = "Ada", age = 3)
+short_name <- person$nam
+short_age <- person$ag
+#++++
+person: Record{age: double, name: character}
+short_name: Unknown
+short_age: Unknown
+220..223 error[type-mismatch] field `nam` does not exist in `Record{age: double, name: character}`. Did you mean `name`?
+244..246 error[type-mismatch] field `ag` does not exist in `Record{age: double, name: character}`. Did you mean `age`?
 
 #---- a_field_only_some_shapes_carry_reads_as_nullable
 # The accumulator idiom: R answers NULL for a name a list does not carry, so a

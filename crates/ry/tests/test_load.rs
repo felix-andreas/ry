@@ -1125,8 +1125,9 @@ fn ry_test_runs_testthat_against_the_loaded_package_on_both_runtimes() {
         assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
         assert!(printed.contains("broken: 1"), "{runtime}: {printed}");
         assert!(printed.contains("step: ."), "{runtime}: {printed}");
+        // The wording of a failed expectation changes between testthat versions.
         assert!(
-            printed.contains("Expected `scale` to equal 11."),
+            printed.contains("`scale`") && printed.contains("11"),
             "{runtime}: {printed}"
         );
         let output = run(Some("step"));
@@ -1277,5 +1278,188 @@ fn namespace_if_directives_are_evaluated_at_every_load_on_both_runtimes() {
             "{runtime}: {printed}"
         );
         assert!(!printed.contains("ignored"), "{runtime}: {printed}");
+    }
+}
+
+const ROXYGEN: &[(&str, &str)] = &[
+    (
+        "DESCRIPTION",
+        "Package: roxy\nTitle: Roxygen Test\nVersion: 0.1.0\nDescription: A test.\n\
+         License: MIT\nImports: R6\nEncoding: UTF-8\nRoxygen: list(markdown = TRUE)\n",
+    ),
+    (
+        "R/account.R",
+        "#' An account\n#'\n#' Holds a balance.\n#' @export\n\
+         Account <- R6::R6Class(\"Account\", public = list(\n\
+         #' @field balance The balance.\nbalance = 0,\n\
+         #' @description Deposit money.\n#' @param x How much.\n\
+         deposit = function(x) {\nself$balance <- self$balance + x\ninvisible(self)\n}\n))\n",
+    ),
+    (
+        "R/add.R",
+        "#' Add two numbers\n#'\n#' Adds `x` and `y`.\n#' @param x A number.\n\
+         #' @param y A number.\n#' @return The sum.\n#' @export\n#' @examples\n#' add(1, 2)\n\
+         add <- function(x, y = 1) x + y\n\n#' @rdname add\n#' @export\n\
+         sub2 <- function(x, y) x - y\n\n#' Print a thing\n#' @param x Thing.\n\
+         #' @param ... Unused.\n#' @export\nprint.thing <- function(x, ...) cat(\"thing\\n\")\n",
+    ),
+    (
+        "R/scale.R",
+        "#' Scale\n#' @inheritParams add\n#' @param factor How much.\n#' @importFrom stats median\n\
+         #' @export\nscale_by <- function(x, factor) x * factor\n",
+    ),
+    (
+        "R/family.R",
+        "#' Double\n#' @param x A number.\n#' @family arithmetic\n#' @export\n\
+         double_it <- function(x) x * 2\n",
+    ),
+    (
+        "R/half.R",
+        "#' Half\n#' @inheritParams double_it\n#' @family arithmetic\n#' @export\n\
+         halve <- function(x) x / 2\n",
+    ),
+];
+
+/// Every file under `root` except `.git`, by relative path, with its bytes.
+fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).expect("under root");
+                files.push((
+                    relative.display().to_string(),
+                    fs::read(&path).expect("read"),
+                ));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// `ry document` writes what `devtools::document()` writes, byte for byte, on a cold run and on
+/// each run after an edit. The later edits change only topics that unchanged files read, through
+/// `@inheritParams` and `@family`, which the cached topics of those files must not hide.
+#[test]
+fn ry_document_matches_devtools_on_both_runtimes() {
+    if !r_available() || !installed("roxygen2") || !installed("devtools") || !installed("R6") {
+        return;
+    }
+    let edits: [(&str, &str, &str); 4] = [
+        ("R/scale.R", "How much.", "How much to scale by."),
+        (
+            "R/add.R",
+            "#' @param x A number.",
+            "#' @param x A real number.",
+        ),
+        ("R/family.R", "@family arithmetic", "@family maths"),
+        ("R/family.R", "#' Double", "#' Double a number"),
+    ];
+    let edit = |root: &Path, (file, from, to): (&str, &str, &str)| {
+        let path = root.join(file);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains(from), "{file} lacks {from}");
+        fs::write(&path, text.replacen(from, to, 1)).expect("write");
+    };
+    let reference = package(ROXYGEN);
+    let devtools = || {
+        let output = Command::new("Rscript")
+            .args(["-e", "devtools::document()"])
+            .current_dir(reference.path())
+            .output()
+            .expect("run devtools");
+        assert!(output.status.success(), "{}", text(&output));
+        tree(reference.path())
+    };
+    let mut expected = vec![devtools()];
+    for step in edits {
+        edit(reference.path(), step);
+        expected.push(devtools());
+    }
+    assert!(
+        expected[0].iter().any(|(path, _)| path == "man/add.Rd"),
+        "{:?}",
+        expected[0]
+    );
+    for runtime in RUNTIMES {
+        let root = package(ROXYGEN);
+        let cache = tempfile::tempdir().expect("temp dir");
+        let document = || {
+            let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .args(["document", "--runtime", runtime])
+                .arg(root.path())
+                .env("XDG_CACHE_HOME", cache.path())
+                .output()
+                .expect("run ry document");
+            assert!(output.status.success(), "{runtime}: {}", text(&output));
+        };
+        document();
+        assert!(
+            tree(root.path()) == expected[0],
+            "{runtime}: the cold run differs"
+        );
+        for (index, step) in edits.into_iter().enumerate() {
+            edit(root.path(), step);
+            document();
+            assert!(
+                tree(root.path()) == expected[index + 1],
+                "{runtime}: the run after editing {} differs",
+                step.0
+            );
+        }
+    }
+}
+
+/// A reload after an edit under `src/` rebuilds the shared library and the session calls the
+/// new code, which on ry's runtime needs `dyn.unload` to retire the old library so the next
+/// load maps the rebuilt file instead of returning the one already open.
+#[test]
+fn a_reload_rebuilds_compiled_code_on_both_runtimes() {
+    if !r_available() || !installed("pkgbuild") {
+        return;
+    }
+    let source = |answer: u32| {
+        format!(
+            "#include <R.h>\n#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+             SEXP c_answer(void) {{ return ScalarInteger({answer}); }}\n\
+             static const R_CallMethodDef calls[] = {{{{\"c_answer\", (DL_FUNC) &c_answer, 0}}, {{NULL, NULL, 0}}}};\n\
+             void R_init_cpkg(DllInfo *info) {{ R_registerRoutines(info, NULL, calls, NULL, NULL); R_useDynamicSymbols(info, FALSE); }}\n"
+        )
+    };
+    for runtime in RUNTIMES {
+        let original = source(41);
+        let root = package(&[
+            ("DESCRIPTION", "Package: cpkg\nVersion: 1.0\n"),
+            (
+                "NAMESPACE",
+                "useDynLib(cpkg, .registration = TRUE)\nexport(answer)\n",
+            ),
+            ("R/answer.R", "answer <- function() .Call(c_answer)\n"),
+            ("src/a.c", &original),
+        ]);
+        let path = root.path().join("src/a.c").display().to_string();
+        let edit = format!(
+            "Sys.sleep(1.1); writeLines({edited:?}, {path:?}); load_all({root:?})",
+            edited = source(44),
+            root = root.path().display().to_string(),
+        );
+        let output = ry_load_on(
+            runtime,
+            root.path(),
+            &[
+                "cat('before:', answer(), '\\n')",
+                &edit,
+                "cat('after:', answer(), '\\n')",
+            ],
+        );
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("before: 41"), "{runtime}: {printed}");
+        assert!(printed.contains("after: 44"), "{runtime}: {printed}");
     }
 }

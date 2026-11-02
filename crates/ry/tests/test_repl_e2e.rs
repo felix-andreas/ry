@@ -1635,6 +1635,23 @@ fn an_editor_attaches_to_a_running_console() {
     answered.sort_unstable();
     assert_eq!(answered, (10_000..10_500).collect::<Vec<u64>>());
     client.request("rySubscribe", serde_json::json!({}));
+    // A subscribed editor gets each changed plot as svg after the command that drew it, from a
+    // default device that writes no file, starting with the first command after subscribing.
+    input.write_all(b"plot(1:10)\n").expect("type a command");
+    let plot = client.until(|message| message["event"] == "ryPlot");
+    let svg = plot["body"]["svg"].as_str().expect("svg text");
+    assert!(svg.contains("<svg") && svg.contains("</svg>"), "{plot}");
+    input
+        .write_all(b"points(2, 3, col = \"red\")\n")
+        .expect("type a command");
+    let added = client.until(|message| message["event"] == "ryPlot");
+    assert_ne!(
+        added["body"]["svg"], plot["body"]["svg"],
+        "the added point is not drawn"
+    );
+    input
+        .write_all(b"cat(names(grDevices::dev.cur()), \"\\n\")\n")
+        .expect("type a command");
     input.write_all(b"View(df)\n").expect("type a command");
     let event = client.until(|message| message["event"] == "ryView");
     assert_eq!(event["body"]["title"], "Data: df");
@@ -1650,6 +1667,14 @@ fn an_editor_attaches_to_a_running_console() {
         "{stdout}"
     );
     assert!(stdout.contains("still running"), "{stdout}");
+    assert!(
+        stdout.contains("pdf \n"),
+        "the plot device is not the console's: {stdout}"
+    );
+    assert!(
+        !project.path().join("Rplots.pdf").exists(),
+        "the console's device wrote a file"
+    );
     let left: Vec<_> = fs::read_dir(temporary.path())
         .expect("temp dir")
         .flatten()

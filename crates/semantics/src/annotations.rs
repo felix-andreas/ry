@@ -17,8 +17,9 @@ use {
     std::mem::take,
     syntax::{
         NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation_kind,
-        matching_nodes, node_text,
+        node_text,
     },
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
@@ -154,7 +155,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 let body = lowering.lower_type(&child);
                 lowering.definition_type = false;
                 annotation.declared = Some(TypeScheme {
-                    binders: take(&mut forall),
+                    binders: ThinVec::from(take(&mut forall)),
                     body,
                 });
             }
@@ -188,9 +189,12 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
+            null_unless: None,
+            reduces: None,
+            from_calls: false,
         };
         annotation.declared = Some(TypeScheme {
-            binders: forall,
+            binders: ThinVec::from(forall),
             body: Ty::new(db, TyKind::Function(function)),
         });
     }
@@ -309,7 +313,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         .map(|parameter: &Parameter<'db>| parameter.name.text(db).to_owned())
         .collect();
     annotation.declared = Some(TypeScheme {
-        binders: forall,
+        binders: ThinVec::from(forall),
         body: Ty::new(
             db,
             TyKind::Function(FunctionType {
@@ -323,6 +327,9 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         ),
     });
@@ -338,18 +345,31 @@ pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
 }
 
 /// The written inline annotations of a site, from the first to the last, so a finding
-/// about the whole annotation never covers the value or the body.
+/// about the whole annotation never covers the value or the body. Every part is a child of
+/// the site except a parameter's `: TYPE`, so the walk never enters a value or a body.
 fn inline_range(site: &SyntaxNode) -> TextRange {
-    let mut parts = matching_nodes(site, |node, parent| {
-        is_inline_annotation_kind(node.kind(), parent.map(NodeRef::kind))
-    })
-    .into_iter()
-    .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
-    .map(|node| node.text_range());
-    let Some(first) = parts.next() else {
+    let top = site.node_ref();
+    if is_inline_annotation_kind(top.kind(), site.parent().map(|parent| parent.kind())) {
         return site.text_range();
+    }
+    let mut covered: Option<TextRange> = None;
+    let mut cover = |part: TextRange| {
+        covered = Some(covered.map_or(part, |covered| covered.cover(part)));
     };
-    parts.fold(first, |covered, part| covered.cover(part))
+    for child in top.child_nodes() {
+        if child.kind() == SyntaxKind::PARAMETER_LIST {
+            for parameter in child.child_nodes() {
+                for part in parameter.child_nodes() {
+                    if part.kind() == SyntaxKind::TYPE_ASCRIPTION {
+                        cover(part.range());
+                    }
+                }
+            }
+        } else if is_inline_annotation_kind(child.kind(), Some(top.kind())) {
+            cover(child.range());
+        }
+    }
+    covered.unwrap_or_else(|| site.text_range())
 }
 
 /// One formal of a `function(...)` literal, as the parser wrote it.
@@ -525,6 +545,9 @@ pub fn merge_annotations<'db>(
                     default_reads: Vec::new(),
                     missing_tested: Vec::new(),
                     condition_only: Vec::new(),
+                    null_unless: None,
+                    reduces: None,
+                    from_calls: false,
                 }),
             ),
         }),
@@ -1660,6 +1683,9 @@ impl<'db> Lowering<'db> {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         )
     }

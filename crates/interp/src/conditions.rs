@@ -485,11 +485,27 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
+    let limit = warning_limit();
     let state = interp();
-    if state.warnings.len() < 50 {
+    if state.warnings.len() < limit {
         state.warnings.push((call, message.to_owned()));
     }
     Ok(())
+}
+
+/// How many deferred warnings are kept: `getOption("nwarnings")`, 50 by default.
+pub unsafe fn warning_limit() -> usize {
+    let option = crate::envir::get_option("nwarnings");
+    let value = if option == nil() {
+        f64::NAN
+    } else {
+        values::as_real_scalar(option)
+    };
+    if value.is_finite() && value >= 1.0 {
+        value as usize
+    } else {
+        50
+    }
 }
 
 /// A warning printed as it happens: the first line of the call, then the message on the same
@@ -532,13 +548,15 @@ pub unsafe fn print_warnings() -> R<()> {
         }
         text.push('\n');
     } else {
+        let limit = warning_limit();
         match warnings.len() {
             ..=10 => text.push_str("Warning messages:\n"),
-            count @ ..50 => text.push_str(&format!(
+            count if count < limit => text.push_str(&format!(
                 "There were {count} warnings (use warnings() to see them)\n"
             )),
-            _ => text
-                .push_str("There were 50 or more warnings (use warnings() to see the first 50)\n"),
+            _ => text.push_str(&format!(
+                "There were {limit} or more warnings (use warnings() to see the first {limit})\n"
+            )),
         }
         if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {
@@ -837,5 +855,43 @@ pub unsafe fn condition_message(condition: Sexp) -> String {
         char_str(message.element(0)).into_owned()
     } else {
         String::new()
+    }
+}
+
+/// Signals a user interrupt as GNU R's `onintr` does: an `interrupt` condition with no message
+/// or call goes to the calling handlers and to an exiting one, and only when none takes it does
+/// the interrupt unwind to top level.
+pub unsafe fn signal_interrupt() -> Unwind {
+    let signal = || -> R<Unwind> {
+        let condition = values::alloc(SexpType::List, 0)?;
+        crate::heap().root(condition);
+        values::set_attr(
+            condition,
+            symbols().class,
+            values::string_vector(&["interrupt", "condition"])?,
+        )?;
+        let saved = interp().handlers.clone();
+        let classes: [&[u8]; 2] = [b"interrupt", b"condition"];
+        while let Some(entry) = find_handler(&interp().handlers, &classes) {
+            interp().handlers = entry.next.clone();
+            if entry.calling {
+                let handler_call = values::call(entry.handler, &[condition])?;
+                if let Err(unwind) = eval::eval(handler_call, global_env()) {
+                    interp().handlers = saved;
+                    return Err(unwind);
+                }
+            } else {
+                interp().handlers = saved;
+                return Ok(jump(Jump::Return {
+                    env: entry.target,
+                    value: exiting_result(condition, nil(), entry.handler)?,
+                }));
+            }
+        }
+        interp().handlers = saved;
+        Ok(Unwind::Interrupt)
+    };
+    match signal() {
+        Ok(unwind) | Err(unwind) => unwind,
     }
 }

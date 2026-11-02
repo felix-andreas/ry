@@ -9,6 +9,8 @@
 //!
 //! `SCENARIO=<name>` runs one scenario.
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use {
     async_lsp::lsp_types::{self, Url},
     ry::server::simulation::{
@@ -19,14 +21,14 @@ use {
     std::{
         collections::{BTreeMap, VecDeque},
         fs,
-        io::BufReader,
+        io::{BufRead, BufReader, Read},
         path::{Path, PathBuf},
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
             OnceLock,
             mpsc::{self, Receiver},
         },
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -107,6 +109,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         open: BTreeMap::new(),
         last_run: None,
         debugger: None,
+        spawned: None,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -314,6 +317,56 @@ fn r_home() -> Result<&'static PathBuf, String> {
     .map_err(Clone::clone)
 }
 
+/// A `ry` with the runtime embedded, as a release ships it, alone in a directory of its own.
+/// It is built with `RY_EMBED_RUNTIME` (`crates/repl/build.rs`) and copied away, and then `ry`
+/// is built again without it, so the binary the other scenarios run is the usual one and the
+/// next `cargo test` has nothing to rebuild. Scenarios run one after another, so none of them
+/// sees the swap.
+fn single_ry() -> Result<&'static PathBuf, String> {
+    static SINGLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    SINGLE
+        .get_or_init(|| {
+            let libr = libr_path()?;
+            let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+                .parent()
+                .ok_or("the ry binary has no directory")?;
+            let release = profile_directory
+                .file_name()
+                .is_some_and(|name| name == "release");
+            let build = |embed: Option<&Path>| -> Result<(), String> {
+                let mut command = Command::new(env!("CARGO"));
+                command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
+                if release {
+                    command.arg("--release");
+                }
+                match embed {
+                    Some(library) => command.env("RY_EMBED_RUNTIME", library),
+                    None => command.env_remove("RY_EMBED_RUNTIME"),
+                };
+                let status = command
+                    .status()
+                    .map_err(|error| format!("building ry: {error}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("building ry failed".to_owned())
+                }
+            };
+            build(Some(libr))?;
+            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry");
+            fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            let single = directory.join("ry");
+            let copied = fs::copy(env!("CARGO_BIN_EXE_ry"), &single)
+                .map(|_| ())
+                .map_err(|error| format!("copying ry: {error}"));
+            build(None)?;
+            copied?;
+            Ok(single)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -328,7 +381,30 @@ struct Journey {
     open: BTreeMap<String, (i32, String)>,
     last_run: Option<Run>,
     debugger: Option<DebugSession>,
+    spawned: Option<Spawned>,
 }
+
+/// A `ry` process the journey started with `spawn` and has not stopped yet, such as a watcher.
+/// Threads forward its output as it arrives, and `await` reads it up to the line it waits for.
+struct Spawned {
+    child: Child,
+    /// Whether `stop` already killed the group and waited for the child.
+    reaped: bool,
+    lines: Receiver<(Stream, String)>,
+    /// What each stream printed so far, which `stop` keeps as the last run's output.
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// How long `await` waits for a line before the journey fails. It only bounds a hang: a line
+/// that arrives sooner is seen at once.
+const AWAIT_LIMIT: Duration = Duration::from_secs(120);
 
 impl Journey {
     fn run(&mut self, step: &Step) -> Result<(), String> {
@@ -628,6 +704,40 @@ impl Journey {
                     .ok_or(format!("no code action titled `{title}`: {response}"))?;
                 self.apply_workspace_edit(&action["edit"])
             }
+            ["refactor", path, selection, title] => {
+                let actions = self.code_actions(path, selection, "all")?;
+                let action = actions
+                    .iter()
+                    .find(|action| action["title"].as_str() == Some(title))
+                    .ok_or(format!(
+                        "no refactoring titled `{title}` over `{selection}`: {actions:?}"
+                    ))?;
+                self.apply_workspace_edit(&action["edit"])
+            }
+            ["expect", "action", path, selection, only, title] => {
+                let actions = self.code_actions(path, selection, only)?;
+                match actions
+                    .iter()
+                    .any(|action| action["title"].as_str() == Some(title))
+                {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "asking for `{only}` over `{selection}` offers no `{title}`: {actions:?}"
+                    )),
+                }
+            }
+            ["expect", "no", "action", path, selection, only, title] => {
+                let actions = self.code_actions(path, selection, only)?;
+                match actions
+                    .iter()
+                    .find(|action| action["title"].as_str() == Some(title))
+                {
+                    None => Ok(()),
+                    Some(action) => Err(format!(
+                        "asking for `{only}` over `{selection}` still offers {action}"
+                    )),
+                }
+            }
             ["expect", "fold", path, from, to] => {
                 let folds = self.request_at(RequestKind::FoldingRange, path, "", "")?;
                 let text = self.text_of(path)?;
@@ -775,18 +885,148 @@ impl Journey {
                     Err(format!("{path} lacks `{needle}`:\n{text}"))
                 }
             }
-            ["run", "ry", arguments @ ..] => {
+            ["run", program @ ("ry" | "single-ry"), arguments @ ..] => {
+                let executable = if *program == "single-ry" {
+                    single_ry()?.clone()
+                } else {
+                    // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test
+                    // only builds it for the scenario's R home.
+                    if matches!(arguments.first(), Some(&("build" | "install"))) {
+                        r_home()?;
+                    }
+                    PathBuf::from(env!("CARGO_BIN_EXE_ry"))
+                };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                let output = Command::new(executable)
                     .args(arguments)
                     .current_dir(&self.root)
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .env_remove("RY_LIBR")
                     .output()
                     .map_err(|error| format!("running ry: {error}"))?;
                 self.last_run = Some(Run {
                     code: output.status.code().unwrap_or(-1),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+                Ok(())
+            }
+            ["spawn", "ry", arguments @ ..] => {
+                if self.spawned.is_some() {
+                    return Err("a spawned process is still running; `stop` it first".to_owned());
+                }
+                let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
+                command
+                    .args(arguments)
+                    .current_dir(&self.root)
+                    .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                // Its own group, so `stop` can end the R session it starts along with it.
+                #[cfg(unix)]
+                command.process_group(0);
+                let mut child = command
+                    .spawn()
+                    .map_err(|error| format!("spawning ry: {error}"))?;
+                let (sender, lines) = mpsc::channel();
+                let stdout = child.stdout.take().ok_or("ry has no stdout")?;
+                let stderr = child.stderr.take().ok_or("ry has no stderr")?;
+                for (stream, reader) in [
+                    (Stream::Stdout, Box::new(stdout) as Box<dyn Read + Send>),
+                    (Stream::Stderr, Box::new(stderr)),
+                ] {
+                    let sender = sender.clone();
+                    std::thread::spawn(move || {
+                        for line in BufReader::new(reader).lines() {
+                            let Ok(line) = line else { break };
+                            if sender.send((stream, line)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                self.spawned = Some(Spawned {
+                    child,
+                    reaped: false,
+                    lines,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+                Ok(())
+            }
+            ["await", stream @ ("stdout" | "stderr"), needle, rest @ ..] => {
+                let not_first = match rest {
+                    [] => None,
+                    ["before", other] => Some(*other),
+                    _ => {
+                        return Err(
+                            "expected `await STREAM \"needle\" [before \"other\"]`".to_owned()
+                        );
+                    }
+                };
+                let spawned = self.spawned.as_mut().ok_or("no `spawn` step came before")?;
+                let wanted = if *stream == "stdout" {
+                    Stream::Stdout
+                } else {
+                    Stream::Stderr
+                };
+                let deadline = Instant::now() + AWAIT_LIMIT;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let (from, line) = spawned.lines.recv_timeout(remaining).map_err(|_| {
+                        format!(
+                            "{stream} never printed `{needle}`\nstdout:\n{}\nstderr:\n{}",
+                            spawned.stdout, spawned.stderr
+                        )
+                    })?;
+                    let output = match from {
+                        Stream::Stdout => &mut spawned.stdout,
+                        Stream::Stderr => &mut spawned.stderr,
+                    };
+                    output.push_str(&line);
+                    output.push('\n');
+                    if from == wanted && line.contains(needle) {
+                        return Ok(());
+                    }
+                    if from == wanted
+                        && let Some(other) = not_first
+                        && line.contains(other)
+                    {
+                        return Err(format!("{stream} printed `{line}` before `{needle}`"));
+                    }
+                }
+            }
+            ["stop"] => {
+                let mut spawned = self.spawned.take().ok_or("no `spawn` step came before")?;
+                kill_group(&mut spawned.child)?;
+                spawned.reaped = true;
+                // The readers end once every process of the group has closed the pipes, so this
+                // drains everything they printed; a process that left the group would hold them
+                // open, which the limit turns into a failure instead of a hang.
+                let deadline = Instant::now() + AWAIT_LIMIT;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let (from, line) = match spawned.lines.recv_timeout(remaining) {
+                        Ok(received) => received,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(
+                                "a process ry started kept its output open after `stop`".to_owned()
+                            );
+                        }
+                    };
+                    let output = match from {
+                        Stream::Stdout => &mut spawned.stdout,
+                        Stream::Stderr => &mut spawned.stderr,
+                    };
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+                self.last_run = Some(Run {
+                    code: -1,
+                    stdout: std::mem::take(&mut spawned.stdout),
+                    stderr: std::mem::take(&mut spawned.stderr),
                 });
                 Ok(())
             }
@@ -1134,6 +1374,38 @@ impl Journey {
         self.request_offset(kind, path, offset, new_name)
     }
 
+    /// The code actions over the first occurrence of `selection` in the buffer. `only` is a code
+    /// action kind such as `refactor.extract`, which limits the answer as an editor's refactor
+    /// menu does, or `all` for every kind.
+    fn code_actions(
+        &mut self,
+        path: &str,
+        selection: &str,
+        only: &str,
+    ) -> Result<Vec<Value>, String> {
+        let start = self.find(path, selection)?;
+        let text = self.text_of(path)?;
+        let range = lsp_types::Range::new(
+            position_of(&text, start, self.options.utf8),
+            position_of(&text, start + selection.len(), self.options.utf8),
+        );
+        let only = match only {
+            "all" => None,
+            kind => Some(vec![lsp_types::CodeActionKind::from(kind.to_owned())]),
+        };
+        let uri = self.uri(path);
+        let editor = self.editor();
+        let id = editor.code_action(&uri, range, only);
+        editor.settle();
+        match editor.take_response(id) {
+            Some(Ok(Value::Null)) => Ok(Vec::new()),
+            Some(Ok(Value::Array(actions))) => Ok(actions),
+            Some(Ok(value)) => Err(format!("the code action response is not a list: {value}")),
+            Some(Err(error)) => Err(format!("the code action request failed: {error:?}")),
+            None => Err("the code action request got no response from an idle server".to_owned()),
+        }
+    }
+
     fn diagnostics(&mut self, path: &str) -> Result<Vec<String>, String> {
         let report = self.request_offset(RequestKind::Diagnostic, path, 0, "")?;
         let items = report["items"].as_array().cloned().unwrap_or_default();
@@ -1405,6 +1677,41 @@ impl DebugSession {
                 .push_str(message["body"]["output"].as_str().unwrap_or_default());
         } else if message["type"] == "event" {
             self.events.push_back(message);
+        }
+    }
+}
+
+/// Kills `child` and every process it started, such as the R session a runtime runs in, which
+/// would otherwise keep the output pipes open.
+fn kill_group(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .status()
+            .map_err(|error| format!("running kill: {error}"))?;
+        if !status.success() {
+            return Err(format!("kill failed: {status}"));
+        }
+    }
+    #[cfg(not(unix))]
+    child
+        .kill()
+        .map_err(|error| format!("killing ry: {error}"))?;
+    child
+        .wait()
+        .map_err(|error| format!("waiting for ry: {error}"))?;
+    Ok(())
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        // A journey that failed while the process ran must not leave it, or the R session it
+        // started, running; the group outlives a `ry` that already exited on its own.
+        if !self.reaped
+            && let Err(error) = kill_group(&mut self.child)
+        {
+            eprintln!("stopping the spawned ry: {error}");
         }
     }
 }

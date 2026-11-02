@@ -33,7 +33,11 @@ pub fn poll_interrupt() -> R<()> {
                 return Ok(());
             }
         }
-        return Err(interp().parked_unwind.take().unwrap_or(Unwind::Interrupt));
+        return Err(match interp().parked_unwind.take() {
+            Some(unwind) => unwind,
+            // SAFETY: polls happen at call boundaries and loop back edges, where R code may run.
+            None => unsafe { crate::conditions::signal_interrupt() },
+        });
     }
     Ok(())
 }

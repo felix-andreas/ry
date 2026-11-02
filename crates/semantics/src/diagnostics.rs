@@ -8,7 +8,7 @@ use {
         },
         check::{
             ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
-            TypeError, TypeErrorKind, column_element,
+            TypeError, TypeErrorKind, alias_cycle_walk, column_element,
         },
         comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
@@ -675,6 +675,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(duplicate_binding_diagnostics(db, file));
     diagnostics.extend(duplicate_type_diagnostics(db, file));
     diagnostics.extend(unknown_type_diagnostics(db, file));
+    diagnostics.extend(alias_cycle_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
 
@@ -803,9 +804,14 @@ fn classify_non_local_read(
     {
         return NonLocalRead::Resolvable;
     }
-    // A near-miss of a name the project itself binds (including the item's locals
-    // and parameters) is a typo, reported even under the blanket tolerance. It is
-    // checked before the stub corpus because it is the likelier intent.
+    // An attached package ry knows nothing about may export any name, including one a
+    // letter away from a project name (stringi's `stri_dup` beside stringr's `str_dup`),
+    // so the blanket tolerance wins over the near-miss heuristic.
+    if imports_every_name(db) {
+        return NonLocalRead::Tolerated;
+    }
+    // A near-miss of a name the project itself binds (including the item's locals and
+    // parameters) is checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
             project_typo_suggestion(db, files, Name::new(db, name), test_files.is_some())
@@ -819,13 +825,42 @@ fn classify_non_local_read(
                     .map(|binding| binding.name.as_str()),
             )
         });
-    if project_typo.is_none() && imports_every_name(db) {
-        return NonLocalRead::Tolerated;
-    }
     NonLocalRead::Unresolved {
         suggestion: project_typo
             .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
+}
+
+/// An alias whose expansion reaches itself never becomes a type. It is reported at each
+/// declaration on the cycle, including one no annotation uses; a use only compares like
+/// `Unknown`, so the one mistake is reported once, where the fix goes.
+fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let table = TypeDefinitions::of(db, file);
+    let mut diagnostics = Vec::new();
+    for (name, range) in type_declaration_sites(db, file) {
+        let interned = Name::new(db, name.as_str());
+        let Some(definition) = table.get(db, interned) else {
+            continue;
+        };
+        if !definition.alias {
+            continue;
+        }
+        let mut expanding = FxHashSet::default();
+        expanding.insert(interned);
+        if alias_cycle_walk(db, table, definition.body, &mut expanding).as_deref()
+            == Some(name.as_str())
+        {
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "annotation",
+                format!(
+                    "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                ),
+            ));
+        }
+    }
+    diagnostics
 }
 
 /// Without this, a misspelled type name would silently become an opaque nominal.
@@ -1648,10 +1683,11 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "Tuple",
 ];
 
+/// Each named definition with its name's range and its item's position in the file.
 #[salsa::tracked(returns(ref))]
-fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
+fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange, usize)> {
     let mut sites = Vec::new();
-    for &item in item_tree(db, file) {
+    for (index, &item) in item_tree(db, file).iter().enumerate() {
         if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
@@ -1661,7 +1697,7 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
         let Some(range) = item_name_range(db, item) else {
             continue;
         };
-        sites.push((name, range));
+        sites.push((name, range, index));
     }
     sites
 }
@@ -1675,8 +1711,9 @@ fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, 
         .clone()
 }
 
-/// Each site warns: per-site winner semantics make every earlier binding dead.
-/// Ranges are read only for files involved in a duplication.
+/// Each site warns: per-site winner semantics make every earlier binding dead, unless code
+/// that runs before the later binding reads the earlier value. Ranges are read only for files
+/// involved in a duplication.
 fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
@@ -1696,25 +1733,39 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     }
     let mut diagnostics = Vec::new();
     for name in own_duplicated {
-        let mut sites: Vec<(SourceFile, TextRange)> = Vec::new();
+        let mut sites: Vec<DefinitionSite> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
         for &site_file in &map[&name] {
             if seen_files.contains(&site_file) {
                 continue;
             }
             seen_files.push(site_file);
-            for (site_name, range) in top_level_name_sites(db, site_file) {
+            for (site_name, range, item_index) in top_level_name_sites(db, site_file) {
                 if *site_name == name {
-                    sites.push((site_file, *range));
+                    sites.push(DefinitionSite {
+                        file: site_file,
+                        range: *range,
+                        item_index: *item_index,
+                    });
                 }
             }
         }
-        for (index, &(site_file, range)) in sites.iter().enumerate() {
-            if site_file != file {
+        // `overwritten[i]`: the binding at site `i` is replaced before anything reads it.
+        let overwritten: Vec<bool> = sites
+            .windows(2)
+            .map(|pair| !earlier_value_read(db, name, pair[0], pair[1]))
+            .collect();
+        for (index, site) in sites.iter().enumerate() {
+            if site.file != file {
                 continue;
             }
-            if index > 0 {
-                let (earlier_file, earlier_range) = sites[index - 1];
+            let range = site.range;
+            if index > 0 && overwritten[index - 1] {
+                let DefinitionSite {
+                    file: earlier_file,
+                    range: earlier_range,
+                    ..
+                } = sites[index - 1];
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Warning,
@@ -1730,8 +1781,14 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     }],
                 });
             }
-            if index + 1 < sites.len() {
-                let (later_file, later_range) = sites[index + 1];
+            if let Some(later) = sites.get(index + 1)
+                && overwritten[index]
+            {
+                let DefinitionSite {
+                    file: later_file,
+                    range: later_range,
+                    ..
+                } = *later;
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Warning,
@@ -1750,6 +1807,100 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
         }
     }
     diagnostics
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DefinitionSite {
+    file: SourceFile,
+    range: TextRange,
+    item_index: usize,
+}
+
+/// Whether top-level code that runs between two definitions of `name`, the later one's own
+/// right-hand side included, reads the earlier value. Then both bindings are used: a script
+/// temporary reassigned after use (`tmp <- 1; first <- tmp * 2; tmp <- 5`), an update that
+/// reads the old value (`x <- c(x, 3)`), and a `setGeneric("f")` that turns the existing
+/// function into the generic's default method. Reads inside function bodies run later and see only
+/// the final binding, so they do not count. Files collated between the two are not scanned.
+fn earlier_value_read(
+    db: &dyn Db,
+    name: Symbol,
+    earlier: DefinitionSite,
+    later: DefinitionSite,
+) -> bool {
+    let earlier_items = item_tree(db, earlier.file);
+    let between: Vec<_> = if earlier.file == later.file {
+        earlier_items
+            .get(earlier.item_index + 1..=later.item_index)
+            .unwrap_or_default()
+            .to_vec()
+    } else {
+        let later_items = item_tree(db, later.file);
+        earlier_items
+            .get(earlier.item_index + 1..)
+            .unwrap_or_default()
+            .iter()
+            .chain(later_items.get(..=later.item_index).unwrap_or_default())
+            .copied()
+            .collect()
+    };
+    between.into_iter().any(|item| {
+        item_naming(db, item).as_ref().is_some_and(|naming| {
+            naming.non_locals.iter().any(|(expression, read)| {
+                *read == name && !naming.deferred_non_locals.contains(expression)
+            }) || naming.quiet_reads.iter().any(|(expression, read)| {
+                *read == name && !naming.deferred_quiet_reads.contains(expression)
+            })
+            // A statement that also writes the name, such as a loop doing
+            // `rownum <- rownum + 1`, reads the earlier value on the path before its own write.
+            || naming.maybe_undefined.iter().any(|expression| {
+                naming
+                    .resolutions
+                    .get(expression)
+                    .and_then(|slot| naming.bindings.get(slot))
+                    .is_some_and(|binding| {
+                        binding.kind == BindingKind::TopLevel && binding.name == name
+                    })
+            })
+        }) || generic_over_existing_function(db, item)
+    })
+}
+
+/// `setGeneric("f")` without a `def` builds the generic from the existing function `f`, and
+/// with one it makes `f` the default method unless `useAsDefault` names another.
+fn generic_over_existing_function(db: &dyn Db, item: crate::Item<'_>) -> bool {
+    let Some(module) = item_hir(db, item) else {
+        return false;
+    };
+    let Some(root) = module.root else {
+        return false;
+    };
+    let ExpressionKind::Call { callee, arguments } = module.kind(root) else {
+        return false;
+    };
+    let callee_name = match module.kind(*callee) {
+        ExpressionKind::NameRef(name) => Some(name.as_str()),
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } => Some(name.as_str()),
+        _ => None,
+    };
+    if callee_name != Some("setGeneric") {
+        return false;
+    }
+    let arguments = &module[arguments];
+    let named = |wanted: &str| {
+        arguments
+            .iter()
+            .any(|argument| module.argument_name(argument).as_deref() == Some(wanted))
+    };
+    let has_def = named("def")
+        || arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .nth(1)
+            .is_some();
+    !(has_def && named("useAsDefault"))
 }
 
 #[salsa::tracked(returns(ref))]
@@ -2212,7 +2363,7 @@ pub(crate) fn nearest_name<'a>(
     candidates: impl Iterator<Item = &'a str>,
 ) -> Option<String> {
     let name_characters: Vec<char> = name.chars().collect();
-    if name_characters.len() < 4 {
+    if name_characters.len() < 2 {
         return None;
     }
     // A standard-library name such as `Str.split` is usually the start of a longer one
@@ -2229,6 +2380,20 @@ pub(crate) fn nearest_name<'a>(
         if let Some(candidate) = completion {
             return Some((*candidate).to_owned());
         }
+    }
+    // A short name is one substitution away from many unrelated names (`df` and `dt`), so it
+    // gets a suggestion only when exactly one candidate is the name with one character
+    // inserted, as `name` is for `nam` and `nme`.
+    if name_characters.len() < 4 {
+        let mut extensions = candidates.iter().filter(|candidate| {
+            let mut characters = candidate.chars();
+            candidate.chars().count() == name_characters.len() + 1
+                && name_characters
+                    .iter()
+                    .all(|wanted| characters.any(|character| character == *wanted))
+        });
+        let first = extensions.next()?;
+        return extensions.next().is_none().then(|| (*first).to_owned());
     }
     let candidates = candidates.into_iter();
     let budget = if name_characters.len() >= 8 { 2 } else { 1 };
@@ -2504,7 +2669,17 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 assignment_targets.insert(*value, *name);
             }
         }
+        let naming = item_naming(db, item);
         for origin in &check.strict_origins {
+            // An unresolved `pkg::name` is already reported as unresolved, and that finding
+            // names the fix; a second one saying its type is unknown adds nothing.
+            if naming
+                .as_ref()
+                .and_then(|naming| naming.namespace_reads.get(&origin.expression))
+                .is_some_and(|read| namespace_read_message(db, read).is_some())
+            {
+                continue;
+            }
             // Loop-widened and recursive origins are about the named binding.
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_)
@@ -2700,8 +2875,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         TypeErrorKind::ArityMismatch { expected, found } => {
             if found < expected {
+                // Only a function type without parameter names reaches here, so the missing
+                // arguments are named by position.
+                let missing = if expected - found == 1 {
+                    format!("argument {expected} is missing")
+                } else {
+                    format!("arguments {} to {expected} are missing", found + 1)
+                };
                 format!(
-                    "this call supplies {found} positional {}, but the function requires {expected}, so a required argument is missing",
+                    "this call supplies {found} positional {}, but the function requires {expected}: {missing}",
                     plural(*found, "argument", "arguments"),
                 )
             } else {
@@ -2711,7 +2893,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 )
             }
         }
-        TypeErrorKind::MissingArguments { names } => {
+        TypeErrorKind::MissingArguments { names, misspelled } => {
             let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
             let listed = match quoted.split_last() {
                 Some((last, [])) => last.clone(),
@@ -2720,7 +2902,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             // A declared required parameter need not be read, so the reason is the
             // signature's, not the body's.
-            format!("this call leaves out {listed}, which the function requires")
+            let hint = misspelled
+                .as_ref()
+                .map(|(argument, nearest)| {
+                    format!(
+                        ". `{argument}` names no parameter, so it goes to `...`. Did you mean `{nearest}`?"
+                    )
+                })
+                .unwrap_or_default();
+            format!("this call leaves out {listed}, which the function requires{hint}")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,
@@ -2772,9 +2962,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             format!(
                 "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
             )
-        }
-        TypeErrorKind::AliasCycle { name } => {
-            format!("Type alias `{name}` expands in a cycle.")
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",
