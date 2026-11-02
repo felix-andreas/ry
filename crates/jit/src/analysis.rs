@@ -594,6 +594,14 @@ pub enum Action<'a> {
         slot: usize,
         ty: Ty,
     },
+    /// Builds the record, tuple or tag of `layout` from registers `base..base + count`, an
+    /// unboxed number going into its slot without being boxed.
+    Construct {
+        dst: usize,
+        layout: u32,
+        base: usize,
+        count: usize,
+    },
     /// Copies an unboxed scalar between registers.
     Move {
         dst: usize,
@@ -1673,10 +1681,57 @@ impl<'a> Builder<'a> {
                     },
                 }
             }
-            Op::MatchFail => self.opaque_step(state, None, &[], Effect::Opaque),
-            Op::Construct => {
-                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Pure)
+            // It always signals an error, so nothing runs after it, and the state it leaves
+            // must not widen the join after the `match`: no register holds a value there, and
+            // the frame's types stand.
+            Op::MatchFail => {
+                let action = self.opaque_step(state, None, &[], Effect::PureUnlessObserved);
+                state.registers.fill(Ty::Bottom);
+                action
             }
+            Op::Construct => {
+                state.registers[operand(0)] = Ty::Boxed;
+                state.visible = Some(true);
+                Action::Construct {
+                    dst: operand(0),
+                    layout: operand(1) as u32,
+                    base: operand(2),
+                    count: operand(3),
+                }
+            }
+            Op::Move => {
+                let ty = state.registers[operand(1)];
+                state.registers[operand(0)] = ty;
+                Action::Move {
+                    dst: operand(0),
+                    src: operand(1),
+                    ty,
+                }
+            }
+            // The expression runs R code in a scratch frame, which may read any variable.
+            Op::BoundEval => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::MatchCondition => match state.registers[operand(1)] {
+                Ty::Lgl => {
+                    state.registers[operand(0)] = Ty::Lgl;
+                    Action::Move {
+                        dst: operand(0),
+                        src: operand(1),
+                        ty: Ty::Lgl,
+                    }
+                }
+                // Reading a condition runs no R code, but `NA` or a record signals an error.
+                _ => self.opaque_step(
+                    state,
+                    Some((operand(0), Ty::Lgl)),
+                    &[],
+                    Effect::PureUnlessObserved,
+                ),
+            },
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -2547,7 +2602,12 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|&register| state.registers[register])
             .collect();
-        if untagged && let Some((intrinsic, result)) = intrinsic_for(name, &types) {
+        if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
+            // A list element is boxed, so its type comes from what the site has read so far,
+            // which the compiled read checks before it unboxes the element.
+            if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
+                result = feedback;
+            }
             state.registers[dst] = result;
             state.visible = Some(true);
             return Ok(Action::Intrinsic {
@@ -3008,6 +3068,20 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             for register in operand(2)..operand(2) + operand(3) {
                 gen_(register, live);
             }
+        }
+        Op::Move => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
+        }
+        Op::BoundEval => {
+            kill(operand(0), live);
+            for register in operand(3)..operand(3) + operand(4) {
+                gen_(register, live);
+            }
+        }
+        Op::MatchCondition => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
         }
         Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {

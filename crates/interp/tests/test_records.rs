@@ -326,6 +326,43 @@ const PRINTS: &[(&str, &str)] = &[
         "{ f <- function(v) match (v) { :Some(x) if (x > 1) => x, :Some(x) => -x, :None => 0 }; for (i in 1:4) r <- c(f(:Some(3)), f(:Some(1)), f(:None)); r }",
         "[1]  3 -1  0\n",
     ),
+    // A compiled guard sees the pattern's names and the function's variables, and runs in a
+    // scratch frame: an assignment in it, or a failing guard, leaves the function's frame alone.
+    (
+        "{ f <- function(v, k) match (v) { (a, b) if (a + b > k) => \"big\", (a, _) if (a < 0) => \"neg\", _ => \"small\" }; for (i in 1:4) r <- c(f((5, 6), 10), f((-1, 2), 10), f((1, 2), 10)); r }",
+        "[1] \"big\"   \"neg\"   \"small\"\n",
+    ),
+    (
+        "{ f <- function(v) { y <- \"outer\"; r <- match (v) { :Some(x) if ({ y <- \"guard\"; x > 1 }) => x, _ => 0 }; c(r, y) }; for (i in 1:4) out <- c(f(:Some(3)), f(:Some(0))); out }",
+        "[1] \"3\"     \"outer\" \"0\"     \"outer\"\n",
+    ),
+    // A guard reads the pattern's names from registers, even where a call it cannot inline
+    // runs in a scratch frame: a closure's promises, `[[` dispatch, a `$` on a list, or a base
+    // function the program has redefined.
+    (
+        "{ is_big <- function(n) n > 2; f <- function(v) { x <- 0; match (v) { :Some(x) if (is_big(x)) => \"big\", _ => \"small\" } }; for (i in 1:4) r <- c(f(:Some(3)), f(:Some(1))); r }",
+        "[1] \"big\"   \"small\"\n",
+    ),
+    (
+        "{ f <- function(p) match (p) { (v, i) if (v[[i]] > 1) => \"yes\", _ => \"no\" }; for (k in 1:4) r <- c(f((c(1, 5), 2L)), f((c(1, 5), 1L))); r }",
+        "[1] \"yes\" \"no\" \n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :Some(p) if (p$n > 1) => p$n, _ => 0 }; for (k in 1:4) r <- c(f(:Some((n = 3, m = 0))), f(:Some(list(n = 5))), f(:Some((n = 1, m = 0)))); r }",
+        "[1] 3 5 0\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :Some(x) if (abs(x) > 1) => 1, _ => 0 }; for (k in 1:4) f(:Some(2)); abs <- function(z) 0; c(f(:Some(2)), f(:Some(-3))) }",
+        "[1] 0 0\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { :Some(s) if (s != \"ab\") => s, _ => \"short\" }; for (k in 1:4) r <- c(f(:Some(\"abcd\")), f(:Some(\"ab\"))); r }",
+        "[1] \"abcd\"  \"short\"\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { (x, x) if (x == 1) => \"first\", _ => \"other\" }; c(f((1, 2)), f((1, 2)), f((1, 2)), f((2, 1))) }",
+        "[1] \"other\" \"other\" \"other\" \"first\"\n",
+    ),
     (
         "{ f <- function(v) match (v) { :A => 1 }; for (i in 1:4) f(:A); f(:B) }",
         "Error in match (v) { : no arm of this `match` matches :B\n",
@@ -425,6 +462,10 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "match (1) { v if (NA) => v }",
+        "missing value where TRUE/FALSE needed",
+    ),
+    (
+        "{ f <- function(v) match (v) { x if (x) => 1, _ => 0 }; for (i in 1:4) f(TRUE); f(NA) }",
         "missing value where TRUE/FALSE needed",
     ),
     (

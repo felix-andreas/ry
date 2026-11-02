@@ -759,6 +759,30 @@ impl Heap {
         Ok(object)
     }
 
+    /// An immutable record from slots compiled code already split into raw numbers and handles,
+    /// so a number never has to be boxed on its way in. A [`Slot::Real`] must not carry a bit
+    /// pattern [`slot_for`] keeps as a handle, and only the first [`crate::object::UNBOXED_SLOTS`] may be raw.
+    pub unsafe fn alloc_record_slots(&mut self, layout: u32, slots: &[Slot]) -> HeapResult<Sexp> {
+        let size = object_size(SexpType::Record, slots.len()).ok_or(HeapError::TooLong)?;
+        if slots.len() > u32::MAX as usize {
+            return Err(HeapError::TooLong);
+        }
+        let handles: smallvec::SmallVec<[Sexp; 4]> = slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Handle(handle) => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        let object = self.allocate(SexpType::Record, size, &handles)?;
+        for handle in &handles {
+            handle.increment_refcount();
+        }
+        object.init_record(layout, slots);
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
     /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
     /// decides.
     pub unsafe fn set_record_slot(&mut self, record: Sexp, index: usize, value: Sexp) {
