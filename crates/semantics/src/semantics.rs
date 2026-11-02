@@ -1789,7 +1789,9 @@ pub fn project_interface_groups<'db>(db: &'db dyn Db, files: ProjectFiles) -> In
         if !cyclic(db, members) {
             return;
         }
-        let index = groups.members.len() as u32;
+        let Ok(index) = u32::try_from(groups.members.len()) else {
+            panic!("project_interface_groups: more than u32::MAX cyclic groups");
+        };
         groups
             .group_of
             .extend(members.iter().map(|&member| (member, index)));

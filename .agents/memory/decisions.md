@@ -5206,3 +5206,31 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   cold-check target is not met, and the rest of the profile is flat across mimalloc, salsa's
   dependency edges, hashing, parse, HIR lowering and naming (`backlog.md`, "Check cache
   follow-ups").
+
+## One-shot checks record coarse dependencies
+
+- **Previous shape.** `ry check --no-cache` ran on the same database shape as the language server:
+  every cross-item name lookup interned a `QueryName` and went through the tracked `package_name` or
+  `test_name` firewall, and every item found its cyclic group with its own `interface_group` walk.
+  That recorded about 340 k salsa edges for name lookups alone, which a check that never edits
+  never replays. Separately, the token-only green builder had stopped sharing nodes, which cost
+  about 70 MiB of peak memory.
+- **Target shape.**
+  - `Db::one_shot()` (true only for `RootDatabase::one_shot`, which `ry check` uses) switches
+    `name_layer` to read `package_definitions` and the conditional-writer maps directly, and
+    `item_group` to read `project_interface_groups`, one iterative Tarjan walk over every item.
+    Every read still goes through salsa, so the answers are the same facts at a coarser
+    dependency granularity. Under `enable_invariants()` both are compared against the per-name and
+    per-item answers, and `test_incremental.rs` pins that the one-shot path runs no firewall
+    query, reports the same findings, and that the incremental path keeps its firewalls.
+  - `ry check` runs the group walk once on a throwaway database handle. It records one edge per
+    item, salsa keeps that capacity in the handle's reused query-stack frame, and every later query
+    at the same depth then cleared a table sized for the project (about 0.75 G instructions,
+    depending on which thread ran the walk).
+  - The tree builder shares nodes of at most three children again, keyed by kind and the
+    addresses of their already shared children, so the key never reads text.
+  - The global allocator enters mimalloc through `mi_malloc` and friends when the alignment is at
+    most 16 and no larger than the size; the `mimalloc` crate always took the aligned path.
+- **Impact.** Callgrind on the finance bench went from 22.8 G to 22.0 G instructions, and
+  interleaved medians from 1.60 s to 1.48 s wall, 5.2 s to 4.8 s of CPU and 445 to 431 MiB, with
+  byte-identical findings. The 1 s target is not met (`backlog.md`, "Check cache follow-ups").
