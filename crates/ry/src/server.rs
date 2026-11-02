@@ -1354,9 +1354,12 @@ impl Worker {
         let (file, text) = self.document(&item.uri)?;
         let offset = self.to_offset(&text, item.selection_range.start);
         let files = ProjectFiles::get(&self.db);
+        // An item's call ranges are relative to its own document, so an item whose name
+        // resolves to a function defined in another file has no answer to give in that one.
         self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
             .ok()
             .flatten()
+            .filter(|resolved| resolved.file == file)
     }
 
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
