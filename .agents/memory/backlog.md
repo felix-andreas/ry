@@ -549,9 +549,12 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `sum`, `sqrt`, `[` on a vector, element-wise arithmetic; `analysis.rs`, `builtin_result`) no
   longer block it, so `vasicek_paths` compiles at its first call. A builtin outside that table
   whose result feeds arithmetic, or `m[i, ]`, still declines as COLD until feedback arrives.
-- **Cold-code cost of typing is unmeasured.** finbench's typed variant uses `#:` comments, which
-  never reach the runtime, so measuring typed against untyped with the JIT on needs an
-  inline-annotated variant (or the strict session's typed finbench) first.
+- **ry's tier 0 trails GNU R on whole test suites.** Typed beats untyped at runtime (finbench
+  30-file slice, callgrind, analysis excluded: typed 71.5G against untyped 72.1G with the JIT on,
+  71.7G against 73.7G off), but wall clock is level with GNU R or up to 15% behind (finbench about
+  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT; the
+  remaining tier cost is Cranelift compile time and `jit_load`/`jit_step` glue. A cold strict
+  check of the typed package costs about 4G instructions (0.5 s) once per binary.
 - **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
   `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
   `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
