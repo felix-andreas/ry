@@ -1,0 +1,113 @@
+#==== deferred_s4
+#---- a_package_s4_model_is_held_back
+#~~~~ R/a.R
+SIDES <- 4
+Sq <- setClass("Sq", representation(side = "numeric"))
+setValidity("Sq", function(object) TRUE)
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", signature("Sq"), function(shape) shape@side^2)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 SIDES <- 4
+hold back R/a.R:2 Sq <- setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:3 setValidity("Sq", function(object) TRUE)
+hold back R/a.R:4 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:5 setMethod("area", signature("Sq"), function(shape) shape@side^2)
+placeholders .__C__Sq .__T__area:demo Sq area
+sync exports
+run .onLoad
+
+#---- a_statement_that_uses_a_class_during_the_load
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setGeneric("area", function(shape) standardGeneric("area"))
+ORIGIN <- new("Sq", side = 0)
+setMethod("area", "Sq", function(shape) shape@side^2)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
+run R/a.R:3 ORIGIN <- new("Sq", side = 0)
+hold back R/a.R:4 setMethod("area", "Sq", function(shape) shape@side^2)
+placeholders .__C__Sq .__T__area:demo area
+sync exports
+run .onLoad
+
+#---- a_method_on_an_external_generic_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setMethod("show", "Sq", function(object) cat("square\n"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 setMethod("show", "Sq", function(object) cat("square\n"))
+sync exports
+run .onLoad
+
+#---- a_replacement_method_without_a_package_generic_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setGeneric("area", function(shape) standardGeneric("area"))
+setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
+run R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+sync exports
+run .onLoad
+
+#---- a_replacement_method_on_a_package_generic_is_held_back
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setGeneric("area<-", function(shape, value) standardGeneric("area<-"))
+setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setGeneric("area<-", function(shape, value) standardGeneric("area<-"))
+hold back R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
+placeholders .__C__Sq .__T__area<-:demo area<-
+sync exports
+run .onLoad
+
+#---- a_reference_class_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+Account <- setRefClass("Account", fields = list(total = "numeric"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 Account <- setRefClass("Account", fields = list(total = "numeric"))
+sync exports
+run .onLoad
+
+#---- a_definition_that_reads_a_later_name_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"), prototype(side = DEFAULT))
+DEFAULT <- 1
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"), prototype(side = DEFAULT))
+run R/a.R:2 DEFAULT <- 1
+sync exports
+run .onLoad
+
+#---- a_generator_also_written_elsewhere_keeps_everything_eager
+#~~~~ R/a.R
+Sq <- setClass("Sq", representation(side = "numeric"))
+Sq <- function(...) new("Sq", ...)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 Sq <- setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 Sq <- function(...) new("Sq", ...)
+sync exports
+run .onLoad
