@@ -2045,6 +2045,24 @@ pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
     runtime().heap.root(object);
     let kind = object.kind();
     let count = length(object)?;
+    // A built-in class that keeps its expansion as a plain vector in data1 or data2, as
+    // compact sequences do once expanded, hands that vector out instead of a fresh copy, so
+    // each read of a long `1:n` does not copy it. It is marked shared, because writing into it
+    // would change the ALTREP object too. A package's class keeps the copy, since its
+    // `Dataptr` may refuse or do work that its region method avoids.
+    if let Method::Builtin(dataptr) = methods(object).dataptr {
+        let pointer = dataptr(object, false)?.cast_const();
+        for slot in [object.car(), object.cdr()] {
+            if slot.kind() == kind
+                && !slot.is_altrep()
+                && slot.length() == count as isize
+                && slot.data().cast_const() == pointer
+            {
+                slot.mark_not_mutable();
+                return Ok(slot);
+            }
+        }
+    }
     let copy = runtime().heap.alloc_vector(kind, count)?;
     runtime().heap.root(copy);
     match kind {

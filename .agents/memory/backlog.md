@@ -2301,10 +2301,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
 - **Only long sequences are compact.** `1:n`, `n:1` and `seq_len(n)` of at least 2^20 elements are
-  libr's `compact_intseq` (`integer_sequence` in `crates/interp/src/arith.rs`); shorter ones are
-  ordinary vectors, so `serialize(1:10)` writes plain `INTSXP` where GNU R writes `ALTREP_SXP`,
-  and `seq()` and `seq_along()` never return compact ones. Most interpreter paths still expand a
-  compact sequence on first read rather than computing elements.
+  libr's compact sequences (`sequence` in `crates/interp/src/arith.rs`; doubles past `INT_MAX`);
+  shorter ones are ordinary vectors, so `serialize(1:10)` writes plain `INTSXP` where GNU R
+  writes `ALTREP_SXP`, and `seq()` and `seq_along()` never return compact ones. Interpreter
+  paths expand a compact sequence on first read (once, kept in data2) rather than computing
+  elements, so subsetting `seq_len(2^31)` allocates 16 GB where GNU R reads elements.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
