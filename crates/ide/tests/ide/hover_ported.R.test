@@ -755,3 +755,29 @@ references: none
 rename: none
 signature: none
 completion (128+): a, b, x, f, break, else, FALSE, for
+
+#---- base_argument_name
+f <- function(env) {
+  ls(env, all$0.names = TRUE)
+}
+#++++
+hover 31..40: all.names: logical
+hover-definition: installed ls from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed ls from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion (120): all, all.equal, all.equal.character, all.equal.default, all.equal.environment, all.equal.envRefClass, all.equal.factor, all.equal.formula
+
+#---- installed_argument_name
+f <- function(x) {
+  undefined_fn(x, opt$0ion = TRUE)
+}
+#++++
+hover 37..43: option: logical
+hover-definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed undefined_fn from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion (116): optim, optimHess, optimise, optimize, options, .Options, .OptRequireMethods, constrOptim

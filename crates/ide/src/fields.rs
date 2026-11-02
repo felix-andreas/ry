@@ -3,7 +3,9 @@
 //! the receiver was built from, or a `receiver$name <- value` write. A read is resolved by following
 //! its receiver back to those constructions; a receiver that cannot be followed (a parameter, an
 //! element of an indexed list) falls back to every place in the project that declares a field of
-//! that name, which is a guess, so such a read never takes part in a rename.
+//! that name, which is a guess, so such a read never takes part in a rename. A receiver a library
+//! function returns (`optim(...)$par`) has its fields declared by that function, so the read
+//! navigates to the function, whose documentation lists what it returns.
 
 use {
     crate::{NavigationTarget, Occurrence, declaring_item, position_in_item},
@@ -13,7 +15,10 @@ use {
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
     },
-    std::collections::{HashMap, HashSet},
+    std::{
+        collections::{HashMap, HashSet},
+        mem,
+    },
     syntax::{TextRange, TextSize},
 };
 
@@ -23,6 +28,9 @@ pub(crate) struct FieldTarget {
     pub name: Symbol,
     pub sites: Vec<NavigationTarget>,
     pub precise: bool,
+    /// The heads of the library calls the receiver comes from, for a receiver no project
+    /// construction builds.
+    pub producers: Vec<NavigationTarget>,
 }
 
 /// The field at `relative` in `item`: the name of a `$` read or write, or a named element of a
@@ -90,6 +98,7 @@ fn declared_here(file: SourceFile, name: Symbol, range: TextRange) -> FieldTarge
         name,
         sites: vec![NavigationTarget { file, range }],
         precise: true,
+        producers: Vec::new(),
     }
 }
 
@@ -100,11 +109,17 @@ pub(crate) fn resolve_field<'db>(
     item: Item<'db>,
     field: ExprId,
 ) -> FieldTarget {
-    let Some((name, sites)) = precise_sites(db, files, item, field) else {
+    let Some(Resolved {
+        name,
+        sites,
+        producers,
+    }) = precise_sites(db, files, item, field)
+    else {
         return FieldTarget {
             name: Symbol::new(""),
             sites: Vec::new(),
             precise: false,
+            producers: Vec::new(),
         };
     };
     if !sites.is_empty() {
@@ -112,13 +127,29 @@ pub(crate) fn resolve_field<'db>(
             name,
             sites,
             precise: true,
+            producers: Vec::new(),
+        };
+    }
+    if !producers.is_empty() {
+        return FieldTarget {
+            name,
+            sites: Vec::new(),
+            precise: false,
+            producers,
         };
     }
     FieldTarget {
         name,
         sites: project_declarations(db, files, name),
         precise: false,
+        producers: Vec::new(),
     }
+}
+
+struct Resolved {
+    name: Symbol,
+    sites: Vec<NavigationTarget>,
+    producers: Vec<NavigationTarget>,
 }
 
 /// The sites the receiver's constructions declare, empty when the receiver cannot be followed.
@@ -127,7 +158,7 @@ fn precise_sites<'db>(
     files: ProjectFiles,
     item: Item<'db>,
     field: ExprId,
-) -> Option<(Symbol, Vec<NavigationTarget>)> {
+) -> Option<Resolved> {
     let hir = item_hir(db, item).as_ref()?;
     let ExpressionKind::Field {
         target,
@@ -142,21 +173,41 @@ fn precise_sites<'db>(
         db,
         files,
         visited: HashSet::new(),
+        producers: Vec::new(),
     };
-    let mut targets: Vec<NavigationTarget> = Vec::new();
+    let absolute = |item: Item<'db>, range: TextRange| {
+        Some(NavigationTarget {
+            file: *item.file(db),
+            range: range + item_node(db, item)?.text_range().start(),
+        })
+    };
+    let mut sites: Vec<NavigationTarget> = Vec::new();
     for site in resolver.sites(item, *target, name, 0) {
-        let Some(node) = item_node(db, site.item) else {
-            continue;
-        };
-        let target = NavigationTarget {
-            file: *site.item.file(db),
-            range: site.range + node.text_range().start(),
-        };
-        if !targets.contains(&target) {
-            targets.push(target);
+        if let Some(target) = absolute(site.item, site.range)
+            && !sites.contains(&target)
+        {
+            sites.push(target);
         }
     }
-    Some((name, targets))
+    let mut producers: Vec<NavigationTarget> = Vec::new();
+    for (producer_item, callee) in mem::take(&mut resolver.producers) {
+        let Some(range) = item_hir(db, producer_item)
+            .as_ref()
+            .map(|hir| hir.range(callee))
+        else {
+            continue;
+        };
+        if let Some(target) = absolute(producer_item, range)
+            && !producers.contains(&target)
+        {
+            producers.push(target);
+        }
+    }
+    Some(Resolved {
+        name,
+        sites,
+        producers,
+    })
 }
 
 /// Every read, write and declaration of the field `target` names. A guessed target is the
@@ -214,7 +265,9 @@ pub(crate) fn field_occurrences(
         }) else {
             continue;
         };
-        let Some((_, sites)) = precise_sites(db, files, position.item, ExprId::new(index)) else {
+        let Some(Resolved { sites, .. }) =
+            precise_sites(db, files, position.item, ExprId::new(index))
+        else {
             continue;
         };
         if sites.iter().any(|site| target_sites.contains(site)) {
@@ -361,6 +414,7 @@ const CONSTRUCTORS: &[&str] = &[
     "lst",
     "data.frame",
     "data.table",
+    "DataFrame",
     "tibble",
     "env",
     // data.table's alias for `list` inside `[`.
@@ -413,6 +467,8 @@ struct Resolver<'db> {
     files: ProjectFiles,
     /// Recursive helpers and self-referential assignments would otherwise loop.
     visited: HashSet<(Item<'db>, ExprId, Symbol)>,
+    /// The heads of library calls a followed value came from, as item and callee.
+    producers: Vec<(Item<'db>, ExprId)>,
 }
 
 impl<'db> Resolver<'db> {
@@ -502,7 +558,11 @@ impl<'db> Resolver<'db> {
                         },
                     ));
                 } else {
-                    for (function_item, function) in self.called_functions(item, *callee) {
+                    let functions = self.called_functions(item, *callee);
+                    if functions.is_empty() && self.is_library_function(item, *callee) {
+                        self.producers.push((item, *callee));
+                    }
+                    for (function_item, function) in functions {
                         self.returned(function_item, function, depth + 1, sources);
                     }
                 }
@@ -749,6 +809,25 @@ impl<'db> Resolver<'db> {
             {
                 self.r6_members(parent_item, parent_class, private, name, depth + 1, sites);
             }
+        }
+    }
+
+    /// A call head naming a function the project does not define: `pkg::name`, or a free name
+    /// with no local binding and no project declaration.
+    fn is_library_function(&self, item: Item<'db>, callee: ExprId) -> bool {
+        let (Some(hir), Some(naming)) = (
+            item_hir(self.db, item).as_ref(),
+            item_naming(self.db, item).as_ref(),
+        ) else {
+            return false;
+        };
+        match hir.kind(callee) {
+            ExpressionKind::Namespace { name: Some(_), .. } => true,
+            ExpressionKind::NameRef(name) => {
+                naming.non_locals.contains_key(&callee)
+                    && declaring_item(self.db, self.files, name.as_str()).is_none()
+            }
+            _ => false,
         }
     }
 

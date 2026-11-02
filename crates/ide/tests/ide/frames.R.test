@@ -87,9 +87,9 @@ sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 sales$amo$0unt
 #++++
 hover 63..69: amount: double[]
-definition: none
-references: none
-rename: none
+definition 39..45
+references: 39..45*, 63..69
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"

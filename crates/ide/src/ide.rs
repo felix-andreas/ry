@@ -134,6 +134,14 @@ pub fn hover(
     }
     let package = match target_at(db, files, file, offset) {
         Some(Target::Package(target)) => target,
+        // A field a library function returns is documented on that function.
+        Some(Target::Field(field)) => {
+            let mut field_hover = typed?;
+            field_hover.definition = field.producers.iter().find_map(|producer| {
+                hover(db, files, producer.file, producer.range.start())?.definition
+            });
+            return Some(field_hover);
+        }
         Some(Target::StubGlobal(name)) if stub_target(db, &name).is_none() => {
             library_target(db, name)
         }
@@ -201,10 +209,22 @@ fn typed_hover(
         });
     }
     // An argument name is no expression; it shows the parameter it fills, as signature help
-    // renders it, rather than widening to the whole call.
-    if let Some(argument) = named_argument_at(hir, position.relative)
-        && let Some(line) = filled_parameter(db, file, offset, argument.name)
-    {
+    // renders it, rather than widening to the whole call. A callee with no known signature,
+    // such as `list` or a function taking `...`, leaves the value the name labels.
+    if let Some(argument) = named_argument_at(hir, position.relative) {
+        let line = filled_parameter(db, file, offset, argument.name).unwrap_or_else(|| {
+            match argument
+                .value
+                .and_then(|value| check.expression_types.get(&value))
+            {
+                Some(ty) => format!(
+                    "{}: {}",
+                    argument.name,
+                    TypeRenderer::default().render(db, without_impossible_vectors(db, *ty))
+                ),
+                None => argument.name.to_string(),
+            }
+        });
         return Some(Hover {
             range: argument.range + position.item_offset,
             lines: vec![line],
@@ -776,10 +796,15 @@ pub fn definition(
         return Vec::new();
     };
     if let Target::Field(field) = &target {
+        let producers = field.producers.iter().filter_map(|producer| {
+            let callee = target_at(db, files, producer.file, producer.range.start())?;
+            single_definition(db, files, callee)
+        });
         return field
             .sites
             .iter()
             .map(|site| DefinitionTarget::Project(*site))
+            .chain(producers)
             .collect();
     }
     single_definition(db, files, target).into_iter().collect()
@@ -5528,6 +5553,7 @@ fn expression_target<'db>(
 struct NamedArgument {
     callee: ExprId,
     name: Symbol,
+    value: Option<ExprId>,
     /// Relative to the item.
     range: TextRange,
 }
@@ -5546,6 +5572,7 @@ fn named_argument_at(hir: &Module, relative: TextSize) -> Option<NamedArgument> 
             Some(NamedArgument {
                 callee: *callee,
                 name: hir.argument_name(argument)?,
+                value: argument.value,
                 range,
             })
         })
@@ -5553,7 +5580,8 @@ fn named_argument_at(hir: &Module, relative: TextSize) -> Option<NamedArgument> 
 }
 
 /// The parameter a named argument fills: a project function's parameter slot, or the library
-/// function itself when a stub declares the callee, since a stub parameter has no site of its own.
+/// function itself when a stub or an installed package declares the callee, since a library
+/// parameter has no site of its own.
 /// R's partial matching (`f(fac = 1)` for `factor`) is not followed.
 fn parameter_target<'db>(
     db: &'db dyn Db,
@@ -5575,7 +5603,7 @@ fn parameter_target<'db>(
             parameter_binding(db, definition, binding, argument.name)
         }
         Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
-        stub @ Target::StubGlobal(_) => Some(stub),
+        library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
         _ => None,
     }
 }

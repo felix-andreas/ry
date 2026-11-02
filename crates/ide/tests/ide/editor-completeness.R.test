@@ -66,9 +66,9 @@ sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 u <- sales$un$0its
 #++++
 hover 73..78: units: integer[]
-definition: none
-references: none
-rename: none
+definition 43..48
+references: 43..48*, 73..78
+rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `u`
   edit 62..62 -> "#: integer[]\n"
@@ -387,7 +387,7 @@ hint @59: <T> fn(factor: T) -> T
 wrap <- function(...) list(...)
 wrap(fi$0eld = 1)
 #++++
-hover 32..47: list[named: Unknown]
+hover 37..42: field: double
 definition: none
 references: none
 rename: none
@@ -426,7 +426,7 @@ completion (6): package.skeleton, packageDescription, packageStatus, getParseDat
 grow <- function(principal, rate) principal * (1 + rate)
 grow(100, ra$0 = 0.05)
 #++++
-hover 57..77: double
+hover 67..69: ra: double
 definition: none
 references: none
 rename: none
@@ -457,7 +457,7 @@ x <- config$port
 other <- list(port = 80L)
 y <- other$port
 #++++
-hover 10..48: list{host: character, port: integer}
+hover 35..39: port: integer
 definition 35..39
 references: 35..39*, 61..65
 rename: 2 edit(s)
@@ -619,3 +619,31 @@ action: Add inferred type annotations for the whole file
   edit 38..38 -> "#: list{amount: integer}\n"
 completion (1): amount
 hint @43: list{amount: integer}
+
+#---- field_library_producer
+result <- optim(c(1, 2), function(p) sum(p^2))
+result$p$0ar
+#++++
+hover 54..57: par: Unknown
+hover-definition: package stats (1 declaration(s), declared in stub source stats at `optim`)
+definition: stub source stats at `optim`
+references: none
+rename: none
+signature: none
+completion (1): par
+
+#---- field_namespaced_producer
+fit <- stats::uniroot(function(x) x - 1, c(0, 2))$ro$0ot
+#++++
+hover 50..54: root: double
+definition: stub source stats at `uniroot`
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `fit`
+  edit 0..0 -> "#: double\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: double\n"
+completion (1): root
+hint @3: double
+hint @41interval =
