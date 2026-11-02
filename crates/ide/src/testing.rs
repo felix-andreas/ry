@@ -4,10 +4,11 @@
 use {
     crate::{DefinitionTarget, DocumentSymbol},
     semantics::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile, stubs::install_shipped_stubs,
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile, diagnostics::file_diagnostics,
+        stubs::install_shipped_stubs,
     },
     std::collections::{BTreeSet, HashSet},
-    syntax::{SyntaxKind, TextRange, TextSize, lex},
+    syntax::{SyntaxKind, TextRange, TextSize, lex, parse},
 };
 
 /// Runs every feature at sampled offsets of `source`: nothing may panic, every range must lie
@@ -280,4 +281,127 @@ fn check_symbol(db: &RootDatabase, file: SourceFile, symbol: &DocumentSymbol) {
     for child in &symbol.children {
         check_symbol(db, file, child);
     }
+}
+
+/// Runs every refactoring at sampled selections of `source` and applies each one: the edits
+/// must lie inside the text without overlapping, a file that parsed cleanly must still parse
+/// cleanly and may report no unresolved name the original did not. Shared
+/// with the coverage-guided `ide` target.
+pub fn check_refactor_invariants(source: &str) {
+    let (db, file) = refactor_database(source);
+    let clean = parse(source).errors().is_empty();
+    let unresolved_before = unresolved_names(&db, file, source);
+    for selection in refactor_selections(source) {
+        let actions = crate::refactors(&db, file, selection);
+        assert_eq!(
+            actions,
+            crate::refactors(&db, file, selection),
+            "refactors are not deterministic in {source:?} at {selection:?}"
+        );
+        for action in actions {
+            let at = format!("`{}` in {source:?} at {selection:?}", action.title);
+            let mut edits = action.edits.clone();
+            edits.sort_by_key(|edit| (edit.range.start(), edit.range.end()));
+            for pair in edits.windows(2) {
+                if let [first, second] = pair {
+                    assert!(
+                        first.range.end() <= second.range.start()
+                            && first.range.start() != second.range.start(),
+                        "{at}: overlapping edits {edits:?}"
+                    );
+                }
+            }
+            let mut edited = source.to_owned();
+            for edit in edits.iter().rev() {
+                let range = usize::from(edit.range.start())..usize::from(edit.range.end());
+                assert!(
+                    edited.get(range.clone()).is_some(),
+                    "{at}: edit {edit:?} outside the text"
+                );
+                edited.replace_range(range, &edit.replacement);
+            }
+            // Broken input has no meaning to preserve, so only the edits' shape is checked.
+            if !clean {
+                continue;
+            }
+            let errors = parse(&edited).errors().to_vec();
+            assert!(
+                errors.is_empty(),
+                "{at}: the result no longer parses: {errors:?}\n{edited}"
+            );
+            let (after, edited_file) = refactor_database(&edited);
+            let unresolved_after = unresolved_names(&after, edited_file, &edited);
+            let introduced: Vec<&String> =
+                unresolved_after.difference(&unresolved_before).collect();
+            assert!(
+                introduced.is_empty(),
+                "{at}: the result leaves {introduced:?} unresolved\n{edited}"
+            );
+        }
+    }
+}
+
+/// Without stubs every library name is unresolved before and after alike, so the comparison
+/// still holds and each check stays cheap.
+fn refactor_database(source: &str) -> (RootDatabase, SourceFile) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
+    ProjectFiles::new(&db, vec![file]);
+    (db, file)
+}
+
+fn unresolved_names(db: &RootDatabase, file: SourceFile, source: &str) -> BTreeSet<String> {
+    file_diagnostics(db, file)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.code == "unresolved")
+        .filter_map(|diagnostic| {
+            source
+                .get(usize::from(diagnostic.range.start())..usize::from(diagnostic.range.end()))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// Every node's range, runs of up to three neighboring statements, and the start of every name
+/// and annotation, which is where the cursor-driven refactorings look.
+fn refactor_selections(source: &str) -> Vec<TextRange> {
+    let root = parse(source).syntax_node();
+    let mut selections = Vec::new();
+    for node in root.descendants() {
+        let range = node.text_range();
+        if !range.is_empty() {
+            selections.push(range);
+        }
+        if node.kind() == SyntaxKind::ANNOTATION {
+            selections.push(TextRange::empty(range.start()));
+        }
+        let statements: Vec<TextRange> = node
+            .children()
+            .filter(|_| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+                )
+            })
+            .map(|child| child.text_range())
+            .collect();
+        for width in 2..=3 {
+            for run in statements.windows(width) {
+                if let (Some(first), Some(last)) = (run.first(), run.last()) {
+                    selections.push(TextRange::new(first.start(), last.end()));
+                }
+            }
+        }
+    }
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+    {
+        if token.kind() == SyntaxKind::IDENT {
+            selections.push(TextRange::empty(token.text_range().start()));
+        }
+    }
+    selections.sort_by_key(|range| (range.start(), range.end()));
+    selections.dedup();
+    selections
 }

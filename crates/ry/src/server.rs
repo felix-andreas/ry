@@ -2322,6 +2322,9 @@ fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult 
                 lsp_types::CodeActionOptions {
                     code_action_kinds: Some(vec![
                         lsp_types::CodeActionKind::QUICKFIX,
+                        lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                        lsp_types::CodeActionKind::REFACTOR_INLINE,
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE,
                         lsp_types::CodeActionKind::SOURCE_FIX_ALL,
                     ]),
                     ..Default::default()
@@ -2946,6 +2949,7 @@ impl LanguageServer for ServerState {
             };
             let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
             let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
+            let wants_refactors = wants(&lsp_types::CodeActionKind::REFACTOR);
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);
@@ -2960,6 +2964,9 @@ impl LanguageServer for ServerState {
                             &mut worker.installed,
                         ));
                         actions.extend(ide::code_actions(&worker.db, file, range));
+                    }
+                    if wants_refactors {
+                        actions.extend(ide::refactors(&worker.db, file, range));
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
                     let worth_listing =
@@ -2997,6 +3004,16 @@ impl LanguageServer for ServerState {
                         let kind = match action.kind {
                             ide::CodeActionKind::FixAll => {
                                 lsp_types::CodeActionKind::SOURCE_FIX_ALL
+                            }
+                            ide::CodeActionKind::ExtractVariable
+                            | ide::CodeActionKind::ExtractFunction => {
+                                lsp_types::CodeActionKind::REFACTOR_EXTRACT
+                            }
+                            ide::CodeActionKind::InlineVariable => {
+                                lsp_types::CodeActionKind::REFACTOR_INLINE
+                            }
+                            ide::CodeActionKind::ConvertAnnotation => {
+                                lsp_types::CodeActionKind::REFACTOR_REWRITE
                             }
                             _ => lsp_types::CodeActionKind::QUICKFIX,
                         };

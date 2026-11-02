@@ -47,6 +47,8 @@ use {
 };
 
 mod fields;
+mod refactor;
+pub use refactor::refactors;
 pub mod testing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2454,6 +2456,11 @@ pub enum CodeActionKind {
     /// Makes an unresolved name reach the package that exports it: `pkg::` before the name, or
     /// in a script a `library(pkg)` call.
     ImportName,
+    ExtractVariable,
+    ExtractFunction,
+    InlineVariable,
+    /// Moves a binding's or function's types between a `#:` comment and inline syntax.
+    ConvertAnnotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
