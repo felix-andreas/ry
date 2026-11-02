@@ -560,10 +560,11 @@ that the gain over a good interpreter is real but modest.
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
-  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  3000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
   code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
-  only a few dozen times, which made the load slower. A fully typed closure, one with an inline
+  only a few dozen times, which made the load slower, and on a test suite, whose bodies mostly run
+  a few hundred to a few thousand times, 1000 entries cost more to compile than it saved. A fully typed closure, one with an inline
   type on every formal, compiles on its first entry instead: the declared types seed the type
   feedback of the instructions that have not run yet, and the guards on them stay. A base builtin
   call or an element-wise operation that has not returned yet takes the type the builtin computes

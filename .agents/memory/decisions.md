@@ -2879,10 +2879,15 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
-- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+- **Compile thresholds are 3000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
   At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
   few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
-  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  about 200 ms of its cold `ry run`. finbench test slices then picked 3000 over 1000
+  (callgrind instructions against `RY_JIT=off`): on 2 files, entries 300 cost +2.9%, 1000 +1.4%,
+  3000 +0.6% and 10,000 +1.0%; on 21 files, 1000 cost +2.7% and 3000 +1.5%, and raising back
+  edges to 30,000 changed nothing. The
+  remaining overhead is per-call tier bookkeeping (`enter`, `compiled_for`, `valid`) and
+  Cranelift, not deoptimization. Hot code crosses 3000 calls within milliseconds, so the
   benchmarks time the same. Lower them only together with a cheaper first tier or background
   compilation.
 - **A fully typed closure compiles at its first call** (`jit.rs`, `fully_typed` and

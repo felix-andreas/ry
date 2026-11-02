@@ -1215,6 +1215,10 @@ impl Heap {
         }
         if cell.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
+            // A watched cell is one some lookup was compiled against, and a lookup of the same
+            // name from elsewhere may pass it while it holds a non-function, so its new value
+            // can change where that lookup stops.
+            bump_symbol_epoch(cell.car());
         }
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
@@ -1257,9 +1261,9 @@ impl Heap {
     }
 
     /// A stamp for lookups of `symbol` through environments other than function frames: it
-    /// changes whenever a binding of `symbol` appears or disappears in such an environment, or
-    /// any enclosure is replaced, so a cell cached under an unchanged stamp is still the one a
-    /// fresh walk would find.
+    /// changes whenever a binding of `symbol` appears or disappears in such an environment, a
+    /// watched binding of it is assigned, or any enclosure is replaced, so a cell cached under an
+    /// unchanged stamp is still the one a fresh walk would find.
     pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
         symbol.symbol_payload().epoch.get() + self.enclosure_epoch
     }

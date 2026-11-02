@@ -561,12 +561,11 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
-- **First-call compiles stop at builtins and subscripts.** A fully typed closure compiles at its
-  first call from its signature (`decisions.md`, "the JIT tier"), but a body that calls a builtin
-  or subscripts a value has no result type until feedback arrives, so `vasicek_paths` is refused
-  as COLD at its first call. Its loop runs 2,000 iterations, under the 10,000 back-edge threshold,
-  so it stays in tier 0. Result types for common builtins (`length`, `numeric`, `matrix`, `sqrt`,
-  `rnorm`) and for `[` on typed vectors would let it compile at the first call.
+- **First-call compiles stop at multi-index subscripts and unknown builtins.** A fully typed
+  closure compiles at its first call, and base builtins with a known result type (`seq_len`,
+  `sum`, `sqrt`, `[` on a vector, element-wise arithmetic; `analysis.rs`, `builtin_result`) no
+  longer block it, so `vasicek_paths` compiles at its first call. A builtin outside that table
+  whose result feeds arithmetic, or `m[i, ]`, still declines as COLD until feedback arrives.
 - **Cold-code cost of typing is unmeasured.** finbench's typed variant uses `#:` comments, which
   never reach the runtime, so measuring typed against untyped with the JIT on needs an
   inline-annotated variant (or the strict session's typed finbench) first.

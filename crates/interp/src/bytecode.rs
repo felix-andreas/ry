@@ -108,16 +108,17 @@ impl State {
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
 /// out of C stack or `expressions` long before it runs out of registers.
-thread_local! { static WEIGHTED: bool = std::env::var_os("RY_JIT_WEIGHTED").is_some(); }
-
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 
 /// The optimizing tier's entry points.
 #[derive(Clone, Copy)]
 pub struct Tier {
-    /// Called whenever compiled bytecode starts running, with a fresh register window. Returns
-    /// `None` to let the interpreter run it from the start.
+    /// Called when compiled bytecode starts running with a fresh register window, if the code
+    /// has optimized code already, is on its first entry, or has been entered
+    /// [`Tier::entry_threshold`] times. Returns `None` to let the interpreter run it from the
+    /// start.
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
+    pub entry_threshold: i32,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
@@ -152,6 +153,10 @@ pub struct Machine<'a> {
 /// Installs the optimizing tier.
 pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
+}
+
+pub fn tier() -> Option<Tier> {
+    interp().bytecode.tier
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -2573,7 +2578,8 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let base = interp().bytecode.registers.len();
     reserve_registers(base + register_count)?;
     let profile = values::ints_mut(constants.element(PROFILE));
-    profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
+    let entries = profile[profile::ENTRIES].saturating_add(1);
+    profile[profile::ENTRIES] = entries;
     let mut loops: SmallVec<[LoopState; 4]> = smallvec![LoopState::default(); loop_count(code)];
     let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
     env.set_gp_bits(gp::COMPILED_FRAME, true);
@@ -2585,8 +2591,16 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
+    // Most bodies never compile, and asking the tier about every call of every body cost more
+    // than the compiled code saved on a test suite.
     let entered = match interp().bytecode.tier {
-        Some(tier) => (tier.enter)(&mut machine),
+        Some(tier)
+            if entries == 1
+                || entries >= tier.entry_threshold
+                || constants.element(TIER1) != nil() =>
+        {
+            (tier.enter)(&mut machine)
+        }
         _ => None,
     };
     let result = match entered {
@@ -2625,12 +2639,7 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                     && let Some(tier) = interp().bytecode.tier
                 {
                     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-                    profile[profile::BACK_EDGES] =
-                        profile[profile::BACK_EDGES].saturating_add(if WEIGHTED.with(|w| *w) {
-                            (at - pc) as i32
-                        } else {
-                            1
-                        });
+                    profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
                     if profile[profile::BACK_EDGES] >= tier.back_edge_threshold {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
