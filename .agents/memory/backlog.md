@@ -2378,9 +2378,13 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   asymptotic expansions or argument limits when a package hits them.
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
-- **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
-  GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
-  `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.
+- **`pgamma` loses up to about 200 ulps for a large shape far above `x`** (shape 15 at `x` below
+  0.1, where GNU R loses 14): `exp(-stirlerr - deviance)` amplifies the exponent's rounding by
+  its size, and below shape 9 the direct product `x^shape e^-x / Gamma(shape + 1)` avoids it,
+  but above, `gammafn` itself is an exponential. A double-double deviance would fix it. For
+  small shapes ry is now closer to mpmath than GNU R (mean 4.5 ulps against 2.8 over a grid
+  that includes these large-shape cases, and 26 points above 2 ulps against GNU R's 39); the
+  remaining `qgamma` differences from GNU R are GNU R's own last-bit errors times `1/shape`.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
   follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
   `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
