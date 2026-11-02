@@ -3496,14 +3496,14 @@ first lines R had already read, leaving R mid-command.
 
 GNU R finalizes an object at the first full `gc()` after its last reference goes, and R6, lgr's buffered appenders and processx all depend on that timing. Four places in ry's runtime held a reference GNU R does not have.
 
-- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`) and releases the activation's handles, as the back edge already did. The AST interpreter's `do_begin` roots only the last value for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0's back edges and the activation's exit.
-- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. A major collection empties every cache it traces (`Heap::trace`, `major_marking`) instead of marking through it; the next lookup refills it. Minor collections still trace them, so the retention lasts at most until the next full collection, which is when GNU R would finalize anyway.
+- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`), and `bytecode::execute_code` releases the activation's handles after every instruction. That is safe because between instructions every live value sits in a register. The AST interpreter's `do_begin` roots only the block's own value on the way out for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0 and the activation's exit. `evaluation__finalizer_run_points` pins the timing, and the bytecode, closure, promise and S3 cases give the same output under `gctorture(TRUE)`.
+- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. The cache list carries the heap flag `WEAK_PAIRS` (`Heap::mark_weak_pairs`): the marker does not trace its elements, and after weak references settle `clear_dead_weak_pairs` sets a pair whose key (the enclosure) or value (the cell) is unmarked to `NULL`, which is a cache miss, releasing the counts the barriered fill took. Minor collections need no special case: an old list that gained a young key is in the remembered set and is traced, and one that did not can only point at old objects. Emptying every cache at each collection was rejected, because each site then pays a full lookup after every collection.
 - **Tier-1 code.** A compiled body embeds its enclosure and the cells its lookups speculated on, and the body outlives any one closure (R6 gives every object's methods the same body). The TIER1 external pointer therefore protects a weak reference keyed on the enclosure, whose value lists what the machine code embeds. While the enclosure lives everything stays reachable; once it dies, `compiled_for` frees the code and clears TIER1, which is safe because a running activation keeps its own enclosure reachable.
 - **Removed binding cells.** A cell can outlive its frame entry while a cache holds it, so `remove_binding` sets the cell's value to the unbound marker and a stale cell reaches nothing.
 - **Dying finalizers.** Marking a dying weak reference's key, value and finalizer can make another weak reference's key reachable after the ephemeron fixpoint ended, and that reference's value and finalizer were then swept while it stayed registered (processx's exit finalizers ran freed closures). `process_weak_refs` now takes every dying reference off the list before marking any of them, then queues and marks them all. What they reach can no longer be a registered reference's key that missed the fixpoint, because every reference still registered has a key the fixpoint already marked, as GNU R's `CheckFinalizers` does.
 - **Visibility of a variable read.** Reading a variable can force a promise, whose expression then decides whether the value prints (`withCallingHandlers(f(), ...)` stays invisible when `f()` is). Compiled code sets the visible flag before the load, not after it, and the analysis treats the flag as unknown after a load that may force.
 - **Expression vectors.** `eval()` of an expression vector (`eval::eval_all`, which is how testthat runs a test file) releases each element's handles before the next element runs, exactly as `{` does, so a `gc()` in one top-level statement of a test file finalizes what an earlier statement dropped (lgr's `AppenderBuffer` flushes on destruction this way).
-- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a cache refill after each major collection. No effect on static analysis.
+- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a handle-stack truncation per instruction. No effect on static analysis.
 
 ## ALTREP elements go through the class methods everywhere
 
@@ -4532,35 +4532,6 @@ check` releases its trees once, and memoized records are compact" below).
 - **The TRE dialect stays on fancy-regex** behind the translator, which is now Extended-only.
   Moving it to a real TRE build is the same trade and is open in `backlog.md`.
 
-## A dropped value is unrooted at once, so finalizers run at the next `gc()`
-
-- **Before.** `do_begin` kept the previous statement's value rooted while the next statement ran,
-  and compiled bodies released heap handles only on a backward jump, so a value a finished call
-  had rooted lived until the body returned. An object only such a value held survived a `gc()`
-  later in the same function, and its finalizer ran late (R6's finalizer tests failed this way).
-- **Now.** `do_begin` roots only the block's own value on the way out; compiled `{` clears its
-  result register before each later statement (GNU R's `POP`); and `bytecode::execute_code`
-  releases handles after every instruction. That is safe because between instructions every
-  live value sits in a register, the invariant the backward-jump release already relied on.
-  `evaluation__finalizer_run_points` pins it, and the bytecode, closure, promise and S3 cases
-  give the same output under `gctorture(TRUE)`.
-
-## Inline lookup caches hold their environments weakly
-
-- **Before.** A bytecode inline cache stored the enclosure a lookup started from and the binding
-  cell it found as ordinary list elements. Closures that share a body share its compiled code, so
-  R6's `clone` method (one body, a new environment per object) kept the last object it ran for
-  alive until another object's call refilled the cache, and that object's finalizer ran one
-  `gc()` late.
-- **Now.** The cache list carries the heap flag `WEAK_PAIRS` (`Heap::mark_weak_pairs`). The marker
-  does not trace its elements; after weak references settle, a pair whose key (the enclosure)
-  or value (the cell) is unmarked is set to `NULL`, which is a cache miss. The cell lives in the
-  enclosure's chain, so it is unmarked only when the enclosure is. Minor collections need no
-  special case: an old list that gained a young key is in the remembered set and is traced, and
-  one that did not can only point at old objects.
-- **Why not invalidate by collection count.** Every minor collection would then empty every
-  cache, which costs a full lookup per site after each collection.
-
 ## Native code sees a compiled closure's body as its expression
 
 - `BODY` and `R_ClosureBody` return the source expression of a compiled body, as `R_ClosureExpr`
@@ -4569,26 +4540,26 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## TRE minimal repetitions over alternatives
 
-- fancy-regex has no leftmost-longest mode for lazy quantifiers, so such a TRE pattern runs
-  leftmost-first, which tries alternatives in order. GNU R's TRE, when no submatches are asked
-  for (`regexpr`, `gregexpr`, `grepl`), minimizes the lazy repetitions over all alternatives:
-  `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. `compile_extended` therefore builds
-  `Matcher::Alternatives` for a pattern with lazy quantifiers and top-level `|`: one variant
-  per alternative (the others prefixed with the empty class `[^\s\S]`, so group numbers stay),
-  and a plain find takes the shortest of the leftmost matches. Submatch queries (`sub`,
-  `regexec`) keep the whole pattern's leftmost-first rule, which agrees with TRE on the common
-  shapes; TRE's submatch results for these patterns are irregular (`regexec` can even skip the
-  leftmost match). Fancy-regex factoring a shared prefix (`A|B` with one prefix) hid the gap,
-  which cli's ANSI hyperlink regex hit with a third alternative.
+- GNU R's TRE, when no submatches are asked for (`regexpr`, `gregexpr`, `grepl`), minimizes the
+  lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has
+  length 4. A pattern with a minimal repetition compiles to `Matcher::Automaton` with
+  `shortest`, and a plain find takes the earliest end among the matches that start leftmost.
+- Submatch queries (`sub`, `regexec`) keep the leftmost-first match of the whole pattern, so
+  `sub("(a).*?Z|(a)(.*?)Y", ...)` takes the first alternative, as TRE does. TRE's submatch
+  results for these patterns are irregular in general (`regexec` can even skip the leftmost
+  match); leftmost-first agrees with it on the shapes the corpus uses.
+- `connections__message_sink_and_flush` pins both.
 
 ## The message sink and connection flush points
 
-- `sink(type = "message")` sets `Table::message_sink` (GNU R's `R_ErrorCon`). Messages,
-  warnings and writes to `stderr()` go there through `connections::write_message`, which
-  flushes after every write as `REvprintf` does. Closing that connection resets it to 2.
+- `sink(type = "message")` sets the connection table's `message_slot` (GNU R's `R_ErrorCon`).
+  Messages, warnings and writes to `stderr()` go there through `connections::write_message`,
+  which flushes after every write as `REvprintf` does. Closing that connection resets it to 2.
 - GNU R flushes a file connection after `cat`, after each message-sink write, and when an output
   sink is removed, but not after `writeLines`; ry matches each point, so a second reader of the
   same file sees exactly what GNU R's would. `connections__message_sink_and_flush` pins it.
+- Native code printing through `Rprintf` and `REprintf` goes through the same table
+  (`libr::boundary::write_console`), so a sink diverts C output too.
 
 ## The C API draws from the interpreter's generator
 
@@ -4597,8 +4568,10 @@ check` releases its trees once, and memoized records are compact" below).
   two shared only `.Random.seed`, so a package calling `unif_rand` after `RNGkind("Marsaglia-Multicarry")`
   read a seed its copy could not parse (doParallel's stress test failed with "'.Random.seed' is not
   a valid integer vector"), and `R_sample_kind` always answered `Rejection`.
-- **Now.** `libr::arith`'s `Rng` delegates every draw to `interp::random`, and
-  `GetRNGstate`/`PutRNGstate` are the interpreter's `get_rng_state`/`put_rng_state`.
+- **Now.** `unif_rand`, `norm_rand`, `exp_rand` and `R_unif_index` call `interp::random`, the
+  `Rf_r*` deviates are `interp::distributions`' functions drawn through `SessionDeviates`, so no
+  deviate algorithm exists twice, and `GetRNGstate`/`PutRNGstate` are the interpreter's
+  `get_rng_state`/`put_rng_state`.
   `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
   hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
 - **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave

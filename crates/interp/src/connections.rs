@@ -1819,16 +1819,14 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
         output.push('\n');
     }
+    print(file, output.as_bytes())?;
     // GNU R flushes the connection after `cat`, so a reader opened on the same file sees the
-    // text at once, although `writeLines` stays buffered.
+    // text at once, although `writeLines` stays buffered. A connection `print` opened is
+    // closed again, which flushed it already.
     let con = resolve_con(file)?.1;
-    with_open(con, "wt", || {
-        if (*con).canwrite == 0 {
-            return Err(error("cannot write to this connection"));
-        }
-        method_print(con, output.as_bytes())?;
-        method_fflush(con)
-    })?;
+    if (*con).isopen != 0 {
+        method_fflush(con)?;
+    }
     Ok(nil())
 }
 

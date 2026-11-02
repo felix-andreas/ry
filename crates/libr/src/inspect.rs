@@ -189,7 +189,11 @@ unsafe fn tree(pre: c_int, object: Sexp, deep: c_int, pvec: c_int) -> ApiResult<
             SexpType::Closure => {
                 for (label, part, depth) in [
                     ("FORMALS", object.car(), deep - 1),
-                    ("BODY", object.cdr(), deep - 1),
+                    (
+                        "BODY",
+                        crate::lists::bytecode_expression(object.cdr()),
+                        deep - 1,
+                    ),
                     ("CLOENV", object.tag(), 0),
                 ] {
                     write_console(format!("{}{label}:\n", indent(pre)).as_bytes(), false);

@@ -2248,7 +2248,6 @@ unsafe fn step(
             for register in operand(1)..operand(2) {
                 set(register, nil());
             }
-            crate::heap().release_handles(machine.mark);
         }
         Op::LogicLeft => {
             let call = constants.element(operand(2));

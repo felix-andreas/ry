@@ -91,8 +91,6 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
-    /// Set while a major collection marks, which is when bytecode inline caches are emptied.
-    major_marking: bool,
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
@@ -344,7 +342,6 @@ impl Heap {
             weak_pairs: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
-            major_marking: false,
             enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
@@ -1432,7 +1429,6 @@ impl Heap {
         }
         self.inhibit += 1;
         self.young_parent = None;
-        self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1477,7 +1473,6 @@ impl Heap {
         self.drain();
         self.process_weak_refs();
         self.clear_dead_weak_pairs();
-        self.major_marking = false;
         // Before the sweep, while a mark still means "survives".
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
@@ -1602,22 +1597,7 @@ impl Heap {
             Shape::Triple => {
                 self.mark(object.car());
                 self.mark(object.cdr());
-                let tag = object.tag();
-                // A bytecode object's tag holds its inline caches: the environment each lookup
-                // started from and the binding cell it found. They are only a speed-up, but
-                // traced they would keep an environment alive for as long as the code lives,
-                // such as an R6 object whose methods a clone shares. A major collection empties
-                // them instead, and the next lookup refills them.
-                if self.major_marking
-                    && object.kind() == SexpType::Bytecode
-                    && tag.kind() == SexpType::List
-                {
-                    for index in 0..tag.length() as usize {
-                        tag.element(index).decrement_refcount();
-                        tag.set_element_unbarriered(index, self.known.nil);
-                    }
-                }
-                self.mark(tag);
+                self.mark(object.tag());
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
@@ -1642,11 +1622,11 @@ impl Heap {
     }
 
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
-    /// key is, so the values are marked to a fixpoint before any key is declared dead. A dead
-    /// key with a finalizer is then revived with its value and finalizer until the finalizer
-    /// has run, and whatever those reach can revive other keys, so marking repeats until no
-    /// more finalizers become ready, as GNU R's collector does. Only then is a reference whose
-    /// key stayed dead cleared.
+    /// key is, so the values are marked to a fixpoint before any key is declared dead. Every
+    /// reference with a dead key is then taken off at once: one with a finalizer is revived with
+    /// its key, value and finalizer until the finalizer has run, and one without is cleared.
+    /// Because all dying references leave together, what the revived finalizers reach cannot
+    /// revive another, so one pass suffices.
     unsafe fn process_weak_refs(&mut self) {
         self.mark_live_weak_values();
         let mut dying = Vec::new();
@@ -1686,6 +1666,8 @@ impl Heap {
                 let key = list.element(pair * 2);
                 let value = list.element(pair * 2 + 1);
                 if !self.space.is_marked(key) || !self.space.is_marked(value) {
+                    key.decrement_refcount();
+                    value.decrement_refcount();
                     list.set_element_unbarriered(pair * 2, nil);
                     list.set_element_unbarriered(pair * 2 + 1, nil);
                 }
