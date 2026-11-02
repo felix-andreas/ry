@@ -1,4 +1,10 @@
 [stdout]
+| zz
+| zz
+| yy
+| [1] 1
+| attr(,"class")
+| [1] "yy" "b" 
 [messages]
 [warnings]
 - 'switch' with no alternatives (in switch("A"))
@@ -7,5 +13,6 @@
 - 'switch' with no alternatives (in switch("A"))
 - 'switch' with no alternatives (in switch(2))
 [errors]
-- object not specified (in NextMethod("print"))
 [value]
+double
+| structure(1, class = c("yy", "b"))
