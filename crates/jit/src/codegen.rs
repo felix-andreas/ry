@@ -570,11 +570,6 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let register = base + index;
                     let ty = before.registers[register];
                     let (kind, bits) = match ty {
-                        // Slots past the unboxed mask hold handles only.
-                        Ty::Dbl | Ty::Int | Ty::Lgl if index >= UNBOXED_SLOTS => {
-                            let value = self.use_register(register, ty);
-                            (representation::BOXED, self.box_value(ty, value))
-                        }
                         Ty::Dbl => {
                             let value = self.use_register(register, ty);
                             (
@@ -616,8 +611,14 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::Move { dst, src, ty } => {
-                let value = self.use_register(src, ty);
-                self.def_register(dst, ty, value);
+                // Only a scalar lives in a variable; any other value lives in the window.
+                if ty.is_unboxed() {
+                    let value = self.use_register(src, ty);
+                    self.def_register(dst, ty, value);
+                } else {
+                    let value = self.load_register(src);
+                    self.store_register(dst, value);
+                }
             }
             Action::Step {
                 effect,

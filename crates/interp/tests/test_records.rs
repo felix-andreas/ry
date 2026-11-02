@@ -356,6 +356,14 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 0 0\n",
     ),
     (
+        "{ f <- function(v) match (v) { :Some(s) if (s != \"ab\") => s, _ => \"short\" }; for (k in 1:4) r <- c(f(:Some(\"abcd\")), f(:Some(\"ab\"))); r }",
+        "[1] \"abcd\"  \"short\"\n",
+    ),
+    (
+        "{ f <- function(v) match (v) { (x, x) if (x == 1) => \"first\", _ => \"other\" }; c(f((1, 2)), f((1, 2)), f((1, 2)), f((2, 1))) }",
+        "[1] \"other\" \"other\" \"other\" \"first\"\n",
+    ),
+    (
         "{ f <- function(v) match (v) { :A => 1 }; for (i in 1:4) f(:A); f(:B) }",
         "Error in match (v) { : no arm of this `match` matches :B\n",
     ),

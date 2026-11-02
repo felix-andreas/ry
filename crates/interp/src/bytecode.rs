@@ -791,10 +791,6 @@ unsafe fn pattern_shape(pattern: Sexp) -> Option<PatternShape> {
     Some(PatternShape::Layout { layout, items })
 }
 
-/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
-/// `pattern => guard, value`, and every pattern is one [`Compiler::pattern`] compiles. Anything
-/// else (an open record pattern, a pattern the special rejects) runs the whole `match` in the
-/// special.
 /// Whether a `match` guard can compile with the arm's bound `names` read from registers: it must
 /// not assign, create a closure, nest a `match`, leave a loop or function, or call a bound name,
 /// since each of those would reach the frame or behave differently outside the special's
@@ -842,6 +838,10 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
     }
 }
 
+/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
+/// `pattern => guard, value`, and every pattern is one [`Compiler::pattern`] compiles. Anything
+/// else (an open record pattern, a pattern the special rejects) runs the whole `match` in the
+/// special.
 unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
     let Some(((_, scrutinee), arms)) = args.split_first() else {
         return Ok(false);
@@ -1252,8 +1252,9 @@ impl Compiler {
         {
             return self.fallback(symbol, dst);
         }
+        // A pattern that binds a name twice leaves the last value bound, as the special does.
         if let Some(bound) = &self.bound
-            && let Some(index) = bound.names.iter().position(|&name| name == symbol)
+            && let Some(index) = bound.names.iter().rposition(|&name| name == symbol)
         {
             let register = bound.base + index as u32;
             self.emit(Op::Move, &[dst, register]);
