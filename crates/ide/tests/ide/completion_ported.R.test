@@ -27,7 +27,7 @@ definition: installed va from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion (11): value, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
 
 #---- outer_local_visible_in_nested_function
 wrapper <- function() {
@@ -64,7 +64,7 @@ definition: installed va from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (11): var_b, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion (11): var_b, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
 hint @55: integer
 hint @107: integer
 
@@ -138,7 +138,9 @@ action: Add inferred type annotations for the whole file
   edit 26..26 -> ": T"
   edit 27..27 -> " -> NULL"
 completion (128+): item, inheritedSlotNames, is.finite, is.finite.POSIXlt, is.infinite, is.infinite.POSIXlt, cite, citeNatbib
-hint @7: <T> fn(values: T) -> NULL
+hint @19<T>
+hint @26: T
+hint @27 -> NULL
 
 #---- local_shadows_global
 value <- function() NULL
@@ -155,8 +157,8 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> NULL"
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
-hint @5: fn() -> NULL
+completion (11): value, validEnc, validObject, validSlotNames, validUTF8, vapply, var, var.test
+hint @19 -> NULL
 hint @56: integer
 
 #---- dollar_empty_query
@@ -183,7 +185,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (2): fi, first_field
+completion (1): first_field
 
 #---- single_colon_not_namespace
 pkg:al$0
@@ -225,7 +227,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 9..9 -> ": integer"
-completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
+completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, formals, format
 hint @9: integer
 
 #---- no_matching_prefix

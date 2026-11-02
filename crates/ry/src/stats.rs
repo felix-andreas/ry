@@ -7,8 +7,10 @@ use {
         config::Config,
         diagnostics::document_diagnostics,
         installed::InstalledPackages,
+        scope_oracle::{Binding, ScopeOracle, Site},
     },
     ide::{DefinitionTarget, HoverDefinition},
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -30,7 +32,10 @@ use {
         sync::atomic::Ordering,
         time::{Duration, Instant},
     },
-    syntax::TextSize,
+    syntax::{
+        SyntaxKind::{BINARY_EXPR, FOR_EXPR, IDENT, PARAMETER},
+        SyntaxToken, TextRange, TextSize,
+    },
 };
 
 const SLOWEST_FILES: usize = 10;
@@ -315,6 +320,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     if let Some(&median) = by_loc.get(by_loc.len() / 2) {
         editor_requests(&mut db, &records, median, &config);
         editor_coverage(&db, &records, &root);
+        completion_coverage(&mut db, &records, &root);
+        reference_coverage(&mut db, &records);
     }
 
     Ok(())
@@ -399,6 +406,7 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
         if record.file.kind(db) != &DocumentKind::Package {
             continue;
         }
+        let syntax_root = semantics::parse(db, record.file).syntax_node();
         for offset in identifier_offsets(&record.source)
             .into_iter()
             .step_by(COVERAGE_POSITION_STRIDE)
@@ -433,7 +441,31 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
                 });
             tally.hover += usize::from(hover);
             tally.definition += usize::from(definition);
-            if !(hover && definition) && tally.misses.len() < COVERAGE_EXAMPLES {
+            // A call head asks inside its parentheses, as typing `(` would.
+            let signature_offset = match role {
+                IdentifierRole::CallHead => record.source[usize::from(offset)..]
+                    .find('(')
+                    .map(|open| offset + TextSize::from(open as u32 + 1)),
+                // A parameter's default sits in a definition, where signature help has no call
+                // to describe.
+                IdentifierRole::ArgumentName => syntax_root
+                    .token_at_offset(offset)
+                    .right_biased()
+                    .filter(|token| !is_declaration(token, &record.source[usize::from(offset)..]))
+                    .map(|_| offset),
+                _ => None,
+            };
+            let mut signature = true;
+            if let Some(signature_offset) = signature_offset {
+                signature =
+                    ide::signature_help_with(db, record.file, signature_offset, &mut |target| {
+                        installed.formals(target)
+                    })
+                    .is_some();
+                tally.signature_total += 1;
+                tally.signature += usize::from(signature);
+            }
+            if !(hover && definition && signature) && tally.misses.len() < COVERAGE_EXAMPLES {
                 let line_start = record.source[..usize::from(offset)]
                     .rfind('\n')
                     .map_or(0, |index| index + 1);
@@ -442,9 +474,10 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
                     .map_or(record.source.len(), |index| line_start + index);
                 let line = record.source[..line_start].matches('\n').count() + 1;
                 tally.misses.push(format!(
-                    "{}{} {}:{line}: {}   [{hover_text}]",
+                    "{}{}{} {}:{line}: {}   [{hover_text}]",
                     if hover { ' ' } else { 'H' },
                     if definition { ' ' } else { 'D' },
+                    if signature { ' ' } else { 'S' },
                     record
                         .path
                         .file_name()
@@ -458,8 +491,16 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     println!("editor coverage ({sampled} identifiers in package files):");
     for (role, tally) in &tallies {
         let share = |answered: usize| answered as f64 * 100.0 / tally.total.max(1) as f64;
+        let signature = if tally.signature_total > 0 {
+            format!(
+                "   signature {:>5.1}%",
+                tally.signature as f64 * 100.0 / tally.signature_total as f64
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "  {:<16} {:>6}   hover {:>5.1}%   definition {:>5.1}%",
+            "  {:<16} {:>6}   hover {:>5.1}%   definition {:>5.1}%{signature}",
             role.label(),
             tally.total,
             share(tally.hover),
@@ -471,6 +512,528 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     }
 }
 
+/// How often completion offers the identifier the code actually wrote among its first
+/// [`COMPLETION_TOP`] items, after cutting the identifier back in the file to the prefix a user
+/// would have typed: half the name, and the first [`COMPLETION_PREFIX`] characters. Declarations
+/// are skipped, since nothing can complete a name before it exists.
+fn completion_coverage(db: &mut RootDatabase, records: &[FileRecord], root: &Path) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let mut tallies: BTreeMap<IdentifierRole, CompletionTally> = BTreeMap::new();
+    let mut planned_per_role: BTreeMap<IdentifierRole, usize> = BTreeMap::new();
+    let mut latencies = Vec::new();
+    let mut installed = InstalledPackages::new(root, None);
+    for record in records {
+        if record.file.kind(db) != &DocumentKind::Package {
+            continue;
+        }
+        let root = semantics::parse(db, record.file).syntax_node();
+        let mut samples = Vec::new();
+        for offset in identifier_offsets(&record.source)
+            .into_iter()
+            .step_by(COMPLETION_POSITION_STRIDE)
+        {
+            let start = usize::from(offset);
+            let Some(role) = identifier_role(&record.source, start) else {
+                continue;
+            };
+            let planned = planned_per_role.entry(role).or_insert(0usize);
+            if *planned == COMPLETION_SAMPLES_PER_ROLE {
+                continue;
+            }
+            let Some(token) = root
+                .token_at_offset(offset)
+                .right_biased()
+                .filter(|token| token.kind() == IDENT)
+            else {
+                continue;
+            };
+            let word = token.text();
+            if word.chars().count() <= COMPLETION_PREFIX
+                || is_declaration(&token, &record.source[start..])
+                || (role == IdentifierRole::ArgumentName
+                    && names_a_dots_element(db, record.file, offset, word, &mut installed))
+            {
+                continue;
+            }
+            *planned += 1;
+            samples.push((offset, word.to_owned(), role));
+        }
+        for (offset, word, role) in samples {
+            let start = usize::from(offset);
+            let length = word.chars().count();
+            let tally = tallies.entry(role).or_default();
+            tally.total += 1;
+            for (cut, typed) in [
+                (PrefixCut::Short, COMPLETION_PREFIX),
+                (PrefixCut::Half, length.div_ceil(2).max(COMPLETION_PREFIX)),
+            ] {
+                let prefix_end = start
+                    + word
+                        .char_indices()
+                        .nth(typed)
+                        .map_or(word.len(), |(index, _)| index);
+                let mut text = String::with_capacity(record.source.len());
+                text.push_str(&record.source[..prefix_end]);
+                text.push_str(&record.source[start + word.len()..]);
+                record
+                    .file
+                    .set_text(db)
+                    .with_durability(Durability::LOW)
+                    .to(text);
+                let cursor = TextSize::from(prefix_end as u32);
+                let began = Instant::now();
+                let result = ide::completion_with(db, files, record.file, cursor, &mut |target| {
+                    installed.formals(target)
+                });
+                latencies.push(began.elapsed());
+                let labels: Vec<String> = result
+                    .map(|result| {
+                        result
+                            .items
+                            .into_iter()
+                            .take(COMPLETION_TOP)
+                            .map(|item| item.label)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let offered = labels
+                    .iter()
+                    .any(|label| label.trim_end_matches(" = ").trim_matches('`') == word);
+                match cut {
+                    PrefixCut::Short => tally.offered_short += usize::from(offered),
+                    PrefixCut::Half => tally.offered_half += usize::from(offered),
+                }
+                if offered || cut == PrefixCut::Short || tally.misses.len() == COVERAGE_EXAMPLES {
+                    continue;
+                }
+                let line_start = record.source[..start]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+                let line_end = record.source[line_start..]
+                    .find('\n')
+                    .map_or(record.source.len(), |index| line_start + index);
+                let line = record.source[..line_start].matches('\n').count() + 1;
+                tally.misses.push(format!(
+                    "{}:{line}: {word}   [{}]   {}{}",
+                    record
+                        .path
+                        .file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                    labels.join(", "),
+                    record.source[line_start..line_end].trim(),
+                    // An argument name is only as good as the signature the call resolves to.
+                    match role {
+                        IdentifierRole::ArgumentName => format!(
+                            "   signature: {}",
+                            ide::signature_help_with(db, record.file, cursor, &mut |target| {
+                                installed.formals(target)
+                            })
+                            .and_then(|help| help.signatures.into_iter().next())
+                            .map_or_else(|| "none".to_owned(), |signature| signature.label)
+                        ),
+                        _ => String::new(),
+                    },
+                ));
+            }
+        }
+        record
+            .file
+            .set_text(db)
+            .with_durability(Durability::LOW)
+            .to(record.source.clone());
+    }
+    latencies.sort();
+    let sampled: usize = tallies.values().map(|tally| tally.total).sum();
+    println!();
+    println!(
+        "completion coverage ({sampled} identifiers, top {COMPLETION_TOP} after typing half the name or {COMPLETION_PREFIX} characters; {:.1} ms p50 {:.1} ms p99):",
+        percentile(&latencies, 50),
+        percentile(&latencies, 99),
+    );
+    for (role, tally) in &tallies {
+        let share = |offered: usize| offered as f64 * 100.0 / tally.total.max(1) as f64;
+        println!(
+            "  {:<16} {:>6}   half {:>5.1}%   {COMPLETION_PREFIX} characters {:>5.1}%",
+            role.label(),
+            tally.total,
+            share(tally.offered_half),
+            share(tally.offered_short),
+        );
+        for miss in &tally.misses {
+            println!("      {miss}");
+        }
+    }
+}
+
+/// Find-references and rename at the package's own bindings, checked against
+/// [`ScopeOracle`], a resolver that reads only syntax and R's scoping rules. References count when
+/// the set they find is exactly the resolver's; rename counts when renaming the binding and then
+/// renaming it back restores every file.
+fn reference_coverage(db: &mut RootDatabase, records: &[FileRecord]) {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return;
+    };
+    let package: Vec<&FileRecord> = records
+        .iter()
+        .filter(|record| record.file.kind(db) == &DocumentKind::Package)
+        .collect();
+    let index: FxHashMap<SourceFile, usize> = package
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.file, index))
+        .collect();
+    let roots: Vec<_> = package
+        .iter()
+        .map(|record| semantics::parse(db, record.file).syntax_node())
+        .collect();
+    let oracle = ScopeOracle::build(&roots);
+    let mut expected: BTreeMap<&Binding, BTreeSet<Span>> = BTreeMap::new();
+    let mut undecided: FxHashSet<Span> = FxHashSet::default();
+    for site in &oracle.sites {
+        match &site.binding {
+            Some(binding) => {
+                expected
+                    .entry(binding)
+                    .or_default()
+                    .insert(span(site.file, site.range));
+            }
+            None => {
+                undecided.insert(span(site.file, site.range));
+            }
+        }
+    }
+    let candidates: Vec<&Site> = oracle
+        .sites
+        .iter()
+        .filter(|site| {
+            site.binding
+                .as_ref()
+                .is_some_and(|binding| oracle.is_project(binding))
+        })
+        .collect();
+    let stride = candidates.len().div_ceil(REFERENCE_SAMPLES).max(1);
+    let mut tallies: BTreeMap<&str, ReferenceTally> = BTreeMap::new();
+    let mut latencies = Vec::new();
+    let location = |file: usize, start: TextSize| {
+        let record = package[file];
+        let line = record.source[..usize::from(start)].matches('\n').count() + 1;
+        let name = record
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        format!("{name}:{line}")
+    };
+    for (position, site) in candidates.iter().step_by(stride).enumerate() {
+        let Some(binding) = &site.binding else {
+            continue;
+        };
+        let kind = match binding {
+            Binding::Local { .. } => "local",
+            Binding::Global(_) => "package-level",
+        };
+        let tally = tallies.entry(kind).or_default();
+        let record = package[site.file];
+        let began = Instant::now();
+        let found: BTreeSet<Span> =
+            ide::references(db, files, record.file, site.range.start(), true)
+                .into_iter()
+                .filter_map(|occurrence| {
+                    Some(span(*index.get(&occurrence.file)?, occurrence.range))
+                })
+                .filter(|occurrence| !undecided.contains(occurrence))
+                .collect();
+        latencies.push(began.elapsed());
+        let wanted = expected.get(binding).cloned().unwrap_or_default();
+        tally.references_total += 1;
+        if found == wanted {
+            tally.references += 1;
+        } else if tally.reference_misses.len() < COVERAGE_EXAMPLES {
+            let missing: Vec<String> = wanted
+                .difference(&found)
+                .take(3)
+                .map(|&(file, start, _)| location(file, start))
+                .collect();
+            let extra: Vec<String> = found
+                .difference(&wanted)
+                .take(3)
+                .map(|&(file, start, _)| location(file, start))
+                .collect();
+            tally.reference_misses.push(format!(
+                "{}: {}   expected {}, found {}   missing [{}]   extra [{}]",
+                location(site.file, site.range.start()),
+                site.name,
+                wanted.len(),
+                found.len(),
+                missing.join(", "),
+                extra.join(", "),
+            ));
+        }
+        // Renaming edits every file it touches, so it runs on every other sample.
+        // A non-syntactic name would need quoting the harness's new spelling does not add.
+        let syntactic = site
+            .name
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '.' | '_'));
+        if position % RENAME_EVERY != 0 || !syntactic {
+            continue;
+        }
+        tally.rename_total += 1;
+        match rename_round_trip(db, files, records, &package, site) {
+            Ok(()) => tally.rename += 1,
+            Err(reason) => {
+                if tally.rename_misses.len() < COVERAGE_EXAMPLES {
+                    tally.rename_misses.push(format!(
+                        "{}: {}   {reason}",
+                        location(site.file, site.range.start()),
+                        site.name
+                    ));
+                }
+            }
+        }
+    }
+    latencies.sort();
+    let sampled: usize = tallies.values().map(|tally| tally.references_total).sum();
+    println!();
+    println!(
+        "references and rename ({sampled} bindings, checked against a lexical resolver; references {:.1} ms p50 {:.1} ms p99):",
+        percentile(&latencies, 50),
+        percentile(&latencies, 99),
+    );
+    for (kind, tally) in &tallies {
+        let share = |count: usize, total: usize| count as f64 * 100.0 / total.max(1) as f64;
+        println!(
+            "  {kind:<16} {:>6}   references {:>5.1}%   rename {:>5.1}% of {}",
+            tally.references_total,
+            share(tally.references, tally.references_total),
+            share(tally.rename, tally.rename_total),
+            tally.rename_total,
+        );
+        for miss in tally.reference_misses.iter().chain(&tally.rename_misses) {
+            println!("      {miss}");
+        }
+    }
+}
+
+/// Renames the binding at `site` to a fresh name and back, and restores the package's files
+/// whatever happens.
+fn rename_round_trip(
+    db: &mut RootDatabase,
+    files: ProjectFiles,
+    records: &[FileRecord],
+    package: &[&FileRecord],
+    site: &Site,
+) -> Result<(), String> {
+    let record = package[site.file];
+    let renamed = format!("ry_renamed_{}", site.name);
+    let first = ide::rename(db, files, record.file, site.range.start())
+        .ok_or_else(|| "refused".to_owned())?;
+    let edits = rename_edits(db, &first, &site.name, &renamed)?;
+    let mut touched: Vec<SourceFile> = edits.iter().map(|(file, _)| *file).collect();
+    set_texts(db, edits);
+    // Every occurrence before the site in its file grew by the same amount.
+    let shift = first
+        .iter()
+        .filter(|occurrence| {
+            occurrence.file == record.file && occurrence.range.end() <= site.range.start()
+        })
+        .count()
+        * (renamed.len() - site.name.len());
+    let moved = site.range.start() + TextSize::from(shift as u32);
+    let outcome = match ide::rename(db, files, record.file, moved) {
+        None => Err("refused after the first rename".to_owned()),
+        Some(back) if back.len() != first.len() => Err(format!(
+            "renamed {} occurrences, then {} back",
+            first.len(),
+            back.len()
+        )),
+        Some(back) => rename_edits(db, &back, &renamed, &site.name).map(|edits| {
+            touched.extend(edits.iter().map(|(file, _)| *file));
+            set_texts(db, edits);
+        }),
+    };
+    let changed = touched.iter().find_map(|&file| {
+        let text: &str = file.text(db);
+        let original = original_text(records, file);
+        let differs_at = text
+            .bytes()
+            .zip(original.bytes())
+            .position(|(left, right)| left != right)
+            .or_else(|| (text.len() != original.len()).then(|| text.len().min(original.len())))?;
+        let line = original[..differs_at].matches('\n').count() + 1;
+        let path = records
+            .iter()
+            .find(|record| record.file == file)
+            .and_then(|record| record.path.file_name())
+            .map_or(std::borrow::Cow::Borrowed(""), |name| {
+                name.to_string_lossy()
+            });
+        Some(format!("renaming back changed {path}:{line}"))
+    });
+    restore(db, records, &touched);
+    outcome?;
+    changed.map_or(Ok(()), Err)
+}
+
+/// Each edited file's new text, provided every occurrence spells `from`. A backticked
+/// occurrence keeps its backticks, so every occurrence grows by the same amount.
+fn rename_edits(
+    db: &RootDatabase,
+    occurrences: &[ide::Occurrence],
+    from: &str,
+    to: &str,
+) -> Result<Vec<(SourceFile, String)>, String> {
+    let mut by_file: FxHashMap<SourceFile, Vec<TextRange>> = FxHashMap::default();
+    for occurrence in occurrences {
+        by_file
+            .entry(occurrence.file)
+            .or_default()
+            .push(occurrence.range);
+    }
+    let mut edits = Vec::new();
+    for (file, mut ranges) in by_file {
+        let mut text = file.text(db).to_string();
+        ranges.sort_by_key(|range| Reverse(range.start()));
+        for range in ranges {
+            let span = std::ops::Range::<usize>::from(range);
+            let spelled = text.get(span.clone()).unwrap_or_default();
+            if spelled.trim_matches('`') != from {
+                return Err(format!("an occurrence spells `{spelled}`"));
+            }
+            if spelled.starts_with('`') {
+                text.replace_range(span, &format!("`{to}`"));
+            } else {
+                text.replace_range(span, to);
+            }
+        }
+        edits.push((file, text));
+    }
+    Ok(edits)
+}
+
+fn set_texts(db: &mut RootDatabase, edits: Vec<(SourceFile, String)>) {
+    for (file, text) in edits {
+        file.set_text(db).with_durability(Durability::LOW).to(text);
+    }
+}
+
+fn original_text(records: &[FileRecord], file: SourceFile) -> &str {
+    records
+        .iter()
+        .find(|record| record.file == file)
+        .map_or("", |record| record.source.as_str())
+}
+
+fn restore(db: &mut RootDatabase, records: &[FileRecord], touched: &[SourceFile]) {
+    for record in records
+        .iter()
+        .filter(|record| touched.contains(&record.file))
+    {
+        record
+            .file
+            .set_text(db)
+            .with_durability(Durability::LOW)
+            .to(record.source.clone());
+    }
+}
+
+/// A file index and a range: an occurrence in one of the package's files.
+type Span = (usize, TextSize, TextSize);
+
+fn span(file: usize, range: TextRange) -> Span {
+    (file, range.start(), range.end())
+}
+
+const REFERENCE_SAMPLES: usize = 400;
+const RENAME_EVERY: usize = 2;
+
+#[derive(Default)]
+struct ReferenceTally {
+    references_total: usize,
+    references: usize,
+    reference_misses: Vec<String>,
+    rename_total: usize,
+    rename: usize,
+    rename_misses: Vec<String>,
+}
+
+/// `list(total = 1)` or `tryCatch(warning = ...)`: an argument name the known signature does not
+/// declare, which `...` takes as a new name that nothing could complete.
+fn names_a_dots_element(
+    db: &RootDatabase,
+    file: SourceFile,
+    offset: TextSize,
+    word: &str,
+    installed: &mut InstalledPackages,
+) -> bool {
+    let Some(signature) =
+        ide::signature_help_with(db, file, offset, &mut |target| installed.formals(target))
+            .and_then(|help| help.signatures.into_iter().next())
+    else {
+        return false;
+    };
+    let mut has_dots = false;
+    for span in &signature.parameters {
+        let Some(parameter) = signature
+            .label
+            .get(usize::from(span.start())..usize::from(span.end()))
+        else {
+            continue;
+        };
+        let name = parameter
+            .trim_start_matches('[')
+            .split([']', ':', ' '])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if name == word {
+            return false;
+        }
+        has_dots |= name == "...";
+    }
+    has_dots
+}
+
+/// A parameter, a loop variable, or an assignment target introduces the name it spells.
+fn is_declaration(token: &SyntaxToken, rest: &str) -> bool {
+    let after = rest[token.text().len()..].trim_start_matches([' ', '\t']);
+    if after.starts_with("<-") || after.starts_with("<<-") || after.starts_with(":=") {
+        return true;
+    }
+    token
+        .parent_ancestors()
+        .take(2)
+        .any(|node| match node.kind() {
+            PARAMETER | FOR_EXPR => true,
+            // `x = 1` as a statement, not `f(x = 1)`.
+            BINARY_EXPR => after.starts_with('=') && !after.starts_with("=="),
+            _ => false,
+        })
+}
+
+const COMPLETION_PREFIX: usize = 2;
+const COMPLETION_TOP: usize = 5;
+const COMPLETION_POSITION_STRIDE: usize = 5;
+const COMPLETION_SAMPLES_PER_ROLE: usize = 400;
+
+#[derive(Default)]
+struct CompletionTally {
+    total: usize,
+    offered_half: usize,
+    offered_short: usize,
+    /// Positions where half the name was not enough.
+    misses: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrefixCut {
+    /// The first [`COMPLETION_PREFIX`] characters.
+    Short,
+    /// Half the name, rounded up: completion that misses here saves less than half the typing.
+    Half,
+}
+
 const COVERAGE_SAMPLES: usize = 20_000;
 const COVERAGE_POSITION_STRIDE: usize = 3;
 const COVERAGE_EXAMPLES: usize = 12;
@@ -480,6 +1043,10 @@ struct CoverageTally {
     total: usize,
     hover: usize,
     definition: usize,
+    /// Call heads and argument names only: how many were asked for signature help, and how many
+    /// got a signature.
+    signature_total: usize,
+    signature: usize,
     misses: Vec<String>,
 }
 
@@ -550,9 +1117,11 @@ fn identifier_role(source: &str, start: usize) -> Option<IdentifierRole> {
     if after.starts_with('(') {
         return Some(IdentifierRole::CallHead);
     }
+    // Arguments often sit one per line, so the `(` or `,` may end an earlier line.
+    let before_line = source[..start].trim_end();
     if after.starts_with('=')
         && !after.starts_with("==")
-        && (before.ends_with('(') || before.ends_with(','))
+        && (before_line.ends_with('(') || before_line.ends_with(','))
     {
         return Some(IdentifierRole::ArgumentName);
     }

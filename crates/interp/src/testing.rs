@@ -507,7 +507,7 @@ fn items(entropy: &mut impl Entropy, defined: usize, most: usize) -> Vec<Item> {
 }
 
 fn mark(entropy: &mut impl Entropy, defined: usize) -> Mark {
-    match entropy.below(4) {
+    match entropy.below(5) {
         0 => Mark::Text {
             origin: point(entropy),
             text: ["", "ry", "Wg ÄÖ", "a\u{301}"][entropy.below(4)].to_owned(),
@@ -517,6 +517,23 @@ fn mark(entropy: &mut impl Entropy, defined: usize) -> Mark {
             hadj: entropy.below(3) as f64 / 2.0,
             colour: colour(entropy),
         },
+        4 => {
+            let (columns, rows) = (1 + entropy.below(4), 1 + entropy.below(4));
+            Mark::Image {
+                pixels: (0..columns * rows).map(|_| colour(entropy)).collect(),
+                columns,
+                rows,
+                placement: Affine([
+                    number(entropy),
+                    number(entropy) / 4.0,
+                    number(entropy) / 4.0,
+                    number(entropy),
+                    number(entropy),
+                    number(entropy),
+                ]),
+                interpolate: entropy.chance(1, 2),
+            }
+        }
         1 => Mark::Group {
             group: reference(entropy, defined),
             transform: Affine([

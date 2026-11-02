@@ -1168,19 +1168,22 @@ fn analyzed_files(
         .collect()
 }
 
+/// A file's R source and, for a literate document, the document text it was extracted from.
+type DecodedSource = (String, Option<String>);
+
 /// Reads every source across cores, in `paths` order. A cold check reads a thousand files
 /// before anything else can start, so a serial read is a visible slice of its wall time. Each
 /// file is decoded in `encoding`, the package's declared one, as R reads its code.
 fn read_sources(
     paths: Vec<PathBuf>,
     encoding: SourceEncoding,
-) -> Vec<(PathBuf, io::Result<(String, Option<String>)>)> {
+) -> Vec<(PathBuf, io::Result<DecodedSource>)> {
     let workers = thread::available_parallelism()
         .map_or(1, usize::from)
         .min(paths.len())
         .max(1);
     let chunk = paths.len().div_ceil(workers).max(1);
-    let read: Vec<io::Result<(String, Option<String>)>> = thread::scope(|scope| {
+    let read: Vec<io::Result<DecodedSource>> = thread::scope(|scope| {
         let handles: Vec<_> = paths
             .chunks(chunk)
             .map(|chunk| {

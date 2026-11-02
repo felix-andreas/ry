@@ -16,7 +16,7 @@
 //! the `bin/` front ends are ry's own.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt, fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -34,6 +34,10 @@ const INSTALL_DRIVER: &str = include_str!("install.R");
 mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
+
+mod makeconf;
+
+use makeconf::{expand_make, make_assignments};
 
 #[derive(Debug)]
 pub enum Error {
@@ -220,17 +224,46 @@ impl Toolchain {
     }
 
     /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
-    /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
-    /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
-    /// uses Apple's clang, the gfortran in `/opt/gfortran` and its own `libRblas`, Homebrew's
-    /// uses Homebrew's gcc and OpenBLAS, and neither has a usable default.
+    /// On macOS it is the one GNU R's own `etc/Makeconf` names, because the compilers and
+    /// libraries vary by installer: CRAN's R uses Apple's clang, the gfortran in `/opt/gfortran`
+    /// and its own `libRblas`, Homebrew's uses Homebrew's gcc and OpenBLAS, and neither has a
+    /// usable default. On Linux it is [`Toolchain::default`] linking the BLAS and LAPACK that
+    /// `Makeconf` names (see [`Toolchain::with_makeconf_libraries`]). On Windows it is Rtools.
     pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
-        if !cfg!(target_os = "macos") {
+        if cfg!(windows) {
             return Ok(Toolchain::default());
         }
         let path = gnu_r_home.join("etc").join("Makeconf");
         let text = fs::read_to_string(&path).map_err(io_error(&path))?;
-        Ok(Toolchain::from_makeconf(&text, gnu_r_home))
+        Ok(if cfg!(target_os = "macos") {
+            Toolchain::from_makeconf(&text, gnu_r_home)
+        } else {
+            Toolchain::default().with_makeconf_libraries(&text, gnu_r_home)
+        })
+    }
+
+    /// This toolchain linking the BLAS and LAPACK that GNU R's `Makeconf` names, where it names
+    /// one. A distribution's R names the bare `-lblas` and `-llapack` the default has, but an R
+    /// on a system without a global library path records where they are (nixpkgs writes
+    /// `-L/nix/store/...-blas-3/lib -lblas`), and the linker finds them nowhere else. An empty
+    /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
+    /// which packages link after `$(LAPACK_LIBS)` anyway.
+    pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
+        let variables = make_assignments(text, &gnu_r_home.display().to_string());
+        let get = |name: &str| {
+            expand_make(variables.get(name).map_or("", String::as_str), &variables)
+                .trim()
+                .to_owned()
+        };
+        let blas_libs = get("BLAS_LIBS");
+        if blas_libs.is_empty() {
+            return self;
+        }
+        Toolchain {
+            blas_libs,
+            lapack_libs: get("LAPACK_LIBS"),
+            ..self
+        }
     }
 
     /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
@@ -265,163 +298,6 @@ impl Toolchain {
             openmp: get("SHLIB_OPENMP_CFLAGS"),
         }
     }
-}
-
-/// The variables a makefile defines, each held as text that `expand_make` expands to its
-/// value. `+=` appends and `?=` assigns only once, as make does. `:=` expands its value at
-/// the point of assignment, and the result is stored with each `$` doubled, so expanding it
-/// later yields that text unchanged. `R_HOME` is `home` whatever the makefile assigns,
-/// because R passes it on make's command line, which overrides the file.
-fn make_assignments(text: &str, home: &str) -> BTreeMap<String, String> {
-    let mut variables = BTreeMap::from([("R_HOME".to_owned(), escape_make(home))]);
-    // The names assigned with `:=`, whose appended text `+=` also expands at once.
-    let mut simple = BTreeSet::from(["R_HOME".to_owned()]);
-    let mut logical = String::new();
-    for line in text.lines() {
-        // make joins a continuation and the whitespace around it into one space.
-        let line = if logical.is_empty() {
-            line
-        } else {
-            line.trim_start()
-        };
-        if let Some(stripped) = line.strip_suffix('\\') {
-            // Trimming the whole buffer collapses a run of blank continuation lines too.
-            logical.push_str(stripped);
-            logical.truncate(logical.trim_end().len());
-            logical.push(' ');
-            continue;
-        }
-        logical.push_str(line);
-        let statement = std::mem::take(&mut logical);
-        if statement.starts_with(['\t', '#']) {
-            continue;
-        }
-        let Some((name, value)) = statement.split_once('=') else {
-            continue;
-        };
-        // A `#` starts a comment anywhere on an assignment line, as in make. make strips the
-        // whitespace before a value but keeps the whitespace after it, even before a comment.
-        let value = value.split('#').next().unwrap_or("").trim_start();
-        let name = name.trim_end();
-        let (name, operator) = match name.strip_suffix("::").or_else(|| name.strip_suffix(':')) {
-            Some(stripped) => (stripped, Some(':')),
-            None => match name.strip_suffix(['+', '?']) {
-                Some(stripped) => (stripped, name.chars().last()),
-                None => (name, None),
-            },
-        };
-        let name = name.trim();
-        if name.is_empty() || name.contains(char::is_whitespace) || name == "R_HOME" {
-            continue;
-        }
-        match operator {
-            Some('+') => {
-                let value = match simple.contains(name) {
-                    true => escape_make(&expand_make(value, &variables)),
-                    false => value.to_owned(),
-                };
-                let entry: &mut String = variables.entry(name.to_owned()).or_default();
-                // make appends nothing, not even the joining space, for empty text.
-                if value.is_empty() {
-                    continue;
-                }
-                if !entry.is_empty() {
-                    entry.push(' ');
-                }
-                entry.push_str(&value);
-            }
-            Some('?') => {
-                variables
-                    .entry(name.to_owned())
-                    .or_insert_with(|| value.to_owned());
-            }
-            Some(':') => {
-                let value = escape_make(&expand_make(value, &variables));
-                variables.insert(name.to_owned(), value);
-                simple.insert(name.to_owned());
-            }
-            _ => {
-                variables.insert(name.to_owned(), value.to_owned());
-                simple.remove(name);
-            }
-        }
-    }
-    variables
-}
-
-/// Expands the variable references in `value` as make does: `$(NAME)`, `${NAME}`, a
-/// one-character `$N`, a name built by a nested reference (`$(CXX$(STD))`), and `$$` to `$`.
-/// An unknown name expands to nothing. A variable that refers to itself, directly or through
-/// others, is an error in make; here the inner reference expands to nothing, so expansion
-/// always ends and never repeats the cycle. Whitespace is kept, so a quoted path with a
-/// space survives, and callers trim the result.
-fn expand_make(value: &str, variables: &BTreeMap<String, String>) -> String {
-    let mut expanded = String::with_capacity(value.len());
-    expand_make_into(value, variables, &mut Vec::new(), &mut expanded);
-    expanded
-}
-
-fn expand_make_into<'a>(
-    value: &str,
-    variables: &'a BTreeMap<String, String>,
-    active: &mut Vec<&'a str>,
-    expanded: &mut String,
-) {
-    let mut rest = value;
-    while let Some(start) = rest.find('$') {
-        expanded.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let mut characters = after.chars();
-        let (name, remainder) = match characters.next() {
-            Some('$') => {
-                expanded.push('$');
-                rest = &after[1..];
-                continue;
-            }
-            Some(open @ ('(' | '{')) => {
-                let close = if open == '(' { ')' } else { '}' };
-                let mut level = 0usize;
-                let end = after.char_indices().find_map(|(index, character)| {
-                    if character == open {
-                        level += 1;
-                    } else if character == close {
-                        level -= 1;
-                        if level == 0 {
-                            return Some(index);
-                        }
-                    }
-                    None
-                });
-                let Some(end) = end else {
-                    expanded.push_str(&rest[start..]);
-                    return;
-                };
-                let mut name = String::new();
-                expand_make_into(&after[1..end], variables, active, &mut name);
-                (name, &after[end + 1..])
-            }
-            Some(character) => (character.to_string(), characters.as_str()),
-            None => {
-                // make keeps a lone `$` at the end of a value.
-                expanded.push('$');
-                return;
-            }
-        };
-        if let Some((name, inner)) = variables.get_key_value(name.as_str())
-            && !active.contains(&name.as_str())
-        {
-            active.push(name);
-            expand_make_into(inner, variables, active, expanded);
-            active.pop();
-        }
-        rest = remainder;
-    }
-    expanded.push_str(rest);
-}
-
-/// Text that `expand_make` expands to `text` itself.
-fn escape_make(text: &str) -> String {
-    text.replace('$', "$$")
 }
 
 /// Where the pieces of an R home come from.
@@ -1859,7 +1735,7 @@ pub fn compile(home: &Path, package: &Path, libraries: &[PathBuf]) -> Result<()>
     paths.push(home.join("library"));
     let built = compile_in(home, package, &name, &description, &paths, &target);
     let removed = fs::remove_dir_all(&target).map_err(io_error(&target));
-    built.and_then(|_| removed)
+    built.and(removed)
 }
 
 /// Runs the `configure` script of the source tree `build` and compiles its `src/`, returning the
@@ -2230,6 +2106,30 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
         assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
         assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn a_linux_toolchain_links_the_blas_and_lapack_gnu_r_makeconf_names() {
+        let home = Path::new("/nix/store/abc-R-4.5.2/lib/R");
+        let nix = "BLAS_LIBS = -L/nix/store/def-blas-3/lib -lblas\n\
+                   LAPACK_LIBS = -L/nix/store/ghi-lapack-3/lib -llapack\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(nix, home);
+        assert_eq!(toolchain.blas_libs, "-L/nix/store/def-blas-3/lib -lblas");
+        assert_eq!(
+            toolchain.lapack_libs,
+            "-L/nix/store/ghi-lapack-3/lib -llapack"
+        );
+        assert_eq!(toolchain.cc, Toolchain::default().cc);
+        let internal = "BLAS_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRblas\nLAPACK_LIBS =\n";
+        let toolchain = Toolchain::default().with_makeconf_libraries(internal, home);
+        assert_eq!(
+            toolchain.blas_libs,
+            "-L\"/nix/store/abc-R-4.5.2/lib/R/lib\" -lRblas"
+        );
+        assert_eq!(toolchain.lapack_libs, "");
+        let toolchain = Toolchain::default().with_makeconf_libraries("CC = gcc\n", home);
+        assert_eq!(toolchain.blas_libs, "-lblas");
+        assert_eq!(toolchain.lapack_libs, "-llapack");
     }
 
     #[test]

@@ -2173,54 +2173,52 @@ fn keys_too_wide_for_one_64_bit_code_group_like_the_plan() {
 /// split the groups. The values mix magnitudes so that any other order rounds differently.
 #[test]
 fn a_double_sum_over_many_groups_adds_in_row_order() {
-    for_each_seed(1, |seed| {
-        let mut rng = SplitMix64(seed);
-        let rows = 300_000;
-        let groups = 40_000;
-        let keys: Vec<i32> = (0..rows).map(|_| rng.below(groups) as i32).collect();
-        let values: Vec<f64> = (0..rows)
-            .map(|_| {
-                if rng.chance(1, 50) {
-                    1e15
-                } else {
-                    rng.below(1_000_000) as f64 / 7.0
-                }
-            })
-            .collect();
-        let mut expected = vec![0.0; groups as usize];
-        let mut seen = vec![false; groups as usize];
-        for (key, value) in keys.iter().zip(&values) {
-            expected[*key as usize] += value;
-            seen[*key as usize] = true;
-        }
-        let table = frame(vec![("k", ints(&keys)), ("v", doubles(&values))]);
-        let query = Query {
-            select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
-            by: vec![named("k", column("k"))],
-            keyed: true,
-            ..Query::default()
-        };
-        let Ok(Executed {
-            output: Output::Table(mut output),
-            ..
-        }) = execute(&mut table.fork(), query)
-        else {
-            panic!("the grouped sum failed");
-        };
-        let RVector::Double(sums) = get(&mut output, "s") else {
-            panic!("the sum is not a double column");
-        };
-        let present: Vec<f64> = expected
-            .iter()
-            .zip(&seen)
-            .filter(|(_, seen)| **seen)
-            .map(|(sum, _)| *sum)
-            .collect();
-        assert_eq!(sums.len(), present.len());
-        for (group, (sum, want)) in sums.iter().zip(&present).enumerate() {
-            assert_eq!(sum.to_bits(), want.to_bits(), "group {group}");
-        }
-    });
+    let mut rng = SplitMix64(23);
+    let rows = 300_000;
+    let groups = 40_000;
+    let keys: Vec<i32> = (0..rows).map(|_| rng.below(groups) as i32).collect();
+    let values: Vec<f64> = (0..rows)
+        .map(|_| {
+            if rng.chance(1, 50) {
+                1e15
+            } else {
+                rng.below(1_000_000) as f64 / 7.0
+            }
+        })
+        .collect();
+    let mut expected = vec![0.0; groups];
+    let mut seen = vec![false; groups];
+    for (key, value) in keys.iter().zip(&values) {
+        expected[*key as usize] += value;
+        seen[*key as usize] = true;
+    }
+    let table = frame(vec![("k", ints(&keys)), ("v", doubles(&values))]);
+    let query = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        by: vec![named("k", column("k"))],
+        keyed: true,
+        ..Query::default()
+    };
+    let Ok(Executed {
+        output: Output::Table(mut output),
+        ..
+    }) = execute(&mut table.fork(), query)
+    else {
+        panic!("the grouped sum failed");
+    };
+    let RVector::Double(sums) = get(&mut output, "s") else {
+        panic!("the sum is not a double column");
+    };
+    let present: Vec<f64> = expected
+        .iter()
+        .zip(&seen)
+        .filter(|(_, seen)| **seen)
+        .map(|(sum, _)| *sum)
+        .collect();
+    assert_eq!(sums.len(), present.len());
+    for (group, (sum, want)) in sums.iter().zip(&present).enumerate() {
+        assert_eq!(sum.to_bits(), want.to_bits(), "group {group}");
+    }
 }
 
 /// data.table 1.18 under R 4.3 gives a double column for `s := sum(v) - 1L` when a total

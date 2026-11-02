@@ -1466,10 +1466,7 @@ pub fn rmultinom(
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use {
-        super::*,
-        crate::{random::SeededDeviates, rmath::*},
-    };
+    use {super::*, crate::random::SeededDeviates};
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 

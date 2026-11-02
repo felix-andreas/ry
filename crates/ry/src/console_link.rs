@@ -215,7 +215,7 @@ mod platform {
                 Some((modified, socket, path))
             })
             .collect();
-        consoles.sort_by(|left, right| right.0.cmp(&left.0));
+        consoles.sort_by_key(|console| std::cmp::Reverse(console.0));
         for (_, socket, registry) in consoles {
             match Stream::connect(&socket) {
                 Ok(stream) => {

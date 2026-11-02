@@ -1,0 +1,15 @@
+# GNU R writes a negative zero as 0 in format() and print() at every scipen, while
+# formatC() and sprintf() keep C's sign.
+options(scipen = -5); print(format(-0)); print(-0); print(c(-0, 1.5)); print(format(c(-0, 12345))); print(as.character(-0)); cat(-0, "\n")
+options(scipen = 0); print(format(-0)); print(format(-0, nsmall = 2)); print(formatC(-0)); print(sprintf("%e", -0)); print(format(c(-0, 1e10)))
+print(format(-0, scientific = TRUE)); print(signif(-0)); print(prettyNum(-0)); print(toString(-0))
+x <- c(a = -0); print(x); print(format(-0, width = 6)); print(format(complex(real = -0, imaginary = -0)))
+print(formatC(c(-0, 0), format = "f"))
+print(formatC(c(-0, 0), format = "e"))
+print(formatC(c(-0, 0), format = "fg"))
+print(formatC(c(-0, 0), format = "g", flag = "#"))
+print(formatC(-0, format = "fg", flag = "#", digits = 3))
+print(formatC(0, format = "fg", flag = "#", digits = 3))
+print(formatC(c(1,0,2.5), flag="#")); print(formatC(0, flag="#")); print(formatC(c(1,0), format="g", flag="#", digits=2))
+print(formatC(1, format="f", flag="#")); print(formatC(1, format="e", flag="#")); print(formatC(3.14159, format="g", flag="#", digits=NULL)); print(formatC(1, format="f", digits=-1)); print(formatC(pi, format="g", digits=-1))
+print(formatC(-0, width = 8, flag = "0")); print(sprintf("%g", -0)); print(sprintf("%5.1f", -0)); print(format(c(-0, -1e-20), digits = 3))

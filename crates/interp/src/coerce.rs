@@ -9,7 +9,11 @@ use {
             self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
         },
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        strings::Encoding,
+    },
+    std::io::Write,
 };
 
 /// Warnings a coercion raises, collected so each is reported once per call.
@@ -556,6 +560,32 @@ pub unsafe fn coerce_atomic(
                 }
             }
         }
+        SexpType::String if source == SexpType::Integer => {
+            let object = values::materialize(object)?;
+            // Integer codes are mostly small and repeat (factor() converts its codes to
+            // character), so their strings are interned once per call, and the rest are written
+            // into a stack buffer rather than an allocated string.
+            const SMALL: usize = 1024;
+            let mut small = [None::<Sexp>; SMALL];
+            let mut buffer = [0u8; 12];
+            for index in 0..count {
+                let value = values::ints(object)[index];
+                let charsxp = if value == NA_INTEGER {
+                    na_string()
+                } else if let Some(slot) = usize::try_from(value)
+                    .ok()
+                    .and_then(|value| small.get_mut(value))
+                {
+                    match *slot {
+                        Some(charsxp) => charsxp,
+                        None => *slot.insert(integer_charsxp(value, &mut buffer)?),
+                    }
+                } else {
+                    integer_charsxp(value, &mut buffer)?
+                };
+                values::set_elt(result, index, charsxp);
+            }
+        }
         SexpType::String => {
             for index in 0..count {
                 let charsxp = element_as_charsxp(object, index)?;
@@ -617,6 +647,18 @@ pub unsafe fn coerce_atomic(
         }
     }
     Ok(result)
+}
+
+/// The caller stores the string at once into a vector it keeps rooted, so the string skips the
+/// root handle `values::mkchar` would push for it.
+unsafe fn integer_charsxp(value: i32, buffer: &mut [u8; 12]) -> R<Sexp> {
+    let mut cursor = &mut buffer[..];
+    // Eleven bytes hold every `i32`, so the write cannot run out of room.
+    if write!(cursor, "{value}").is_err() {
+        return values::mkchar(&value.to_string());
+    }
+    let written = 12 - cursor.len();
+    Ok(crate::heap().mk_char(&buffer[..written], Encoding::Native)?)
 }
 
 fn parse_complex(text: &str) -> Option<Rcomplex> {
@@ -704,6 +746,7 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         return Err(error("invalid 'mode' argument"));
     };
     if kind == SexpType::Symbol {
+        values::refuse_bytes(object)?;
         let text = values::as_string_scalar(object)?
             .ok_or_else(|| error("invalid type/length (symbol/0) in vector allocation"))?;
         return values::install(&text);

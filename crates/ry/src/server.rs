@@ -1552,9 +1552,11 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let mut updated = self.apply_content_changes(text, &params.content_changes);
-        if self.literate_documents.contains_key(&file) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) =
+            self.literate_documents.entry(file)
+        {
             let analysed = r_source_of_literate(&updated);
-            self.literate_documents.insert(file, updated);
+            e.insert(updated);
             updated = analysed;
         }
         self.pending_lowering.retain(|owed| owed != &path);
@@ -1933,7 +1935,7 @@ impl Worker {
         let published = apply_suppressions(document_diagnostics(&self.db, file, &config), &text);
         let fixable = published
             .iter()
-            .filter(|diagnostic| diagnostic.fix.is_some())
+            .filter(|diagnostic| ide::has_quick_fix(diagnostic))
             .cloned()
             .collect();
         let converted = published
@@ -1961,7 +1963,7 @@ impl Worker {
         }
         apply_suppressions(document_diagnostics(&self.db, file, &self.config), text)
             .into_iter()
-            .filter(|diagnostic| diagnostic.fix.is_some())
+            .filter(ide::has_quick_fix)
             .collect()
     }
 
@@ -2690,7 +2692,12 @@ impl LanguageServer for ServerState {
             }
             let files = ProjectFiles::get(&worker.db);
             let result = worker
-                .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
+                .cancellable(|worker| {
+                    let installed = &mut worker.installed;
+                    ide::completion_with(&worker.db, files, file, offset, &mut |target| {
+                        installed.as_mut()?.formals(target)
+                    })
+                })
                 .unwrap_or_default();
             let (mut items, is_incomplete) = match result {
                 Some(result) => (
@@ -2712,7 +2719,7 @@ impl LanguageServer for ServerState {
                 usize::from(offset),
                 &items,
             ));
-            Ok((!items.is_empty()).then(|| {
+            Ok((!items.is_empty()).then_some({
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete,
                     items,
@@ -2764,7 +2771,12 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let help = worker
-                .cancellable(|worker| ide::signature_help(&worker.db, file, offset))
+                .cancellable(|worker| {
+                    let installed = &mut worker.installed;
+                    ide::signature_help_with(&worker.db, file, offset, &mut |target| {
+                        installed.as_mut()?.formals(target)
+                    })
+                })
                 .unwrap_or_default();
             Ok(help.map(|help| {
                 let active_parameter = help
@@ -2816,6 +2828,7 @@ impl LanguageServer for ServerState {
                     let mut actions = Vec::new();
                     if wants_quick_fixes {
                         actions.extend(ide::diagnostic_fixes(&fixable, range));
+                        actions.extend(ide::import_fixes(&worker.db, file, &fixable, range));
                         actions.extend(ide::code_actions(&worker.db, file, range));
                     }
                     // Listed beside the quick fixes only when it does more than one of them.
@@ -3540,6 +3553,7 @@ fn convert_completion_item(
         CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
         CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
         CompletionKind::Tag => lsp_types::CompletionItemKind::ENUM_MEMBER,
+        CompletionKind::Package => lsp_types::CompletionItemKind::MODULE,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),

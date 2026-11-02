@@ -97,6 +97,21 @@ pub struct ItemNaming {
     /// Bare names read as the routine of `.Call` and the other native interfaces, which a
     /// registering `useDynLib` may bind.
     pub native_routine_reads: SortedSet<ExprId>,
+    /// Slots a replacement assignment creates in a scope with no variable of that name yet:
+    /// R runs `the$x <- v` in a function as `the <- `$<-`(the, "x", v)`, which copies the
+    /// enclosing `the` into a new local. The checker types the copy as its own variable, but an
+    /// editor treats it as the variable it copies, since renaming one without the other breaks
+    /// the code.
+    pub replacement_copies: SortedMap<BindingId, CopySource>,
+}
+
+/// The variable a replacement assignment's local copy starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopySource {
+    /// An enclosing scope's slot in the same item.
+    Slot(BindingId),
+    /// A name the item does not bind: another item's or the library's.
+    NonLocal(Symbol),
 }
 
 /// Where a call head's lookup continues when its nearest binding cannot hold a function.
@@ -132,6 +147,7 @@ struct NamingDraft {
     or_pattern_mismatches: Vec<OrPatternMismatch>,
     callee_fallbacks: BTreeMap<ExprId, CalleeFallback>,
     native_routine_reads: BTreeSet<ExprId>,
+    replacement_copies: BTreeMap<BindingId, CopySource>,
 }
 
 impl NamingDraft {
@@ -158,6 +174,7 @@ impl NamingDraft {
             or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             callee_fallbacks: self.callee_fallbacks.into(),
             native_routine_reads: self.native_routine_reads.into(),
+            replacement_copies: self.replacement_copies.into(),
         }
     }
 }
@@ -1230,9 +1247,20 @@ impl Context<'_> {
             // (R evaluates `x[i] <- v` as `x <- `[<-`(x, i, v)`).
             _ => match replacement_base(module, target) {
                 Some((base_expression, name, range)) => {
+                    let fresh = !self.current_scope().slots.contains_key(&name);
+                    // A loop body is walked more than once, and an earlier walk's resolution of
+                    // the base to this very copy must not be read back as its source.
+                    self.naming.resolutions.remove(&base_expression);
                     self.resolve(base_expression);
+                    let source = match self.naming.resolutions.get(&base_expression) {
+                        Some(&outer) => CopySource::Slot(outer),
+                        None => CopySource::NonLocal(name),
+                    };
                     let kind = self.assignment_binding_kind();
                     let slot = self.frame_slot(name, range, kind);
+                    if fresh && kind != BindingKind::TopLevel {
+                        self.naming.replacement_copies.insert(slot, source);
+                    }
                     self.naming.resolutions.insert(base_expression, slot);
                     self.record_write_site(assignment, name, range, slot, false);
                     self.resolve_replacement_subscripts(target, base_expression);
