@@ -689,6 +689,12 @@ fn analyze_project_with(
             semantics::item_interface_edges(db, item);
         }
     });
+    // The group walk records one dependency edge per item, and salsa keeps that capacity in the
+    // handle's reused query-stack frame, so every later query at the same depth would clear a
+    // table sized for the whole project. A throwaway handle takes the walk and drops the frame.
+    if let Some(project) = ProjectFiles::try_get(&db) {
+        semantics::project_interface_groups(&db.clone(), project);
+    }
     let mut per_file: Vec<Vec<Diagnostic>> = recorded
         .into_iter()
         .map(Option::unwrap_or_default)
