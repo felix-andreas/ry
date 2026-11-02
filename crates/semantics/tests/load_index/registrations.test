@@ -34,8 +34,8 @@ Anonymous <- R6Class(public = list())
 #++++
 package demo 0.1.0
 == R/a.R
-1:0 eager binds [Counter] reads [list] registers R6Class { class: "Counter" }
-2:0 eager binds [Anonymous] reads [R6Class list] registers R6Class { class: "Anonymous" }
+1:0 lazy Counter constant at 1:11 registers R6Class { class: "Counter" }
+2:0 lazy Anonymous constant at 2:13 registers R6Class { class: "Anonymous" }
 
 #==== s3
 #---- explicit_s3_registration_calls_are_recorded

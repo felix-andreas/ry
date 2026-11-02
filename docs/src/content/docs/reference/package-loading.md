@@ -17,6 +17,13 @@ This page is the exact behavior.
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
   ([lazy constants](/reference/type-system#lazy-constants)).
+- **An R6 class generator**, `Name <- R6Class(...)` or `Name <- R6::R6Class(...)` in any file,
+  becomes a promise too when its arguments are built only from literals, names, functions, and
+  `list()` or `c()` of them, and every package name it reads outside its methods (an `inherit =`
+  class, say) is written once, earlier in collation order. Such a generator depends on nothing but
+  its arguments, and its methods read the namespace only when they run, so building it on first
+  use gives the same class. An argument that calls anything else, as in
+  `public = list(at = Sys.time())`, keeps the statement eager.
 - **Every other top-level statement** runs at load time, in collation order. The code files are
   those of `R/` and then those of `R/unix/` (`R/windows/` on Windows), as R CMD INSTALL finds them:
   names that start with a letter or digit and end in `.R`, `.r`, `.S`, `.s` or `.q`. Collation
