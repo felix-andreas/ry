@@ -1006,8 +1006,13 @@ const STIRLERR_HALVES: [f64; 31] = [
 /// with as many terms as Loader's cutoffs (35, 80 and 500) need for full precision.
 fn stirlerr(n: f64) -> f64 {
     // |B_2k| / (2k (2k - 1)) for k = 1..5; the series alternates in sign.
-    const STIRLING_SERIES: [f64; 5] =
-        [1.0 / 12.0, 1.0 / 360.0, 1.0 / 1260.0, 1.0 / 1680.0, 1.0 / 1188.0];
+    const STIRLING_SERIES: [f64; 5] = [
+        1.0 / 12.0,
+        1.0 / 360.0,
+        1.0 / 1260.0,
+        1.0 / 1680.0,
+        1.0 / 1188.0,
+    ];
     if n <= 15.0 {
         let doubled = 2.0 * n;
         if doubled == doubled.trunc()
@@ -1034,7 +1039,6 @@ fn stirlerr(n: f64) -> f64 {
     }
     sum / n
 }
-
 
 /// The deviance term `x log(x/np) + np - x`, by a series when `x` is near `np` (Loader 2000).
 fn bd0(x: f64, np: f64) -> f64 {
@@ -2744,7 +2748,11 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     for (side, upward) in [true, false].into_iter().enumerate() {
         let mut edge = x;
         for _ in 0..MAXIMUM_POLISH {
-            edge = if upward { edge.next_up() } else { edge.next_down() };
+            edge = if upward {
+                edge.next_up()
+            } else {
+                edge.next_down()
+            };
             if residual_at(edge).abs() != closest {
                 break;
             }
@@ -2753,7 +2761,11 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     }
     let (up, down) = (run[0], run[1]);
     for _ in 0..up.abs_diff(down) / 2 {
-        x = if up > down { x.next_up() } else { x.next_down() };
+        x = if up > down {
+            x.next_up()
+        } else {
+            x.next_down()
+        };
     }
     x
 }

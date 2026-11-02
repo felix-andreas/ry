@@ -2335,9 +2335,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
 - **Routines left to audit clean room:** the `optif9`/UNCMIN helpers, `fdhess`, the
-  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
-  `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
-  `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
+  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, and `dpofa`'s 1e-14
+  tolerance. Rewrite each from its published source as `decisions.md` describes.
+- **`pgamma` is a few ulps off GNU R for small shapes** (for example shape 0.5 or 0.01, where
+  GNU R is exact against mpmath), and `qgamma` inherits that error times `1/shape`. This, not
+  `qgamma` itself, is why about half of `qgamma`'s answers differ from GNU R in the last bits.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
   follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
   `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on

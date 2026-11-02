@@ -2096,6 +2096,17 @@ primitives, and nothing built or installed packages.
   function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
   Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
   custom candidate generator and always takes the Gaussian step.
+  - The Rmath helpers and quantiles were rewritten the same way: `stirlerr` and `bd0` from
+    Loader (2000), with the half-integer table recomputed in mpmath and the deviance series
+    summed by one shared Horner-evaluated `progression_series` (which also replaced the
+    continued fraction behind `log1pmx` and `lgamma1p`); `qgamma` as Halley's method on
+    `ln P(ln y)` from Wilson-Hilferty and the leading series and asymptotic terms (Abramowitz
+    and Stegun 26.4.17, 6.5.29, 6.5.32), polished to the closest double; `dnchisq` as the
+    Poisson mixture summed outward from its peak (Johnson, Kotz and Balakrishnan), with
+    Patnaik's two-moment approximation past a peak of 1e10; `d1mach`/`i1mach` from the PORT
+    paper (Fox, Hall and Schryer 1978). `qgeom` keeps an absolute 1e-12 fuzz because that is
+    what GNU R's answers show. GNU R's `dnchisq` truncates its sum at an absolute 5e-15, so in
+    the tails ry differs from it but matches mpmath; `test_rmath` allows that absolute error.
 - **One L-BFGS-B, written from the BSD reference v3.0** (Zhu, Byrd, Lu and Nocedal's Fortran,
   `lbfgsb.f`). `crates/interp/src/stats_lbfgsb.rs` is the only implementation: `optim` calls it
   through `stats_optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
