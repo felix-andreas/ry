@@ -4389,7 +4389,14 @@ check` releases its trees once, and memoized records are compact" below).
   the check) and recompiles once the binding changes. A hand-off before the loop has written
   anything visible is invisible; `map` and `keep_if` build their result in the destination
   register, which tier 0 overwrites.
-- **Measured.** See the pull request that introduced the loops; numbers land here once measured on the profiling build.
+- **Measured** (`ry run`, profiling build, best of 3). A hot caller that traverses a 100-element
+  double list 10,000 times: `List.walk` 0.014 s (0.008 s with a named callback), `List.map`
+  0.036 s, `List.keep_if` 0.013 s, `List.any` 0.008 s, `List.count_if` 0.008 s, against
+  0.34-0.46 s with the JIT off and 0.57-0.94 s for the `Reduce`/`lapply`/`Filter`/`vapply`
+  equivalents on GNU R. A cold caller over 1,000,000 elements only gets the prepared callback:
+  `List.walk` 0.734 to 0.400 s, `List.map` 0.516 to 0.340 s, `List.keep_if` 0.488 to 0.259 s,
+  `List.find_first` 0.501 to 0.290 s, `Dict.walk` (x10 over 100,000 entries) 0.670 to 0.491 s.
+  The typed benchmark folds use no library callbacks and are unchanged.
 - **Impact.** Values, errors and warnings are unchanged (`traversals_agree_across_tiers` in
   `crates/jit/tests/test_tiers.rs` runs each shape in both tiers, including the hand-off cases),
   and analysis is unaffected. `List.find_first`, `Dict.walk` and the `walk_until` functions are
