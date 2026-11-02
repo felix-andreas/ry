@@ -4427,7 +4427,10 @@ check` releases its trees once, and memoized records are compact" below).
   every `Result`, `List`, `Dict` and `Set` function that takes no callback and does not update
   its first argument in place, and every `Num`, `Bool` and `Str` function except the `Str` walks.
   The JIT treats a leaf as an opaque step with `Effect::PureUnlessObserved`, so it flushes nothing
-  around it. An in-place update is excluded because compiled code may hold its argument in a
+  around it unless an argument is observed: every boxed argument's object and ALTREP flags are
+  checked at run time, because reading an ALTREP vector (`List.from_vector` materializes one)
+  runs its class's methods, which a package may write in R. A set flag flushes state exactly as
+  an opaque call does. An in-place update is excluded because compiled code may hold its argument in a
   register that no reference count sees, so the update could change a value still in use. The
   test `leaves_are_the_functions_without_callbacks` derives the rule from the stub signatures.
 - **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and
@@ -4448,6 +4451,49 @@ check` releases its trees once, and memoized records are compact" below).
 - **Impact.** Library calls in loops are as cheap as `length()`, value semantics and errors are
   unchanged (pinned in `test_standard_library.rs`, including compiled-loop error cases), and the
   analysis is unaffected.
+
+## Library traversals compile to loops
+
+- **Before.** `List.walk`, `List.map` and the other callback-taking library functions called the
+  callback through `eval::apply` once per element, which built a call, matched arguments, made a
+  promise per argument and entered the callee's compiled body: about 5,000 instructions per
+  element under callgrind, of which the callback's own `a + x` was about 1,000. Compiled code
+  treated the whole library call as one opaque step.
+- **Interpreter.** `standard_library::Callback` checks a closure callback once per library
+  call: when it has no `...` and takes exactly the arguments the library passes, each item binds
+  positionally with `bind_arguments` and `run_closure`, skipping argument matching. The frame's
+  call still quotes the values, `(f)(5)`, as `eval::apply` does. A call naming the formals, like
+  GNU R's `FUN(X[[i]], ...)`, would be wrong: `sys.call()` and `match.call()` users evaluate it
+  in the caller's frame, where the formal names find the caller's own variables. Any other
+  callback goes through `eval::apply` as before.
+- **JIT.** `call_builtin` turns `List.walk`, `List.map`, `List.keep_if`, `List.drop_if`,
+  `List.any`, `List.all` and `List.count_if` into `Action::Traverse` when the callback inlines:
+  a closure literal at the call site (`Ty::Closure`), a function constant (`Ty::Fun`), or a name
+  whose variable lookup from the enclosure finds a closure now. The element's type is the join
+  of the feedback of the callback's own reads of its last formal (or a declared scalar
+  annotation), and the callback body lowers through `lower_expression`, the same inliner direct
+  calls use, so it must be scalar arithmetic, comparisons and intrinsics over its formals and
+  loaded variables.
+- **Guards.** The loop hands the whole call back to tier 0, which reruns it from the start,
+  whenever the list is not a plain `VECSXP` (an ALTREP or array list), an element is not the
+  expected unboxed scalar, a predicate returns `NA`, or the arithmetic overflows. A named
+  callback adds an identity check of the register against the inlined closure, plus a
+  speculation on its binding that keeps the closure alive (so a recycled address cannot pass
+  the check) and recompiles once the binding changes. A hand-off before the loop has written
+  anything visible is invisible; `map` and `keep_if` build their result in the destination
+  register, which tier 0 overwrites.
+- **Measured** (`ry run`, profiling build, best of 3). A hot caller that traverses a 100-element
+  double list 10,000 times: `List.walk` 0.014 s (0.008 s with a named callback), `List.map`
+  0.036 s, `List.keep_if` 0.013 s, `List.any` 0.008 s, `List.count_if` 0.008 s, against
+  0.34-0.46 s with the JIT off and 0.57-0.94 s for the `Reduce`/`lapply`/`Filter`/`vapply`
+  equivalents on GNU R. A cold caller over 1,000,000 elements only gets positional binding:
+  `List.walk` 0.734 to 0.463 s, `List.map` 0.516 to 0.406 s, `List.keep_if` 0.488 to 0.350 s,
+  `List.find_first` 0.501 to 0.324 s, `Dict.walk` (x10 over 100,000 entries) 0.670 to 0.598 s.
+  The typed benchmark folds use no library callbacks and are unchanged.
+- **Impact.** Values, errors and warnings are unchanged (`traversals_agree_across_tiers` in
+  `crates/jit/tests/test_tiers.rs` runs each shape in both tiers, including the hand-off cases),
+  and analysis is unaffected. `List.find_first`, `Dict.walk` and the `walk_until` functions are
+  not looped yet (`backlog.md`).
 
 ## Moving a collection into a helper's parameter
 
