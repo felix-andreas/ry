@@ -1639,6 +1639,19 @@ impl<'a> Builder<'a> {
             Op::Construct => {
                 self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Pure)
             }
+            Op::Move => {
+                let ty = state.registers[operand(1)];
+                state.registers[operand(0)] = ty;
+                Action::Move {
+                    dst: operand(0),
+                    src: operand(1),
+                    ty,
+                }
+            }
+            // A guard runs R code in a scratch frame, which may read any variable.
+            Op::MatchGuard => {
+                self.opaque_step(state, Some((operand(0), Ty::Lgl)), &[], Effect::Opaque)
+            }
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
@@ -2973,6 +2986,16 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         Op::Construct => {
             kill(operand(0), live);
             for register in operand(2)..operand(2) + operand(3) {
+                gen_(register, live);
+            }
+        }
+        Op::Move => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
+        }
+        Op::MatchGuard => {
+            kill(operand(0), live);
+            for register in operand(3)..operand(3) + operand(4) {
                 gen_(register, live);
             }
         }

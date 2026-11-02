@@ -225,6 +225,13 @@ fn seeds_agree_across_tiers() {
             "(n = 40L)",
             false,
         ),
+        // Guarded arms in a compiled loop: the guard reads the pattern's names and a loop
+        // variable, and a failing guard falls through to the next arm.
+        (
+            "s <- 0\nfor (i in 1:n) { v <- if (i %% 3L == 0L) :Some(i) else (i, 2L)\ns <- s + match (v) { :Some(x) if (x > 10L) => x, :Some(x) => -1, (a, b) if (a * b > i + 5L) => a, (a, b) => 0.5 } }\ns",
+            "(n = 30L)",
+            false,
+        ),
         // A tag pattern with `..`, constructors in the loop, and no arm matching at the end.
         (
             "s <- 0L\nfor (i in 1:n) { r <- if (i < n) :Ok(i) else :Other(i)\ns <- s + match (r) { :Ok(..) => 1L, :Err(e) => e } }\ns",

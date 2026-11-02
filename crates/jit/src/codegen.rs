@@ -2785,6 +2785,8 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         | Op::Slot => vec![operand(1)],
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => vec![operand(0)],
         Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
+        Op::Move => vec![operand(1)],
+        Op::MatchGuard => (operand(3)..operand(3) + operand(4)).collect(),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

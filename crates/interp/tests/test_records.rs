@@ -326,6 +326,16 @@ const PRINTS: &[(&str, &str)] = &[
         "{ f <- function(v) match (v) { :Some(x) if (x > 1) => x, :Some(x) => -x, :None => 0 }; for (i in 1:4) r <- c(f(:Some(3)), f(:Some(1)), f(:None)); r }",
         "[1]  3 -1  0\n",
     ),
+    // A compiled guard sees the pattern's names and the function's variables, and runs in a
+    // scratch frame: an assignment in it, or a failing guard, leaves the function's frame alone.
+    (
+        "{ f <- function(v, k) match (v) { (a, b) if (a + b > k) => \"big\", (a, _) if (a < 0) => \"neg\", _ => \"small\" }; for (i in 1:4) r <- c(f((5, 6), 10), f((-1, 2), 10), f((1, 2), 10)); r }",
+        "[1] \"big\"   \"neg\"   \"small\"\n",
+    ),
+    (
+        "{ f <- function(v) { y <- \"outer\"; r <- match (v) { :Some(x) if ({ y <- \"guard\"; x > 1 }) => x, _ => 0 }; c(r, y) }; for (i in 1:4) out <- c(f(:Some(3)), f(:Some(0))); out }",
+        "[1] \"3\"     \"outer\" \"0\"     \"outer\"\n",
+    ),
     (
         "{ f <- function(v) match (v) { :A => 1 }; for (i in 1:4) f(:A); f(:B) }",
         "Error in match (v) { : no arm of this `match` matches :B\n",
@@ -425,6 +435,10 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "match (1) { v if (NA) => v }",
+        "missing value where TRUE/FALSE needed",
+    ),
+    (
+        "{ f <- function(v) match (v) { x if (x) => 1, _ => 0 }; for (i in 1:4) f(TRUE); f(NA) }",
         "missing value where TRUE/FALSE needed",
     ),
     (
