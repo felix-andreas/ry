@@ -18,3 +18,9 @@ print(gsub("a(?:b|c)", "X", "abac"))
 print(sub("(?:a)(b)", "<\\1>", "zab"))
 print(grepl("(?i)ABC", "xabc"))
 print(gsub("\\\\([0-9a-f]{1,6})(?:\r\n|[ \n\r\t\f])?", "\\1", "x\\41 y", ignore.case = TRUE))
+# A compiled call passes a constant argument as a value, which the callee must still copy
+# before modifying it in place.
+modify_first <- function(x) { x[1] <- 5; x }
+compiled_caller <- compiler::cmpfun(function() modify_first(1))
+print(c(compiled_caller(), compiled_caller()))
+print(body(compiled_caller))

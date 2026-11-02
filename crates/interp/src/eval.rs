@@ -774,7 +774,23 @@ pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
 
 /// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
 /// moving a returned argument vector through every frame.
-pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+pub unsafe fn promise_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into(arguments, env, args, false)
+}
+
+/// The arguments of a closure call that compiled code makes. GNU R's byte code passes a
+/// constant argument as its value instead of a promise (`PUSHCONSTARG`), and native code can
+/// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
+pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into(arguments, env, args, true)
+}
+
+unsafe fn closure_args_into(
+    mut arguments: Sexp,
+    env: Sexp,
+    args: &mut Args,
+    constants_as_values: bool,
+) -> R<()> {
     let dots = symbols().dots;
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
@@ -793,9 +809,13 @@ pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args)
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
-            // A constant gets a promise too, as in GNU R: native code such as lazyeval reads a
-            // promise's environment to tell whether it was forced.
-            let value = if expression == missing_arg() {
+            // A constant gets a promise too, as in GNU R's AST evaluator: native code such as
+            // lazyeval reads a promise's environment to tell whether it was forced.
+            let constant = !matches!(
+                expression.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            );
+            let value = if expression == missing_arg() || (constants_as_values && constant) {
                 expression
             } else {
                 make_promise(expression, env)?

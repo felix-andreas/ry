@@ -58,7 +58,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("mkCode", 2, do_mk_code),
     internal("bcClose", 3, |call| unsafe {
-        eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))
+        let closure = eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))?;
+        crate::heap().root(closure);
+        // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
+        // code passes constant arguments as values, which native code such as rlang observes.
+        // A body the compiler rejects stays an expression, as in `run_body`.
+        if let Ok(Some(code)) = compile(closure.cdr(), closure) {
+            crate::heap().set_cdr(closure, code);
+        }
+        Ok(closure)
     }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
@@ -2536,7 +2544,13 @@ unsafe fn step(
         Op::CallGeneric => {
             let function = register(operand(1));
             let call = constants.element(operand(2));
-            let value = eval::apply_call(call, function, call.cdr(), env)?;
+            let value = if function.kind() == SexpType::Closure {
+                let mut args = eval::Args::new();
+                eval::compiled_args_into(call.cdr(), env, &mut args)?;
+                eval::apply_closure(call, function, &args, env, None)?
+            } else {
+                eval::apply_call(call, function, call.cdr(), env)?
+            };
             decoded.record(at, value);
             set(operand(0), value);
         }

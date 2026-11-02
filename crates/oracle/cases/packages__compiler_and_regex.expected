@@ -15,9 +15,11 @@
 | [1] "z<b>"
 | [1] TRUE
 | [1] "x41y"
+| [1] 5 5
+| modify_first(1)
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "x41y"
+language
+| modify_first(1)
