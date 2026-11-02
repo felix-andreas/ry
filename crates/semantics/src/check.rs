@@ -1530,9 +1530,19 @@ struct FormalUses {
     /// does. A formal read only after `if (fo == "A1") return("")` is not forced on the
     /// path that returns.
     returned: Option<FxHashSet<Symbol>>,
+    /// Names some path reads before writing them, so the argument's value is used.
+    evaluated: FxHashSet<Symbol>,
+    /// Names passed bare to `substitute()`, which reads the argument's code, not its value.
+    substituted: FxHashSet<Symbol>,
 }
 
 impl FormalUses {
+    /// withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a
+    /// function built at run time, so the argument never runs in the caller's frame.
+    fn quotes(&self, name: Symbol) -> bool {
+        self.substituted.contains(&name) && !self.evaluated.contains(&name)
+    }
+
     fn makes_optional(&self, name: Symbol) -> bool {
         self.missing_tested.contains(&name) || !self.forces_on_every_path(name)
     }
@@ -1555,6 +1565,7 @@ impl FormalUses {
     fn record_read(&mut self, name: Symbol) {
         if self.tracked.contains(&name) && !self.assigned.contains(&name) {
             self.forced.insert(name);
+            self.evaluated.insert(name);
         }
     }
 
@@ -2554,6 +2565,11 @@ impl<'db> Checker<'db, '_> {
                         ret: return_ty,
                         inferred: true,
                         flag_return,
+                        quoted: module[parameters]
+                            .iter()
+                            .filter(|parameter| uses.quotes(parameter.name))
+                            .map(|parameter| Name::new(self.db, &parameter.name))
+                            .collect(),
                     }),
                 )
             }
@@ -4719,6 +4735,13 @@ impl<'db> Checker<'db, '_> {
                     .filter(|name| uses.tracked.contains(name))
                     .collect();
                 self.collect_formal_uses(*body, &mut nested);
+                uses.evaluated.extend(
+                    nested
+                        .evaluated
+                        .iter()
+                        .filter(|name| !uses.assigned.contains(*name)),
+                );
+                uses.substituted.extend(nested.substituted.iter().copied());
                 for &name in &nested.forced {
                     if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
                         uses.forced.insert(name);
@@ -4878,6 +4901,18 @@ impl<'db> Checker<'db, '_> {
                     } if package == "base" || package == "rlang" => Some(name.as_str()),
                     _ => None,
                 };
+                if tester == Some("substitute")
+                    && let [argument] = &self.module[arguments][..]
+                    && argument.name.is_none()
+                    && let Some(value) = argument.value
+                    && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                    && uses.tracked.contains(name)
+                {
+                    if !uses.assigned.contains(name) {
+                        uses.substituted.insert(*name);
+                    }
+                    return;
+                }
                 if matches!(tester, Some("missing" | "is_missing")) {
                     if let [argument] = &self.module[arguments][..]
                         && argument.name.is_none()
@@ -7076,6 +7111,7 @@ impl<'db> Checker<'db, '_> {
             ret: declared.ret,
             inferred: false,
             flag_return: None,
+            quoted: Vec::new(),
         };
         for parameter in &module[parameters] {
             if parameter.name == "..." {
@@ -10344,16 +10380,19 @@ impl<'db> Checker<'db, '_> {
             .collect();
         let mut call_arguments: Vec<CallArgument<'db>> = arguments
             .iter()
-            .zip(&deferred)
-            .map(|(argument, &deferred)| {
-                let ty = if deferred {
-                    None
-                } else {
-                    argument.value.map(|value| self.infer(value))
-                };
-                self.call_argument(range, argument, ty)
-            })
+            .map(|argument| self.call_argument(range, argument, None))
             .collect();
+        let quoted = self.quoted_arguments(callees, &call_arguments);
+        for (index, argument) in arguments.iter().enumerate() {
+            if deferred[index] {
+                continue;
+            }
+            call_arguments[index].ty = if quoted.get(index).copied().unwrap_or(false) {
+                Some(unknown(self.db))
+            } else {
+                argument.value.map(|value| self.infer(value))
+            };
+        }
         if !deferred.contains(&true) {
             return call_arguments;
         }
@@ -10370,6 +10409,29 @@ impl<'db> Checker<'db, '_> {
             self.name_contextual_parameters(value, errors_before);
         }
         call_arguments
+    }
+
+    /// The arguments every candidate callee binds to a quoted formal: code the callee captures
+    /// with `substitute()`, which reads names from a frame the caller cannot see.
+    fn quoted_arguments(&self, callees: &[Ty<'db>], arguments: &[CallArgument<'db>]) -> Vec<bool> {
+        let mut quoted = vec![!callees.is_empty(); arguments.len()];
+        for &callee in callees {
+            let resolved = self.table.resolve(self.db, callee);
+            let TyKind::Function(function) = resolved.kind(self.db) else {
+                return vec![false; arguments.len()];
+            };
+            if function.quoted.is_empty() {
+                return vec![false; arguments.len()];
+            }
+            let arena = self.arena;
+            let targets =
+                &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+            for (flag, target) in quoted.iter_mut().zip(targets) {
+                *flag &= matches!(target, Some(ArgumentTarget::Named(formal))
+                    if function.named.get(*formal).is_some_and(|parameter| function.quoted.contains(&parameter.name)));
+            }
+        }
+        quoted
     }
 
     fn call_argument(
@@ -10824,6 +10886,7 @@ impl<'db> Checker<'db, '_> {
                         ret,
                         inferred: true,
                         flag_return: None,
+                        quoted: Vec::new(),
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);

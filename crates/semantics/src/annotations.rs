@@ -184,6 +184,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             ret: ret.unwrap_or_else(|| unknown(db)),
             inferred: false,
             flag_return: None,
+            quoted: Vec::new(),
         };
         annotation.declared = Some(TypeScheme {
             binders: forall,
@@ -315,6 +316,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 ret,
                 inferred: false,
                 flag_return: None,
+                quoted: Vec::new(),
             }),
         ),
     });
@@ -513,6 +515,7 @@ pub fn merge_annotations<'db>(
                     ret,
                     inferred: false,
                     flag_return: None,
+                    quoted: Vec::new(),
                 }),
             ),
         }),
@@ -1642,6 +1645,7 @@ impl<'db> Lowering<'db> {
                 ret,
                 inferred: false,
                 flag_return: None,
+                quoted: Vec::new(),
             }),
         )
     }

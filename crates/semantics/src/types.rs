@@ -328,6 +328,9 @@ pub struct FunctionType<'db> {
     /// The body returns one of two values chosen by a logical flag with a literal default,
     /// so a call that leaves the flag out or passes a literal returns that branch alone.
     pub flag_return: Option<FlagReturn<'db>>,
+    /// Formals the body reads only through `substitute()`, so a call's argument there is code
+    /// the callee captures rather than a value the caller computes. Inferred only.
+    pub quoted: Vec<Name<'db>>,
 }
 
 /// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
@@ -754,6 +757,7 @@ fn mapped_kind<'db>(
                 when_false: map(flag.when_false),
                 ..flag
             }),
+            quoted: function.quoted.clone(),
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(

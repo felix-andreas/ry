@@ -73,6 +73,38 @@ each <- function(f) lapply(list(1, 2), f)
 #++++
 each: <T> fn(f: fn(double) -> T) -> list[T]
 
+#---- an_argument_the_callee_only_substitutes_is_not_checked_in_the_caller
+# withr's `wrap(f, pre)` splices `pre` into a function that takes `f`'s formals, so `append`
+# there is `sink_to`'s formal, not base's `append`.
+wrap <- function(f, pre, envir = parent.frame()) {
+  pre <- substitute(pre)
+  fun <- eval(bquote(function(args) {
+    .(pre)
+    f()
+  }))
+  environment(fun) <- envir
+  fun
+}
+sink_to <- function(file = NULL, append = FALSE) NULL
+set_sink <- wrap(sink_to, {
+  mode <- if (append) "a" else "w"
+})
+#++++
+wrap: <T, U, V> fn(f: T, [pre]: U, [envir]: V) -> Any
+sink_to: <T, U> fn([file]: T, [append]: U) -> NULL
+set_sink: Any
+
+#---- an_argument_the_callee_also_evaluates_is_checked
+both <- function(x) {
+  print(substitute(x))
+  x + 1
+}
+use <- function() both(if (append) 1 else 2)
+#++++
+both: <T: numeric> fn(x: T) -> double
+use: Unknown
+82..88 error[type-mismatch] expected `logical`, found `fn(x: Any, values: Any, [after]: Any) -> Any`
+
 #---- the_apply_family_takes_r_s_own_argument_names
 f <- function(xs) lapply(X = xs, FUN = function(v) v)
 #++++
