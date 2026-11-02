@@ -127,7 +127,7 @@ file.
 `ry debug-adapter` serves one debug session over the
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
 output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
-script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments. On Unix, the `ry run` console serves the same protocol on a socket, so an editor can attach to it while you work.
 
 ## debug
 

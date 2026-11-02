@@ -339,8 +339,8 @@ mod platform {
             .collect();
         if subscribers.is_empty() {
             return Err(
-                "View() needs an editor connected to this console; run \"ry: Attach to \
-                 Console\" in VS Code"
+                "View() needs an editor connected to this console: start the console with \
+                 \"ry: Open Console\" in VS Code, or run \"ry: Attach to Console\" there"
                     .to_owned(),
             );
         }
