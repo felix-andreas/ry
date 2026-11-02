@@ -44,6 +44,7 @@ use {
         cell::Cell,
         ffi::c_void,
         fmt,
+        io::Write,
         ptr::NonNull,
         rc::Rc,
         time::{Duration, Instant},
@@ -116,6 +117,11 @@ pub struct Heap {
     /// on every allocation is one compare.
     allocation_reporter: Option<fn(usize) -> bool>,
     report_threshold: usize,
+    /// The file `RY_GC_LOG` names, which receives one line per collection: its kind, its
+    /// elapsed time in nanoseconds and the bytes of small objects and large vectors it found
+    /// young. Measuring pause distributions over a whole test suite needs every pause, which
+    /// `gc.time()`'s totals cannot give.
+    pause_log: Option<std::fs::File>,
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -218,6 +224,23 @@ pub enum GcStressStart {
     /// stress without paying for base R's loading under it. The host that runs the script
     /// switches it on.
     Script,
+}
+
+/// Opens the collection log `RY_GC_LOG` names for appending, so the processes of one run,
+/// such as a test suite's workers, share a file.
+fn open_pause_log() -> Option<std::fs::File> {
+    let path = std::env::var_os("RY_GC_LOG")?;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => Some(file),
+        Err(error) => panic!(
+            "cannot open the collection log {}: {error}",
+            path.to_string_lossy()
+        ),
+    }
 }
 
 /// The collection stress `RY_GC_STRESS` asks for, if any.
@@ -454,6 +477,7 @@ impl Heap {
             stats: GcStats::default(),
             inhibit: 1,
             stress_counter: 0,
+            pause_log: open_pause_log(),
             // Overwritten below, before anything reads it.
             known: WellKnown::placeholder(),
         };
@@ -1885,6 +1909,10 @@ impl Heap {
             .policy
             .timing
             .then(|| (Instant::now(), process_times()));
+        let logged = self
+            .pause_log
+            .is_some()
+            .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
         if kind == Collection::Major {
             self.clear_marks();
@@ -1971,6 +1999,20 @@ impl Heap {
             stats.user_time += user_now.saturating_sub(user);
             stats.system_time += system_now.saturating_sub(system);
             stats.elapsed_time += elapsed.elapsed();
+        }
+        if let (Some((started, young, young_large)), Some(log)) = (logged, &mut self.pause_log) {
+            let kind = match kind {
+                Collection::Minor => "minor",
+                Collection::Major => "major",
+            };
+            let line = format!(
+                "{kind} {} {young} {young_large} {}\n",
+                started.elapsed().as_nanos(),
+                self.old_bytes
+            );
+            if let Err(error) = log.write_all(line.as_bytes()) {
+                panic!("cannot write the collection log RY_GC_LOG names: {error}");
+            }
         }
         if let Some(reporter) = self.policy.reporter {
             reporter(&self.report(kind));
