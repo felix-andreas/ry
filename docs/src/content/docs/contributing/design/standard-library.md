@@ -102,8 +102,8 @@ that exists only for Roc's type system or memory model.
 | `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `from_utf8_lossy`, `with_ascii_lowercased`, `with_ascii_uppercased`, `caseless_ascii_equals`, `walk_utf8`, `walk_utf8_with_index`, `to_utf16`, `from_utf16`, `from_utf16_lossy`, `to_utf32`, `from_utf32`, `from_utf32_lossy` |
 | `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked`, `add`, `sub`, `mul`, `div`, `div_trunc`, `div_ceil`, `rem`, `pow_int`, `sqrt`, `log`, `asin`, `acos`, `is_nan`, `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left_by`, `shift_right_by`, `shift_right_zf_by`, `count_one_bits`, `count_leading_zero_bits`, `count_trailing_zero_bits`, `to_double`, `to_integer`, `to_integer_checked`, `pi`, `tau`, `e`, `infinity`, `max_integer`, `min_integer`, `max_double`, `min_double` |
 | `Bool` | `true`, `false`, `and`, `or`, `not`, `is_eq`, `is_not_eq` |
-| `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `capacity`, `release_excess_capacity`, `clear` |
-| `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve`, `capacity`, `release_excess_capacity` |
+| `Dict` | `empty`, `with_capacity`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `capacity`, `release_excess_capacity`, `clear` |
+| `Set` | `empty`, `with_capacity`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve`, `capacity`, `release_excess_capacity` |
 
 ### Added or changed on the way
 
@@ -163,12 +163,12 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   heap decides by itself, and the others exist to serve Roc's abilities, which ry does not have
   (traits are declined). R's `print`, `format` and `serialize` play the inspection and encoding
   roles.
-- **`Dict.with_capacity`, `Set.with_capacity` and the `Str` capacity functions**: the capacity
-  functions on `List`, `Dict` and `Set` are taken, because updates happen in place (see "Running
-  it") and the heap never shrinks a resizable vector by itself. `Dict.with_capacity` and
-  `Set.with_capacity` are not: an empty collection has no key vector until its first key fixes the
-  key type, so there is nothing to size. Roc's `Str` capacity functions are skipped because a
-  string is an immutable `CHARSXP`.
+- **The `Str` capacity functions**: a string is an immutable `CHARSXP`, so there is no buffer to
+  size. The capacity functions on `List`, `Dict` and `Set` are taken, because updates happen in
+  place (see "Running it") and the heap never shrinks a resizable vector by itself. An empty
+  dictionary or set has no key vector until its first key fixes the key type, so
+  `Dict.with_capacity` and `Set.with_capacity` size its index, and the first insert sizes the key
+  and value vectors to match.
 - **Wrapping arithmetic** (`add_wrap`, `sub_wrap`, `mul_wrap`): R's 32-bit integer reserves its
   smallest value for `NA`, so wrapping arithmetic would have to stop at that one value, and code
   that wants wrapping (hashing, checksums) wants it total.

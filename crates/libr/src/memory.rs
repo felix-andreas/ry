@@ -172,7 +172,7 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
 /// `DUPLICATE_ATTRIB` and its shallow form: the attributes, the object bit and the S4 bit.
 pub unsafe fn copy_attributes(to: Sexp, from: Sexp, deep: bool) -> ApiResult<()> {
     let runtime = runtime();
-    let attributes = from.attrib();
+    let attributes = crate::attributes::visible_attributes(from);
     let attributes = if attributes == runtime.nil() {
         attributes
     } else {

@@ -1,7 +1,7 @@
 //! The language-object evaluator: symbols, promises, calls, closures, argument matching and the
 //! control-flow specials. It is the semantic reference the bytecode interpreter must agree with,
-//! and it runs everything the bytecode does not compile: promise code, `eval()` of constructed
-//! calls, and top-level expressions.
+//! and it runs everything the bytecode does not compile: the arguments of uncompiled code,
+//! `eval()` of constructed calls, and top-level expressions.
 
 use {
     crate::{
@@ -299,6 +299,16 @@ pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, unbound(), code, env)
 }
 
+/// A promise to run the compiled `code` in `env`, the frame of the code it was compiled with.
+/// Its expression is the code's source, as for any other promise; the code itself sits in the
+/// attribute slot, which a promise otherwise never uses (see `force_promise`).
+pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
+    heap.root(promise);
+    Ok(promise)
+}
+
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
 pub unsafe fn forced_promise(code: Sexp, value: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, value, code, nil())
@@ -315,7 +325,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     moves::forcing(promise)?;
     promise.set_gp_bits(PROMISE_SEEN, true);
-    let result = eval(promise.cdr(), promise.tag());
+    let code = promise.attrib();
+    let result = if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, promise.tag())
+    } else {
+        eval(promise.cdr(), promise.tag())
+    };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let value = result?;
     if promise.has_gp(gp::CHECKED_PROMISE) {
@@ -774,7 +789,23 @@ pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
 
 /// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
 /// moving a returned argument vector through every frame.
-pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+pub unsafe fn promise_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into(arguments, env, args, false)
+}
+
+/// The arguments of a closure call that compiled code makes. GNU R's byte code passes a
+/// constant argument as its value instead of a promise (`PUSHCONSTARG`), and native code can
+/// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
+pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into(arguments, env, args, true)
+}
+
+unsafe fn closure_args_into(
+    mut arguments: Sexp,
+    env: Sexp,
+    args: &mut Args,
+    constants_as_values: bool,
+) -> R<()> {
     let dots = symbols().dots;
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
@@ -793,10 +824,16 @@ pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args)
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
-            // A constant gets a promise too, as in GNU R: native code such as lazyeval reads a
-            // promise's environment to tell whether it was forced.
-            let value = if expression == missing_arg() {
+            // A constant gets a promise too, as in GNU R's AST evaluator: native code such as
+            // lazyeval reads a promise's environment to tell whether it was forced.
+            let constant = !matches!(
+                expression.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            );
+            let value = if expression == missing_arg() || (constants_as_values && constant) {
                 expression
+            } else if expression.kind() == SexpType::Bytecode {
+                compiled_promise(expression, env)?
             } else {
                 make_promise(expression, env)?
             };
@@ -1523,7 +1560,13 @@ unsafe fn value_is_missing(value: Sexp) -> R<bool> {
     {
         let code = value.cdr();
         let caller = value.tag();
-        if crate::heap().frame_cell(caller, code).is_some() {
+        // A promise for `..1` asks about the caller's `...`, the binding that holds it.
+        let bound = if dot_dot_index(code).is_some() {
+            symbols().dots
+        } else {
+            code
+        };
+        if crate::heap().frame_cell(caller, bound).is_some() {
             return symbol_is_missing(code, caller, false);
         }
     }

@@ -7,7 +7,10 @@ use {
         globals::R_NamesSymbol,
         runtime,
     },
-    heap::object::{Sexp, SexpType, Shape},
+    heap::{
+        Heap,
+        object::{Sexp, SexpType, Shape},
+    },
     std::ffi::c_int,
 };
 
@@ -234,6 +237,10 @@ pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
     enter(|| match object.kind() {
         SexpType::ExternalPtr => Ok(Reachable(object.external_tag())),
         SexpType::Bytecode | SexpType::Environment => Ok(Reachable(runtime().nil())),
+        // In GNU R a vector's header overlaps the cell fields, so `TAG` of a vector reads a
+        // word that is never a symbol. nanonext relies on that: it checks `TAG(x) != tag`
+        // to tell its external pointers from an aio slot that already holds an integer result.
+        _ if object.kind().shape() != Shape::Triple => Ok(Reachable(runtime().nil())),
         _ => Ok(Reachable(triple(object, "TAG")?.tag())),
     })
     .0
@@ -453,8 +460,34 @@ macro_rules! promise_writer {
 }
 
 promise_writer!(SET_PRVALUE, set_car);
-promise_writer!(SET_PRCODE, set_cdr);
-promise_writer!(SET_PRENV, set_tag);
+/// A promise compiled by the bytecode interpreter keeps its code in the attribute slot. That
+/// code was compiled from the promise's expression for its environment's frame, so a new
+/// expression or environment drops it and the promise runs on the AST evaluator.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_PRCODE(object: Sexp, value: Sexp) {
+    set_promise_source(object, value, "SET_PRCODE", Heap::set_cdr);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_PRENV(object: Sexp, value: Sexp) {
+    set_promise_source(object, value, "SET_PRENV", Heap::set_tag);
+}
+
+unsafe fn set_promise_source(
+    object: Sexp,
+    value: Sexp,
+    name: &'static str,
+    setter: unsafe fn(&mut Heap, Sexp, Sexp),
+) {
+    enter(|| {
+        checked_kind(object, SexpType::Promise, name)?;
+        let heap = &mut runtime().heap;
+        setter(heap, object, value);
+        let nil = heap.known().nil;
+        heap.set_attrib(object, nil);
+        Ok(())
+    })
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_mkClosure(formals: Sexp, body: Sexp, env: Sexp) -> Sexp {

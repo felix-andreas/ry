@@ -91,6 +91,7 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
   hover with the Lowering, Naming, and Parsing views of the expression under the cursor. It is
   deliberately not a `ry.toml` key, because the configuration file is a user-facing contract.
 - `ry debug ast <file>` prints a file's syntax tree.
+- `ry debug erase <file>...` rewrites files in place as their erasure, the plain R that `ry R` runs.
 - `ry debug analysis-stats [path]` (or `just stats`) runs the full pipeline over a workspace,
   through the same queries the language server uses. It prints the wall time and resident-memory
   growth of each phase, the slowest files by type-checking time, and an incremental probe that

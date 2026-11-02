@@ -29,19 +29,18 @@ The quality bar is four things.
 - **Oracle cases failing under `ORACLE_ENGINE=ry`**: `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
 - **A hashed frame lists in a different order from GNU R after `rm()`.** `Frame::hash_chains` replays GNU R's table growth over the live bindings only, but GNU R grew its table while the removed ones were still there, so `h <- new.env(hash = TRUE)`, 60 assignments, then `rm()` of the first 45 lists `w60` first in GNU R and last in ry. Replaying needs the removed bindings' insertion history, which compaction drops (`crates/heap/src/env.rs`).
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 115k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: compiled promise code, since a promise's expression is evaluated by the AST walker (about 9 promises per `sd`, with their builtin arguments evaluated through `evaluate_args_into` and uncached `find_called_fun`, roughly 15k instructions); GNU R compiles it to bytecode and reads the expression back through `R_PromiseExpr`, so the 83 readers of a promise's code would go through one accessor. Then fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call, and the callers of `mk_char` in the test code.
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 119.2k instructions against GNU R's 72k (callgrind, run minus a zero-iteration baseline), spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). At 1e6 rows, 31 of 52 kernels run at or below GNU R's time and three more within 5%. Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. These are still slower:
 
-- **Strings:** `formatC` 1.5x, `substr` 1.5x (interning an already-interned piece still costs about 200 instructions in `Heap::mk_char`), `grepl(fixed = TRUE)` 1.3x, `sub` and `gsub(perl = TRUE)` 1.1x.
+- **Strings:** `formatC` 1.5x, `substr` 1.5x (interning an already-interned piece still costs about 200 instructions in `Heap::mk_char`), `grepl(fixed = TRUE)` 1.3x, `sub` and `gsub(perl = TRUE)` 1.1x. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
 - **Grouping and tabulation:** `match` on integers 2.7x (a hash table where GNU R uses a direct-address table for small ranges), `order` on two keys 1.6x, `split` 1.5x, `cut` 1.5x, `table` on two factors 1.25x, `sort` on integers and strings 1.1 to 1.2x.
 - **Matrix and time series:** `apply` over rows 1.8x (per-call interpreter cost, which the tier-0 work owns), xts `period.apply` 1.7x, zoo `na.locf` 1.5x.
 - **Correctness gaps found beside the kernels** (unverified against every GNU R version): `sum` over several arguments keeps one long double total, so `sum(1e308, 1e308, -1e308)` is `1e+308` where GNU R, which adds each argument's sum in double, gives `Inf`. A logical subscript longer than the vector does not stretch it on assignment (`y <- NA; y[c(TRUE, TRUE, FALSE, TRUE, FALSE)] <- 1:3` gives length 4, GNU R 5), which breaks `rank(c(2, 1, NA, 2, NaN), ties.method = "first")`. `format(-0)` under `options(scipen = -5)` writes `-0e+00` (GNU R `0e+00`). `order(<raw>, method = "radix")` succeeds where GNU R errors.
 - **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
-  - **data.table subsetting:** `dt[i]` on a 1e6-row, three-column table raises RSS by about 95 MB per call where GNU R adds 17 MB for a 28 MB result, so a data.table script that orders and subsets peaks at about 360 MB against GNU R's 173 MB. The heap's old generation stays at 55 to 116 MB, so the memory is live outside the heap's counted bytes: suspect a C API path in `CsubsetDT` that materializes or caches (`DATAPTR`, `STRING_PTR`, `R_alloc`). `forderv` itself costs little.
-  - **Base `order` on several keys** holds about 50 to 70 MB of Rust scratch at 1e6 rows in `sort.rs` (a `Vec<Vec<u64>>` of keys, 16-byte key and index pairs plus their scratch, a dense histogram, and a result `Vec<i32>` copied into the heap). Ordering in place on an `alloc_uninit` integer result and narrowing keys would cut most of it.
+  - **Base `order` on several keys** still peaks about 15% above GNU R at 1e6 rows (171 MB against about 150): `radix_order` holds one `u64` per row for the current pass plus a spare, so about 24 MB of scratch. Sorting directly on 32-bit keys where a column fits would halve it.
 
 ## Open: the package loader
 
@@ -389,6 +388,9 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- `List.from_vector` is a leaf but materializes an ALTREP vector, and a package's ALTREP class
+  could run R code in its materialize method. No such class is known among the benchmark
+  dependencies; if one appears, check `is_altrep` in the compiled call or drop it from `LEAVES`.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
@@ -399,9 +401,10 @@ protects construction but nothing after it.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
-- The new pure `Bool` and `Num` functions are not in `standard_library::LEAVES`, so compiled code
-  saves its state around each call. Adding them is safe (none runs R code) once the JIT's
-  intrinsic table is settled.
+- A function that takes a callback (`List.map`, `List.walk`, `Dict.update` and the rest) calls
+  the closure through `eval::apply` once per element, and compiled code treats the whole call as
+  opaque. Compiling such a call with a closure known at the call site into a loop over the
+  elements, with the closure inlined, is the fast path these functions still lack.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
@@ -436,6 +439,8 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 ## Open: strict-mode friction from typing finbench
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
+
+- **A call returning a record inside `expect_error` is an error.** With `g <- function(n: integer) -> Record{x: integer}`, `expect_error(g(-1L), "neg")` reports "`expect_error` is an R function, and this value is a ry record, not an R object", although `expect_error` only evaluates the expression and never keeps its value. The typed bench tests work around it with `expect_error({ g(-1L); NULL })`. The fix is to let a parameter the callee only evaluates or quotes accept native values (testthat's `expect_error`, `expect_warning`, `expect_message`, `expect_silent`).
 
 - **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
   ```r
@@ -520,10 +525,6 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)
   and tier 0 itself overflows the machine stack at a depth of about 2,000 to 3,000. Fix both, and
   give native entry a stack-limit check, before raising the depth limit.
-- **An integer and a double joined at a merge point leave the value untyped.** A `match` whose
-  arms return `v` (integer) and `0` (double), summed into a double, runs at tier-0 speed: 0.67 s
-  per 2M iterations against 0.10 s when the arm is `0L`. Join `Int` and `Dbl` to `Dbl` with a
-  coercion at the merge instead of widening to unknown.
 - **Tier 0 makes `return(y <- x)` invisible.** GNU R and native functions keep it visible.
 - **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
   compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
@@ -628,8 +629,7 @@ effectively a two-core number.
 
 ### A first strict `ry load` costs the strict check's wall time
 
-- On typed finbench (4 cores), a load with a cold verdict takes 2.2 to 2.6 s, against 0.6 to 1.0 s untyped and 0.55 s for either once warm. The load overlaps the check (`decisions.md`, "The strict load check overlaps the runtime start"), so the gap is the check alone: about 1.9 s wall and 4.3 CPU-s for 380,000 lines, half of it type checking and a quarter rendering diagnostics and lints that the verdict never shows.
-- Levers, largest first: a verdict-only pass that stops rendering and linting and only asks whether any strict error exists; reusing a `ry check` record (`.ry_cache/check.json`) when it covers the `R/` files under the same configuration, which needs the record to tell an `R/`-only resolution from a whole-project one; and the type checker's own per-item cost.
+- On typed finbench (4 cores), a load with no usable check record takes 2.5 to 2.7 s, against about 0.6 s untyped, and 0.55 to 0.64 s after `ry check` or a previous load (`decisions.md`, "The strict load check shares the check record"). The gap is analysis CPU: about 5.3 CPU-s for 380,000 lines of `R/` (parse 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), so the lever left is the analysis core's own speed.
 
 ### Corpus reports that more precise types now reach
 
@@ -2095,10 +2095,14 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
-  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
-  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
-  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
+- **A factor column with a missing value costs a second whole-file parse.** The sliced reader
+  (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
+  `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
+  missing value is read again as text, unsliced, which faults the released file back in and
+  holds a full string column. Parsing such a column as text within the sliced pass, once a slice
+  shows a null, would keep the peak at one slice.
+- **A text column is joined from its slices at the end**, which copies its strings once
+  (`Builder::Text`); building the final `Utf8View` buffers directly would avoid it.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
@@ -2126,9 +2130,13 @@ The end-to-end guard rests on the corpus suites.
   column string to the verb or constructor argument that created it are not implemented; hover and
   completion are.
 - **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
-  unknown, because the refinement reads argument syntax. Typing `Expr` with its column type
-  (`Expr<double>`) would close it. The column-error wording says "the frame `x`" for every table
-  kind.
+  unknown and its operands unchecked, because the refinement reads argument syntax. Typing `Expr`
+  with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
+  `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
+  and the numeric aggregations.
+- **data-table lint:** flags only the constructors (`data.table`, `fread`, `as.data.table`,
+  `setDT`); it offers no fix, because a query rewrite from bracket syntax to verbs is not
+  mechanical in general.
 - **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
@@ -2250,13 +2258,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
-    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
-  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
-    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
-    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
-    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
-    directory).
+    the timeout, though a lone `callr::r_session` works.
+  - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
+    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
+    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
+    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
+    group, order, runs, split, expand and slice-chop files also fail; run them with
+    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.
@@ -2281,9 +2291,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is
   unshared, cache the frame cell of a local variable per activation, and skip guards proven by the
   binding epoch for a whole loop body.
-- **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
-  evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
-  promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
+- **Some promise code still runs on the AST evaluator.** A closure argument containing
+  `function`, a loop, `break`, `next` or `return`, an argument of a closure call that is itself
+  inside promise code (`f(g(x + 1))` compiles `g(x + 1)` but not `x + 1`, because promise code
+  does not know its closure), and every promise made outside compiled code (`delayedAssign`, the
+  loader's lazy bindings, calls from the AST evaluator) are evaluated by the AST walker.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`prmatrix`,
   `format.Date`, `stem`, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
@@ -3006,6 +3018,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: findings from the records, library and frame round
 
+- **A record prints a classed field as its bare data.** `print((first = as.Date("2024-01-01"),))` shows `(first = 19723,)`, because the record printer deparses each field without its class. Print a classed field through `format()`, as `print.default` does for a list element.
 - **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
   as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
   which makes a diagnostic differ from the user's own definition. Show the declaration order.
