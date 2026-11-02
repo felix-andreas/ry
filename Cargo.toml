@@ -59,6 +59,13 @@ regex = "1.11.1"
 
 tokio-util = { version = "0.7.15", features = ["compat"] }
 
+# Full debug info makes every interp and libr test binary close to a gigabyte, and a workspace
+# test run links dozens of them, which fills a 16 GB machine's disk and slows every link. Line
+# tables keep backtraces and profiles symbolized; set CARGO_PROFILE_DEV_DEBUG=true to step
+# through locals in a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
 # Dependency debug info, mostly Polars, runs to tens of gigabytes per build and
 # slows every link, while backtraces through workspace code stay intact without it.
 [profile.dev.package]
