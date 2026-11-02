@@ -7,10 +7,37 @@
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
 # R, and `ry.R` hands ry's interpreter the analysis's syntax trees. The backend's
 # `.ry_await_verdict()` returns once the host lets the package's effects run. The host defines the
-# transport, `.ry_request(root, full)` (which returns the plan) and `.ry_commit(root)`, and
+# transport, `.ry_request(root, full, conditions)` (which returns the plan, given the values of
+# the conditions of `if` directives in NAMESPACE, see `.ry_namespace_conditions`) and
+# `.ry_commit(root)`, and
 # creates the session's state, `.ry_packages` (one entry per loaded package root) and
 # `.ry_timing`, since a host may cache the compiled functions across sessions and state must
 # not be.
+
+# The values of the conditions of each `if` directive (given as source text), encoded for
+# `.ry_request`: per directive, a line of `T` and `F` letters, a tab, and the escaped text. As in
+# `parseNamespaceFile`, a condition is evaluated in the global environment, and only the
+# conditions on the branch taken are, depth first.
+.ry_namespace_conditions <- function(directives) {
+  lines <- vapply(directives, function(text) {
+    values <- logical()
+    walk <- function(e) {
+      if (!is.call(e)) return(invisible())
+      head <- as.character(e[[1L]])[[1L]]
+      if (identical(head, "if")) {
+        value <- if (eval(e[[2L]], .GlobalEnv)) TRUE else FALSE
+        values <<- c(values, value)
+        if (value) walk(e[[3L]]) else if (length(e) == 4L) walk(e[[4L]])
+      } else if (identical(head, "{")) {
+        for (inner in as.list(e)[-1L]) walk(inner)
+      }
+    }
+    walk(parse(text = text, keep.source = FALSE, encoding = "UTF-8")[[1L]])
+    escaped <- gsub("\r", "\\r", gsub("\n", "\\n", gsub("\\", "\\\\", text, fixed = TRUE), fixed = TRUE), fixed = TRUE)
+    paste0(paste(ifelse(values, "T", "F"), collapse = ""), "\t", escaped)
+  }, character(1), USE.NAMES = FALSE)
+  paste(lines, collapse = "\n")
+}
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
@@ -29,7 +56,20 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   full <- isTRUE(full) || !current
   started <- proc.time()[["elapsed"]]
   .ry_phase(NULL)
-  plan <- .ry_request(root, full)
+  # R evaluates the conditions of NAMESPACE's `if` directives at every load, and only those of
+  # the directives the file holds now, so the first request sends no values and the plan names
+  # the directives whose conditions it needs. A file edited between two requests names new
+  # ones, and the same values twice means the plan cannot use them.
+  conditions <- ""
+  repeat {
+    plan <- .ry_request(root, full, conditions)
+    if (!isTRUE(plan$unresolved)) break
+    evaluated <- .ry_namespace_conditions(plan$namespace_conditionals)
+    if (identical(evaluated, conditions)) {
+      stop("the `if` directives in NAMESPACE could not be resolved", call. = FALSE)
+    }
+    conditions <- evaluated
+  }
   .ry_phase("plan")
   if (!is.null(plan$error)) {
     stop(plan$error, call. = FALSE)
@@ -91,16 +131,25 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 # A reload that would leave a declared S3 method without its function is refused before it
-# changes anything, as R refuses such a package. When the reload runs statements or reads
-# `sysdata.rda`, either may define the function, so `.ry_register_s3` checks after them instead.
+# changes anything, as R refuses such a package. The new `sysdata.rda` is read into a scratch
+# environment here, so its names count. Only a statement that may write a name it computes
+# (`run_writes` is `NULL`) can still define the function, and then `.ry_register_s3` checks
+# after the statements ran instead.
 .ry_refuse_missing_s3 <- function(state, plan) {
-  if (length(plan$run_path) || !identical(plan$sysdata, "keep")) {
+  sysdata <- character()
+  state$sysdata_pending <- NULL
+  if (identical(plan$sysdata, "load")) {
+    state$sysdata_pending <- new.env(parent = emptyenv())
+    sysdata <- load(file.path(state$root, "R", "sysdata.rda"), envir = state$sysdata_pending)
+  }
+  if (is.null(plan$run_writes)) {
     return(invisible())
   }
+  gone <- c(plan$remove, if (!identical(plan$sysdata, "keep")) state$sysdata)
   for (method in plan$s3_register) {
     name <- method$`function`
-    bound <- name %in% plan$bind_name ||
-      (!(name %in% plan$remove) && exists(name, envir = state$ns, inherits = FALSE))
+    bound <- name %in% plan$bind_name || name %in% plan$run_writes || name %in% sysdata ||
+      (!(name %in% gone) && exists(name, envir = state$ns, inherits = FALSE))
     if (!bound) {
       stop(sprintf("object '%s' not found whilst loading namespace '%s'", name, state$name),
            call. = FALSE)
@@ -393,7 +442,12 @@ View <- function(x, title) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)
     }
-    state$sysdata <- if (identical(plan$sysdata, "load")) {
+    state$sysdata <- if (!is.null(state$sysdata_pending)) {
+      pending <- state$sysdata_pending
+      state$sysdata_pending <- NULL
+      list2env(as.list(pending, all.names = TRUE), envir = ns)
+      ls(pending, all.names = TRUE, sorted = FALSE)
+    } else if (identical(plan$sysdata, "load")) {
       load(file.path(state$root, "R", "sysdata.rda"), envir = ns)
     } else {
       character()
@@ -821,33 +875,52 @@ View <- function(x, title) {
 }
 
 .ry_load_compiled <- function(state, libraries) {
+  reload <- length(state$dlls) > 0L
   for (dll in state$dlls) {
     try(dyn.unload(dll[["path"]]), silent = TRUE)
   }
   state$dlls <- list()
+  ns <- state$ns
+  # The symbols the last load bound go with the libraries they point into. A name the package's
+  # R code has bound since is the code's, and a check of it forces at most that one definition.
+  for (name in names(state$native_symbols)) {
+    if (exists(name, envir = ns, inherits = FALSE) &&
+        identical(get(name, envir = ns, inherits = FALSE), state$native_symbols[[name]])) {
+      rm(list = name, envir = ns)
+    }
+  }
+  state$native_symbols <- list()
   if (!length(libraries)) {
     return(invisible())
   }
-  if (!requireNamespace("pkgbuild", quietly = TRUE)) {
-    stop("compiling src/ needs the pkgbuild package, which is not installed", call. = FALSE)
+  .ry_compile(state$root)
+  # As in `loadNamespace`, a symbol never replaces a name the namespace already defines.
+  bind <- function(name, symbol) {
+    if (exists(name, envir = ns, inherits = FALSE)) {
+      warning(sprintf(
+        "failed to assign RegisteredNativeSymbol for %s to %s since %s is already defined in the %s namespace",
+        symbol$name, name, name, sQuote(state$name)
+      ), call. = FALSE)
+    } else {
+      assign(name, symbol, envir = ns)
+      state$native_symbols[[name]] <- symbol
+    }
   }
-  pkgbuild::compile_dll(state$root, quiet = TRUE)
-  ns <- state$ns
   for (library in libraries) {
     path <- file.path(state$root, "src", paste0(library$library, .Platform$dynlib.ext))
-    dll <- dyn.load(path)
+    dll <- dyn.load(.ry_loadable(path, reload))
     state$dlls[[library$library]] <- dll
     if (isTRUE(library$registration)) {
       routines <- getDLLRegisteredRoutines(dll)
       for (kind in routines) {
         for (routine in names(kind)) {
-          assign(paste0(library$fixes, routine), kind[[routine]], envir = ns)
+          bind(paste0(library$fixes, routine), kind[[routine]])
         }
       }
     }
     for (i in seq_along(library$symbol_names)) {
-      assign(paste0(library$fixes, library$symbol_names[[i]]),
-             getNativeSymbolInfo(library$symbols[[i]], dll), envir = ns)
+      bind(paste0(library$fixes, library$symbol_names[[i]]),
+           getNativeSymbolInfo(library$symbols[[i]], dll))
     }
   }
   setNamespaceInfo(ns, "DLLs", state$dlls)

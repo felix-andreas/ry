@@ -4,7 +4,7 @@
 //! runtime [`crate::ry_runtime`] builds it on the heap.
 
 use {
-    crate::{Code, Plan, SysdataChange},
+    crate::{Code, LoadError, Plan, SysdataChange},
     semantics::{
         load_index::Registration,
         metadata::{NamespaceImportDirective, S3MethodDirective},
@@ -141,6 +141,12 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
         ("run_start".into(), integers(&plan.run, |code| code.start)),
         ("run_end".into(), integers(&plan.run, |code| code.end)),
         (
+            "run_writes".into(),
+            plan.run_writes
+                .clone()
+                .map_or(RValue::Null, RValue::Character),
+        ),
+        (
             "touched".into(),
             plan.touched_names().map_or(RValue::Null, RValue::Character),
         ),
@@ -268,6 +274,21 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
         ("run_on_load".into(), RValue::Logical(plan.run_on_load)),
         ("warnings".into(), strings(&plan.warnings)),
     ])
+}
+
+/// What a host returns for a failed plan: the `if` directives R must evaluate before it plans
+/// again for [`LoadError::Conditionals`], and an error message otherwise.
+pub fn failure_value(failure: &LoadError) -> RValue {
+    match failure {
+        LoadError::Conditionals(conditionals) => RValue::List(vec![
+            ("unresolved".into(), RValue::Logical(true)),
+            (
+                "namespace_conditionals".into(),
+                RValue::Character(conditionals.clone()),
+            ),
+        ]),
+        failure => error_value(&failure.to_string()),
+    }
 }
 
 /// What R reads instead of a plan when planning failed.

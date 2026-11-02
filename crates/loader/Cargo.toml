@@ -11,12 +11,13 @@ path = "src/loader.rs"
 
 [features]
 # The backend for ry's own runtime, which links the interpreter.
-runtime = ["dep:heap", "dep:interp"]
+runtime = ["dep:heap", "dep:interp", "dep:rcmd"]
 
 [dependencies]
 bincode = { version = "2.0.1", default-features = false, features = ["serde", "std"] }
 heap = { path = "../heap", optional = true }
 interp = { path = "../interp", optional = true }
+rcmd = { path = "../rcmd", optional = true }
 rustc-hash.workspace = true
 salsa.workspace = true
 semantics = { path = "../semantics" }

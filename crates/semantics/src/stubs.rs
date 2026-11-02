@@ -370,6 +370,33 @@ fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<St
     )
 }
 
+/// For each name, every namespace whose export manifest lists it, whether or not the project
+/// uses that package, in namespace order. An unresolved name looks up here which packages could
+/// provide it.
+#[salsa::tracked(returns(ref))]
+pub fn exporting_namespaces(db: &dyn Db, sources: StubSources) -> ExportingNamespaces {
+    let mut index: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    for (namespace, text) in sources.manifests(db) {
+        for line in text.lines() {
+            let name = strip_comment(line).trim();
+            if name.is_empty() {
+                continue;
+            }
+            let namespaces = index.entry(name.to_owned()).or_default();
+            if !namespaces.contains(namespace) {
+                namespaces.push(namespace.clone());
+            }
+        }
+    }
+    for namespaces in index.values_mut() {
+        namespaces.sort_unstable();
+    }
+    ExportingNamespaces(index)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ExportingNamespaces(pub FxHashMap<String, Vec<String>>);
+
 pub fn stubs<'db>(db: &'db dyn Db) -> Option<&'db StubLibrary<'db>> {
     StubSources::try_get(db).map(|sources| stub_library(db, sources))
 }

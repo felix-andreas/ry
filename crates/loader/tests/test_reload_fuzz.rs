@@ -3,7 +3,7 @@
 
 use {
     loader::{
-        Loader,
+        Loader, NamespaceConditions,
         testing::{ReloadLoaders, check_load_index_input, check_random_reload},
     },
     syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes},
@@ -47,7 +47,9 @@ fn changed_roots_reports_each_disk_edit_once() {
     std::fs::write(root.join("R/b.R"), "g <- function( 1\n").expect("write");
     let mut loader = Loader::default();
     assert!(
-        loader.plan(root, false).is_err(),
+        loader
+            .plan(root, false, &NamespaceConditions::default())
+            .is_err(),
         "a syntax error fails the plan"
     );
     assert!(
@@ -62,10 +64,14 @@ fn changed_roots_reports_each_disk_edit_once() {
     );
     assert!(loader.changed_roots().is_empty(), "reported once");
     // A plan that is never committed, as when strict mode refuses it, is watched the same way.
-    loader.plan(root, false).expect("plans");
+    loader
+        .plan(root, false, &NamespaceConditions::default())
+        .expect("plans");
     std::fs::write(root.join("R/a.R"), "f <- function() 22\n").expect("write");
     assert_eq!(loader.changed_roots(), vec![root.to_path_buf()]);
-    loader.plan(root, false).expect("plans");
+    loader
+        .plan(root, false, &NamespaceConditions::default())
+        .expect("plans");
     loader.commit(root);
     assert!(
         loader.changed_roots().is_empty(),

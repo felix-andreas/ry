@@ -97,7 +97,10 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
   growth of each phase, the slowest files by type-checking time, and an incremental probe that
   reports keystroke latency and rechecks per keystroke. An editor-coverage table then counts how
   often hover and goto-definition answer at sampled identifiers, grouped by role (call head,
-  variable, argument name, `$` field, `pkg::name`), with a few unanswered lines per role. It forces `[check] typing` on. Build with
+  variable, argument name, `$` field, `pkg::name`), and how often signature help answers inside a
+  call, with a few unanswered lines per role. A completion table then deletes the tail of sampled
+  identifiers (half the name, then all but two characters) and counts how often the original name
+  is in the top five, with the latency percentiles of those requests. It forces `[check] typing` on. Build with
   `--release` when absolute numbers matter; a debug build still gives honest ratios.
 
 ## The docs site
