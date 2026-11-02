@@ -582,6 +582,7 @@ pub fn check_item_with_annotation<'db>(
         value_read_slots: None,
         computed_slots: FxHashSet::default(),
         lookup_slots: FxHashSet::default(),
+        valued_slots: FxHashSet::default(),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -1046,6 +1047,9 @@ struct Checker<'db, 'a> {
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
     lookup_slots: FxHashSet<BindingId>,
+    /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
+    /// is a path the code takes rather than a placeholder.
+    valued_slots: FxHashSet<BindingId>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -2197,6 +2201,16 @@ impl<'db> Checker<'db, '_> {
                         true => self.lookup_slots.insert(slot),
                         false => self.lookup_slots.remove(&slot),
                     };
+                    // A `<<-` write reaches the readers in sibling closures only once the
+                    // defining frame joins it, so until then they still read the `NULL`.
+                    if spelling != AssignSpelling::Super
+                        && !matches!(
+                            self.table.resolve(self.db, value_ty).kind(self.db),
+                            TyKind::Null
+                        )
+                    {
+                        self.valued_slots.insert(slot);
+                    }
                 }
                 self.write_target(spelling, target, value, value_ty);
                 value_ty
@@ -3074,12 +3088,21 @@ impl<'db> Checker<'db, '_> {
                     if let Some((seed, bound)) = self.superassign_seeds.get(&slot).copied()
                         && !bound
                     {
-                        // A later write of another type leaves the seed at the first one.
+                        // A read before this first write already used the variable as a
+                        // value of some type, so a write of another type breaks that read.
                         let snapshot = self.table.snapshot();
-                        if self.table.unify(self.db, seed, written).is_ok() {
-                            self.superassign_seeds.insert(slot, (seed, true));
-                        } else {
-                            self.table.rollback(snapshot);
+                        match self.table.unify(self.db, seed, written) {
+                            Ok(()) => {
+                                self.superassign_seeds.insert(slot, (seed, true));
+                            }
+                            // An accumulator `x <<- c(x, list(item))` reads itself inside the
+                            // write, which the occurs check rejects; the seed stays open.
+                            Err(UnifyError::Occurs(..)) => self.table.rollback(snapshot),
+                            Err(error) => {
+                                self.table.rollback(snapshot);
+                                let range = self.module.range(value);
+                                self.report_unify(range, error);
+                            }
                         }
                     }
                     self.environment.set(slot, EnvEntry::Mono(written));
@@ -7406,9 +7429,20 @@ impl<'db> Checker<'db, '_> {
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
             value = *inner;
         }
-        matches!(ty.kind(self.db), TyKind::Null)
-            && matches!(self.module.kind(value), ExpressionKind::NameRef(_))
-            && !self.binds_parameter(value)
+        if !matches!(ty.kind(self.db), TyKind::Null)
+            || !matches!(self.module.kind(value), ExpressionKind::NameRef(_))
+            || self.binds_parameter(value)
+        {
+            return false;
+        }
+        // A local that a test narrowed to `NULL`, or a write replaced with `NULL`, also held a
+        // real value, so its `NULL` is a path the code takes. A top-level variable read from
+        // inside a function resolves through the project's definitions, whose other writes are
+        // out of sight.
+        self.naming
+            .resolutions
+            .get(&value)
+            .is_none_or(|slot| !self.valued_slots.contains(slot))
     }
 
     fn binds_parameter(&self, callee: ExprId) -> bool {
@@ -10619,15 +10653,21 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// A variable the body computed, or a `switch()` call written in place of one: Matrix's
+    /// `new(switch(shape, g = "dgeMatrix", t = "dtrMatrix"))` lists an arm for every shape.
     fn names_computed_value(&self, value: ExprId) -> bool {
-        matches!(
-            self.module.expression(value).kind,
-            ExpressionKind::NameRef(_)
-        ) && self
-            .naming
-            .resolutions
-            .get(&value)
-            .is_some_and(|slot| self.computed_slots.contains(slot))
+        match self.module.kind(value) {
+            ExpressionKind::NameRef(_) => self
+                .naming
+                .resolutions
+                .get(&value)
+                .is_some_and(|slot| self.computed_slots.contains(slot)),
+            ExpressionKind::Call { callee, .. } => matches!(
+                self.module.kind(*callee),
+                ExpressionKind::NameRef(name) if name.as_str() == "switch"
+            ),
+            _ => false,
+        }
     }
 
     /// A variable the body assigns, from a `switch` without a default, an `if` without `else`

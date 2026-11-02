@@ -1930,14 +1930,18 @@ type `integer`. When the assignment carries an annotation, `expr` is checked by 
   write replaces the old type, and writes that arrive from different paths are joined (see
   [control-flow joins](#control-flow-joins)). So after `x <- 1L; x <- "foo"`, `x` is `character`, and
   after `x <- 1L; if (flag) x <- "foo"`, it is `integer | character`.
-- `x <<- v` writes the nearest enclosing frame that defines `x`, or the global environment. The rest
-  of the writing function reads `x` as `v`, and the frame that defines `x` joins `v` with its own
-  writes, because a closure may run at any time after it is created. A write whose type is still
+- `x <<- v` writes the nearest enclosing frame that defines `x`, or the global environment. When
+  an enclosing function defines `x`, the rest of the writing function reads `x` as `v`, and that
+  function joins `v` with its own writes, because a closure may run at any time after it is created. A write whose type is still
   undetermined, such as a callback's result, joins as a union member instead of binding the other
-  writes, so a reset `cache <<- TRUE` beside `cache <<- fun()` leaves `fun` generic.
+  writes, so a reset `cache <<- TRUE` beside `cache <<- fun()` leaves `fun` generic. A write to a
+  top-level variable is not read back yet: after `cache <- 1L`, the body
+  `cache <<- "a"; cache` still reads `cache` as `integer`.
 - A closure may run many times, so on entry an enclosing variable that may still be `NULL` holds
   either that or what the closure's own first `<<-` writes. The lazily filled cache
-  `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`.
+  `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`. A read
+  before that first write already fixes the type, so a first write of another type is an error:
+  after `y <- if (is.null(x)) 0 else x + 1`, the write `x <<- "a"` is reported.
 
 #### Recursion
 
@@ -2011,7 +2015,8 @@ scoped <- function(namespace, name) prefixer(namespace)(name)
 An argument that names a variable the body assigns without an annotation drops its `NULL` member
 when the parameter's type admits no `NULL`. The `NULL` there comes from a `switch` without a default,
 an `if` without `else`, or a helper that returns `NULL` on some path, and the code presumably does
-not reach the call on that path. So `type <- switch(type, logical = "a logical %s", integer =
+not reach the call on that path. A `switch()` without a default written directly as the argument
+is treated the same way, as in Matrix's `new(switch(shape, g = "dgeMatrix", t = "dtrMatrix"))`. So `type <- switch(type, logical = "a logical %s", integer =
 "an integer %s")` followed by `sprintf(type, kind)` is clean. A parameter the body does not
 reassign, and a variable whose assignment is annotated, keep their `NULL`, so passing a
 `name: character | NULL` parameter on to a `character` parameter is still reported. The `NULL` of
@@ -2362,7 +2367,8 @@ exceptions and additions:
 - Passing the formal positionally to a function that the enclosing body defines further down,
   as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
   "advice"` in the same `local()`, does not force it either. The sibling runs only after its
-  definition, and it decides for itself what it reads.
+  definition, and the checker does not look at what it reads, so the formal stays optional even
+  when the sibling reads it, and a call that omits it is not reported.
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
   `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`.
@@ -2385,7 +2391,7 @@ exceptions and additions:
   nested function has its own parameter or assignment of that name.
 - A read inside another formal's default does not force a formal, because the default runs only
   when the call omits that formal. So in `function(x, y = x) y`, `x` is optional, and `g(y = 1)`
-  is accepted.
+  is accepted. So is `g()`, although R then fails with "argument "x" is missing".
 
 #### `missing()` on a defaultless formal
 
@@ -2593,8 +2599,8 @@ upper_names <- function(x) {
   function, even though base has a `format`. A call declares no parameter names, so a later call
   may name an argument the first call passed by position: after `f(pars, arglist)`, the call
   `f(pars = pars + 1, arglist)` takes a slot without checking it, while an argument beyond the
-  slots the first call used is still an error, unless the body reads `formals()` of that
-  parameter. Code that does so picks the call by the callback's arity, as in
+  slots the first call used is still an error, unless the body reads `formals()` or `formalArgs()` of that
+  parameter anywhere. Code that does so picks the call by the callback's arity, as in
   `if (length(formals(handler)) == 1) handler(src) else handler(src, call)`, so a call with
   another argument count is not checked. Which slot the name took is unknown, so the call's
   positional arguments are not checked either. When the first call forwarded `...`, as

@@ -4396,4 +4396,14 @@ explicit allocators".
   processx `format_advice(x)`). An earlier-defined local still forces, as before.
 - An inferred `integer` slot accepts a `double` (`fits_inferred_scalar`), since R's
   integer-taking functions truncate one and a first call's `length(x)` pins the shape only
-  incidentally (ks `col.fun(n = length(abs.cont) + 1)`). A string still fails.
+  incidentally. A string still fails. Only an unresolved inferred scalar slot is covered: ks
+  `col.fun(n = length(abs.cont) + 1)` still errors, because `col.fun` has a default lambda that the
+  join binds, so `n` is a variable already bound to `integer`.
+- A `NULL` read is a placeholder only when no ordinary write to the slot so far gave a type other
+  than `NULL` (`valued_slots`), so a local narrowed or overwritten to `NULL` is checked. A `<<-`
+  write does not count, because sibling closures read the `NULL` until the defining frame joins
+  the write (pkgbuild's `now`), and a top-level variable read from a function has no local slot,
+  so it stays a placeholder (brew's `.extendedError`).
+- A read before a body's first `<<-` can bind the superassignment seed. A first write that then
+  fails to unify is reported, except for an occurs failure, which is the accumulator
+  `acc <<- c(acc, list(item))` reading itself inside the write.

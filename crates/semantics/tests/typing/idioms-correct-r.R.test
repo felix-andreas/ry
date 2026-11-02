@@ -1611,3 +1611,119 @@ palette <- function(levels, col.fun) {
 #++++
 palette: Unknown
 110..116 error[type-mismatch] expected `integer`, found `character`
+
+#---- a_switch_without_a_default_passed_straight_to_a_string_parameter_drops_its_null
+make <- function(flag) {
+  shape <- if (flag) "g" else "t"
+  new(switch(shape, g = "dge", t = "dtr"))
+}
+#++++
+make: fn(flag: logical) -> Any
+
+#---- a_switch_passed_straight_to_a_string_parameter_still_checks_its_arms
+make <- function(flag) {
+  shape <- if (flag) "g" else "t"
+  new(switch(shape, g = "dge", t = sum))
+}
+#++++
+make: Unknown
+65..98 error[type-mismatch] expected `character`, found `character | (fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex)`
+
+#---- a_null_narrowed_from_a_local_that_also_holds_a_string_is_still_checked
+#: fn(s: character) -> character
+g <- function(s) s
+f <- function(flag) {
+  x <- if (flag) "a,b" else NULL
+  if (is.null(x)) return(g(x))
+  x
+}
+#++++
+g: fn(s: character) -> character
+f: Unknown
+134..135 error[type-mismatch] expected `character`, found `NULL`
+
+#---- a_null_written_over_a_string_is_still_checked
+#: fn(s: character) -> character
+g <- function(s) s
+f <- function() {
+  x <- "a,b"
+  x <- NULL
+  g(x)
+}
+#++++
+g: fn(s: character) -> character
+f: Unknown
+72..73 warning[unused] `x` is assigned but never used.
+99..100 error[type-mismatch] expected `character`, found `NULL`
+
+#---- a_cache_read_as_a_number_before_its_first_write_rejects_a_string_write
+f <- function() {
+  x <- NULL
+  function() {
+    y <- if (is.null(x)) 0 else x + 1
+    x <<- "a"
+    y
+  }
+}
+#++++
+f: Unknown
+93..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_cache_read_before_its_first_write_takes_a_write_of_the_same_type
+f <- function() {
+  x <- NULL
+  function() {
+    y <- if (is.null(x)) 0 else x + 1
+    x <<- 2
+    y
+  }
+}
+#++++
+f: fn() -> fn() -> double
+
+#---- a_formal_passed_to_a_sibling_defined_further_down_stays_optional_even_when_the_sibling_reads_it
+make <- function() {
+  outer <- function(x) inner(x)
+  inner <- function(y) y + 1
+  outer
+}
+#++++
+make: <T> fn() -> fn([x]: T) -> double
+
+#---- a_formal_read_only_by_another_formals_default_stays_optional
+g <- function(x, y = x) y
+g()
+#++++
+g: <T, U> fn([x]: T, [y]: U) -> U
+T
+
+#---- a_superassignment_to_a_top_level_variable_is_not_read_back_yet
+cache <- 1L
+g <- function() {
+  cache <<- "a"
+  cache
+}
+#++++
+cache: integer
+g: fn() -> integer
+
+#---- an_accumulator_that_reads_itself_in_its_first_superassignment_is_not_reported
+collect <- function(items) {
+  acc <- NULL
+  add <- function(item) acc <<- c(acc, list(item))
+  for (item in items) add(item)
+  acc
+}
+#++++
+collect: <T> fn(items: T) -> list[Unknown] | NULL
+
+#---- a_null_filled_by_a_siblings_superassignment_is_still_a_placeholder
+timer <- function() {
+  now <- NULL
+  started <- Sys.time()
+  elapsed <- function() now - started
+  tick <- function() now <<- Sys.time()
+  list(elapsed, tick)
+}
+#++++
+timer: fn() -> list{fn() -> difftime, fn() -> POSIXct}
