@@ -2507,17 +2507,22 @@ impl<'a> Builder<'a> {
                 right,
             });
         }
-        // An operand of unknown type is typically the result of a call that has not returned
-        // yet, as in a recursive function compiled on its way down.
-        if self.patient && (a == Ty::Boxed || b == Ty::Boxed) && self.never_ran(inst.pc) {
+        let ty = if !self.never_ran(inst.pc) {
+            self.feedback_at(inst.pc)
+        } else if let Some(ty) = vector_arithmetic(arith, a, b) {
+            ty
+        } else if self.patient && (a == Ty::Boxed || b == Ty::Boxed) {
+            // An operand of unknown type is typically the result of a call that has not
+            // returned yet, as in a recursive function compiled on its way down.
             return Err(Refusal(COLD));
-        }
+        } else {
+            Ty::Boxed
+        };
         let effect = if a.is_plain() && b.is_plain() {
             Effect::PureUnlessObserved
         } else {
             Effect::Opaque
         };
-        let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
         state.visible = Some(true);
         Ok(action)
@@ -2533,8 +2538,8 @@ impl<'a> Builder<'a> {
         let call = self.constant(operand(2));
         let (first, count) = (operand(3), operand(4));
         let args = self.slice(first..first + count);
-        let feedback = self.feedback_at(inst.pc);
         let Ty::Fun(function) = state.registers[operand(1)] else {
+            let feedback = self.feedback_at(inst.pc);
             return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
         let definition = interp::eval::builtin_def(function)
@@ -2557,6 +2562,14 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
+        // Before the call has returned, its result type comes from what the builtin computes
+        // for these argument types, so a first-call compile need not wait for feedback. The
+        // refinement after the call checks the guess like any other.
+        let feedback = if untagged && self.never_ran(inst.pc) {
+            builtin_result(name, &types).unwrap_or(Ty::Boxed)
+        } else {
+            self.feedback_at(inst.pc)
+        };
         // A library leaf never dispatches, so even an object argument cannot run R code.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
             return Ok(self.opaque_step(
@@ -2929,6 +2942,95 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             )
         }
         _ => return None,
+    })
+}
+
+/// The type a base builtin returns for plain arguments of these types, for a call that has not
+/// returned yet. A guess that a scalar comes back can be wrong (an index of 0 selects nothing),
+/// which the check after the call catches.
+fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
+    let numeric = |ty: &Ty| ty.is_vector() || ty.is_numeric_scalar();
+    let all = |test: &dyn Fn(&Ty) -> bool| !types.is_empty() && types.iter().all(test);
+    let storage = |ty: &Ty| ty.element();
+    let widest = || {
+        if all(&|ty| storage(ty) == Ty::Lgl) {
+            Ty::Lgl
+        } else if all(&|ty| storage(ty) != Ty::Dbl) {
+            Ty::Int
+        } else {
+            Ty::Dbl
+        }
+    };
+    Some(match (name, types) {
+        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntVec,
+        ("seq_along", [along]) if along.is_plain() => Ty::IntVec,
+        // `1:n` makes integers even from double literals whenever the start is a whole number.
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntVec,
+        ("sum", _) if all(&numeric) => match widest() {
+            Ty::Dbl => Ty::Dbl,
+            _ => Ty::Int,
+        },
+        ("prod", _) if all(&numeric) => Ty::Dbl,
+        ("max" | "min", _) if all(&numeric) => match widest() {
+            Ty::Lgl => Ty::Int,
+            other => other,
+        },
+        ("c", _) if all(&numeric) => widest().vector(),
+        ("sqrt" | "exp" | "log" | "floor" | "ceiling" | "cumprod", [vector])
+            if vector.is_vector() =>
+        {
+            Ty::DblVec
+        }
+        ("abs" | "cumsum", [vector]) if vector.is_vector() => match vector.element() {
+            Ty::Dbl => Ty::DblVec,
+            _ => Ty::IntVec,
+        },
+        ("is.na", [vector]) if vector.is_vector() => Ty::LglVec,
+        ("as.integer", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Int
+            } else {
+                Ty::IntVec
+            }
+        }
+        ("as.double" | "as.numeric", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Dbl
+            } else {
+                Ty::DblVec
+            }
+        }
+        ("as.logical", [ty]) if numeric(ty) => {
+            if ty.is_numeric_scalar() {
+                Ty::Lgl
+            } else {
+                Ty::LglVec
+            }
+        }
+        ("[", [vector, index]) if vector.is_vector() && index.is_vector() => {
+            vector.element().vector()
+        }
+        _ => return None,
+    })
+}
+
+/// The type of an element-wise operation that has not run yet on plain operands, at least one of
+/// them a vector: plain operands carry no attributes, so neither does the result.
+fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
+    let operand = |ty: Ty| ty.is_vector() || ty.is_numeric_scalar();
+    if !(operand(a) && operand(b)) || !(a.is_vector() || b.is_vector()) {
+        return None;
+    }
+    let doubles = a.element() == Ty::Dbl || b.element() == Ty::Dbl;
+    Some(match arith {
+        Arith::Equal
+        | Arith::NotEqual
+        | Arith::Less
+        | Arith::Greater
+        | Arith::LessEqual
+        | Arith::GreaterEqual => Ty::LglVec,
+        Arith::Add | Arith::Subtract | Arith::Multiply if !doubles => Ty::IntVec,
+        _ => Ty::DblVec,
     })
 }
 
