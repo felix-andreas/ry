@@ -102,6 +102,8 @@ impl State {
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
 /// out of C stack or `expressions` long before it runs out of registers.
+thread_local! { static WEIGHTED: bool = std::env::var_os("RY_JIT_WEIGHTED").is_some(); }
+
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 
 /// The optimizing tier's entry points.
@@ -2330,7 +2332,12 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                     && let Some(tier) = interp().bytecode.tier
                 {
                     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-                    profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
+                    profile[profile::BACK_EDGES] =
+                        profile[profile::BACK_EDGES].saturating_add(if WEIGHTED.with(|w| *w) {
+                            (at - pc) as i32
+                        } else {
+                            1
+                        });
                     if profile[profile::BACK_EDGES] >= tier.back_edge_threshold {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
