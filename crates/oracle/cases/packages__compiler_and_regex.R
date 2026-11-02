@@ -24,3 +24,9 @@ modify_first <- function(x) { x[1] <- 5; x }
 compiled_caller <- compiler::cmpfun(function() modify_first(1))
 print(c(compiled_caller(), compiled_caller()))
 print(body(compiled_caller))
+
+# A compiled `local()` runs as a call of `function`, whose frame call keeps the srcref slot.
+in_local <- compiler::cmpfun(function() local(sys.call()))
+head_call <- in_local()[[1]]
+print(length(head_call))
+print(head_call[[1]])

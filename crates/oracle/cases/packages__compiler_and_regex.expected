@@ -17,9 +17,11 @@
 | [1] "x41y"
 | [1] 5 5
 | modify_first(1)
+| [1] 4
+| `function`
 [messages]
 [warnings]
 [errors]
 [value]
-language
-| modify_first(1)
+symbol
+| function

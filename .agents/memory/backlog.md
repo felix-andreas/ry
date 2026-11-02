@@ -2276,13 +2276,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     path is skipped. The same expressions pass in a fresh script, so state that earlier lines of
     the test set up is involved; bisect the file to find it.
   - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
-    the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
-    fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
-  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
-    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
-    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
-    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
-    directory).
+    the timeout, though a lone `callr::r_session` works.
+  - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
+    `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates. ry's
+    `nlminb` (`crates/interp/src/stats_port.rs`) is its own trust-region method, not PORT's
+    algorithm; matching GNU R needs a clean-room reimplementation that follows PORT's iteration.
+  - vctrs: `rank(na.last = "keep")` needs `yy <- NA; yy[!nas] <- y` to stretch `yy` (a logical
+    subscript longer than the vector, in the base-R subassign backlog). The compare, dictionary,
+    group, order, runs, split, expand and slice-chop files also fail; run them with
+    `LC_ALL=C.UTF-8` (as the harness does) before examining them.
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
     (and magick) must be installed from source on ry, which `oracle install` does. magick's
     configure needs Magick++ (`libmagick++-dev`), which the container lacks.

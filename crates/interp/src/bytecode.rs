@@ -1723,9 +1723,11 @@ impl Compiler {
                 // of a closure made on the spot, instead of `local`'s `eval.parent(substitute(
                 // eval(quote(expr), new.env())))`, which costs several calls and an `eval`.
                 let expression = args[0].1;
+                // The `function` call carries the srcref slot, NULL here, as the parser's does:
+                // rlang's `trace_back` zaps a frame call's `function` head by poking that slot.
                 let function_call = values::lcons(
                     symbols().function,
-                    values::cons(nil(), values::cons(expression, nil())?)?,
+                    values::cons(nil(), values::cons(expression, values::cons(nil(), nil())?)?)?,
                 )?;
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
