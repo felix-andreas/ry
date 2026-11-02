@@ -205,6 +205,25 @@ fn seeds_agree_across_tiers() {
             "(n = 8L)",
             false,
         ),
+        // Tuple items with constant indices reach the slot intrinsic; a list where the tuple was
+        // hands the read back to `[[`'s path.
+        (
+            "t <- (1.5, 2L, \"s\")\ns <- 0\nfor (i in 1:n) { if (i == 6L) t <- list(10, 20L, \"l\"); s <- s + t[[1L]] * t[[2]] }\nlist(s, t[[3L]])",
+            "(n = 9L)",
+            false,
+        ),
+        // A compiled `match` over tags, tuples, records and literals, with nested payloads.
+        (
+            "s <- 0\nfor (i in 1:n) { v <- if (i %% 4L == 0L) :Some((i, 2)) else if (i %% 4L == 1L) :None else if (i %% 4L == 2L) (x = i, y = 1L) else \"k\"\ns <- s + match (v) { :Some((a, b)) => a * b, :None => 1, (x = a, y = 1L) => a, \"k\" | \"j\" => 0.5, _ => 100 } }\ns",
+            "(n = 40L)",
+            false,
+        ),
+        // A tag pattern with `..`, constructors in the loop, and no arm matching at the end.
+        (
+            "s <- 0L\nfor (i in 1:n) { r <- if (i < n) :Ok(i) else :Other(i)\ns <- s + match (r) { :Ok(..) => 1L, :Err(e) => e } }\ns",
+            "(n = 12L)",
+            true,
+        ),
         // A boxed field, then a missing one, which is an error.
         (
             "r <- (x = c(1, 2), y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 5L) r <- (y = 1,); s <- s + r$x[[1L]] }\ns",

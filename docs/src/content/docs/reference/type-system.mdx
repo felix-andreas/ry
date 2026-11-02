@@ -441,10 +441,11 @@ rendered, in backticks, so `list(\`max size\` = 10L)` has the type `` list{`max 
 
 - Any list coerces to a list-like `list[T]` when every element is compatible with `T`.
 - A record-like or dict-like list coerces to a dict-like `list[named: T]` when every value is
-  compatible with `T`.
+  compatible with `T`. So does a `list[Any]` or `list[Unknown]`, whose names are not known, such
+  as `as.list(x)` on an untyped `x`.
 - When `T` is still open, it becomes the union of the element types, so `lapply(list(1L, "a"), f)`
   passes `integer | character`.
-- The reverse is never allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
+- Otherwise the reverse is not allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
   dict-like list, and a `list[named: T]` does not coerce back into a record-like one.
 
 Two records are compatible when they declare the same field names and each field's type is
@@ -472,6 +473,12 @@ empty, so any element read from `list{}` is `Unknown`: `out <- list(); out[[1]]`
 
 The literal `NULL` has the type `NULL`, which is the unit type of this type system and is
 incompatible with every other type. An empty block is also `NULL`.
+
+A variable whose every visible write is `NULL` is a placeholder for a value written where the
+checker cannot see, such as lifecycle's `msg <- NULL # trick R CMD check` before `msg %<~% ...`,
+or a top-level flag that `assign()` fills in later. Passing such a variable as an argument, or
+testing it as a condition, is not reported. A parameter whose type is `NULL` and the literal
+`NULL` stay checked, so `report(NULL)` against a `character[]` parameter is an error.
 
 ### `Any` and `Unknown`
 
@@ -1185,6 +1192,10 @@ An unannotated `function(...)` expression gets its type from the definition itse
   parameters both by name and by position.
 - A parameter with a default is optional at call sites, and so is one the body never forces, as
   [lazy arguments](#lazy-arguments-and-required-formals) describes.
+- A default runs lazily in the function's own frame, so it sees the variables the body assigns.
+  In `function(n, ma, innov = rnorm(n + q)) { q <- length(ma); innov }`, the `q` in the default is
+  the body's local, not base R's `q()`. A name the body never assigns resolves outside the function
+  as usual. Such a read is not yet typed against the body's writes, so it reads as `Unknown`.
 - A `...` formal becomes a rest parameter with element type `Any`, at the position it holds among the
   formals, so `function(x, ...) …` is `fn(x: T, ...: Any) -> …`. The values that reach `...` are not
   tracked into the body, so forwarding `...` to another call gives `Unknown`.
@@ -1359,7 +1370,8 @@ the difference. At a call to a variadic function, a function-typed argument that
 interface check is therefore checked again, as that forwarded call:
 
 - Forwarded named arguments fill the callback's formals of the same name first, each checked against
-  its formal's type.
+  its formal's type exactly as a direct call checks it. So a `logical[]` forwarded to a formal whose
+  inferred type is `logical` is accepted, as `show(tab, fade = fade)` would be.
 - The interface's own parameter types then fill the remaining formals in order, followed by the
   forwarded positional arguments.
 - Any formal left unfilled must have a default.
@@ -1378,7 +1390,7 @@ because the forwarded `...` may be empty. So `dedup(basename, paths)` is accepte
 `basename` takes a single argument. A call that passes nothing but the forwarded `...`, as in
 `function(callback) function(...) callback(...)`, gives the parameter the type `fn(...: Any) -> T`,
 which any function satisfies, including one with required parameters such as
-`function(path) paste0(path, "/cache")`. An annotation `fn(...: Any) -> T` means the same. R
+`function(path) paste0(path, "/cache")` or `function(endpoint, ...) paste(endpoint, ...)`. An annotation `fn(...: Any) -> T` means the same. R
 expands an argument whose value is `...` whatever its name, so `func(x, ... = ...)` forwards the
 dots exactly as `func(x, ...)` does.
 
@@ -1569,7 +1581,8 @@ scalar condition admits:
 - A `character` condition of `if` or `while` is accepted unless it is a string literal. R reads it
   with `as.logical`, which accepts the spellings of `TRUE` and `FALSE` (such as `"T"` or `"true"`),
   and the value of `Sys.getenv("FLAG", unset = "TRUE")` presumably is one. Only a literal shows its
-  text, so `if ("yes")` is reported and `if ("TRUE")` is not. An operand of `&&` or `||` that is
+  text, so `if ("yes")` is reported and `if ("TRUE")` is not. The same holds for a `character`
+  member of a union condition, such as `character | logical`. An operand of `&&` or `||` that is
   `character` is a type error, because R rejects any string there.
 - A vector is accepted, because a vector type carries no length, and the vector a test produces,
   such as `x >= 1` on a `double[]`, has length one at run time far more often than not. Only a
@@ -1921,6 +1934,18 @@ type `integer`. When the assignment carries an annotation, `expr` is checked by 
   write replaces the old type, and writes that arrive from different paths are joined (see
   [control-flow joins](#control-flow-joins)). So after `x <- 1L; x <- "foo"`, `x` is `character`, and
   after `x <- 1L; if (flag) x <- "foo"`, it is `integer | character`.
+- `x <<- v` writes the nearest enclosing frame that defines `x`, or the global environment. When
+  an enclosing function defines `x`, the rest of the writing function reads `x` as `v`, and that
+  function joins `v` with its own writes, because a closure may run at any time after it is created. A write whose type is still
+  undetermined, such as a callback's result, joins as a union member instead of binding the other
+  writes, so a reset `cache <<- TRUE` beside `cache <<- fun()` leaves `fun` generic. A write to a
+  top-level variable is not read back yet: after `cache <- 1L`, the body
+  `cache <<- "a"; cache` still reads `cache` as `integer`.
+- A closure may run many times, so on entry an enclosing variable that may still be `NULL` holds
+  either that or what the closure's own first `<<-` writes. The lazily filled cache
+  `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`. A read
+  before that first write already fixes the type, so a first write of another type is an error:
+  after `y <- if (is.null(x)) 0 else x + 1`, the write `x <<- "a"` is reported.
 
 #### Recursion
 
@@ -2001,7 +2026,8 @@ scoped <- function(namespace, name) prefixer(namespace)(name)
 An argument that names a variable the body assigns without an annotation drops its `NULL` member
 when the parameter's type admits no `NULL`. The `NULL` there comes from a `switch` without a default,
 an `if` without `else`, or a helper that returns `NULL` on some path, and the code presumably does
-not reach the call on that path. So `type <- switch(type, logical = "a logical %s", integer =
+not reach the call on that path. A `switch()` without a default written directly as the argument
+is treated the same way, as in Matrix's `new(switch(shape, g = "dgeMatrix", t = "dtrMatrix"))`. So `type <- switch(type, logical = "a logical %s", integer =
 "an integer %s")` followed by `sprintf(type, kind)` is clean. A parameter the body does not
 reassign, and a variable whose assignment is annotated, keep their `NULL`, so passing a
 `name: character | NULL` parameter on to a `character` parameter is still reported. The `NULL` of
@@ -2069,6 +2095,15 @@ Arguments are checked for compatibility, not exact equality:
   array-like `T[]`, and `T` or `NULL` into `T | NULL`.
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
+- A type parameter that several parameters share, directly as `T` or as the items of `list[T]` or
+  `Array<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
+  union, so with `light: :Red | :Green`, `Bool.is_eq(:Red, light)` checks just as
+  `Bool.is_eq(light, :Red)` does, and `pick(:Red, :Green)` on `<T> fn(a: T, b: T) -> T` is
+  `:Red | :Green`. Numbers join in R's promotion order, so `Num.add(1L, 2.5)` and
+  `List.concat(list(1L), list(2.5))` are `double` and `list[double]`. Any other mix is a type
+  error, as in `Bool.is_eq(1L, "one")`, and every argument, a callback's parameters included, is
+  then checked against the joined type, so `fn(f: fn(T) -> logical, a: T, b: T)` rejects a
+  callback that accepts only `:Red` when `a` and `b` are `:Red` and `:Green`.
 - A whole-number `double` literal counts as `integer` at a parameter, as it does at the endpoints of
   `:`, so for `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. A fractional literal such as `2.5`
   is still rejected, and so is a `double` variable that happens to hold a whole number. `-3` is unary
@@ -2094,7 +2129,10 @@ Arguments are checked for compatibility, not exact equality:
   same atomic type, so `rlength <- function(x) if (all(!x)) length(x) else min(which(x)) - 1L`
   accepts `flags > 0`. An inferred `logical` parameter also accepts an `integer` or a `double`,
   scalar or vector, because that claim comes from a condition or `!`, which coerce numbers, so
-  `skip <- function(line.id) if (!line.id) 0L else 1L` accepts `skip(0L)`. An annotated signature
+  `skip <- function(line.id) if (!line.id) 0L else 1L` accepts `skip(0L)`. An inferred `integer`
+  slot also accepts a `double`, because R's integer-taking functions truncate one: a callback
+  shape that a first call `col.fun(n = length(levels))` pinned to `integer` accepts
+  `col.fun(n = length(levels) + 1)`. An annotated signature
   keeps its scalars: under `#: fn(flag: logical) -> double`, `pick(c(1, 0, 2) > 0)` is a type
   error. A type parameter bound by an earlier argument still widens as usual, and an inferred
   `character` parameter still rejects a number.
@@ -2247,6 +2285,11 @@ a local variable or parameter, the recognized guards are:
 - `is.character(x)`, `is.logical(x)`, `is.integer(x)`, `is.double(x)`, `is.function(x)`, and
   `is.list(x)` keep only the members of that family in the true branch, and remove them in the false
   branch. `is.numeric(x)` does the same for the `integer` and `double` family.
+- `is.null(x$field)` removes from `x`'s union, in the false branch, each member that cannot carry
+  the field: `NULL`, the empty `list()` placeholder, and a record with no field the name partially
+  matches. The true branch keeps every member, because the field itself may hold `NULL`. So
+  `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
+  `url` as the filled record.
 - `!cond` swaps the two branches.
 
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists
@@ -2353,6 +2396,11 @@ exceptions and additions:
   still forces it, except for a base R parameter that has no default and that the function tests
   with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
   the formal unforced.
+- Passing the formal positionally to a function that the enclosing body defines further down,
+  as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
+  "advice"` in the same `local()`, does not force it either. The sibling runs only after its
+  definition, and the checker does not look at what it reads, so the formal stays optional even
+  when the sibling reads it, and a call that omits it is not reported.
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
   `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`.
@@ -2377,8 +2425,9 @@ exceptions and additions:
   read. A project binding of that name still types the read.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
-- When a forced formal has a default, the formals its default reads are forced too, so in
-  `function(x, y = x) y`, `x` is required.
+- A read inside another formal's default does not force a formal, because the default runs only
+  when the call omits that formal. So in `function(x, y = x) y`, `x` is optional, and `g(y = 1)`
+  is accepted. So is `g()`, although R then fails with "argument "x" is missing".
 
 #### `missing()` on a defaultless formal
 
@@ -2570,6 +2619,10 @@ upper_names <- function(x) {
   itself, so past it only the library remains. A test file's top level encloses in the helpers'
   bindings and then the package namespace, and a script's in the namespace, so
   `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
+- A top-level `setGeneric("f", ...)` binds `f` as a function, and so does one inside a top-level
+  `if` with no `else`, such as `if (!isGeneric("type")) setGeneric("type", fun)`: whichever branch
+  runs, `type` is a function afterwards. So a `type` parameter holding a string still leaves
+  `type(object)` calling the generic.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
 - A binding whose type joins functions with `NULL` is called as the functions when the body
   computed it, such as `handler <- switch(kind, ...)` without a default, because the code presumably
@@ -2582,7 +2635,10 @@ upper_names <- function(x) {
   function, even though base has a `format`. A call declares no parameter names, so a later call
   may name an argument the first call passed by position: after `f(pars, arglist)`, the call
   `f(pars = pars + 1, arglist)` takes a slot without checking it, while an argument beyond the
-  slots the first call used is still an error. Which slot the name took is unknown, so the call's
+  slots the first call used is still an error, unless the body reads `formals()` or `formalArgs()` of that
+  parameter anywhere. Code that does so picks the call by the callback's arity, as in
+  `if (length(formals(handler)) == 1) handler(src) else handler(src, call)`, so a call with
+  another argument count is not checked. Which slot the name took is unknown, so the call's
   positional arguments are not checked either. When the first call forwarded `...`, as
   `f(x, ...)` does, a later name may also go to `...`, so it takes only a slot that the call's
   positional arguments leave free. When the body also reads it as a value and an outer
@@ -2711,7 +2767,12 @@ slot, so the slot's type reflects the update:
 
 - A write to a known field, `x$field <- v` or `x[["literal"]] <- v`, on a record-like `x` sets that
   field's type to the type of `v`, adding the field if it is absent. The same write on an empty
-  `list()` starts a record `list{field: V}`.
+  `list()` starts a record `list{field: V}`, and on a list whose names are not tracked,
+  `list[named: T]` or `list[T]`, it gives `list[named: T | V]`. Writing `NULL` removes a field, so
+  it adds no type.
+- When `x` is a union, as after a loop that may or may not have filled it, each member takes the
+  write and the results join, so `ret <- list()`, a loop of `ret[[i]] <- part`, and then
+  `ret$count <- n` leave every shape of `ret` holding the count.
 - The same write on a *nominal* `x` is checked rather than applied, because a nominal type's
   representation is its invariant: `v` is checked against the field's declared type, a field the
   representation does not declare is an error, and `x` keeps its nominal type either way.
@@ -2720,8 +2781,9 @@ slot, so the slot's type reflects the update:
   - an empty `list()` becomes a dict-like `list[named: V]`;
   - a dict-like `list[named: T]` becomes `list[named: T | V]`;
   - a list-like `list[T]` becomes `list[T | V]`, and stays list-like;
-  - a record-like or tuple-like container is left unchanged, because widening a shape whose fields
-    are individually known would throw away precision the code has not given up.
+  - a record-like `list{a: A, b: B}` becomes `list[named: A | B | V]`, because the write may add a
+    field or replace any one, so `globals[[key]]` afterwards may be `v`;
+  - a tuple-like container is left unchanged.
 - A write through `[`, `x[i] <- v` or `x[i, j] <- v`, on an atomic `x` with an atomic `v` coerces
   `x` to the wider of the two atomic types, as R does. So after `prob <- rep(NA, n)`, the write
   `prob[i] <- 0.5` makes `prob` a `double[]`, and `x[1] <- "a"` makes a numeric `x` a

@@ -197,26 +197,20 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
 }
 
 /// Whether the innermost move is into the frame `env` and still lasts, which shows that no code
-/// the checks did not cover has run, so nothing can have captured the frame.
-pub unsafe fn frame_private(env: Sexp) -> bool {
-    interp()
-        .moves
-        .moves
-        .last()
-        .is_some_and(|entry| !entry.ended && !entry.shared && entry.callee == env)
-}
-
-/// Whether a call of `function` may create a closure, from its body or a default, which would
-/// capture the call's frame without entering a closure, so without ending a move.
-pub unsafe fn may_capture_frame(function: Sexp) -> bool {
-    let mut formal = function.car();
-    while formal.kind() == SexpType::Pairlist {
-        if creates_closure(formal.car()) {
-            return true;
-        }
-        formal = formal.cdr();
-    }
-    creates_closure(crate::bytecode::source_body(function))
+/// the checks did not cover has run, and whether no closure created while it lasted can outlive
+/// the frame, so nothing can see the frame once the call that ends its body returns. `others`
+/// are that call's other arguments: argument values are not counted, so a closure among them,
+/// which the call may store in the updated value, would escape unseen.
+pub unsafe fn frame_private(env: Sexp, others: &[Sexp]) -> bool {
+    interp().moves.moves.last().is_some_and(|entry| {
+        !entry.ended
+            && !entry.shared
+            && entry.callee == env
+            && !others
+                .iter()
+                .any(|&value| entry.closures.iter().any(|&(closure, _)| closure == value))
+            && closures_dead(entry, nil())
+    })
 }
 
 /// Called before code reads or writes a variable through an environment value, as `e$x`,
@@ -449,25 +443,6 @@ unsafe fn closures_dead(finished: &Move, result: Sexp) -> bool {
         }
         u32::from(closure.refcount()) <= held
     })
-}
-
-/// Whether evaluating `expression` may create a closure, which would capture its frame.
-unsafe fn creates_closure(expression: Sexp) -> bool {
-    if expression.kind() != SexpType::Language {
-        return false;
-    }
-    let head = expression.car();
-    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "function" {
-        return true;
-    }
-    let mut cell = expression;
-    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
-        if creates_closure(cell.car()) {
-            return true;
-        }
-        cell = cell.cdr();
-    }
-    false
 }
 
 /// Whether moving into `function` for `call` is invisible, as far as the code can tell before

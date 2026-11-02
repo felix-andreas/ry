@@ -555,7 +555,7 @@ pub fn package_bindings(db: &dyn Db, sources: PackageSources) -> Arc<PackageBind
         // later or second write would change what a late evaluation reads.
         let lazy = match &item.kind {
             BindKind::Function => true,
-            BindKind::Constant { mentions } => mentions.iter().all(|name| {
+            BindKind::Constant { reads } => reads.iter().all(|name| {
                 writers
                     .get(name.as_str())
                     .is_none_or(|&(count, first)| count == 1 && first < position)
@@ -625,9 +625,12 @@ struct ItemBinds {
 enum BindKind {
     /// A function definition, lazy unless another item writes its name.
     Function,
-    /// A constant of a strict file, lazy when the names its value mentions allow it.
+    /// A pure constant of a strict file, or an R6 generator, lazy when the names evaluating
+    /// its value reads allow it. A constant counts every name its value mentions, since a pure
+    /// function it calls may read them; a generator counts only its immediate reads, because
+    /// its methods read the namespace when they are called, lazy or not.
     Constant {
-        mentions: Vec<String>,
+        reads: Vec<String>,
     },
     Other,
 }
@@ -645,20 +648,30 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
                 .binding
                 .as_ref()
                 .is_some_and(|binding| binding.function);
-            let constant = strict
-                && is_constant_candidate(item)
-                && loaded
-                    .get(index)
-                    .is_some_and(|loaded| *item_top_level(db, loaded.item) == TopLevel::Constant);
+            // A generator is lazy in any file, a constant only in a strict one, and the
+            // registration screens out every other item before the classification runs.
+            let generator = item
+                .registrations
+                .iter()
+                .any(|registration| matches!(registration, Registration::R6Class { .. }));
+            let top_level = (is_constant_candidate(item) && (strict || generator))
+                .then(|| loaded.get(index))
+                .flatten()
+                .map(|loaded| item_top_level(db, loaded.item));
+            let reads = match top_level {
+                Some(TopLevel::Constant) if strict => Some(&item.mentions),
+                Some(TopLevel::Generator) => Some(&item.reads),
+                _ => None,
+            };
             ItemBinds {
                 binds: item.binds.clone(),
                 binding: item.binding.as_ref().map(|binding| binding.name.clone()),
                 load_writes: item.load_writes.clone(),
                 kind: if function {
                     BindKind::Function
-                } else if constant {
+                } else if let Some(reads) = reads {
                     BindKind::Constant {
-                        mentions: item.mentions.clone(),
+                        reads: reads.clone(),
                     }
                 } else {
                     BindKind::Other

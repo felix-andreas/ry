@@ -25,7 +25,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use {
-    crate::linalg::format_g,
+    crate::format::format_g,
     std::{cell::RefCell, ffi::c_int, rc::Rc},
 };
 

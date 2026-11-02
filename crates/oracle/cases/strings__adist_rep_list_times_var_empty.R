@@ -1,0 +1,15 @@
+# adist's weighted Levenshtein distances with counts and trafos, rep() with a list of counts,
+# var() of an empty matrix, and .Internal(inspect()) going through sink() like any output.
+L <- list(a = 1:2, b = 3)
+print(rep(names(L), lapply(L, length)))
+m <- matrix(1:6, 2)
+print(var(m[, 0], m))
+print(adist("kitten", "sitting"))
+a <- adist(c(p = "kitten", q = "abc"), c(r = "sitting", "ab"), counts = TRUE)
+print(a)
+print(adist(c("Abc", "abd"), ignore.case = TRUE, costs = c(2, 1, 3)))
+print(adist(c("a", NA), "b"))
+lines <- capture.output(.Internal(inspect(structure(1:3, class = "foo"))))
+print(grepl("^@[0-9a-f]+ 13 INTSXP g[0-9]c[0-9] \\[OBJ", lines[1]))
+print(grepl("ATTRIB:", lines[2]))
+print(sub(".*\\] ", "", capture.output(.Internal(inspect(c(1.5, 2, 3, 4, 5, 6))))))

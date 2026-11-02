@@ -32,6 +32,11 @@ pub enum TopLevel {
     Definition,
     /// `name <- value` where evaluating `value` has no effect, so it may be bound lazily.
     Constant,
+    /// `name <- R6Class(...)` built from literals, names, functions and `list()` or `c()` of
+    /// them. The generator depends on nothing but those arguments and the namespace it is
+    /// created in, so unlike a constant, whose pure functions may still read options or the
+    /// locale, it may be bound lazily in any file.
+    Generator,
     /// The statement has an effect, found at `range` (item-relative).
     Effect { range: TextRange, effect: Effect },
 }
@@ -198,6 +203,33 @@ fn plain_value(module: &Module, id: ExprId) -> bool {
     }
 }
 
+/// Whether `id` is what an R6 class definition is built from: literals, names, functions, and
+/// `list()` or `c()` of them. The rule is syntactic, so a load that reads neither the stubs
+/// nor the project's definitions classifies a generator the same way `ry check` does.
+fn generator_part(module: &Module, id: ExprId) -> bool {
+    match &module.expression(id).kind {
+        ExpressionKind::Missing
+        | ExpressionKind::Literal(_)
+        | ExpressionKind::NameRef(_)
+        | ExpressionKind::Namespace { .. }
+        | ExpressionKind::Function { .. } => true,
+        ExpressionKind::Unary { operand, .. } | ExpressionKind::Paren(operand) => {
+            generator_part(module, *operand)
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            matches!(
+                &module.expression(*callee).kind,
+                ExpressionKind::NameRef(name) if matches!(name.as_str(), "c" | "list")
+            ) && module[arguments].iter().all(|argument| {
+                argument
+                    .value
+                    .is_none_or(|value| generator_part(module, value))
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Whether calling `package::name`, or a bare `name`, is declared to have no effect, and
 /// where the declaration would live. A project definition shadows a stub's.
 pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, CalleeOrigin) {
@@ -335,6 +367,22 @@ impl Classifier<'_> {
                 target,
                 value,
             } if self.binds_name(*target) => self.binding(*value),
+            ExpressionKind::Call { callee, arguments }
+                if self.callee_name(*callee).is_some_and(|(package, name)| {
+                    name == "R6Class" && package.is_none_or(|package| package == "R6")
+                }) =>
+            {
+                let built = self.module[arguments].iter().all(|argument| {
+                    argument
+                        .value
+                        .is_none_or(|value| generator_part(self.module, value))
+                });
+                if built {
+                    TopLevel::Generator
+                } else {
+                    TopLevel::Definition
+                }
+            }
             ExpressionKind::Call { callee, .. } if self.declares(*callee) => TopLevel::Definition,
             _ => self.effect(value, &mut None).unwrap_or(TopLevel::Constant),
         }

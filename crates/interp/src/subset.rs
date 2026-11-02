@@ -227,6 +227,99 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     Ok(result)
 }
 
+/// `object[index]` for a plain logical, integer or double vector and an attribute-free integer,
+/// double or logical subscript, gathered straight from the subscript without first resolving
+/// it to a position list. `None` defers to the general path, which handles every other shape
+/// (negative or zero subscripts, recycled logical subscripts, other element types).
+unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if index == missing_arg() || values::has_attributes(index) || values::has_attributes(object) {
+        return Ok(None);
+    }
+    let kind = object.kind();
+    if !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real) {
+        return Ok(None);
+    }
+    let index = values::materialize(index)?;
+    match index.kind() {
+        SexpType::Integer => {
+            let positions = values::ints(index);
+            // Every subscript must be NA or positive; anything else needs the general rules.
+            if positions
+                .iter()
+                .any(|&position| position <= 0 && position != NA_INTEGER)
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &i32| (*position as u32 as usize).wrapping_sub(1);
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Real => {
+            let positions = values::reals(index);
+            if positions
+                .iter()
+                .any(|&position| !(position >= 1.0) && !position.is_nan())
+            {
+                return Ok(None);
+            }
+            let position_of = |position: &f64| {
+                if position.is_nan() {
+                    NA_POSITION
+                } else {
+                    position.trunc() as usize - 1
+                }
+            };
+            Ok(Some(gather_kind(
+                object,
+                positions.iter().map(position_of),
+                positions.len(),
+            )?))
+        }
+        SexpType::Logical => {
+            let flags = values::ints(index);
+            if flags.len() != length(object) {
+                return Ok(None);
+            }
+            let selected = flags.iter().filter(|&&flag| flag != 0).count();
+            let positions = flags
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &flag)| match flag {
+                    0 => None,
+                    NA_LOGICAL => Some(NA_POSITION),
+                    _ => Some(position),
+                });
+            Ok(Some(gather_kind(object, positions, selected)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `object[positions]` for a logical, integer or double vector, NA past the end.
+unsafe fn gather_kind(
+    object: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let kind = object.kind();
+    let result = values::alloc_uninit(kind, count)?;
+    if kind == SexpType::Real {
+        let source = values::reals(object);
+        for (slot, position) in values::reals_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_REAL);
+        }
+    } else {
+        let source = values::ints(object);
+        for (slot, position) in values::ints_mut(result).iter_mut().zip(positions) {
+            *slot = source.get(position).copied().unwrap_or(NA_INTEGER);
+        }
+    }
+    Ok(result)
+}
+
 /// `source[indices]` for an atomic vector of plain elements, with NA past the end.
 unsafe fn gather<T: Copy + 'static>(
     kind: SexpType,
@@ -572,6 +665,12 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
+    if dims.is_none()
+        && names == nil()
+        && let Some(result) = gather_plain(object, index)?
+    {
+        return Ok(result);
+    }
     let (indices, _) = resolve(index, count, names, false, call)?;
     let result = select_elements(object, &indices)?;
     if names != nil() {
@@ -1306,6 +1405,8 @@ unsafe fn matrix_index_positions(
                         "negative values are not allowed in a matrix subscript",
                     ));
                 }
+                // GNU R drops a row that names position 0 in the first dimension it reaches,
+                // the way a 0 in a vector subscript selects nothing.
                 if value == 0.0 {
                     dropped = true;
                     break;
@@ -2441,7 +2542,10 @@ unsafe fn do_length(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
     let new_length = length_argument(call.arg(1))?;
-    if object == nil() && new_length == 0 {
+    if object == nil() {
+        if new_length > 0 {
+            conditions::warning_call(call.call, "length of NULL cannot be changed")?;
+        }
         return Ok(nil());
     }
     if object.kind() == SexpType::Pairlist {
@@ -2461,12 +2565,13 @@ unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
     if !object.kind().is_vector() && object != nil() {
         return Err(call.error("invalid argument"));
     }
-    let object = if object == nil() {
-        alloc(SexpType::Logical, 0)?
-    } else {
-        object
-    };
     let count = length(object);
+    // GNU returns the object itself when the length is unchanged, so every
+    // attribute survives; the methods package relies on this to compare
+    // signatures with `identical`.
+    if count == new_length {
+        return Ok(object);
+    }
     let result = alloc(object.kind(), new_length)?;
     for position in 0..new_length {
         if position < count {
@@ -2668,7 +2773,7 @@ unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
 /// list shorter than the dimensions is padded with `NULL`, an empty list removes the
 /// dimnames, and a list of only `NULL` components is kept as it is.
 pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
-    if dimnames == nil() {
+    if dimnames == nil() || (dimnames.kind() == SexpType::List && length(dimnames) == 0) {
         values::remove_attr(object, symbols().dimnames);
         return Ok(());
     }
@@ -2680,10 +2785,6 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     };
     if dimnames.kind() != SexpType::List {
         return Err(crate::unwind::error_in(call, "'dimnames' must be a list"));
-    }
-    if length(dimnames) == 0 {
-        values::remove_attr(object, symbols().dimnames);
-        return Ok(());
     }
     if length(dimnames) > dims.len() {
         return Err(crate::unwind::error_in(
@@ -2729,7 +2830,7 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
             let name = if index < length(names) {
                 names.element(index)
             } else {
-                values::mkchar("")?
+                values::blank_string()
             };
             values::set_elt(padded, index, name);
         }
@@ -3183,65 +3284,6 @@ unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
     )?;
     if named(answer_names) {
         values::set_attr(result, symbols().dimnames, answer_names)?;
-    }
-    Ok(result)
-}
-
-/// The column of each row's maximum. Ties are broken at random, first or last
-/// (`ties.method` 1, 2 or 3). At random, values within a relative tolerance of the row's
-/// largest magnitude count as tied, and each tied column replaces the choice so far with
-/// probability one over the number of ties seen, so every tied column is equally likely.
-unsafe fn do_max_col(call: &Call<'_>) -> R<Sexp> {
-    let matrix = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let (rows, cols) = match values::dims(call.arg(0)) {
-        Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
-        _ => return Err(call.error("'m' must be a matrix")),
-    };
-    let ties = values::as_integer_scalar(call.arg(1));
-    let values: &[f64] = matrix.slice();
-    let at = |row: usize, col: usize| values.get(row + col * rows).copied().unwrap_or(f64::NAN);
-    let random = ties == 1;
-    if random {
-        crate::random::get_rng_state()?;
-    }
-    let result = alloc(SexpType::Integer, rows)?;
-    for row in 0..rows {
-        if cols == 0 || (0..cols).any(|col| at(row, col).is_nan()) {
-            result.slice_mut::<i32>()[row] = NA_INTEGER;
-            continue;
-        }
-        let mut best = 0;
-        let mut best_value = at(row, 0);
-        if random {
-            let largest = (0..cols).map(|col| at(row, col).abs()).fold(0.0, f64::max);
-            let tolerance = 1e-5 * largest;
-            let mut tied = 1.0;
-            for col in 1..cols {
-                let value = at(row, col);
-                if value > best_value + tolerance {
-                    tied = 1.0;
-                    best_value = value;
-                    best = col;
-                } else if value >= best_value - tolerance {
-                    tied += 1.0;
-                    if tied * crate::random::unif_rand()? < 1.0 {
-                        best = col;
-                    }
-                }
-            }
-        } else {
-            for col in 1..cols {
-                let value = at(row, col);
-                if value > best_value || (ties == 3 && value == best_value) {
-                    best_value = value;
-                    best = col;
-                }
-            }
-        }
-        result.slice_mut::<i32>()[row] = best as i32 + 1;
-    }
-    if random {
-        crate::random::put_rng_state()?;
     }
     Ok(result)
 }
@@ -3734,6 +3776,100 @@ unsafe fn row_col(call: &Call<'_>, rows: bool) -> R<Sexp> {
     let dim = values::integer_vector(&[row_count as i32, col_count as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     Ok(result)
+}
+
+/// `.Internal(max.col(m, ties.method))`, with the method as GNU R's code: 1 random, 2 first,
+/// 3 last.
+unsafe fn do_max_col(call: &Call<'_>) -> R<Sexp> {
+    let matrix = call.arg(0);
+    let dims = get_attr(matrix, symbols().dim);
+    let dims = coerce_vector(dims, SexpType::Integer)?;
+    let (rows, columns) = match values::ints(dims) {
+        &[rows, columns] => (rows.max(0) as usize, columns.max(0) as usize),
+        _ => (length(matrix), 1),
+    };
+    let method = values::as_integer_scalar(call.arg(1));
+    let matrix = coerce_vector(matrix, SexpType::Real)?;
+    let result = alloc(SexpType::Integer, rows)?;
+    max_col(
+        values::reals(matrix),
+        rows,
+        columns,
+        method,
+        values::ints_mut(result),
+    )?;
+    Ok(result)
+}
+
+/// `R_max_col`: the column of each row's maximum of the column-major `matrix`, or `NA` for a
+/// row with a missing value. With `method` 1, entries within a relative 1e-5 of the row's
+/// largest magnitude tie and one of them is drawn at random; 2 takes the first maximum and 3
+/// the last.
+pub unsafe fn max_col(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    method: i32,
+    maxes: &mut [i32],
+) -> R<()> {
+    let random = method == 1;
+    if random {
+        crate::random::get_rng_state()?;
+    }
+    let entry = |row: usize, column: usize| matrix.get(row + column * rows).copied();
+    for (row, slot) in maxes.iter_mut().enumerate().take(rows) {
+        let mut missing = false;
+        let mut largest = 0.0f64;
+        for column in 0..columns {
+            let value = entry(row, column).unwrap_or(f64::NAN);
+            if value.is_nan() {
+                missing = true;
+                break;
+            }
+            if value.is_finite() {
+                largest = largest.max(value.abs());
+            }
+        }
+        let Some(mut maximum) = entry(row, 0).filter(|_| !missing && columns > 0) else {
+            *slot = NA_INTEGER;
+            continue;
+        };
+        let mut chosen = 0;
+        if random {
+            // Entries are treated as probabilities: values this close to the maximum tie.
+            let tolerance = 1e-5 * largest;
+            let mut ties = 1;
+            for column in 1..columns {
+                let value = entry(row, column).unwrap_or(f64::NAN);
+                if value > maximum + tolerance {
+                    maximum = value;
+                    chosen = column;
+                    ties = 1;
+                } else if value >= maximum - tolerance {
+                    // Reservoir sampling: each tied column ends up chosen with equal
+                    // probability.
+                    ties += 1;
+                    if f64::from(ties) * crate::random::unif_rand()? < 1.0 {
+                        chosen = column;
+                    }
+                }
+            }
+        } else {
+            let last = method == 3;
+            for column in 1..columns {
+                let value = entry(row, column).unwrap_or(f64::NAN);
+                if value > maximum || (last && value == maximum) {
+                    maximum = value;
+                    chosen = column;
+                }
+            }
+        }
+        *slot = chosen as i32 + 1;
+    }
+    if random {
+        crate::random::put_rng_state()?;
+    }
+    Ok(())
 }
 
 unsafe fn do_diag(call: &Call<'_>) -> R<Sexp> {

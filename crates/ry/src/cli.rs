@@ -1,6 +1,6 @@
 use {
     crate::{
-        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Fingerprinter, Plan},
+        check_cache::{self, CacheUse, FileOutcome, Fingerprint, Plan},
         config,
         diagnostics::{apply_suppressions, document_diagnostics},
         namespace,
@@ -12,7 +12,7 @@ use {
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
-    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -21,8 +21,9 @@ use {
             derive_from_syntax, project_fold_shares,
         },
         metadata::{
-            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-            parse_description_dependencies, parse_description_package, parse_namespace,
+            OS_TYPE, PackageMetadata, attached_union, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -34,7 +35,6 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
-        hash::Hasher,
         io::Read,
         iter, mem,
         num::NonZero,
@@ -326,12 +326,10 @@ pub(crate) fn analyze_project(
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<ProjectAnalysis, CommandError> {
-    // A directory that is no project, such as one holding a downloaded script, gets no record.
-    let is_project = config::CONFIG_FILE_NAMES
-        .iter()
-        .chain(["DESCRIPTION"].iter())
-        .any(|name| root.join(name).is_file());
-    let cache = if is_project { cache } else { CacheUse::Off };
+    let cache = match check_cache::is_project(root) {
+        true => cache,
+        false => CacheUse::Off,
+    };
     let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
@@ -509,25 +507,18 @@ fn analyze_project_with(
         .durability(Durability::HIGH)
         .new(&db);
     let data_files = scan_data_files(root);
-    let key = {
-        let mut fingerprinter = Fingerprinter::new();
-        fingerprinter
-            .text(env!("CARGO_PKG_VERSION"))
-            .text(&build_identity())
-            .text(&format!("{config:?}"))
-            .text(&root.to_string_lossy())
-            .text(&format!("{data_files:?}"));
-        for source in [&namespace_source, &description_source] {
-            match source {
-                Some(text) => fingerprinter.bytes(&[1]).text(text),
-                None => fingerprinter.bytes(&[0]),
-            };
-        }
-        for stub in &project_stubs {
-            fingerprinter.text(&stub.stem).text(&stub.text);
-        }
-        fingerprinter.finish()
-    };
+    let executable = env::current_exe().unwrap_or_default();
+    let key = check_cache::key(
+        &executable,
+        &config,
+        root,
+        &data_files,
+        namespace_source.as_deref(),
+        description_source.as_deref(),
+        project_stubs
+            .iter()
+            .map(|stub| (stub.stem.as_str(), stub.text.as_str())),
+    );
     let _: DataFiles = DataFiles::builder(data_files)
         .durability(Durability::HIGH)
         .new(&db);
@@ -551,9 +542,9 @@ fn analyze_project_with(
     };
     if let Plan::Replay(record) = &plan {
         let per_file: Option<Vec<Vec<Diagnostic>>> = (0..files.len())
-            .map(|index| record.diagnostics(index, &files))
+            .map(|index| record.diagnostics(index, |index| files.get(index).copied()))
             .collect();
-        let namespace = record.namespace(&files);
+        let namespace = record.namespace(|index| files.get(index).copied());
         if let (Some(per_file), Some(namespace)) = (per_file, namespace) {
             let namespace = match (namespace, &namespace_source) {
                 (Some(problems), Some(source)) => Some((namespace_path, source.clone(), problems)),
@@ -576,7 +567,7 @@ fn analyze_project_with(
     if let Plan::Partial { previous, stale } = &mut plan {
         for (index, stale) in stale.iter_mut().enumerate() {
             if !*stale {
-                recorded[index] = previous.diagnostics(index, &files);
+                recorded[index] = previous.diagnostics(index, |index| files.get(index).copied());
                 *stale = recorded[index].is_none();
             }
         }
@@ -714,7 +705,7 @@ fn analyze_project_with(
                 .collect();
             recorded == used_tokens
         })
-        .and_then(|previous| previous.namespace(&files));
+        .and_then(|previous| previous.namespace(|index| files.get(index).copied()));
     if let (Some(namespace_source), Some(problems)) = (&namespace_source, recorded_namespace) {
         namespace = problems.map(|problems| (namespace_path, namespace_source.clone(), problems));
     } else if let Some(namespace_source) = &namespace_source {
@@ -821,20 +812,6 @@ fn analyzed_files(
             diagnostics,
         })
         .collect()
-}
-
-/// Identifies the running ry binary by its bytes, so a record written by another build is never
-/// read back, even one with the same size and modification time. Hashing the binary takes a few
-/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
-fn build_identity() -> String {
-    match env::current_exe().and_then(fs::read) {
-        Ok(bytes) => {
-            let mut hasher = FxHasher::default();
-            hasher.write(&bytes);
-            format!("{} {:x}", bytes.len(), hasher.finish())
-        }
-        Err(_) => format!("unreadable {}", std::process::id()),
-    }
 }
 
 /// Runs `work` for every index in `order` across `workers` threads.
@@ -1119,28 +1096,45 @@ pub(crate) fn read_project_stubs(
         .collect()
 }
 
-/// Package documents first (in `Collate` order when declared, then by path), then
-/// scripts. The server, `check`, and the stats agree on it, so the last-writer-wins
-/// symbol index selects the same winners everywhere.
+/// Package documents first, then scripts. Package files follow a load's order
+/// (`loader::collate_code_files`): the `Collate` field's files, then the rest with those of `R/`
+/// before those of a subdirectory, each by path. A load never runs the other operating system's
+/// subdirectory (`R/windows/` on Unix), so its files come first, where every loaded definition
+/// of the same name overrides them. The server, `check`, and the stats agree on this order, so
+/// the last-writer-wins symbol index selects the same winners everywhere, and the winner is the
+/// definition a load leaves bound.
 pub(crate) fn project_order<'a>(
     root: &'a Path,
     collate: &'a [String],
-) -> impl Fn(&Path) -> (bool, usize, String) + 'a {
+) -> impl Fn(&Path) -> (bool, bool, usize, bool, String) + 'a {
     let r_path = root.join("R");
+    let other_os = if OS_TYPE == "unix" { "windows" } else { "unix" };
     let collate_rank: HashMap<&str, usize> = collate
         .iter()
         .enumerate()
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
     move |path| {
-        let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+        // A `Collate` entry is a path relative to `R/`, such as `unix/a.R`.
+        let relative = path
+            .strip_prefix(&r_path)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+        let rank = relative
+            .as_deref()
+            .and_then(|relative| collate_rank.get(relative))
             .copied()
             .unwrap_or(usize::MAX);
+        let in_other_os = relative
+            .as_deref()
+            .is_some_and(|relative| relative.starts_with(&format!("{other_os}/")));
         (
-            !path.starts_with(&r_path),
+            relative.is_none(),
+            !in_other_os,
             rank,
+            relative
+                .as_deref()
+                .is_some_and(|relative| relative.contains('/')),
             path.strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()
@@ -1754,22 +1748,15 @@ pub fn fmt(
     let paths_with_config = files
         .iter()
         .map(|file| {
-            let config = config::Config::discover(file).map_err(|err| {
+            let mut config = config::Config::discover(file).map_err(|err| {
                 report(&err);
                 CommandError
             })?;
+            // lintr's settings only concern lints, so formatting never warns about them.
+            config.lintr_problems.clear();
             warn_config(&config);
-            // `[check] exclude` scopes analysis, not formatting. Literate documents are never
-            // formatted: most of an `.Rmd` is prose.
-            let paths: Vec<PathBuf> = collect_r_files(file, None)?
-                .into_iter()
-                .filter(|path| {
-                    !path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(is_literate_extension)
-                })
-                .collect();
+            // `[check] exclude` scopes analysis, not formatting.
+            let paths: Vec<PathBuf> = collect_r_files(file, None)?;
             Ok((paths, config.format))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1779,6 +1766,12 @@ pub fn fmt(
         .collect();
     if range.is_some() && jobs.len() != 1 {
         error("`--range` formats part of one file, so pass exactly one file");
+        return Err(CommandError);
+    }
+    if range.is_some() && jobs.iter().any(|(path, _)| is_literate_path(path)) {
+        error(
+            "`--range` formats part of an R file; an `.Rmd`, `.qmd` or `.Rnw` formats whole chunks",
+        );
         return Err(CommandError);
     }
 
@@ -1869,8 +1862,7 @@ pub fn fmt(
         }
     }
 
-    // Not a usage error: a pre-commit hook may pass only a literate document, which
-    // fmt deliberately skips.
+    // Not a usage error: a pre-commit hook may pass only files of other kinds.
     if n_files == 0 {
         info("0 files formatted");
         return Ok(Outcome::Clean);
@@ -1945,6 +1937,12 @@ enum FormatResult {
     },
 }
 
+fn is_literate_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_literate_extension)
+}
+
 fn format_file(
     path: &Path,
     config: format::Config,
@@ -1967,6 +1965,8 @@ fn format_file(
             format::format_range(&initial, config, selection)
                 .map(|edits| format::apply_edits(&initial, &edits))
         }
+        // A literate document formats chunk by chunk, so its prose is never touched.
+        None if is_literate_path(path) => format::format_literate(&initial, config),
         None => format::format(&initial, config),
     };
     let elapsed = start.elapsed();

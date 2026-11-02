@@ -146,7 +146,9 @@ on purpose.
   `#~~~~ after <path>` exists on that side only, so the same path on both sides is an edit and one
   side alone is an addition or a deletion, while a plain `#~~~~ <path>` is unchanged. The case loads
   the `before` side, then renders the plan that takes it to the `after` side: what is bound, run,
-  removed, unregistered, and re-registered. Run it with
+  removed, unregistered, re-registered, and which datasets are read again. `R/` files run in the
+  order `DESCRIPTION`'s collation field gives them, and a `data/` file is a dataset whose text stands
+  in for its size and modification time. Run it with
   `cargo test -p loader --test test_reload_fixtures`.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.
@@ -393,6 +395,13 @@ fuzz tables are small, so the kernels' parallel paths get large-table tests of t
 `just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
 data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
 data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
+
+`just bench-base [--rows 1e5,1e6 --only REGEX --memory]` times base R's own kernels (sorting,
+string formatting and regex, grouping, `merge`, `match`, matrix margins, cumulative sums, xts and
+zoo rolling operations) under `ry run` and GNU R, and prints the ratio ry / GNU R per kernel. A
+kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory` every kernel
+runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
+`RY_BENCH_RLIB` (default `~/R/library`).
 
 ### Coverage-guided fuzzing
 
