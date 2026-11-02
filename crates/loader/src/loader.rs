@@ -200,7 +200,57 @@ pub struct DeferredS4 {
     pub generics: Vec<String>,
     /// Every namespace binding the definitions make.
     pub names: Vec<String>,
+    /// A key for the S4 metadata the definitions produce, when running them depends on nothing
+    /// but their own text, the package's imports and the version of R: each reads only names
+    /// they bind themselves and functions in [`PURE_S4_READS`]. A backend may then save what
+    /// they bind and restore it in a later process instead of running them.
+    pub cache_key: Option<String>,
 }
+
+/// The functions an S4 definition may call and still be cached: the methods package's
+/// definition functions and the base functions that build constant values, all of which
+/// return the same result for the same arguments. A definition that reads any other name, a
+/// package constant or something like `Sys.time()`, runs in every process.
+const PURE_S4_READS: &[&str] = &[
+    "setClass",
+    "setGeneric",
+    "setMethod",
+    "setReplaceMethod",
+    "setValidity",
+    "representation",
+    "signature",
+    "prototype",
+    "standardGeneric",
+    "new",
+    "methods",
+    "::",
+    "c",
+    "list",
+    "character",
+    "numeric",
+    "integer",
+    "logical",
+    "double",
+    "complex",
+    "function",
+    "-",
+    "+",
+    "*",
+    "/",
+    "^",
+    ":",
+    "(",
+    "{",
+    "<-",
+    "=",
+    "!",
+    "==",
+    "!=",
+    "&&",
+    "||",
+    "T",
+    "F",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceText {
@@ -1401,6 +1451,25 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         }
         names.extend(item.binds.iter().cloned());
     }
+    let pure = definitions.iter().all(|(_, _, item, _)| {
+        item.reads.iter().all(|name| {
+            PURE_S4_READS.contains(&name.as_str()) || names.iter().any(|bound| bound == name)
+        })
+    });
+    let cache_key = pure.then(|| {
+        let mut hasher = Xxh3::new();
+        let mut field = |bytes: &[u8]| {
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
+        field(index.package.as_bytes());
+        field(index.version.as_bytes());
+        for (_, _, item, _) in &definitions {
+            field(&item.hash.to_le_bytes());
+        }
+        format!("{:032x}", hasher.digest128())
+    });
     names.extend(classes.iter().map(|class| format!(".__C__{class}")));
     names.extend(
         generics
@@ -1414,6 +1483,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         classes,
         generics,
         names,
+        cache_key,
     })
 }
 
@@ -1655,10 +1725,7 @@ struct IndexCache {
 /// the user's cache directory, one file per package root, and its key covers everything the
 /// load index is derived from: the sources, the strict setting, and the build of ry.
 fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
-    let directory = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|directory| !directory.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))?;
+    let directory = cache_directory()?;
     let mut hasher = Xxh3::new();
     let mut field = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -1678,6 +1745,20 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
         path: directory.join("ry").join("load-index").join(name),
         key,
     })
+}
+
+/// Where a backend keeps the S4 metadata of the package at `root` ([`DeferredS4::cache_key`]),
+/// one file per package that each save replaces.
+pub fn s4_cache_path(root: &Path) -> Option<PathBuf> {
+    let name = format!("{:016x}.rds", xxh3_64(root.as_os_str().as_encoded_bytes()));
+    Some(cache_directory()?.join("ry").join("s4").join(name))
+}
+
+fn cache_directory() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
 }
 
 /// The cached load index, when there is one for exactly the cache's key. An entry that is

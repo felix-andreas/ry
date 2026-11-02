@@ -317,16 +317,34 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     options(previous)
     .Internal(ryLoaderUndefer(state$root))
   }, add = TRUE)
-  for (k in seq_along(held$position)) {
-    if (loading && held$position[[k]] >= state$s4_cursor) {
-      break
-    }
+  # Only a run of all the definitions at once is the same in every process, so only that one
+  # is saved or restored.
+  cache <- if (!loading && !is.null(deferred$cache_key)) {
+    .ry_s4_cache(ns, deferred$cache_key, held$cache)
+  }
+  if (!.ry_restore_s4(ns, cache)) {
+    before <- names(ns)
+    signalled <- FALSE
     withCallingHandlers(
-      .Internal(ryLoaderRunDeferred(state$root, ns, k)),
-      error = function(error) {
-        message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
-      }
+      for (k in seq_along(held$position)) {
+        if (loading && held$position[[k]] >= state$s4_cursor) {
+          break
+        }
+        withCallingHandlers(
+          .Internal(ryLoaderRunDeferred(state$root, ns, k)),
+          error = function(error) {
+            message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
+          }
+        )
+      },
+      message = function(condition) signalled <<- TRUE,
+      warning = function(condition) signalled <<- TRUE
     )
+    # A message or warning must show again in the next process, so a run that signalled one
+    # is not saved.
+    if (!is.null(cache) && !signalled) {
+      .ry_save_s4(ns, cache, setdiff(names(ns), before))
+    }
   }
   if (!loading) {
     methods::cacheMetaData(ns, TRUE, ns)
@@ -335,6 +353,55 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       .ry_sync_package_env(state)
     }
   }
+  invisible()
+}
+
+# Where the held-back definitions' bindings are saved, and what must match for a later process
+# to restore them: the definitions' own text (`key`), the version of R, which fixes the methods
+# package, and the versions of the packages the namespace imports, whose classes and generics
+# the definitions may extend.
+.ry_s4_cache <- function(ns, key, path) {
+  if (is.null(path)) {
+    return(NULL)
+  }
+  imports <- setdiff(unique(names(getNamespaceImports(ns))), "base")
+  versions <- vapply(imports, function(package) {
+    as.character(getNamespaceVersion(asNamespace(package)))
+  }, "")
+  list(path = path, key = key, r = R.version.string, imports = versions)
+}
+
+# Binds what an earlier process saved for exactly these definitions, which then need not run,
+# and reports whether it did. A saved file that is missing, stale or unreadable means running
+# them, as it does on the first load.
+.ry_restore_s4 <- function(ns, cache) {
+  if (is.null(cache) || !file.exists(cache$path)) {
+    return(FALSE)
+  }
+  saved <- tryCatch(readRDS(cache$path), error = function(error) NULL)
+  if (!identical(saved[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
+    return(FALSE)
+  }
+  list2env(saved$values, envir = ns)
+  TRUE
+}
+
+# Saves the bindings the held-back definitions made, replacing the file atomically so that a
+# concurrent load reads either the old file or the new one. Failing to save only costs the
+# next process the run, so a failure is reported as a warning and the load goes on.
+.ry_save_s4 <- function(ns, cache, names) {
+  saved <- c(cache[c("key", "r", "imports")], list(values = mget(names, envir = ns)))
+  directory <- dirname(cache$path)
+  temporary <- paste0(cache$path, ".", Sys.getpid())
+  tryCatch({
+    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(saved, temporary)
+    file.rename(temporary, cache$path)
+  }, error = function(error) {
+    unlink(temporary)
+    warning(sprintf("could not save the S4 metadata cache: %s", conditionMessage(error)),
+      call. = FALSE)
+  })
   invisible()
 }
 

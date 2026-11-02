@@ -13,6 +13,7 @@ use {
     crate::{
         Code, Loader, Source,
         r::{RUNTIME_RY, RValue, error_value, plan_value},
+        s4_cache_path,
     },
     heap::object::{Sexp, SexpType},
     interp::{
@@ -349,6 +350,12 @@ unsafe fn do_deferred(call: &Call<'_>) -> R<Sexp> {
                     .map(|(_, code)| i32::try_from(code.line).unwrap_or(i32::MAX))
                     .collect(),
             ),
+        ),
+        (
+            "cache".into(),
+            s4_cache_path(Path::new(&root)).map_or(RValue::Null, |path| {
+                RValue::Character(vec![path.to_string_lossy().into_owned()])
+            }),
         ),
     ]);
     drop(session);
