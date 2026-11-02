@@ -5439,6 +5439,58 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Target shape.** The templates use inline syntax. An untyped run erases each generated file with `ry debug erase` (`syntax::erase_inline_annotations`, the same erasure `ry R` runs) and then drops the `#: @type` lines the erasure leaves, so there is one source of truth for the program and the erasure is exercised on 180,000 lines per run. Where typed code models data better with a record or a tag union than with S4, R6 or a named list, the template keeps both versions in `#@ typed` / `#@ untyped` / `#@ end` blocks; the untyped version stays the plain R the dependency set expects, and `generate.py` counts lines on it so both runs instantiate the same templates.
 - **Impact.** The typed and untyped programs differ only where a record or tag replaces an R object system; everything else is the same program. `return()` had to accept native values (it passes its argument through, like `invisible()`).
 
+## `$` fields resolve through the values that built the receiver
+
+- Before, a `$` field was no navigation target at all: goto, references and rename found nothing.
+- Now `ide::fields` follows the receiver back to its constructions: a constructor call (`list`,
+  `data.frame`, `DataFrame`, `env`...), a record, an R6 class seen from outside or through
+  `self$`/`private$` (following `inherit`), `Class$new(...)`, pass-through calls, the returns of a
+  project function, `if` branches, and `receiver$name <- value` writes. The named element is the
+  declaration. Depth is capped (`MAX_DEPTH`) to bound a request.
+- A receiver that cannot be followed (a parameter) falls back to every same-named declaration in
+  the project. That target is imprecise: references list every same-named access, and rename is
+  refused, because a guess must never edit code.
+- A precise target's references are a closed set: a read that reaches one of its declarations
+  brings in every other declaration it reaches (both `if` branches). Rename is refused while any
+  same-named read in the project is untraced, because that read might be this field; the same
+  holds for a method parameter, whose calls are the field's reads.
+- Named arguments that are a constructor's own parameters (`stringsAsFactors`, `key`,
+  `.name_repair`) are no fields (`CONSTRUCTOR_PARAMETERS`).
+- `Resolver::sources` is memoized per resolution with a cycle placeholder, so a variable
+  reassigned from itself costs one pass per assignment, not a power of them.
+- A receiver a library function returns has its fields declared by that function, so goto goes
+  to the function (stub or installed package) and the hover carries its help page.
+- A tag's payload record is not a field declaration, because patterns, not `$`, read it.
+- A named argument passed to a project function that forwards its `...` into a constructor
+  (`new_rate <- function(...) list(...)`, then `new_rate(pause = 1)`) declares that field for the
+  by-name fallback, unless it names one of the function's parameters.
+- `object$method(arg = 1)` navigates `arg` to the parameter of the function the precise field
+  holds, and references of that parameter include such calls, so rename edits them too.
+- Field spellings come from `field_index`, a tracked map built from per-file `file_fields`
+  memos, so a references request does not scan every file and an edit re-derives one file's list.
+  References on a precise field resolve every same-named access through one `Resolver`, which
+  caches each item's field writes, so a common name costs one scan per item, not per access.
+  `goto_definition` returns several locations because an `if` can build the value two ways.
+
+## Packages without stubs are read from the R library by the host, lazily
+
+- Before, a name that neither the project nor a stub declared had no definition and hovered as
+  `Unknown`.
+- Now the analysis returns `DefinitionTarget::Package` with the candidate packages, in R's lookup
+  order (`importFrom`, `import`, attached packages, then the default search path). The analysis
+  never touches the R library, so it stays pure, deterministic and independent of the machine.
+- The host (`crates/ry/src/installed.rs`) resolves the target through the `rdb` crate, which
+  reads a package's lazy-load database (`R/<pkg>.rdb`/`.rdx`) and Rd help without running R. A
+  package is read once, on first use, and its namespace is written as R source under
+  `<cache>/ry/packages/<pkg>/<version>/<pkg>.R` so the editor can open it; the server ignores
+  that file's open and change notifications so it never becomes project code.
+- Base primitives have no R code. Their argument lists come from the closures in `.ArgsEnv` and
+  `.GenericArgsEnv`, which the database stores as separate environment records (the index's
+  `references` table), and the generated source shows them as `name <- function(args)
+  .Primitive("name")`.
+- The LSP simulator runs with `installed_packages: false`, because the machine's library would
+  make it nondeterministic. No stub is generated from what is read: this is navigation only.
+
 ## One-shot checks record coarse dependencies
 
 - **Previous shape.** `ry check --no-cache` ran on the same database shape as the language server:
@@ -5474,6 +5526,47 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **When requests are answered** follows GNU R, which serves help only from its event loop: at the console prompt (the `console_server` idle loop, woken through `console_server::wake`), in `Sys.sleep`, in `process.events`, and while an HTTP download runs on its transfer thread, so a session can fetch its own help pages through `url()` or `download.file`. A running command never interleaves with a handler. Off Unix the console idle loop does not serve yet.
 - **Wire format.** Request decoding (path percent-decoding that stops at the first malformed escape, the query vector, the raw body with its `content-type`, the `Request-Method:` header block) and the response rules (error 500 forms, status reason "Code N", HEAD, HTTP version echo, `startHTTPD` return codes 0, -1 and -2) were probed against GNU R and are pinned by `crates/oracle/cases/tools__help_server.R`.
 - **Impact.** The handler runs exactly as on GNU R, so every Rd page renders through R's own `tools` code; a sweep of every Rd file in 14 default packages through `Rd2txt`, `Rd2HTML`, `Rd2latex` and `Rd2ex` matches GNU R byte for byte apart from the render timestamps.
+
+## Inferred signatures carry body facts that a call reads
+
+- **Previous shape.** An inferred `FunctionType` was its parameters, its return and the `inferred`
+  bit. A call could only see the joined return and each formal's optionality, so three things R
+  decides from the call were lost: which branch a flag's default selects, which arguments the callee
+  captures with `substitute()` instead of evaluating, and which formals another formal's default
+  forces. The checker reported `pDist(...) - p` (DistributionUtils), typed withr's `wrap(f, pre)`
+  template in the caller's frame, and accepted `g()` for `function(x, y = x) y`.
+- **Shape.** `types::FunctionType` gains inferred-only fields, empty on every declared or stub
+  signature: `flag_return` (a formal with a literal logical default, never reassigned, that the
+  tail `if` tests, plus both branch types), `quoted` (formals read only through `substitute()`, from
+  `check::FormalUses`; a bare forward to another call counts as an evaluation), `default_reads` (an
+  optional formal that a forced formal's default forces), `missing_tested` (formals tested with
+  `missing()`) and `condition_only` (formals read only as a whole `if`/`while` condition, the only
+  ones that take logical text, since `!` and `&&` reject strings). `map_child_types` and `for_each_child` walk the branch types, so they
+  instantiate and generalize with the signature. The call site reads them: `flag_selected_return`
+  returns one branch when the flag is omitted or a literal (a forwarded `...` is assumed not to
+  carry the flag, since the opposite reports DistributionUtils' ordinary `pDist(densFn, q, ...)`), `quoted_arguments` types a captured
+  argument as `Unknown` without inferring it, and `match_arguments` reports a formal as missing when
+  both it and the formal whose default reads it are left out.
+- **Why on the type, not a side query.** The facts belong to the function value, which flows through
+  bindings, lists and callbacks; a per-item side table would only serve direct calls to a named
+  definition and would need its own invalidation. They are derived once from the body that inference
+  already walks, so there is no second source of truth.
+- **Limits.** An annotation has no syntax for these facts, so a written-back annotation is less
+  precise (`test_roundtrip.rs` lists the flag case). Branch selection needs the flag's default to be
+  a literal and the tail to be the only return.
+- **Related leniencies, no model change.** An apply-family element gets the inferred-scalar leniency
+  a direct call gives (`lapply(0:(n - 1L), Eulerian, n = n)`); a string that reads as a logical fits
+  an inferred `logical` parameter listed in `condition_only`; and at a `match.fun` caller, a bare
+  formal the body also reads as a value is accepted unpinned (`check::reads_as_value`), because
+  `match.fun` takes a function or its name and looks a bare name up as a function. A formal used only
+  as a function still infers as one, so `function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`.
+
+## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
+
+- Previous shape: `Reduce`'s stub `fn(f: fn(U, T) -> U, ...)` pinned the accumulator to the start type, so a function whose return is wider (`T | NULL`, a union of list shapes) was reported as "must return `T`", although R simply carries the wider value forward.
+- Target shape: `infer_reduce_fold` in `check.rs` calls a directly named function (or an `if` between two names) on `(accumulator, element)` repeatedly, joining each return into the accumulator until it stops growing (bounded at four rounds). Only the last round's findings are kept, unless a round fails, which is reported as is.
+- A function that mentions type variables created before the call (a closure over the enclosing function's formals, like purrr's `reduce` wrapper) keeps the stub path, because repeated calls would pin those shared variables to every step. Lambda literals also keep the stub path, which already infers their formals from the body.
+- `FunctionType.missing_tested` (inferred only) lists the formals a body tests with `missing()`. `optional_argument_targets` treats such a parameter as one the callee may leave unread even when it has a default, so a missing formal forwarded there (knitr's `kable_format(format)`) stays optional in the caller.
 
 ## `ry test` is `ry load` plus testthat, with affected tests first
 
