@@ -595,6 +595,10 @@ Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logic
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
 invisible : @pure <T> fn([x]: T) -> T
+# The checker types `list(...)` and `c(...)` from their arguments; these declare what a
+# call takes, for signature help, and what the function is as a value.
+list : @pure fn(...: Any) -> list[Any]
+c : @pure fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
 force : <T> fn(x: T) -> T
 # `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent), so their results stay `Any`; `apply` and friends also forward named

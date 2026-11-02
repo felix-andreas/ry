@@ -6439,6 +6439,28 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
 
+## Completion pushes down names whose declared type cannot fit, and never promotes
+
+- **Before.** Completion ranked equally good matches by source and use counts only, so in
+  `if (is_|)` a helper declared `-> character` ranked beside one declared `-> logical`.
+- **Shape.** `expected_type` in `crates/ide/src/ide.rs` reads what the code around the cursor
+  wants: a logical for an `if`/`while` condition and an operand of `!`, `&&` or `||`, and for an
+  argument the parameter type its global or stub callee *declares*. It reads the declared
+  scheme, not the call's instance, because the instance took its parameter types from the
+  argument being typed (`print(i)` made the slot `integer` and pushed `iconv` down), and it
+  unions the parameter across every stub overload, because the argument picks the overload only
+  once it is written (`lapply`'s first overload takes a named list, which pushed `seq_along`
+  down). A candidate is compared by coarse value shape (`type_mismatch`), with R's
+  logical-to-integer-to-double widening allowed, and a known mismatch sorts after the fits within
+  the same match score and source group. Inferred function types are ignored on both sides,
+  since they say how a body ends, not what callers may pass.
+- **Rejected:** promoting candidates that fit. Project helpers with an inferred `logical` result
+  then outranked `is.na` and friends, and two characters on call heads lost 2 points on purrr and
+  1.3 on R6.
+- **Impact.** Neutral on httr2, purrr and R6 and +0.3 points on finbench at two characters,
+  with completion still about 2 ms median on the packages and 8 ms on finbench; the gain is in
+  annotated code, which the `completion_expected_type` fixtures pin.
+
 # Decision record: a cold check holds one parse tree per worker
 
 - **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released

@@ -18,7 +18,7 @@ f <- function(x) {
 #++++
 action Inline variable `twice`
   f <- function(x) {
-    (x * 2) + (x * 2)
+    x * 2 + x * 2
   }
 
 #---- call_with_several_reads_is_refused
@@ -38,6 +38,61 @@ f <- function(a, b) {
 action Inline variable `total`
   f <- function(a, b) {
     (a + b) * 2
+  }
+
+#---- parentheses_kept_on_the_right_of_a_left_associative_operator
+f <- function(x, a, b) {
+  $0rest <- a - b
+  x - rest
+}
+#++++
+action Inline variable `rest`
+  f <- function(x, a, b) {
+    x - (a - b)
+  }
+
+#---- no_parentheses_on_the_left_of_a_left_associative_operator
+f <- function(x, a, b) {
+  $0rest <- a - b
+  rest - x
+}
+#++++
+action Inline variable `rest`
+  f <- function(x, a, b) {
+    a - b - x
+  }
+
+#---- parentheses_kept_between_two_comparisons
+f <- function(x, a, b) {
+  $0rest <- a < b
+  rest == x
+}
+#++++
+action Inline variable `rest`
+  f <- function(x, a, b) {
+    (a < b) == x
+  }
+
+#---- parentheses_kept_before_a_prefix_not_would_swallow_the_operator
+f <- function(a, b, c) {
+  $0v <- a + !b
+  v < c
+}
+#++++
+action Inline variable `v`
+  f <- function(a, b, c) {
+    (a + !b) < c
+  }
+
+#---- parentheses_kept_on_the_left_of_a_right_associative_operator
+f <- function(a, b) {
+  $0power <- a^b
+  power^2
+}
+#++++
+action Inline variable `power`
+  f <- function(a, b) {
+    (a^b)^2
   }
 
 #---- rebound_operand_is_refused
