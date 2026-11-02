@@ -5193,8 +5193,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `Rprofmem` logs a vector only when its data exceeds 128 bytes, sized as GNU R counts it (data
   rounded up to 8 bytes plus a 48-byte header), because GNU R takes smaller vectors from pages of
   small cells. ry has no such pages, so it writes no `new page:` lines. The heap calls a plain
-  `fn(usize)` reporter (`Heap::report_allocations`), which costs one compare per vector while no
-  profile runs. The bytecode compiler hides its own vectors with `Heap::swap_report_threshold`.
+  `fn(usize) -> bool` reporter (`Heap::report_allocations`), which costs one compare per vector
+  while no profile runs. The reporter returns false to end the profile (a failed write), since
+  it runs while the heap is mutably borrowed and must not reach the heap itself. The bytecode compiler hides its own vectors with `Heap::swap_report_threshold`.
 - `Rprof` raises intervals below 10 ms to 10 ms with GNU R's warning, since GNU R's timer cannot
   sample faster.
 - `system(intern = FALSE)` and `system2` return invisibly, as in GNU R.
@@ -5208,6 +5209,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `RtmpXXXXXX` under the first writable `R_TMPDIR`, `TMPDIR`, `TMP` or `TEMP`, as in GNU R.
   libR passes it to native code. `session::finish` removes it, but only in the process that
   created it, so a forked `mcparallel` child that ends never deletes its parent's directory.
+- **Order at exit.** `session::finish` runs the exit finalizers (the `run_exit_finalizers`
+  hook, so `quit()` runs them too) and only then removes the directory, because a finalizer
+  may still write there. The embedding exits (`R_CleanUp`, `Rf_endEmbeddedR`) remove it
+  through `R_CleanTempDir` after their finalizers.
+- **`tempdir(check = TRUE)` recreates the same path**, not a fresh name as GNU R does,
+  because native code already copied it as `R_TempDir`. It is created private, and an
+  existing directory at that path must belong to the current user.
 
 ## Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting
 

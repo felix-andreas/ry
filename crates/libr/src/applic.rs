@@ -1356,8 +1356,12 @@ pub unsafe extern "C" fn optif9(
         // C callers may pass the same array for `x` and `xpls`, so the start point is copied
         // before `xpls` becomes a `&mut` slice.
         let start = vector(x, size).to_vec();
+        let cells = rows
+            .checked_mul(size as usize)
+            .and_then(|cells| c_int::try_from(cells).ok())
+            .ok_or_else(|| error("optif9: the Hessian 'a' is too large"))?;
         let mut matrix = nlm::Matrix {
-            values: vector(a, (rows * size as usize) as c_int),
+            values: vector(a, cells),
             rows,
         };
         let settings = nlm::Settings {
@@ -1427,6 +1431,10 @@ pub unsafe extern "C" fn fdhess(
                 "fdhess: the leading dimension 'nfd' is smaller than 'n'",
             ));
         }
+        let cells = rows
+            .checked_mul(size as usize)
+            .and_then(|cells| c_int::try_from(cells).ok())
+            .ok_or_else(|| error("fdhess: the Hessian 'h' is too large"))?;
         finite_difference_hessian(
             &mut |point| nlm::Problem::value(&mut problem, point),
             vector(x, size),
@@ -1434,7 +1442,7 @@ pub unsafe extern "C" fn fdhess(
             vector(typx, size),
             ndigit,
             &mut nlm::Matrix {
-                values: vector(h, (rows * size as usize) as c_int),
+                values: vector(h, cells),
                 rows,
             },
             vector(step, size),
@@ -1564,6 +1572,11 @@ pub unsafe extern "C" fn lbfgsb(
         } else {
             std::slice::from_raw_parts(nbd, size as usize)
         };
+        let expected = size as usize;
+        let point = vector(x, size);
+        if [point.len(), lower.len(), upper.len(), kinds.len()] != [expected; 4] {
+            return Err(error("lbfgsb: 'x', 'l', 'u' and 'nbd' must hold 'n' values"));
+        }
         let mut bounds = Vec::with_capacity(kinds.len());
         for &kind in kinds {
             bounds.push(match kind {
@@ -1602,7 +1615,7 @@ pub unsafe extern "C" fn lbfgsb(
         let mut adapter = CallbackObjective { objective };
         let outcome = minimize(
             &mut adapter,
-            vector(x, size),
+            point,
             lower,
             upper,
             &bounds,

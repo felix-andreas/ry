@@ -160,8 +160,12 @@ unsafe fn do_sockconnect(call: &NativeCall<'_>) -> R<Sexp> {
     let Ok(port) = u16::try_from(port) else {
         return scalar_integer(0);
     };
-    let Ok(addresses) = (host.as_str(), port).to_socket_addrs() else {
-        return scalar_integer(0);
+    let addresses = match (host.as_str(), port).to_socket_addrs() {
+        Ok(addresses) => addresses,
+        Err(reason) => {
+            report_socket_error(&reason);
+            return scalar_integer(0);
+        }
     };
     let mut failure = None;
     for address in addresses {
@@ -242,7 +246,9 @@ unsafe fn do_sockread(call: &NativeCall<'_>) -> R<Sexp> {
         }
     };
     buffer.truncate(count);
-    values::scalar_string(&String::from_utf8_lossy(&buffer))
+    // GNU R keeps the bytes as they arrived, so invalid UTF-8 travels as ry's byte stand-ins
+    // instead of being replaced.
+    values::scalar_string(&values::escape_invalid_bytes(&buffer))
 }
 
 /// `.Call(C_sockwrite, socket, string)`: the number of bytes written.
@@ -1960,9 +1966,10 @@ pub unsafe fn stop_memory_profiler() -> R<()> {
         .map_err(|failure| error(format!("Rprofmem: cannot write the output file: {failure}")))
 }
 
-/// The heap calls this inside an allocation, so it must not allocate R objects: it writes the
-/// size and the names of the calls on the stack, innermost first, as GNU R does.
-fn record_allocation(size: usize) {
+/// The heap calls this inside an allocation, so it must not touch the heap: it writes the size
+/// and the names of the calls on the stack, innermost first, as GNU R does. It returns false
+/// to end the profile.
+fn record_allocation(size: usize) -> bool {
     let mut line = format!("{size} :");
     for frame in crate::interp().frames.iter().rev() {
         line.push_str(&format!("\"{}\" ", unsafe { profile_name(frame.call.car()) }));
@@ -1975,8 +1982,9 @@ fn record_allocation(size: usize) {
     // The allocation itself must still succeed, so a write failure ends the profile instead.
     if written.is_err() {
         MEMORY_PROFILE.with_borrow_mut(Option::take);
-        crate::heap().report_allocations(None, 0);
+        return false;
     }
+    true
 }
 
 // Hash tables.
@@ -2257,9 +2265,6 @@ unsafe fn do_is_hashtab(call: &NativeCall<'_>) -> R<Sexp> {
 
 // unzip.
 
-/// `unzip(zipfile, files, exdir, list, overwrite, junkpaths, setTimes)`: lists or extracts the
-/// members of a zip archive (stored or deflated). Listing returns the names, sizes and
-/// modification times; extracting returns 0 with the extracted paths as `extracted`.
 /// `download.file(method = "internal")`: `.External(C_download, url, destfile, quiet, mode,
 /// headers, cacheOK)`. Since R 4.2 the internal method only copies `file://` URLs; http and ftp
 /// are defunct for it and every other scheme is refused, with the messages GNU R gives.
@@ -2315,6 +2320,9 @@ unsafe fn do_download(call: &NativeCall<'_>) -> R<Sexp> {
     scalar_integer(0)
 }
 
+/// `unzip(zipfile, files, exdir, list, overwrite, junkpaths, setTimes)`: lists or extracts the
+/// members of a zip archive (stored or deflated). Listing returns the names, sizes and
+/// modification times; extracting returns 0 with the extracted paths as `extracted`.
 unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "zipfile")?;
     let path = crate::connections::expand_path(&path);

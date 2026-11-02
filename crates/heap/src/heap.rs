@@ -97,7 +97,7 @@ pub struct Heap {
     /// `Rprofmem()`'s reporter and its threshold in bytes. A vector whose reported size exceeds
     /// the threshold is passed to the reporter; `usize::MAX` turns reporting off, so the check
     /// on every allocation is one compare.
-    allocation_reporter: Option<fn(usize)>,
+    allocation_reporter: Option<fn(usize) -> bool>,
     report_threshold: usize,
 }
 
@@ -469,7 +469,7 @@ impl Heap {
 
     /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
     /// bytes to `reporter`, or stops reporting when `reporter` is `None`.
-    pub fn report_allocations(&mut self, reporter: Option<fn(usize)>, threshold: usize) {
+    pub fn report_allocations(&mut self, reporter: Option<fn(usize) -> bool>, threshold: usize) {
         self.report_threshold = if reporter.is_some() {
             threshold
         } else {
@@ -488,9 +488,11 @@ impl Heap {
     }
 
     /// GNU R allocates vectors of up to 128 data bytes from pages of small cells and reports
-    /// only the larger ones, each as its data rounded up to 8 bytes plus a 48-byte header.
+    /// only the larger ones, each as its data rounded up to 8 bytes plus a 48-byte header. The
+    /// reporter returns false to stop reporting, because it runs while the heap is borrowed and
+    /// so cannot turn reporting off through the heap itself.
     #[inline]
-    fn report_allocation(&self, kind: SexpType, length: usize) {
+    fn report_allocation(&mut self, kind: SexpType, length: usize) {
         if self.report_threshold == usize::MAX {
             return;
         }
@@ -505,8 +507,9 @@ impl Heap {
         if data > 128
             && size > self.report_threshold
             && let Some(reporter) = self.allocation_reporter
+            && !reporter(size)
         {
-            reporter(size);
+            self.report_allocations(None, 0);
         }
     }
 

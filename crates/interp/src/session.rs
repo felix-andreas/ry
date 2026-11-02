@@ -453,7 +453,8 @@ pub unsafe fn run_console(
 }
 
 /// Ends a session as GNU R does before it exits: closes every graphics device, which writes
-/// the files they were drawing, stops the profilers and removes the temporary directory.
+/// the files they were drawing, stops the profilers, runs the exit finalizers and removes the
+/// temporary directory. The directory goes last because a finalizer may still write there.
 pub unsafe fn finish() {
     if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
         report_toplevel(unwind);
@@ -464,6 +465,7 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::utils::stop_memory_profiler() {
         report_toplevel(unwind);
     }
+    (interp().hooks.run_exit_finalizers)();
     crate::system::remove_session_temp_dir();
 }
 

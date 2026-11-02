@@ -162,6 +162,11 @@ pub unsafe extern "C" fn ry_run_exit_finalizers() {
     crate::extptr::R_RunExitFinalizers();
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_remove_session_temp_dir() {
+    interp::system::remove_session_temp_dir();
+}
+
 /// `Rf_initEmbeddedR(argc, argv)`: starts the runtime. The arguments are ry's to interpret
 /// once the interpreter reads them; the runtime itself needs none.
 #[unsafe(no_mangle)]
@@ -179,6 +184,7 @@ pub extern "C" fn Rf_initialize_R(_argc: c_int, _argv: *mut *mut c_char) -> c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_endEmbeddedR(_fatal: c_int) {
     crate::extptr::R_RunExitFinalizers();
+    interp::system::remove_session_temp_dir();
 }
 
 /// The arguments an embedding front end hands `R_set_command_line_arguments`, which

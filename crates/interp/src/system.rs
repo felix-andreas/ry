@@ -413,10 +413,6 @@ fn find_r_home() -> Result<String, String> {
     ))
 }
 
-fn temp_dir() -> String {
-    session_temp_dir().map_or_else(|_| "/tmp".to_owned(), str::to_owned)
-}
-
 /// The session's temporary directory, which `tempdir()` returns and native code reads as
 /// `R_TempDir`. As in GNU R it is a fresh `RtmpXXXXXX` under the first of `R_TMPDIR`, `TMPDIR`,
 /// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
@@ -489,14 +485,22 @@ fn writable_directory(path: &str) -> bool {
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
-/// `tempdir(check)`: with `check`, a session directory something deleted is created again.
+/// `tempdir(check)`: with `check`, a session directory something deleted is created again at
+/// the same path, because native code already holds that path as `R_TempDir`. GNU R picks a
+/// fresh name instead; keeping the name is safe only because the directory is created
+/// private and a directory that already exists must belong to this user.
 unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = session_temp_dir().map_err(|message| call.error(message))?;
-    if values::as_logical_scalar(call.arg(0)) == 1
-        && !std::path::Path::new(path).is_dir()
-        && std::fs::create_dir_all(path).is_err()
-    {
-        return Err(call.error("cannot create 'R_TempDir'"));
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        let usable = match std::fs::symlink_metadata(path) {
+            // SAFETY: geteuid has no preconditions.
+            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
+        };
+        if !usable {
+            return Err(call.error("cannot create 'R_TempDir'"));
+        }
     }
     scalar_string(path)
 }
@@ -2562,9 +2566,12 @@ unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
         let pattern = values::string_at(patterns, index % length(patterns).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let directory = values::string_at(directories, index % length(directories).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(temp_dir);
+        let directory = match values::string_at(directories, index % length(directories).max(1)) {
+            Some(text) => text.into_owned(),
+            None => session_temp_dir()
+                .map_err(|message| call.error(message))?
+                .to_owned(),
+        };
         let extension = values::string_at(extensions, index % length(extensions).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
