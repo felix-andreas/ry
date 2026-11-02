@@ -23,7 +23,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, stubs},
+        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
@@ -3266,6 +3266,11 @@ impl<'db> Checker<'db, '_> {
             && let Some(ty) = self.quiet_global_read(id, name)
         {
             return ty;
+        }
+        if let Some(name) = naming.non_locals.get(&id)
+            && let Some(scheme) = operator_value(self.db, name)
+        {
+            return self.instantiate(&scheme);
         }
         // A package's export list or the project's imports name the binding, but no stub
         // types it. An unresolved name is not an origin: naming reports it.
@@ -8132,14 +8137,17 @@ impl<'db> Checker<'db, '_> {
                 }
                 let ty = match candidates.last() {
                     Some(scheme) => self.instantiate(scheme),
-                    // An export list names the function but no stub types it.
-                    None => {
-                        self.record_strict_origin(
-                            callee,
-                            StrictOriginKind::UndeterminedReference(name.to_string()),
-                        );
-                        unknown(self.db)
-                    }
+                    None => match operator_value(self.db, &name) {
+                        Some(scheme) => self.instantiate(&scheme),
+                        // An export list names the function but no stub types it.
+                        None => {
+                            self.record_strict_origin(
+                                callee,
+                                StrictOriginKind::UndeterminedReference(name.to_string()),
+                            );
+                            unknown(self.db)
+                        }
+                    },
                 };
                 Some(self.record(callee, ty))
             }
@@ -16196,6 +16204,20 @@ fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<Inferenc
         into.insert(*var);
     }
     for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
+}
+
+/// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result
+/// depends on R's coercion and dispatch rules for the operand types, which one signature cannot
+/// state, so it takes and returns `Any`.
+fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",
+        "&&", "||",
+    ];
+    if !OPERATORS.contains(&name) {
+        return None;
+    }
+    lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
 }
 
 #[cfg(test)]

@@ -342,3 +342,18 @@ last_strict <- function(x) {
 last_of: fn(x: double[]) -> double | NULL
 last_strict: fn(x: double[]) -> double
 175..180 error[type-mismatch] expected `double`, found `double | NULL`
+
+#==== strict_operator_values
+#---- an_operator_read_as_a_value_takes_and_returns_any
+#~~~~ R/main.R
+#: fn(xs: double[]) -> double
+total <- function(xs) Reduce(`+`, xs)
+#: fn(m: matrix, s: double[]) -> matrix
+scaled <- function(m, s) sweep(m, 2, s, `*`)
+#: fn(a: double, b: double) -> double
+added <- function(a, b) `+`(a, b)
+#++++
+== R/main.R
+total: fn(xs: double[]) -> double
+scaled: fn(m: matrix, s: double[]) -> matrix
+added: fn(a: double, b: double) -> double
