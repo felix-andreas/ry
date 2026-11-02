@@ -366,8 +366,10 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .ok()
         .and_then(entry)
         .ok_or_else(invalid)?;
+    // The `conn_id` object itself identifies the connection, not its address: a package may
+    // store its own pointer there, as curl does with its multi handle.
     let id = values::get_attr(object, values::install("conn_id")?);
-    if id.kind() == SexpType::ExternalPtr && id.external_address() != entry.con.cast() {
+    if id.kind() == SexpType::ExternalPtr && id.as_ptr().cast() != (*entry.con).ex_ptr {
         return Err(invalid());
     }
     Ok((slot as usize, entry.con))
@@ -1165,6 +1167,7 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
     }
     let con = resolve_con(call.arg(1))?.1;
     let separator = values::require_string(call.arg(2), "sep")?;
+    let use_bytes = values::as_logical_scalar(call.arg(3)) == 1;
     with_open(con, "wt", || {
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
@@ -1174,10 +1177,11 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
             line.clear();
             let charsxp = text.element(index);
             // Only Latin-1 text needs re-encoding for the UTF-8 session; every other string,
-            // bytes-declared or invalid UTF-8 included, goes out as the bytes it holds.
+            // bytes-declared or invalid UTF-8 included, goes out as the bytes it holds, and
+            // `useBytes = TRUE` writes Latin-1 text as its bytes too.
             if charsxp == values::na_string() {
                 line.extend_from_slice(b"NA");
-            } else if charsxp.has_gp(heap::object::gp::LATIN1) {
+            } else if !use_bytes && charsxp.has_gp(heap::object::gp::LATIN1) {
                 line.extend_from_slice(values::char_str(charsxp).as_bytes());
             } else {
                 line.extend_from_slice(charsxp.bytes());
@@ -2094,14 +2098,12 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
 /// Runs when a connection's `conn_id` becomes unreachable while the connection is open.
 unsafe extern "C" fn connection_finalizer(id: Sexp) {
     from_native(|| {
-        let address = id.external_address();
-        if address.is_null() {
-            return Ok(());
-        }
-        let found = (3..NCONNECTIONS)
-            .find(|&slot| entry(slot).is_some_and(|entry| entry.con.cast() == address));
-        if let Some(slot) = found {
-            let con = address as Rconnection;
+        let found = (3..NCONNECTIONS).find_map(|slot| {
+            entry(slot)
+                .filter(|entry| (*entry.con).ex_ptr == id.as_ptr().cast())
+                .map(|entry| (slot, entry.con))
+        });
+        if let Some((slot, con)) = found {
             crate::conditions::warning(format!(
                 "closing unused connection {slot} ({})",
                 description_of(con)

@@ -24,7 +24,11 @@ pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub fn poll_interrupt() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
         INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
-        return Err(interp().parked_unwind.take().unwrap_or(Unwind::Interrupt));
+        return Err(match interp().parked_unwind.take() {
+            Some(unwind) => unwind,
+            // SAFETY: polls happen at call boundaries and loop back edges, where R code may run.
+            None => unsafe { crate::conditions::signal_interrupt() },
+        });
     }
     Ok(())
 }

@@ -2790,10 +2790,17 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     if symbol == symbols.class {
         return crate::dispatch::set_class_attribute(object, value);
     }
-    // `dput()` of a data frame writes its compact row names as the double `c(NA, n)`; GNU R
-    // stores them back as integers so the frame keeps its compact form.
-    let value = if symbol == symbols.row_names
-        && value.kind() == SexpType::Real
+    if symbol == symbols.row_names {
+        return set_row_names(object, value);
+    }
+    values::set_attr(object, symbol, value)
+}
+
+/// GNU R's `row_names_gets`: row names `1:n`, and the double `c(NA, n)` that `dput()` writes
+/// and C code builds, are stored in the compact integer form `c(NA, -n)` (or `c(NA, n)`).
+pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
+    let symbol = symbols().row_names;
+    let value = if value.kind() == SexpType::Real
         && length(value) == 2
         && values::reals(value)[0].is_nan()
     {
@@ -2801,8 +2808,7 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     } else {
         value
     };
-    if symbol == symbols.row_names && value.kind() == SexpType::Integer {
-        // Row names 1:n are stored compactly, as GNU R does.
+    if value.kind() == SexpType::Integer {
         let data = values::ints(value);
         let compact = !data.is_empty()
             && data

@@ -10,7 +10,7 @@ use {
         vectors::{coerce_vector, generic_length, integers, sexp_elt, xlength},
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
-    interp::subset::set_dimnames,
+    interp::subset::{set_dimnames, set_row_names},
     std::ffi::{c_char, c_int},
 };
 
@@ -339,26 +339,10 @@ pub unsafe fn class_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
     Ok(value)
 }
 
-/// `row.names` that are `1:n` are stored in GNU R's compact form, `c(NA, -n)`.
 unsafe fn row_names_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
-    if value.kind() == SexpType::Integer {
-        let values = integers(value)?;
-        let sequential = values
-            .iter()
-            .enumerate()
-            .all(|(index, &value)| value == index as i32 + 1);
-        if sequential && !values.is_empty() {
-            let compact = runtime.heap.alloc_vector(SexpType::Integer, 2)?;
-            runtime.heap.root(compact);
-            compact
-                .slice_mut::<i32>()
-                .copy_from_slice(&[NA_INTEGER, -(values.len() as i32)]);
-            install_attribute(object, R_RowNamesSymbol.get(), compact)?;
-            return Ok(value);
-        }
-    }
-    install_attribute(object, R_RowNamesSymbol.get(), value)?;
+    crate::vectors::refuse_native(object)?;
+    runtime().heap.root(value);
+    set_row_names(object, value)?;
     Ok(value)
 }
 

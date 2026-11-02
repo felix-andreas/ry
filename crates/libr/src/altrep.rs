@@ -2,7 +2,7 @@
 //!
 //! An instance has the triple shape (data1, data2, class) with a vector type code and the
 //! ALTREP header flag, so every accessor that reaches vector storage checks the flag and
-//! dispatches here. A class is a raw vector whose bytes hold its method table and whose
+//! dispatches here. A class is a raw vector whose bytes hold its method tables and whose
 //! attribute is the pairlist (class symbol, package symbol, type code), the layout packages
 //! read through `ATTRIB(ALTREP_CLASS(x))`. Classes are preserved for the life of the session
 //! and registered by (class symbol, package symbol), which is how unserialization finds them.
@@ -164,6 +164,192 @@ impl Methods {
     }
 }
 
+/// The bytes of a class object. GNU R's method table comes first, in GNU R's layout, because
+/// packages read it directly: vctrs calls `Extract_subset` through
+/// `STDVEC_DATAPTR(ALTREP_CLASS(x))`. Every slot there is a trampoline into ry's dispatch, so
+/// the table depends only on the class's type and never goes stale when a method is set.
+#[repr(C)]
+struct ClassRecord {
+    gnu: GnuTable,
+    methods: Methods,
+}
+
+/// `altinteger_methods_t`, the longest of GNU R's tables; shorter ones use a prefix of it.
+type GnuTable = [*const c_void; 18];
+
+/// GNU R's table for a class of `kind`: the `altrep_methods_t` and `altvec_methods_t` slots,
+/// then the slots of the type's own table in GNU R's order.
+fn gnu_table(kind: SexpType) -> GnuTable {
+    let mut table: GnuTable = [std::ptr::null(); 18];
+    let common: [*const c_void; 11] = [
+        gnu_unserialize_ex as *const c_void,
+        gnu_unserialize as *const c_void,
+        gnu_serialized_state as *const c_void,
+        gnu_duplicate_ex as *const c_void,
+        gnu_duplicate as *const c_void,
+        gnu_coerce as *const c_void,
+        gnu_inspect as *const c_void,
+        gnu_length as *const c_void,
+        gnu_dataptr as *const c_void,
+        gnu_dataptr_or_null as *const c_void,
+        gnu_extract_subset as *const c_void,
+    ];
+    table[..11].copy_from_slice(&common);
+    let own: &[*const c_void] = match kind {
+        SexpType::Integer => &[
+            gnu_int_elt as *const c_void,
+            gnu_get_region::<i32> as *const c_void,
+            gnu_is_sorted as *const c_void,
+            gnu_no_na as *const c_void,
+            gnu_sum as *const c_void,
+            gnu_min as *const c_void,
+            gnu_max as *const c_void,
+        ],
+        SexpType::Real => &[
+            gnu_real_elt as *const c_void,
+            gnu_get_region::<f64> as *const c_void,
+            gnu_is_sorted as *const c_void,
+            gnu_no_na as *const c_void,
+            gnu_sum as *const c_void,
+            gnu_min as *const c_void,
+            gnu_max as *const c_void,
+        ],
+        SexpType::Logical => &[
+            gnu_int_elt as *const c_void,
+            gnu_get_region::<i32> as *const c_void,
+            gnu_is_sorted as *const c_void,
+            gnu_no_na as *const c_void,
+            gnu_sum as *const c_void,
+        ],
+        SexpType::Raw => &[
+            gnu_raw_elt as *const c_void,
+            gnu_get_region::<u8> as *const c_void,
+        ],
+        SexpType::Complex => &[
+            gnu_complex_elt as *const c_void,
+            gnu_get_region::<Rcomplex> as *const c_void,
+        ],
+        SexpType::String => &[
+            gnu_sexp_elt as *const c_void,
+            gnu_set_sexp_elt as *const c_void,
+            gnu_is_sorted as *const c_void,
+            gnu_no_na as *const c_void,
+        ],
+        _ => &[gnu_sexp_elt as *const c_void, gnu_set_sexp_elt as *const c_void],
+    };
+    table[11..11 + own.len()].copy_from_slice(own);
+    table
+}
+
+unsafe extern "C" fn gnu_unserialize_ex(
+    class: Sexp,
+    state: Sexp,
+    attributes: Sexp,
+    object_bit: c_int,
+    levels: c_int,
+) -> Option<Sexp> {
+    enter(|| unserialize(class.attrib(), state, attributes, object_bit, levels))
+}
+
+unsafe extern "C" fn gnu_unserialize(class: Sexp, state: Sexp) -> Option<Sexp> {
+    enter(|| unserialize(class.attrib(), state, runtime().nil(), 0, 0))
+}
+
+unsafe extern "C" fn gnu_serialized_state(object: Sexp) -> Option<Sexp> {
+    enter(|| serialized_state(object))
+}
+
+unsafe extern "C" fn gnu_duplicate_ex(object: Sexp, deep: Rboolean) -> Option<Sexp> {
+    enter(|| duplicate(object, deep != 0))
+}
+
+unsafe extern "C" fn gnu_duplicate(object: Sexp, deep: Rboolean) -> Option<Sexp> {
+    enter(|| with_flag(object, methods(object).duplicate, deep != 0))
+}
+
+unsafe extern "C" fn gnu_coerce(object: Sexp, kind: c_int) -> Option<Sexp> {
+    enter(|| coerce(object, sexp_type(kind as u32)?))
+}
+
+unsafe extern "C" fn gnu_inspect(
+    object: Sexp,
+    pre: c_int,
+    deep: c_int,
+    pvec: c_int,
+    subtree: InspectSubtree,
+) -> Rboolean {
+    enter(|| Ok(inspect(object, pre, deep, pvec, subtree)? as Rboolean))
+}
+
+unsafe extern "C" fn gnu_length(object: Sexp) -> R_xlen_t {
+    enter(|| length(object))
+}
+
+unsafe extern "C" fn gnu_dataptr(object: Sexp, writable: Rboolean) -> *mut c_void {
+    enter(|| Ok(dataptr(object, writable != 0)?.cast::<c_void>()))
+}
+
+unsafe extern "C" fn gnu_dataptr_or_null(object: Sexp) -> *const c_void {
+    enter(|| dataptr_or_null(object))
+}
+
+unsafe extern "C" fn gnu_extract_subset(object: Sexp, indices: Sexp, call: Sexp) -> Option<Sexp> {
+    enter(|| extract_subset(object, indices, call))
+}
+
+unsafe extern "C" fn gnu_int_elt(object: Sexp, index: R_xlen_t) -> c_int {
+    enter(|| int_elt(object, index))
+}
+
+unsafe extern "C" fn gnu_real_elt(object: Sexp, index: R_xlen_t) -> f64 {
+    enter(|| real_elt(object, index))
+}
+
+unsafe extern "C" fn gnu_raw_elt(object: Sexp, index: R_xlen_t) -> u8 {
+    enter(|| raw_elt(object, index))
+}
+
+unsafe extern "C" fn gnu_complex_elt(object: Sexp, index: R_xlen_t) -> Rcomplex {
+    enter(|| complex_elt(object, index))
+}
+
+unsafe extern "C" fn gnu_sexp_elt(object: Sexp, index: R_xlen_t) -> Sexp {
+    enter(|| sexp_elt(object, index))
+}
+
+unsafe extern "C" fn gnu_set_sexp_elt(object: Sexp, index: R_xlen_t, value: Sexp) {
+    enter(|| set_sexp_elt(object, index, value))
+}
+
+unsafe extern "C" fn gnu_get_region<T: Element + Handout>(
+    object: Sexp,
+    start: R_xlen_t,
+    count: R_xlen_t,
+    buffer: *mut T,
+) -> R_xlen_t {
+    enter(|| get_region(object, start, count, buffer))
+}
+
+unsafe extern "C" fn gnu_is_sorted(object: Sexp) -> c_int {
+    enter(|| is_sorted(object))
+}
+
+unsafe extern "C" fn gnu_no_na(object: Sexp) -> c_int {
+    enter(|| no_na(object))
+}
+
+unsafe extern "C" fn gnu_sum(object: Sexp, remove_na: Rboolean) -> Option<Sexp> {
+    enter(|| sum(object, remove_na != 0))
+}
+
+unsafe extern "C" fn gnu_min(object: Sexp, remove_na: Rboolean) -> Option<Sexp> {
+    enter(|| min(object, remove_na != 0))
+}
+
+unsafe extern "C" fn gnu_max(object: Sexp, remove_na: Rboolean) -> Option<Sexp> {
+    enter(|| max(object, remove_na != 0))
+}
+
 unsafe extern "C" {
     fn ry_altrep_length(method: NativeLength, x: Sexp, result: *mut R_xlen_t) -> c_int;
     fn ry_altrep_dataptr(
@@ -266,11 +452,11 @@ unsafe fn native<T>(initial: T, call: impl FnOnce(*mut T) -> c_int) -> ApiResult
 }
 
 unsafe fn methods<'a>(object: Sexp) -> &'a Methods {
-    &*(object.tag().data() as *const Methods)
+    &(*(object.tag().data() as *const ClassRecord)).methods
 }
 
 unsafe fn class_methods<'a>(class: AltrepClass) -> &'a mut Methods {
-    &mut *(class.pointer.data() as *mut Methods)
+    &mut (*(class.pointer.data() as *mut ClassRecord)).methods
 }
 
 // Dispatch. Every function takes an ALTREP instance unless it says otherwise.
@@ -781,9 +967,15 @@ unsafe fn register(name: &[u8], package: &[u8], kind: SexpType) -> ApiResult<Alt
             return Ok(class);
         }
     }
-    let pointer = heap.alloc_vector(SexpType::Raw, size_of::<Methods>() as isize)?;
+    let pointer = heap.alloc_vector(SexpType::Raw, size_of::<ClassRecord>() as isize)?;
     heap.root(pointer);
-    std::ptr::write(pointer.data() as *mut Methods, Methods::new(kind));
+    std::ptr::write(
+        pointer.data() as *mut ClassRecord,
+        ClassRecord {
+            gnu: gnu_table(kind),
+            methods: Methods::new(kind),
+        },
+    );
     let code = heap.alloc_vector(SexpType::Integer, 1)?;
     *(code.data() as *mut i32) = kind.code() as i32;
     let nil = heap.nil();

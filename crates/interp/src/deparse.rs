@@ -327,7 +327,7 @@ impl Deparser {
             }
             SexpType::Environment => self.print("<environment>"),
             SexpType::Promise => self.print("<promise>"),
-            SexpType::ExternalPtr => self.print("<pointer: 0x0>"),
+            SexpType::ExternalPtr => self.print(&crate::print::pointer_text(object)),
             SexpType::WeakRef => self.print("<weak reference>"),
             SexpType::Bytecode => self.print("<bytecode>"),
             SexpType::Char => self.print(&format::encode_element(object, Some('"'))),

@@ -813,3 +813,41 @@ pub unsafe fn condition_message(condition: Sexp) -> String {
         String::new()
     }
 }
+
+/// Signals a user interrupt as GNU R's `onintr` does: an `interrupt` condition with no message
+/// or call goes to the calling handlers and to an exiting one, and only when none takes it does
+/// the interrupt unwind to top level.
+pub unsafe fn signal_interrupt() -> Unwind {
+    let signal = || -> R<Unwind> {
+        let condition = values::alloc(SexpType::List, 0)?;
+        crate::heap().root(condition);
+        values::set_attr(
+            condition,
+            symbols().class,
+            values::string_vector(&["interrupt", "condition"])?,
+        )?;
+        let saved = interp().handlers.clone();
+        let classes: [&[u8]; 2] = [b"interrupt", b"condition"];
+        while let Some(entry) = find_handler(&interp().handlers, &classes) {
+            interp().handlers = entry.next.clone();
+            if entry.calling {
+                let handler_call = values::call(entry.handler, &[condition])?;
+                if let Err(unwind) = eval::eval(handler_call, global_env()) {
+                    interp().handlers = saved;
+                    return Err(unwind);
+                }
+            } else {
+                interp().handlers = saved;
+                return Ok(jump(Jump::Return {
+                    env: entry.target,
+                    value: exiting_result(condition, nil(), entry.handler)?,
+                }));
+            }
+        }
+        interp().handlers = saved;
+        Ok(Unwind::Interrupt)
+    };
+    match signal() {
+        Ok(unwind) | Err(unwind) => unwind,
+    }
+}

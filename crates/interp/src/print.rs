@@ -172,7 +172,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out(&format!("{line}\n"));
             }
         }
-        SexpType::ExternalPtr => out("<pointer: 0x0>\n"),
+        SexpType::ExternalPtr => out(&format!("{}\n", pointer_text(value))),
         SexpType::WeakRef => out("<weak reference>\n"),
         SexpType::Bytecode => out("<bytecode>\n"),
         SexpType::Object => {
@@ -931,4 +931,15 @@ unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
         _ => print_value(function, &options, &mut String::new())?,
     }
     Ok(function)
+}
+
+/// An external pointer as GNU R prints it, through C's `%p`: glibc writes a null pointer as
+/// `(nil)`.
+pub unsafe fn pointer_text(object: Sexp) -> String {
+    let address = object.external_address();
+    if address.is_null() {
+        "<pointer: (nil)>".to_owned()
+    } else {
+        format!("<pointer: {address:p}>")
+    }
 }
