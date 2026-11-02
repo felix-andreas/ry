@@ -6493,3 +6493,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Incremental.** The server path keeps every memo and firewall; only the tracked names changed
   (`parse_memo`, `item_syntax_memo`, `item_annotation_syntax_memo`), and `test_incremental.rs`
   pins the first two under those names.
+
+## Optimized tests build with the bench profile, not fat LTO
+
+- **Previous shape.** Optimized tests ran as `cargo test --release`, which builds with the release profile and so with fat LTO (`lto = true`, one codegen unit). Its link of libr's `test_linpack` peaked at 11.1 GiB of RSS and took about 30 minutes; on a 16 GB machine with anything else running it was OOM-killed.
+- **Why not change release.** Shipped binaries and every benchmark number in the docs come from `cargo build --release`, and fat LTO is part of what those numbers measure. Cargo always builds `cargo test --release` with the release profile, so tests cannot get a different setting under that command.
+- **Target shape.** `[profile.bench]` inherits release with `lto = false` (thin local LTO) and 16 codegen units. `cargo test-release` (`.cargo/config.toml` alias for `cargo test --profile bench`), `just perf`, `just simulate` and `cargo bench` use it. Plain `cargo test --release` still works on a machine with the memory.
+- **Dev debug info.** `[profile.dev] debug = "line-tables-only"`: libr's `test_linpack` went from 0.28 to 0.11 GB and the debug `libR.so` from 1.03 to 0.85 GB. An interp test binary barely shrinks (0.88 to 0.78 GB), because its `.text` (185 MB) and relocations dominate, not debug info.

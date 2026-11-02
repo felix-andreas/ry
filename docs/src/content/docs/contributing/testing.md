@@ -402,7 +402,7 @@ and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing
 data.table behavior was read from data.table under GNU R. Its differential fuzz generates random
 tables and queries and checks the native kernels against the Polars plans
 (`query::execute_with_plans_only`), which serve as the reference. `FUZZ_ITERS` raises the
-iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
+iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test-release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
 `just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
@@ -695,7 +695,7 @@ ignored by default, because it needs the fetched corpus and a release build, and
 the corpus:
 
 ```sh
-cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+cargo test-release -p semantics --test test_perf -- --ignored --nocapture
 ```
 
 `just perf` runs the same command. Its budgets are measured numbers plus headroom, and cover the
@@ -704,13 +704,15 @@ memoization), resident bytes per line, and the p50 and p95 latency from a keystr
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
-`cargo test --release`, `cargo bench` and `just perf` build with the `bench` profile, which keeps
-`opt-level = 3` but uses thin local LTO and 16 codegen units, because a fat-LTO link of a test
-binary that pulls in libr or polars needs more memory than a 16 GB machine has. Shipped binaries and
-every benchmark number in the docs come from `cargo build --release`, which keeps fat LTO, so a
-budget measured under `cargo test --release` can be slightly slower than a release binary. Debug
-builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which keeps backtraces
-symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
+Run optimized tests with `cargo test-release`, an alias for `cargo test --profile bench`, which is
+what `just perf` and `cargo bench` use. The `bench` profile keeps `opt-level = 3` but uses thin
+local LTO and 16 codegen units. Plain `cargo test --release` builds with the release profile's fat
+LTO, and its link of libr's `test_linpack` peaked at 11.1 GiB, which a 16 GB machine running
+anything else cannot spare (it was OOM-killed once). Shipped binaries and every benchmark number in
+the docs come from `cargo build --release`, so a budget measured under `cargo test-release` can be
+slightly slower than a release binary. Debug builds keep line tables only (`[profile.dev] debug =
+"line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
+inspect locals in a debugger.
 
 ## Guidelines
 

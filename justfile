@@ -96,7 +96,7 @@ stats path=".":
 
 # Corpus perf and memory budgets; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
 perf:
-    cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+    cargo test -p semantics --profile bench --test test_perf -- --ignored --nocapture
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench *args:
@@ -422,7 +422,7 @@ gc-torture:
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.
 simulate count="200" actions="60" base="0":
-    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --release --test test_simulation -- --nocapture
+    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --profile bench --test test_simulation -- --nocapture
 
 # The scripted user journeys in crates/ry/tests/scenarios; `just scenarios edit-and-rename` runs one.
 scenarios name="":
