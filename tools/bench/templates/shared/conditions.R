@@ -7,7 +7,7 @@ transient_error_@ID@ <- function(message: character) -> rlang_error {
 
 flaky_@ID@ <- function(fail_times: integer) -> fn() -> character {
   calls <- 0L
-  function() {
+  function() -> character {
     calls <<- calls + 1L
     if (calls <= fail_times) rlang::cnd_signal(transient_error_@ID@(paste("failure", calls)))
     paste("ok after", calls)
@@ -23,7 +23,7 @@ with_retry_@ID@ <- function<T>(fn: fn() -> T, attempts: integer = @ATTEMPTS@L) -
   for (attempt in seq_len(attempts)) {
     result: Any <- tryCatch(
       fn(),
-      transient_error = function(condition) {
+      transient_error = function(condition: rlang_error) -> NULL {
         failures <<- c(failures, conditionMessage(condition))
         NULL
       }
@@ -40,7 +40,7 @@ with_retry_@ID@ <- function<T>(fn: fn() -> T, attempts: integer = @ATTEMPTS@L) -
 logged_@ID@ <- function<T>(expr: T) -> T | character {
   tryCatchLog::tryCatchLog(
     expr,
-    error = function(e) structure(conditionMessage(e), class = "logged_failure"),
+    error = function(e: condition) -> character structure(conditionMessage(e), class = "logged_failure"),
     include.full.call.stack = FALSE
   )
 }

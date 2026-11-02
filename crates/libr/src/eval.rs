@@ -990,6 +990,9 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
     if let Some(package) = builtin_libraries::builtin_library(&path) {
         return builtin_libraries::load(package, &path);
     }
+    if let Some(reason) = builtin_libraries::refused_library(&path) {
+        return Err(error(reason));
+    }
     let local = call.arg(1) == runtime().nil() || crate::vectors::as_logical(call.arg(1))? != 0;
     let dll = crate::dynload::load_library(&path, local)?;
     dll_info(dll)

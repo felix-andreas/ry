@@ -32,7 +32,7 @@ test_that("serialization @ID@ round trips", {
   back: list[list[named: Any]] <- json_to_records_@ID@(text)
   expect_length(back, @ROWS@)
   expect_equal(back[[1]]$id, 1L)
-  expect_equal(vapply(back, function(r) r$score, numeric(1)), seq_len(@ROWS@) / 7)
+  expect_equal(vapply(back, function(r: list[named: Any]) -> double r$score, numeric(1)), seq_len(@ROWS@) / 7)
   fast <- fast_parse_@ID@(text)
   expect_equal(NROW(fast), @ROWS@)
   expect_equal(nchar(fingerprint_@ID@(records)), 64L)

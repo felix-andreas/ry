@@ -16,7 +16,7 @@ expected_shortfall_@ID@ <- function(returns: double[], level: double = @LEVEL@) 
 }
 
 stress_@ID@ <- function(weights: double[], shocks: list[named: double[]]) -> double[] {
-  vapply(names(shocks), function(name) sum(weights * shocks[[name]]), numeric(1))
+  vapply(names(shocks), function(name: character) -> double sum(weights * shocks[[name]]), numeric(1))
 }
 
 scenario_table_@ID@ <- function(n: integer = @SCENARIOS@L, seed: integer = 5L) -> data.table {

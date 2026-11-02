@@ -61,6 +61,7 @@ pub mod native;
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
+pub mod plotmath;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -251,6 +252,7 @@ pub struct Interp {
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
+    pub method_cache: dispatch::MethodCache,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -365,6 +367,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
+        method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,

@@ -341,6 +341,34 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: Vec<Name<'db>>,
+    /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
+    /// call where the caller already showed `predicate` holds of its argument returns the
+    /// other members alone. Inferred only.
+    pub null_unless: Option<NullUnless<'db>>,
+    /// The body ends in `Reduce(f, x, init = init)` over its own formals, with `f` a formal
+    /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
+    /// accumulator may widen past the start. Inferred only.
+    pub reduces: Option<ReduceForward<'db>>,
+    /// Built from a call on a value of unknown type, so its parameters are the arguments that
+    /// call passed rather than formals: another call may pass a different set of names, which
+    /// the real callee's defaults or `...` may accept.
+    pub from_calls: bool,
+}
+
+/// purrr's `reduce(.x, .f, ..., .init)` calling `Reduce(function(x, y) .f(x, y, ...), .x,
+/// init = .init)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct ReduceForward<'db> {
+    pub function: Name<'db>,
+    pub x: Name<'db>,
+    pub init: Option<Name<'db>>,
+}
+
+/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct NullUnless<'db> {
+    pub predicate: Name<'db>,
+    pub parameter: Name<'db>,
 }
 
 /// `formal` is required by a call that leaves out `default_of`, whose default reads it.
@@ -806,6 +834,9 @@ fn mapped_kind<'db>(
             default_reads: function.default_reads.clone(),
             missing_tested: function.missing_tested.clone(),
             condition_only: function.condition_only.clone(),
+            null_unless: function.null_unless,
+            reduces: function.reduces,
+            from_calls: function.from_calls,
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -1046,6 +1077,9 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         );
 
@@ -1077,6 +1111,9 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         );
         let f2 = Ty::new(
@@ -1092,6 +1129,9 @@ mod tests {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         );
         assert_eq!(f1, f2);

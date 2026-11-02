@@ -239,7 +239,7 @@ persistence feature would need every memo to serialize, including the process-wi
 
 The record has a key fingerprint and, for each file, four facts:
 
-- **Key**: the ry version and binary, the configuration, the project root, the data files,
+- **Key**: the ry version and build, the configuration, the project root, the data files,
   `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
 - **Content fingerprint**: the file's text.
 - **Surface fingerprint**: two parts. The first is the text with the body of each top-level
@@ -257,9 +257,19 @@ The record has a key fingerprint and, for each file, four facts:
 
 A run with no changed file replays every finding without building a tree. A run whose changed
 files all keep their surface checks the changed files and the files whose dependencies include
-one of them. Every surface then matches the record, so the attached set and, when the imports used
-are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
-file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+one of them. Every surface then matches the record, so the attached set comes from the record as
+well, and the `NAMESPACE` findings are recomputed from the imports used, which costs a few
+milliseconds. Any other change checks every file.
+
+A package-only run, such as `ry check R` or the strict check of `ry load`, analyses only the
+package files. Tests and scripts read the package namespace but add nothing to it, so leaving
+them unparsed changes no package finding. They stay in the record: a file the run left unanalysed
+keeps its recorded content, surface, findings and imports used while its text is unchanged. When
+its text did change, the record keeps no surface for it and marks every unanalysed file
+unchecked, so the next run that analyses them checks them all. The `NAMESPACE` findings read only
+the imports the analysed files use, so a package-only run and a full run can disagree on them
+(an import only the tests use is unused to the first and used to the second). A replay therefore
+recomputes them when the package files' imports differ from all files' imports. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
 an edit inside a body rechecks one or two files.
 
 A partial run still parses every file, because the project-wide maps fold every file's items. So

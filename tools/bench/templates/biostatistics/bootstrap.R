@@ -13,7 +13,7 @@ percentile_interval_@ID@ <- function(draws: double[], level: double = 0.95) -> d
 }
 
 jackknife_@ID@ <- function(x: double[]) -> double[] {
-  estimates <- vapply(seq_along(x), function(i) mean(x[-i]), numeric(1))
+  estimates <- vapply(seq_along(x), function(i: integer) -> double mean(x[-i]), numeric(1))
   n <- length(x)
   c(estimate = mean(estimates), se = sqrt((n - 1) / n * sum((estimates - mean(estimates))^2)))
 }

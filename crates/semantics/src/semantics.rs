@@ -951,8 +951,12 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         if !plain {
             return None;
         }
-        parameters.push(if position < passed {
+        // `if (!missing(pkgname))` lets a developer call the hook by hand without arguments.
+        let optional = formal.has_default || tests_missing(&function, &formal.name);
+        parameters.push(if position < passed && !optional {
             format!("{}: character", formal.name)
+        } else if position < passed {
+            format!("[{}]: character", formal.name)
         } else {
             format!("[{}]: Any", formal.name)
         });
@@ -962,6 +966,24 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         return None;
     }
     stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
+}
+
+/// Whether the function's text contains `missing(name)`.
+fn tests_missing(function: &SyntaxNode, name: &str) -> bool {
+    let tokens: Vec<_> = function
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !token.kind().is_trivia())
+        .collect();
+    tokens.windows(4).any(|window| {
+        let [missing, open, argument, close] = window else {
+            return false;
+        };
+        missing.text() == "missing"
+            && open.text() == "("
+            && argument.text().trim_matches('`') == name
+            && close.text() == ")"
+    })
 }
 
 fn expression_annotations<'db>(
@@ -1287,8 +1309,10 @@ pub fn file_typing_directives(
                 else {
                     continue;
                 };
-                // The whole remainder is the value: `typing: on gely` is a typo, not `on`.
-                match rest.trim() {
+                // The whole remainder up to a trailing `# reason` comment is the value:
+                // `typing: on gely` is a typo, not `on`.
+                let value = rest.split_once('#').map_or(rest, |(value, _)| value);
+                match value.trim() {
                     "off" => mode = Some(TypingMode::Off),
                     "on" => mode = Some(TypingMode::On),
                     "strict" => mode = Some(TypingMode::Strict),

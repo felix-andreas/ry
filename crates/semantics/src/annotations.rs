@@ -189,6 +189,9 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
+            null_unless: None,
+            reduces: None,
+            from_calls: false,
         };
         annotation.declared = Some(TypeScheme {
             binders: ThinVec::from(forall),
@@ -324,6 +327,9 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         ),
     });
@@ -526,6 +532,9 @@ pub fn merge_annotations<'db>(
                     default_reads: Vec::new(),
                     missing_tested: Vec::new(),
                     condition_only: Vec::new(),
+                    null_unless: None,
+                    reduces: None,
+                    from_calls: false,
                 }),
             ),
         }),
@@ -1661,6 +1670,9 @@ impl<'db> Lowering<'db> {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         )
     }

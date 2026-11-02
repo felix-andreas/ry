@@ -47,7 +47,12 @@ use {
 };
 
 mod fields;
+mod refactor;
+pub use refactor::refactors;
+mod migrate;
 pub mod testing;
+
+pub use migrate::{DataTableRewrite, apply_data_table_rewrites, data_table_rewrites};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
@@ -1405,6 +1410,7 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
     // cannot tell.
     let mut parameter_reads: HashSet<TextSize> = HashSet::new();
     let mut library_reads: HashSet<TextSize> = HashSet::new();
+    let mut column_reads: HashSet<TextSize> = HashSet::new();
     let files = ProjectFiles::try_get(db);
     // R6 members and S4 slots are named by call arguments, so the outline's reading of those
     // calls decides them, which keeps one definition of what a member is.
@@ -1446,6 +1452,11 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 library_reads.insert(hir.range(*expression).start() + offset);
             }
         }
+        column_reads.extend(
+            frame_column_reads(db, item, hir, naming)
+                .into_iter()
+                .map(|range| range.start() + offset),
+        );
     }
     // Tokens arrive in order, so one region's binders serve all of its tokens.
     let mut current_region: Option<(SyntaxNode, Vec<String>)> = None;
@@ -1491,6 +1502,8 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 let start = token.text_range().start();
                 if token.kind() == IDENT && parameter_reads.contains(&start) {
                     Some(SemanticClass::Parameter)
+                } else if token.kind() == IDENT && column_reads.contains(&start) {
+                    Some(SemanticClass::Property)
                 } else if let Some(class) = member_names.get(&start) {
                     Some(*class)
                 } else {
@@ -1515,6 +1528,97 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
         }
     }
     spans
+}
+
+/// The bare names inside a frame query's brackets, `x[i, j, by]`, that read a column of `x` or
+/// name one the query writes with `:=`. A name the code binds itself is a variable, and only an
+/// item that has such a query pays for its type check.
+fn frame_column_reads(
+    db: &dyn Db,
+    item: Item<'_>,
+    hir: &Module,
+    naming: &ItemNaming,
+) -> Vec<TextRange> {
+    let queries: Vec<(ExprId, ExprId, Vec<TextRange>)> = hir
+        .expressions()
+        .enumerate()
+        .filter_map(|(index, expression)| match &expression.kind {
+            ExpressionKind::Index {
+                double: false,
+                target,
+                arguments,
+            } => {
+                let ranges: Vec<TextRange> = hir[arguments]
+                    .iter()
+                    .filter_map(|argument| argument.value.map(|value| hir.range(value)))
+                    .collect();
+                Some((ExprId::new(index), *target, ranges))
+            }
+            _ => None,
+        })
+        .collect();
+    let candidates: Vec<(ExprId, &str)> = hir
+        .expressions()
+        .enumerate()
+        .filter_map(|(index, expression)| match &expression.kind {
+            ExpressionKind::NameRef(name) => Some((ExprId::new(index), name.as_str())),
+            _ => None,
+        })
+        .filter(|(id, _)| !naming.resolutions.contains_key(id))
+        .filter(|(id, _)| {
+            let range = hir.range(*id);
+            queries.iter().any(|(_, _, arguments)| {
+                arguments
+                    .iter()
+                    .any(|argument| argument.contains_range(range))
+            })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let callees: HashSet<ExprId> = hir
+        .expressions()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Call { callee, .. } => Some(*callee),
+            _ => None,
+        })
+        .collect();
+    let Some(check) = item_check(db, item) else {
+        return Vec::new();
+    };
+    let columns_of = |expression: ExprId| -> Vec<&str> {
+        match check
+            .expression_types
+            .get(&expression)
+            .map(|ty| ty.kind(db))
+        {
+            Some(TyKind::Frame(_, Some(columns))) => {
+                columns.iter().map(|column| column.name.text(db)).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    let mut reads = Vec::new();
+    for (query, target, arguments) in &queries {
+        let mut columns = columns_of(*target);
+        if columns.is_empty() {
+            continue;
+        }
+        columns.extend(columns_of(*query));
+        for &(id, name) in &candidates {
+            let range = hir.range(id);
+            if !callees.contains(&id)
+                && columns.contains(&name)
+                && arguments
+                    .iter()
+                    .any(|argument| argument.contains_range(range))
+            {
+                reads.push(range);
+            }
+        }
+    }
+    reads
 }
 
 /// The package `pkg` of the name token in `pkg::name` or `pkg:::name`.
@@ -2451,9 +2555,18 @@ pub enum CodeActionKind {
     DiagnosticFix(Applicability),
     /// Every safe fix in the file at once, as `ry check --fix` applies them in one pass.
     FixAll,
+    /// One data.table form rewritten as DataFrame code.
+    MigrateDataTable,
+    /// Every data.table form in the file, as `ry migrate data-table` rewrites it.
+    MigrateDataTableFile,
     /// Makes an unresolved name reach the package that exports it: `pkg::` before the name, or
     /// in a script a `library(pkg)` call.
     ImportName,
+    ExtractVariable,
+    ExtractFunction,
+    InlineVariable,
+    /// Moves a binding's or function's types between a `#:` comment and inline syntax.
+    ConvertAnnotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2563,6 +2676,39 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             title: "Add inferred type annotations for the whole file".to_owned(),
             kind: CodeActionKind::AddMissingAnnotations,
             edits: all_annotation_edits,
+        });
+    }
+
+    let rewrites = data_table_rewrites(db, file);
+    for rewrite in rewrites
+        .iter()
+        .filter(|rewrite| ranges_overlap(rewrite.range, viewport))
+    {
+        actions.push(CodeAction {
+            title: rewrite.title.to_owned(),
+            kind: CodeActionKind::MigrateDataTable,
+            edits: vec![TextEdit {
+                range: rewrite.range,
+                replacement: rewrite.standalone.clone(),
+            }],
+        });
+    }
+    // Listed only where the cursor offers a rewrite, and only when it does more than that one.
+    if rewrites.len() > 1
+        && rewrites
+            .iter()
+            .any(|rewrite| ranges_overlap(rewrite.range, viewport))
+    {
+        actions.push(CodeAction {
+            title: "Rewrite all data.table code in the file as DataFrame code".to_owned(),
+            kind: CodeActionKind::MigrateDataTableFile,
+            edits: rewrites
+                .into_iter()
+                .map(|rewrite| TextEdit {
+                    range: rewrite.range,
+                    replacement: rewrite.replacement,
+                })
+                .collect(),
         });
     }
 
@@ -3898,29 +4044,54 @@ pub struct WorkspaceSymbol {
 }
 
 pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<WorkspaceSymbol> {
+    // A non-syntactic name is listed by its plain spelling, so a backquoted query still finds it.
+    let query = query.trim_matches('`');
     let mut symbols: Vec<(MatchScore, WorkspaceSymbol)> = Vec::new();
     for &file in files.files(db) {
-        for symbol in document_symbols(db, file) {
-            symbols.extend(once(&symbol).chain(&symbol.children).filter_map(|entry| {
-                Some((
-                    search_match(&entry.name, query)?,
-                    WorkspaceSymbol {
-                        name: entry.name.clone(),
-                        kind: entry.kind,
-                        target: NavigationTarget {
-                            file,
-                            range: entry.selection,
-                        },
+        symbols.extend(searchable_symbols(db, file).iter().filter_map(|symbol| {
+            Some((
+                search_match(&symbol.name, query)?,
+                WorkspaceSymbol {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind,
+                    target: NavigationTarget {
+                        file,
+                        range: symbol.selection,
                     },
-                ))
-            }));
-        }
+                },
+            ))
+        }));
     }
     symbols.sort_by_cached_key(|(score, symbol)| {
         (*score, symbol.name.to_lowercase(), symbol.name.clone())
     });
     symbols.truncate(COMPLETION_LIMIT);
     symbols.into_iter().map(|(_, symbol)| symbol).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchableSymbol {
+    name: String,
+    kind: DocumentSymbolKind,
+    selection: TextRange,
+}
+
+/// A file's outline entries and their direct children, flattened. Memoized because a workspace
+/// search reads every file on each keystroke in the search box, and rebuilding every outline took
+/// about half a second at 300,000 lines.
+#[salsa::tracked(returns(ref))]
+fn searchable_symbols(db: &dyn Db, file: SourceFile) -> Vec<SearchableSymbol> {
+    let mut symbols = Vec::new();
+    for symbol in document_symbols(db, file) {
+        for entry in once(&symbol).chain(&symbol.children) {
+            symbols.push(SearchableSymbol {
+                name: entry.name.clone(),
+                kind: entry.kind,
+                selection: entry.selection,
+            });
+        }
+    }
+    symbols
 }
 
 struct AnnotationTypeCursor {
@@ -4938,6 +5109,8 @@ struct SpelledNames {
     namespace: Vec<(String, String)>,
     /// Sorted by name.
     uses: Vec<(String, u32)>,
+    /// How often the file calls each name, `f` in `f(x)` or `pkg::f(x)`. Sorted by name.
+    calls: Vec<(String, u32)>,
 }
 
 /// Memoized per file, so completion does not re-walk every syntax tree in the project.
@@ -4948,9 +5121,11 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         dollar: Vec::new(),
         namespace: Vec::new(),
         uses: Vec::new(),
+        calls: Vec::new(),
     };
     let root = semantics::parse(db, file).syntax_node();
     let mut uses: HashMap<&str, u32> = HashMap::new();
+    let mut calls: HashMap<&str, u32> = HashMap::new();
     let tokens: Vec<SyntaxToken> = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -4958,12 +5133,17 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         .collect();
     for token in &tokens {
         *uses.entry(token.text()).or_default() += 1;
+        if token.kind() == IDENT && is_called_name(token) {
+            *calls.entry(token.text()).or_default() += 1;
+        }
     }
-    spelled.uses = uses
-        .into_iter()
-        .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
-        .collect();
-    spelled.uses.sort_unstable();
+    for (counts, sorted) in [(uses, &mut spelled.uses), (calls, &mut spelled.calls)] {
+        *sorted = counts
+            .into_iter()
+            .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
+            .collect();
+        sorted.sort_unstable();
+    }
     for node in root.descendants() {
         // The lhs is an expression node, so the last bare NAME child is the spelled name.
         let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
@@ -4997,29 +5177,67 @@ const USE_CHUNK_FILES: usize = 32;
 /// A keystroke changes its file's counts, so a single project-wide sum would be redone over
 /// every file on every completion; a chunk is redone over its own files only, and a lookup adds
 /// up one count per chunk.
+/// `with_tests` false leaves out testthat files ([`Usage::calls`] says why).
 #[salsa::tracked(returns(ref))]
-fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize) -> NameUses {
-    let mut uses: HashMap<String, u32> = HashMap::new();
+fn chunk_uses(db: &dyn Db, files: ProjectFiles, chunk: usize, with_tests: bool) -> NameUses {
+    let mut uses = NameUses {
+        spelled: HashMap::new(),
+        called: HashMap::new(),
+    };
     for &file in files
         .files(db)
         .iter()
         .skip(chunk * USE_CHUNK_FILES)
         .take(USE_CHUNK_FILES)
+        .filter(|file| with_tests || !is_test_kind(*file.kind(db)))
     {
-        for (name, count) in &spelled_names(db, file).uses {
-            match uses.get_mut(name.as_str()) {
-                Some(total) => *total += count,
-                None => {
-                    uses.insert(name.clone(), *count);
+        let names = spelled_names(db, file);
+        for (totals, counts) in [
+            (&mut uses.spelled, &names.uses),
+            (&mut uses.called, &names.calls),
+        ] {
+            for (name, count) in counts {
+                match totals.get_mut(name.as_str()) {
+                    Some(total) => *total += count,
+                    None => {
+                        totals.insert(name.clone(), *count);
+                    }
                 }
             }
         }
     }
-    NameUses(uses)
+    uses
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
-struct NameUses(HashMap<String, u32>);
+struct NameUses {
+    spelled: HashMap<String, u32>,
+    called: HashMap<String, u32>,
+}
+
+/// `f` in `f(x)` or in `pkg::f(x)`.
+fn is_called_name(token: &SyntaxToken) -> bool {
+    let Some(name) = token.parent().filter(|name| name.kind() == NAME) else {
+        return false;
+    };
+    let head = match name.parent() {
+        // `pkg` in `pkg::f()` is not called; `f` is.
+        Some(parent) if parent.kind() == NAMESPACE_EXPR => {
+            if parent
+                .children()
+                .filter(|child| child.kind() == NAME)
+                .last()
+                != Some(name)
+            {
+                return false;
+            }
+            parent
+        }
+        _ => name,
+    };
+    head.parent()
+        .is_some_and(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&head))
+}
 
 fn dollar_completions(
     db: &dyn Db,
@@ -5875,15 +6093,22 @@ fn package_completions(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<Com
 /// first [`COMPLETION_LIMIT`] are selected and sorted, without allocating a key per candidate.
 ///
 /// Within a match tier and a [`CompletionSource::group`], names the project spells more often
-/// rank first, counting the current file twice: in R a call to `return` or `is.null` is far more
-/// likely than the alphabetically first global that shares the prefix.
+/// rank first, counting nearer uses more: in R a call to `return` or `is.null` is far more
+/// likely than the alphabetically first global that shares the prefix. When a `(` follows the
+/// cursor, how often the project calls a name ranks first, because the names a project spells
+/// most are its data (`req`, `resp`), which it seldom calls.
 fn finish_completions(
     items: Vec<CompletionItem>,
     query: &str,
     usage: &Usage<'_>,
     called: bool,
 ) -> Option<CompletionResult> {
-    let mut ranked: Vec<(Option<MatchScore>, u8, Reverse<u32>, usize)> = {
+    let labels: HashSet<&str> = if called {
+        items.iter().map(|item| item.label.as_str()).collect()
+    } else {
+        HashSet::new()
+    };
+    let mut ranked: Vec<(Option<MatchScore>, u8, UseRank, usize)> = {
         let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
         items
             .iter()
@@ -5899,18 +6124,25 @@ fn finish_completions(
                 {
                     return None;
                 }
-                let uses = usage.count(name);
+                let calls = if called { usage.call_count(name) } else { 0 };
+                // A project function named `generic.class` beside a `generic` is an S3 method,
+                // which code calls through its generic, not by name.
+                let method = called
+                    && item.source == CompletionSource::Global
+                    && name
+                        .match_indices('.')
+                        .any(|(dot, _)| labels.contains(&name[..dot]));
                 Some((
                     search_match(&item.label, query),
                     item.source.group(called),
-                    Reverse(uses),
+                    (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
                 ))
             })
             .collect()
     };
-    let order = |left: &(Option<MatchScore>, u8, Reverse<u32>, usize),
-                 right: &(Option<MatchScore>, u8, Reverse<u32>, usize)| {
+    let order = |left: &(Option<MatchScore>, u8, UseRank, usize),
+                 right: &(Option<MatchScore>, u8, UseRank, usize)| {
         let (Some(left_item), Some(right_item)) = (items.get(left.3), items.get(right.3)) else {
             return left.3.cmp(&right.3);
         };
@@ -5943,11 +6175,19 @@ fn finish_completions(
     })
 }
 
+/// S3 methods last, then calls and spellings, both descending.
+type UseRank = (bool, Reverse<u32>, Reverse<u32>);
+
 /// How often a name is spelled, for ranking: across the project, in the current file, and in
 /// the top-level item around the cursor. Nearer uses weigh more, since code tends to reuse the
 /// names it has just used.
 struct Usage<'db> {
     project: Vec<&'db NameUses>,
+    /// The project's uses that count for calls: outside `tests/`, test files are left out,
+    /// because testthat's `expect_*` are called in every test and never in package code. Test
+    /// files still count for spellings, which also rank `pkg::` members, where tests show which
+    /// of a package's functions the project uses.
+    calls: Vec<&'db NameUses>,
     file: Option<&'db SpelledNames>,
     item: HashMap<String, u32>,
 }
@@ -5972,9 +6212,13 @@ impl<'db> Usage<'db> {
                 }
             }
         }
+        let chunks = files.files(db).len().div_ceil(USE_CHUNK_FILES);
         Usage {
-            project: (0..files.files(db).len().div_ceil(USE_CHUNK_FILES))
-                .map(|chunk| chunk_uses(db, files, chunk))
+            project: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, true))
+                .collect(),
+            calls: (0..chunks)
+                .map(|chunk| chunk_uses(db, files, chunk, is_test_kind(*file.kind(db))))
                 .collect(),
             file: Some(spelled_names(db, file)),
             item,
@@ -5984,6 +6228,7 @@ impl<'db> Usage<'db> {
     fn none() -> Usage<'static> {
         Usage {
             project: Vec::new(),
+            calls: Vec::new(),
             file: None,
             item: HashMap::new(),
         }
@@ -5992,8 +6237,29 @@ impl<'db> Usage<'db> {
     fn project_count(&self, name: &str) -> u32 {
         self.project
             .iter()
-            .filter_map(|uses| uses.0.get(name))
+            .filter_map(|uses| uses.spelled.get(name))
             .sum()
+    }
+
+    /// Calls weigh like [`Usage::count`]'s spellings: the project, then the file, three times.
+    fn call_count(&self, name: &str) -> u32 {
+        let project: u32 = self
+            .calls
+            .iter()
+            .filter_map(|uses| uses.called.get(name))
+            .sum();
+        let file = self
+            .file
+            .and_then(|spelled| {
+                spelled
+                    .calls
+                    .binary_search_by(|(called, _)| called.as_str().cmp(name))
+                    .ok()
+                    .and_then(|index| spelled.calls.get(index))
+                    .map(|(_, count)| *count)
+            })
+            .unwrap_or(0);
+        project.saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
     }
 
     fn count(&self, name: &str) -> u32 {
@@ -6013,6 +6279,10 @@ impl<'db> Usage<'db> {
             .saturating_add(file.saturating_mul(FILE_USE_WEIGHT))
             .saturating_add(item.saturating_mul(ITEM_USE_WEIGHT))
     }
+}
+
+fn is_test_kind(kind: DocumentKind) -> bool {
+    matches!(kind, DocumentKind::Test | DocumentKind::TestHelper)
 }
 
 const FILE_USE_WEIGHT: u32 = 3;

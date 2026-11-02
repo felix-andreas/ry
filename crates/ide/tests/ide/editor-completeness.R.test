@@ -58,7 +58,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
-completion (18): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
+completion (19): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
 hint @5: DataFrame{region: character[], units: integer[]}
 
 #---- df_column_hover_after_dollar
@@ -999,7 +999,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (32): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (34): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]
 
 #---- completion_of_a_call_ranks_locals_with_the_globals
@@ -1016,5 +1016,5 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (32): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (34): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]

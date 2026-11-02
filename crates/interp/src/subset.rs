@@ -649,8 +649,13 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
+    // A parsed expression's per-element source references are subset along with it, as in GNU
+    // R, so `attr(exprs[i], "srcref")` still locates element `i`.
+    let srcrefs = get_attr(object, symbols().srcref);
+    let srcrefs = (srcrefs.kind() == SexpType::List).then_some(srcrefs);
     if dims.is_none()
         && names == nil()
+        && srcrefs.is_none()
         && let Some(result) = gather_plain(object, index)?
     {
         return Ok(result);
@@ -668,6 +673,22 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
             values::set_elt(new_names, position, name);
         }
         values::set_attr(result, symbols().names, new_names)?;
+    }
+    if let Some(srcrefs) = srcrefs
+        && index != missing_arg()
+    {
+        let positions: Vec<usize> = indices
+            .iter()
+            .map(|&index| {
+                if index < length(srcrefs) {
+                    index
+                } else {
+                    usize::MAX
+                }
+            })
+            .collect();
+        let selected = select_elements(srcrefs, &positions)?;
+        values::set_attr(result, symbols().srcref, selected)?;
     }
     // A one-dimensional array stays one when indexed.
     if let Some(dims) = dims
@@ -719,7 +740,7 @@ unsafe fn array_subset(
         && let ([row, column], &[rows, columns]) = (indices, dims)
         && *column == missing_arg()
         && columns != 1
-        && let Some(row) = matrix_row(*row, rows)
+        && let Some(row) = matrix_position(*row, rows)
         && matches!(
             object.kind(),
             SexpType::Real | SexpType::Integer | SexpType::Logical
@@ -732,7 +753,37 @@ unsafe fn array_subset(
             gather_row(values::ints_mut(result), values::ints(object), row, rows);
         }
         if dimnames.kind() == SexpType::List && dimnames.element(1) != nil() {
-            let names = values::duplicate(dimnames.element(1))?;
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(1))?;
+            values::clear_attributes(names);
+            values::set_attr(result, symbols().names, names)?;
+        }
+        return Ok(result);
+    }
+    // `m[, j]` is one contiguous run, the shape `apply` takes once per row or column.
+    if drop
+        && let ([row, column], &[rows, columns]) = (indices, dims)
+        && *row == missing_arg()
+        && rows != 1
+        && let Some(column) = matrix_position(*column, columns)
+        // C code can set a `dim` that disagrees with the length, which the general path reports.
+        && (column + 1) * rows <= length(object)
+        && matches!(
+            object.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        )
+    {
+        let start = column * rows;
+        let result = values::alloc_uninit(object.kind(), rows)?;
+        if object.kind() == SexpType::Real {
+            values::reals_mut(result).copy_from_slice(&values::reals(object)[start..start + rows]);
+        } else {
+            values::ints_mut(result).copy_from_slice(&values::ints(object)[start..start + rows]);
+        }
+        if dimnames.kind() == SexpType::List && dimnames.element(0) != nil() {
+            // The dimnames vector may carry names of its own, which the result's names drop.
+            let names = values::shallow_duplicate(dimnames.element(0))?;
+            values::clear_attributes(names);
             values::set_attr(result, symbols().names, names)?;
         }
         return Ok(result);
@@ -833,9 +884,10 @@ unsafe fn array_subset(
     Ok(result)
 }
 
-/// The zero-based row a scalar subscript selects in a matrix of `rows` rows, when it is a plain
-/// positive in-range number; anything else takes the general path, which also reports errors.
-unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
+/// The zero-based position a scalar subscript selects along a matrix dimension of `extent`, when
+/// it is a plain positive in-range number; anything else takes the general path, which also
+/// reports errors.
+unsafe fn matrix_position(index: Sexp, extent: usize) -> Option<usize> {
     if index.is_altrep() || length(index) != 1 || values::has_attributes(index) {
         return None;
     }
@@ -847,7 +899,7 @@ unsafe fn matrix_row(index: Sexp, rows: usize) -> Option<usize> {
         _ => return None,
     };
     // NaN fails both comparisons, and `m[2.7, ]` truncates to the second row.
-    (position >= 1.0 && position < rows as f64 + 1.0).then(|| position as usize - 1)
+    (position >= 1.0 && position < extent as f64 + 1.0).then(|| position as usize - 1)
 }
 
 /// Copies row `row` of a column-major matrix with `rows` rows into `target`, one element per
@@ -1950,7 +2002,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         // `m[i, ] <- value` on a plain numeric matrix writes one strided row in place.
         if let ([row, column], &[rows, columns]) = (indices, &dims[..])
             && *column == missing_arg()
-            && let Some(row) = matrix_row(*row, rows)
+            && let Some(row) = matrix_position(*row, rows)
             && value != result
             && value.kind() == result.kind()
             && value_count > 0
@@ -3514,15 +3566,36 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
     let attributes = call.arg(1);
-    if object == nil() {
-        if attributes == nil() {
-            return Ok(nil());
+    // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
+    let object = match call.arg(0) {
+        object if object != nil() => modifiable(object)?,
+        _ if attributes == nil() => return Ok(nil()),
+        _ => alloc(SexpType::List, 0)?,
+    };
+    // The value is checked before anything is cleared, so a bad one leaves the object as it was.
+    let names = values::names(attributes);
+    if attributes != nil() {
+        if attributes.kind() != SexpType::List {
+            return Err(call.error("attributes must be a list or NULL"));
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        if length(attributes) > 0 && names == nil() {
+            return Err(call.error("attributes must be named"));
+        }
+        // GNU R checks the names from the second on; an empty first name fails later, when
+        // it is installed as a symbol.
+        if length(attributes) > 0 && names.element(0).bytes().is_empty() {
+            return Err(call.error("attempt to use zero-length variable name"));
+        }
+        for index in 1..length(attributes) {
+            if names.element(index).bytes().is_empty() {
+                return Err(call.error(format!(
+                    "all attributes must have names [{} does not]",
+                    index + 1
+                )));
+            }
+        }
     }
-    let object = modifiable(object)?;
     let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {
@@ -3532,13 +3605,6 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     // object keeps it an S4 object.
     if was_s4 && length(attributes) > 0 {
         object.set_gp_bits(gp::S4_OBJECT, true);
-    }
-    if attributes.kind() != SexpType::List {
-        return Err(call.error("attributes must be a list or NULL"));
-    }
-    let names = values::names(attributes);
-    if length(attributes) > 0 && names == nil() {
-        return Err(call.error("attributes must be named"));
     }
     // `dim` goes first, so `dimnames` can be checked against it.
     for pass in 0..2 {
