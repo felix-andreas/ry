@@ -591,6 +591,42 @@ impl Loader {
         changed
     }
 
+    /// Every top-level name of the package loaded from `root` whose definition reaches one of
+    /// `changed`, through the names the definitions mention, `changed` included. A test that
+    /// mentions none of them runs exactly the code it ran before a reload that changed only
+    /// `changed`, so `ry test` reruns the tests that mention one first.
+    pub fn callers(&self, root: &Path, changed: &[String]) -> Vec<String> {
+        let Some(index) = self
+            .packages
+            .iter()
+            .find(|package| package.root == root)
+            .and_then(|package| package.committed.as_ref())
+            .map(|state| &state.index)
+        else {
+            return changed.to_vec();
+        };
+        let mut mentioned_by: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for (_, item) in index.items() {
+            for name in &item.binds {
+                for mention in item.mentions.iter().chain(&item.reads) {
+                    mentioned_by.entry(mention).or_default().push(name);
+                }
+            }
+        }
+        let mut reached: FxHashSet<&str> = changed.iter().map(String::as_str).collect();
+        let mut queue: Vec<&str> = reached.iter().copied().collect();
+        while let Some(name) = queue.pop() {
+            for &caller in mentioned_by.get(name).map_or(&[][..], Vec::as_slice) {
+                if reached.insert(caller) {
+                    queue.push(caller);
+                }
+            }
+        }
+        let mut names: Vec<String> = reached.into_iter().map(str::to_owned).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// The pending state for `root`, which a backend that persists state saves.
     pub fn pending(&self, root: &Path) -> Option<&LoadState> {
         self.packages
