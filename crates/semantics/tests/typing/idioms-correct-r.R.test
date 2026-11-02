@@ -2311,3 +2311,17 @@ next_index <- function() iam(1) * 2
 iam: <T: numeric, U> fn(j: T, [both]: U) -> list{row.index: T} | double
 rows: fn() -> double
 next_index: fn() -> double
+
+#---- a_dollar_method_reads_a_classed_atomic_vector
+# igraph's vertex sequences are classed integer vectors with a `$` method.
+V <- function(n) {
+  res <- seq_len(n)
+  class(res) <- "vs"
+  res
+}
+`$.vs` <- function(x, name) paste(name, length(x))
+weights <- function() V(3)$weight
+#++++
+V: <T> fn(n: T) -> integer[]
+$.vs: <T, U> fn(x: T, name: U) -> character
+weights: fn() -> Unknown

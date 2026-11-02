@@ -618,6 +618,10 @@ pub trait GlobalEnv<'db> {
     /// declares, so a plain list operand may carry that class.
     fn has_untracked_arithmetic_class(&self) -> bool;
 
+    /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
+    /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
+    fn defines_dollar_method(&self) -> bool;
+
     /// The shipped declaration alone, which a call reaches when R's function lookup skips a
     /// project binding whose value is not a function.
     fn stub_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
@@ -15779,6 +15783,14 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any => Ok(any(self.db)),
             // `NULL$name` is `NULL` in R, so an optional list reads its settings directly.
             TyKind::Null => Ok(subject),
+            // igraph's `V(graph)$weight` reads a classed integer vector through `$.igraph.vs`.
+            TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_)
+                if self
+                    .globals
+                    .is_some_and(|globals| globals.defines_dollar_method()) =>
+            {
+                Ok(unknown(self.db))
+            }
             TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },

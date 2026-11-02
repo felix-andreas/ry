@@ -3061,6 +3061,12 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         *has_untracked_arithmetic_class(self.db, self.file)
     }
 
+    fn defines_dollar_method(&self) -> bool {
+        *file_defines_dollar_method(self.db, self.file)
+            || ProjectFiles::try_get(self.db)
+                .is_some_and(|files| *project_defines_dollar_method(self.db, files))
+    }
+
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
         self.library?.schemes.get(name)?.last().cloned()
     }
@@ -3085,6 +3091,22 @@ fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Str
         }
     }
     classes
+}
+
+#[salsa::tracked]
+fn project_defines_dollar_method(db: &dyn Db, files: ProjectFiles) -> bool {
+    files.files(db).iter().any(|&file| {
+        *file.kind(db) == DocumentKind::Package && *file_defines_dollar_method(db, file)
+    })
+}
+
+#[salsa::tracked]
+fn file_defines_dollar_method(db: &dyn Db, file: SourceFile) -> bool {
+    file_definitions(db, file).iter().any(|(name, _)| {
+        name.as_str()
+            .strip_prefix("$.")
+            .is_some_and(|class| !class.is_empty())
+    })
 }
 
 #[salsa::tracked(returns(ref))]
