@@ -3380,9 +3380,10 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 }
 
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
-/// arguments.
+/// arguments. A classed character vector is already text and is used as it is, which matters
+/// for vctrs, whose `as.character` method refuses a class with no cast to character.
 unsafe fn as_character(value: Sexp, env: Sexp) -> R<Sexp> {
-    if value.is_object() {
+    if value.is_object() && value.kind() != SexpType::String {
         let function = values::install("as.character")?;
         let call = values::call(function, &[eval::quote_value(value)?])?;
         let converted = eval::eval(call, env)?;

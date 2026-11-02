@@ -171,11 +171,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dirname", 1, |call| unsafe {
+        // GNU R keeps an empty path empty and drops the slashes before the last component.
         map_strings(call, |path| {
+            if path.is_empty() {
+                return String::new();
+            }
             let trimmed = path.trim_end_matches('/');
             match trimmed.rfind('/') {
-                Some(0) => "/".to_owned(),
-                Some(position) => trimmed[..position].to_owned(),
+                Some(position) => match trimmed[..position].trim_end_matches('/') {
+                    "" => "/".to_owned(),
+                    parent => parent.to_owned(),
+                },
+                None if path.starts_with('/') => "/".to_owned(),
                 None => ".".to_owned(),
             }
         })
