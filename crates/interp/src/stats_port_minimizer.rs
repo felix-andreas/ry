@@ -3033,34 +3033,48 @@ fn dd7tpr(x: &[f64], y: &[f64]) -> f64 {
     sum
 }
 
-/// `DV2NRM`: the 2-norm, scaled to avoid overflow and underflow.
+/// `DV2NRM`, the 2-norm. GNU R hands PORT's norm to the BLAS `dnrm2`, which its iterates
+/// show to the last bit, so this is reference LAPACK 3.12's `dnrm2`: Blue's algorithm, which
+/// sums the squares of mid-range values directly and scales only values near overflow or
+/// underflow.
 fn dv2nrm(x: &[f64]) -> f64 {
-    let Some(first) = x.iter().position(|value| *value != 0.0) else {
-        return 0.0;
-    };
-    let mut scale = x[first].abs();
-    if first + 1 == x.len() {
-        return scale;
-    }
-    let sqteta = sqteta();
-    let mut t = 1.0;
-    for value in &x[first + 1..] {
-        let xi = value.abs();
-        if xi > scale {
-            let mut r = scale / xi;
-            if r <= sqteta {
-                r = 0.0;
+    let tsml = 2f64.powi(-511);
+    let tbig = 2f64.powi(486);
+    let ssml = 2f64.powi(537);
+    let sbig = 2f64.powi(-538);
+    let mut notbig = true;
+    let (mut asml, mut amed, mut abig) = (0.0, 0.0, 0.0);
+    for value in x {
+        let ax = value.abs();
+        if ax > tbig {
+            abig = abig + square(ax * sbig);
+            notbig = false;
+        } else if ax < tsml {
+            if notbig {
+                asml = asml + square(ax * ssml);
             }
-            t = 1.0 + t * r * r;
-            scale = xi;
         } else {
-            let r = xi / scale;
-            if r > sqteta {
-                t = t + r * r;
-            }
+            amed = amed + ax * ax;
         }
     }
-    scale * t.sqrt()
+    let (scale, sumsq) = if abig > 0.0 {
+        if amed > 0.0 || amed.is_nan() {
+            abig = abig + (amed * sbig) * sbig;
+        }
+        (1.0 / sbig, abig)
+    } else if asml > 0.0 {
+        if amed > 0.0 || amed.is_nan() {
+            let amed = amed.sqrt();
+            let asml = asml.sqrt() / ssml;
+            let (ymin, ymax) = if asml > amed { (amed, asml) } else { (asml, amed) };
+            (1.0, ymax * ymax * (1.0 + square(ymin / ymax)))
+        } else {
+            (1.0 / ssml, asml)
+        }
+    } else {
+        (1.0, amed)
+    };
+    scale * sumsq.sqrt()
 }
 
 /// `DRLDST`: the relative distance between `x` and `x0` in the scaled norm.

@@ -2306,6 +2306,25 @@ primitives, and nothing built or installed packages.
   messages and the abnormal line-search exit were matched the same way, and
   `stats__lbfgsb_paths` and `test_numerics` hold the result exactly. The trace text for a line
   search that exhausts 20 evaluations is unverified, since no case reached it in GNU R.
+- **`nlminb` runs PORT's own drivers, written from netlib's reference** (<https://netlib.org/port/>,
+  the code R's `COPYRIGHTS.portsrc` relies on; GNU R's `portsrc.f`/`port.c` were never read).
+  `crates/interp/src/stats_port_minimizer.rs` holds `DRMNG`/`DRMNGB` (gradient: BFGS factor,
+  double dogleg), `DRMNH`/`DRMNHB` (gradient and Hessian: More-Hebden steps) and
+  `DRMNF`/`DRMNFB` (finite differences around the secant drivers), behind one reverse-
+  communication `Minimizer`. GNU R's driver, found by black-box tests: a Hessian without a
+  gradient is ignored; it loops "call PORT, then evaluate the gradient (and Hessian) if PORT
+  asked for it and one exists, else the objective" until the code is 3 or more, so the objective
+  runs once more, uncounted, at the final point; a NaN objective warns "NA/NaN function
+  evaluation" and becomes Inf; the Hessian's lower triangle is read by rows; `trace` prints at
+  PORT's `DITSUM` points when `niter % trace == 0`; dparck's control checks report the last bad
+  `v` slot and a nonpositive `scale` gives code 18. Quirks kept to match: `DRMNGB`'s `G0` shares
+  storage with `DD7DGB`'s and `DQ7RSH`'s scratch, `DD7DGB` leaves `NRED` unset with no free
+  variables (a start on an active bound returns code 3 after one iteration), and `DS7BQN` keeps
+  the last violating index. `DV2NRM` is BLAS `dnrm2` (LAPACK 3.12's Blue algorithm), not PORT's
+  scaled norm, because GNU R links PORT's norm to the BLAS: with PORT's own norm the iterates
+  differ in the last bit from the second step. `stats__nlminb_port_paths` pins the matching
+  cases bitwise; the open divergences are in `backlog.md`. `nls(algorithm = "port")` still runs
+  ry's own trust-region method in `stats_port.rs`.
 - **KalmanLike and `prod` accumulate as GNU R observably does.** The Kalman filter subtracts and
   adds term by term (`y -= z_i a_i`, `V[i,j] += m T`), and `prod` multiplies each argument in long
   double, combines arguments in double, and lets the first NaN win, so `prod(NaN, NA)` is NaN.
@@ -3476,8 +3495,8 @@ first lines R had already read, leaving R mid-command.
   reads `LC_COLLATE` from it (`sort::refresh_collation`) instead of a fixed C.UTF-8 answer, which
   is what withr's `local_locale` tests and C-collation sorts observe.
 - **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
-  Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
-  `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
+  Dennis and Schnabel's UNCMIN for `nlm`, netlib's PORT reference for `nlminb` (see "`nlminb`
+  runs PORT's own drivers"), and
   Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
   GNU R returns.
 - **One UNCMIN, one QUADPACK, one interval search, all in `interp`.** libR used to carry its own
@@ -5059,7 +5078,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Bytes-encoded strings force byte matching**: when any pattern or text element of `regexpr`, `gregexpr`, `regexec`, `grep`, `sub`, `gsub` or `strsplit` is marked `"bytes"`, the call behaves as `useBytes = TRUE` (byte positions, `index.type = "bytes"`, non-ASCII results marked `"bytes"`), as GNU R does.
 - **TRE compile errors** reject PCRE-only groups (`(?<`, `(?=`, `(?!`, `(?>`, `(?P<`) with "Invalid regexp" and an inverted interval with "Invalid contents of {}". The warning and error wording follows GNU R's three observed paths (wide-character `regexpr`/`grep`, `regexec`, everything else).
 - **Accepted divergences**: `fisher.test` on tables whose network exceeds GNU R's FEXACT hash computes the p-value instead of erroring "hash key ... > INT_MAX"; `gsub("\\b", ...)` does not reproduce TRE's re-match of `\b` after an empty match; printing a bytes string pads by its escaped width, not GNU R's single-escaped width.
-- **`nlminb` control ranges** are checked before minimizing, and an out-of-range control sets `iv[1]` to its PORT `v` position so that `nlminb`'s R code prints GNU R's "is out of range" message.
+- **`nlminb` control ranges** are PORT's own `DPARCK` checks: an out-of-range `v` slot sets `iv[1]` to the last failing position, so `nlminb`'s R code prints GNU R's "is out of range" message. `nls(algorithm = "port")` keeps ry's simplified range check.
 - **`qbeta` polishes its last digits** with a neighbour walk over adjacent doubles that minimizes `|pbeta(x) - p|`, because GNU R's tests require a mean relative round-trip error below 8e-16.
 - **`traceOnOff`** keeps a real tracing state (default on), so `trace()` tracers run.
 - **`qbeta` past the log-scale solve**: Newton steps on the caller's own probability scale recover the digits a log-scale solve loses when `|log p|` is large; a NaN from pbeta's asymptotic expansion bisects toward 0; pbeta warnings raised while searching are dropped; a subnormal result snaps to 0 or 2^-1024, whichever probability is nearer the target, because GNU R never returns a subnormal quantile and `d-p-q-r-tst-2` relies on it.
