@@ -20,7 +20,7 @@
 use {
     crate::{
         env::Frame,
-        object::{Sexp, SexpType, flag_bits, gc_bits},
+        object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
     },
     std::ptr::NonNull,
 };
@@ -93,12 +93,20 @@ pub(crate) struct Space {
     allocated: Vec<Bitmap>,
     /// Slots whose object owns memory outside the heap: environments, whose frames spill.
     finalizable: Vec<Bitmap>,
+    /// Slots whose object is a string in the intern table. A minor collection finds the dead
+    /// young strings, which it must take out of the table, from these bits on the pages it
+    /// sweeps, instead of from a list of every string interned since the last collection, which
+    /// would cost 8 bytes per new string.
+    interned: Vec<Bitmap>,
     cursors: [Cursor; CLASS_COUNT],
     /// Pages of each class with free slots, which no cursor is on.
     available: [Vec<u32>; CLASS_COUNT],
     empty_pages: Vec<u32>,
     /// Pages a cursor entered since the last collection: the only ones that can hold young objects.
     touched: Vec<u32>,
+    /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
+    /// counted as marking reaches each object because its header is in cache then.
+    pub marked_vector_cells: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -157,10 +165,12 @@ impl Space {
             marks: Vec::new(),
             allocated: Vec::new(),
             finalizable: Vec::new(),
+            interned: Vec::new(),
             cursors: [IDLE_CURSOR; CLASS_COUNT],
             available: Default::default(),
             empty_pages: Vec::new(),
             touched: Vec::new(),
+            marked_vector_cells: 0,
         }
     }
 
@@ -252,6 +262,7 @@ impl Space {
         self.marks.push([0; BITMAP_WORDS]);
         self.allocated.push([0; BITMAP_WORDS]);
         self.finalizable.push([0; BITMAP_WORDS]);
+        self.interned.push([0; BITMAP_WORDS]);
         Some(page as u32)
     }
 
@@ -293,8 +304,11 @@ impl Space {
         };
         // A major collection marks every live object again, so the test keeps it from storing
         // into the header of each one that is already old.
-        if unmarked && unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
-            unsafe { object.set_gc_bit(gc_bits::OLD, true) };
+        if unmarked {
+            if unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
+                unsafe { object.set_gc_bit(gc_bits::OLD, true) };
+            }
+            self.marked_vector_cells += unsafe { vector_cells(object) };
         }
         unmarked
     }
@@ -303,6 +317,51 @@ impl Space {
     pub fn set_finalizable(&mut self, object: Sexp) {
         if let Some((page, word, bit)) = self.locate(object) {
             self.finalizable[page][word] |= bit;
+        }
+    }
+
+    /// Records that `object` is in the intern table, and says whether it lives in this space; a
+    /// string too long for any slot is a large object, which the caller tracks itself.
+    pub fn set_interned(&mut self, object: Sexp) -> bool {
+        match self.locate(object) {
+            Some((page, word, bit)) => {
+                self.interned[page][word] |= bit;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The interned strings allocated since the last collection that it has not marked. Only
+    /// pages a cursor entered since then can hold them.
+    pub fn unmarked_young_interned(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.touched.iter().flat_map(move |&page| {
+            let page = page as usize;
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            (0..BITMAP_WORDS).flat_map(move |word| {
+                let bits = self.interned[page][word] & !self.marks[page][word];
+                set_bits(bits).map(move |bit| {
+                    let offset = page * PAGE_SIZE + (word * 64 + bit) * slot_size;
+                    // SAFETY: an interned slot holds a string of a committed page.
+                    unsafe { Sexp::from_non_null(self.base.add(offset).cast()) }
+                })
+            })
+        })
+    }
+
+    /// Marks every interned string allocated since the last collection.
+    pub unsafe fn mark_young_interned(&mut self) {
+        for index in 0..self.touched.len() {
+            let page = self.touched[index] as usize;
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            for word in 0..BITMAP_WORDS {
+                let unmarked = self.interned[page][word] & !self.marks[page][word];
+                for bit in set_bits(unmarked) {
+                    let offset = page * PAGE_SIZE + (word * 64 + bit) * slot_size;
+                    // SAFETY: an interned slot holds a string of a committed page.
+                    unsafe { self.mark(Sexp::from_non_null(self.base.add(offset).cast())) };
+                }
+            }
         }
     }
 
@@ -411,6 +470,7 @@ impl Space {
                 swept.freed += u64::from(dead.count_ones());
             }
             self.allocated[page][word] = marks;
+            self.interned[page][word] &= marks;
             live += marks.count_ones();
         }
         let before = self.live_slots[page] as isize;
@@ -572,6 +632,20 @@ fn run_mask(bit: usize, run: usize) -> u64 {
     } else {
         ((1u64 << run) - 1) << bit
     }
+}
+
+/// The 8-byte cells `object`'s vector data takes, as GNU R's `Vcells` count it, or zero for an
+/// object that is not a vector. An ALTREP vector's data lives in the objects it points at.
+unsafe fn vector_cells(object: Sexp) -> u64 {
+    let kind = unsafe { object.kind() };
+    if kind.shape() != Shape::Vector || unsafe { object.is_altrep() } {
+        return 0;
+    }
+    let Some(element) = kind.element_size() else {
+        return 0;
+    };
+    let elements = unsafe { object.length() } as usize + usize::from(kind == SexpType::Char);
+    (elements * element).div_ceil(8) as u64
 }
 
 /// The slots of word `word` that exist in a page of `slots` slots.

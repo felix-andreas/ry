@@ -49,7 +49,9 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check.
+behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
+but only when started by hand: the orchestrating agent starts it on main at its hourly check when
+main has new commits, so a push or a pull request gets no CI run of its own.
 
 ### Blessing expectations
 
@@ -382,6 +384,8 @@ JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, 
 and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
+engines and compares the images ([Corpus and oracle](/contributing/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
 in a debug build. `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup`
 from the first allocation, which takes about seven seconds on an empty script in a debug build.

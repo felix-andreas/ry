@@ -19,6 +19,7 @@ use {
         NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation_kind,
         matching_nodes, node_text,
     },
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
@@ -154,7 +155,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 let body = lowering.lower_type(&child);
                 lowering.definition_type = false;
                 annotation.declared = Some(TypeScheme {
-                    binders: take(&mut forall),
+                    binders: ThinVec::from(take(&mut forall)),
                     body,
                 });
             }
@@ -188,9 +189,12 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             default_reads: Vec::new(),
             missing_tested: Vec::new(),
             condition_only: Vec::new(),
+            null_unless: None,
+            reduces: None,
+            from_calls: false,
         };
         annotation.declared = Some(TypeScheme {
-            binders: forall,
+            binders: ThinVec::from(forall),
             body: Ty::new(db, TyKind::Function(function)),
         });
     }
@@ -309,7 +313,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         .map(|parameter: &Parameter<'db>| parameter.name.text(db).to_owned())
         .collect();
     annotation.declared = Some(TypeScheme {
-        binders: forall,
+        binders: ThinVec::from(forall),
         body: Ty::new(
             db,
             TyKind::Function(FunctionType {
@@ -323,6 +327,9 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         ),
     });
@@ -525,6 +532,9 @@ pub fn merge_annotations<'db>(
                     default_reads: Vec::new(),
                     missing_tested: Vec::new(),
                     condition_only: Vec::new(),
+                    null_unless: None,
+                    reduces: None,
+                    from_calls: false,
                 }),
             ),
         }),
@@ -1660,6 +1670,9 @@ impl<'db> Lowering<'db> {
                 default_reads: Vec::new(),
                 missing_tested: Vec::new(),
                 condition_only: Vec::new(),
+                null_unless: None,
+                reduces: None,
+                from_calls: false,
             }),
         )
     }

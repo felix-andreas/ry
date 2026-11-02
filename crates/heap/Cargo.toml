@@ -10,13 +10,12 @@ publish = false
 path = "src/heap.rs"
 
 [dependencies]
-hashbrown = "0.16"
 libc = "0.2"
 rustc-hash.workspace = true
 smallvec = { version = "1.15", features = ["union"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [dev-dependencies]
 syntax = { path = "../syntax" }

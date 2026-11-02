@@ -126,7 +126,6 @@ foobar::bazqux(1L)
 == R/main.R
 Unknown
 0..14 warning[unresolved] unknown package namespace `foobar`.
-0..14 error[strict] strict mode: could not determine the type of `bazqux`; it has no known type
 0..18 error[strict] strict mode: this calls `bazqux`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- strict_off_keeps_unresolved_a_warning

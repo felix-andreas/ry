@@ -244,3 +244,82 @@ pub unsafe extern "C" fn ry_read_rds(path: *const c_char) -> crate::SEXP {
         crate::serialize::read_rds(std::path::Path::new(&path))
     })
 }
+
+/// Runs when the dynamic loader loads this library, after it has applied the relocations of the
+/// executable and of every library loaded with it.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static RELEASE_RELOCATION_TABLES: extern "C" fn() = release_relocation_tables;
+
+/// Drops the pages of every loaded object's dynamic relocation table (`DT_RELA`). The loader
+/// reads each table once, when it maps the object, and never again, yet the pages stay resident
+/// for the life of the process: about 4 MB for `libR` and the `ry` executable, a third of their
+/// resident start-up footprint. The tables live in a read-only file mapping, so dropping the
+/// pages loses nothing, and a later read faults them back in from the file. The lazy-binding
+/// table (`DT_JMPREL`) is left alone, because the loader reads it again on each first call
+/// through the PLT. Packed relative relocations (`-z pack-relative-relocs`) would shrink the
+/// tables instead, but they need glibc 2.36 and the release binaries support glibc 2.35.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+extern "C" fn release_relocation_tables() {
+    unsafe extern "C" fn release(
+        info: *mut libc::dl_phdr_info,
+        _size: libc::size_t,
+        _data: *mut c_void,
+    ) -> c_int {
+        const DT_NULL: i64 = 0;
+        const DT_RELA: i64 = 7;
+        const DT_RELASZ: i64 = 8;
+        // Small tables are not worth a system call.
+        const MINIMUM: u64 = 64 * 1024;
+        // SAFETY: the loader passes a valid description of one loaded object.
+        let info = unsafe { &*info };
+        let headers = unsafe { std::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum.into()) };
+        let Some(dynamic) = headers
+            .iter()
+            .find(|header| header.p_type == libc::PT_DYNAMIC)
+        else {
+            return 0;
+        };
+        let (mut table, mut size) = (0u64, 0u64);
+        let mut entry = (info.dlpi_addr + dynamic.p_vaddr) as *const [u64; 2];
+        loop {
+            // SAFETY: the dynamic section is mapped and ends with a `DT_NULL` entry.
+            let [tag, value] = unsafe { *entry };
+            match tag as i64 {
+                DT_NULL => break,
+                DT_RELA => table = value,
+                DT_RELASZ => size = value,
+                _ => {}
+            }
+            entry = unsafe { entry.add(1) };
+        }
+        if size < MINIMUM {
+            return 0;
+        }
+        // glibc rewrites the table's address to an absolute one on most targets; on others it
+        // stays relative to the load address, which makes it smaller than that address.
+        if table < info.dlpi_addr {
+            table += info.dlpi_addr;
+        }
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        let start = table.next_multiple_of(page);
+        let end = (table + size) / page * page;
+        if start < end {
+            // A failure leaves the pages resident, which is only a missed saving, so the result
+            // is not checked.
+            // SAFETY: the range lies inside the object's read-only, file-backed first segment.
+            unsafe {
+                libc::madvise(
+                    start as *mut c_void,
+                    (end - start) as usize,
+                    libc::MADV_DONTNEED,
+                )
+            };
+        }
+        0
+    }
+    // SAFETY: the callback only reads the loader's descriptions and advises on their pages.
+    unsafe { libc::dl_iterate_phdr(Some(release), std::ptr::null_mut()) };
+}
