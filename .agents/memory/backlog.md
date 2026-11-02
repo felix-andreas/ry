@@ -2242,6 +2242,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - purrr: with testthat's parallel mode its run starts two test processes and then hangs until
     the timeout, though a lone `callr::r_session` works. Serially, five `test-parallel.R` tests
     fail: mirai's indexed errors lose the index ("In index: ." instead of the position or name).
+  - pkgload's `test-dll.R` fails under `oracle packages` (`getNativeSymbolInfo` is handed
+    something that is not a `DLLInfo`, and `test-load.R` hits "SETCAR on NULL"), yet the same
+    `load_all("testDllLoad")` from the test directory with `ry run` loads cleanly. Find what the
+    harness's environment changes (`R_HOME`, the `R CMD` it compiles with, or the working
+    directory).
   - No graphics devices: gtable, and every vignette that plots (rcmdcheck's
     `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
