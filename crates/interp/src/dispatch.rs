@@ -1175,12 +1175,11 @@ unsafe fn group_dispatch(
             } else if choose_ops_method(call, args, right, left, true)? {
                 (1, 1)
             } else {
-                crate::conditions::warning_call(
-                    call,
-                    format!(
-                        "Incompatible methods (\"{left_name}\", \"{right_name}\") for \"{generic}\""
-                    ),
-                )?;
+                // GNU R attributes this warning to the enclosing closure call, not the operator
+                // call, so at top level it has no call at all.
+                crate::conditions::warning(format!(
+                    "Incompatible methods (\"{left_name}\", \"{right_name}\") for \"{generic}\""
+                ))?;
                 return Ok(None);
             }
         }

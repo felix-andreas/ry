@@ -25,3 +25,17 @@ check(order(as.integer(x * 10), g, method = "radix"))
 check(order(g, x, na.last = NA, method = "radix"))
 small <- c(2L, 1L, 2L, 1L, 2L)
 print(order(small, c(5, 4, 3, 2, 1), method = "radix"))
+
+# `@` reads slots of S4 objects only; anything else dispatches an S3 method or errors.
+y <- structure(1, foo = 2)
+print(tryCatch(y@foo, error = conditionMessage))
+print(tryCatch(letters@foo, error = conditionMessage))
+identical(letters@.Data, letters)
+registerS3method("@", "zz", function(x, name) paste("slot", name))
+z <- structure(list(), class = "zz")
+z@anything
+
+# nsmall widens a fixed format after the notation is chosen.
+print(sapply(c(0, 5, 14), function(i) format(2, nsmall = i)))
+print(format(c(-1.25, 3.14159), nsmall = 10))
+print(format(3.14 + 2.2i, nsmall = 6))

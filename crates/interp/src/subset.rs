@@ -1350,9 +1350,38 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
     }
 }
 
+/// `object@name`. Only S4 objects have slots: on any other object `@` reads `.Data` (the
+/// object itself) or dispatches an S3 `@` method, and otherwise is an error.
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env)?;
     let symbol = slot_symbol(call.arg(1))?;
+    if symbol != symbols().dot_data && !crate::coerce::is_s4(object) {
+        if object.is_object() {
+            let name = values::scalar_string_charsxp(symbol.car())?;
+            let args = [
+                Arg {
+                    tag: nil(),
+                    value: object,
+                },
+                Arg {
+                    tag: nil(),
+                    value: name,
+                },
+            ];
+            if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env)?
+            {
+                return Ok(value);
+            }
+        }
+        let class = crate::dispatch::class_of(object)?;
+        return Err(crate::unwind::error_in(
+            call.call,
+            format!(
+                "no applicable method for `@` applied to an object of class \"{}\"",
+                values::first_string(class).unwrap_or_default()
+            ),
+        ));
+    }
     get_slot(object, symbol, call.call)
 }
 

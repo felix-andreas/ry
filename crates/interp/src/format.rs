@@ -176,8 +176,18 @@ pub fn format_real_common(values: &[f64], settings: Settings) -> RealFormat {
             exponent: 0,
         },
     };
+    widen_to_nsmall(&mut format, settings.nsmall);
     format.width = format.width.max(candidates.special_width);
     format
+}
+
+/// Gives a fixed format at least `nsmall` decimals. `nsmall` widens the format only after the
+/// choice between fixed and scientific notation, so it never tips a value into scientific.
+fn widen_to_nsmall(format: &mut RealFormat, nsmall: usize) {
+    if format.exponent == 0 && format.width > 0 && nsmall > format.decimals {
+        format.width += nsmall - format.decimals + (format.decimals == 0) as usize;
+        format.decimals = nsmall;
+    }
 }
 
 /// The fixed and the scientific format `values` would share, `None` when no value is finite,
@@ -240,10 +250,7 @@ fn real_format_candidates(values: &[f64], settings: Settings) -> RealCandidates 
         + mantissa_decimals
         + 3
         + exponent_digits;
-    let mut right = right_max.max(0) as usize;
-    if settings.nsmall > right {
-        right = settings.nsmall;
-    }
+    let right = right_max.max(0) as usize;
     let fixed_width = max_sleft as usize + right + (right != 0) as usize;
     RealCandidates {
         notations: Some((
@@ -518,6 +525,8 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
     } else {
         (real_scientific, imaginary_scientific)
     };
+    widen_to_nsmall(&mut real, settings.nsmall);
+    widen_to_nsmall(&mut imaginary, settings.nsmall);
     real.width = real.width.max(real_candidates.special_width);
     imaginary.width = imaginary.width.max(imaginary_candidates.special_width);
     (real, imaginary)

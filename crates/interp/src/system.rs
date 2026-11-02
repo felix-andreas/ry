@@ -29,7 +29,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
     internal("pcre_config", 0, |_| unsafe {
-        let result = values::logical_vector(&[1, 1, 1, 1])?;
+        // PCRE2 from 10.30 on matches without recursion, so it never needs the C stack.
+        let result = values::logical_vector(&[1, 1, 1, 0])?;
         let names = string_vector(&["UTF-8", "Unicode properties", "JIT", "stack"])?;
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
