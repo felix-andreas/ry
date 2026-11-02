@@ -27,7 +27,7 @@ use {
         strings::Encoding,
     },
     memchr::memmem,
-    pcre2::bytes::{Regex as PerlRegex, RegexBuilder as PerlRegexBuilder},
+    pcre2::bytes::{CaptureLocations, Regex as PerlRegex, RegexBuilder as PerlRegexBuilder},
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{borrow::Cow, cell::RefCell, rc::Rc},
@@ -2662,7 +2662,15 @@ enum Matcher {
         shortest: bool,
     },
     /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
-    Perl(Rc<PerlRegex>),
+    Perl(Rc<Perl>),
+}
+
+/// A PCRE2 pattern with the capture locations its matches reuse. Each new set of locations
+/// creates PCRE2 match data with its own JIT stack, which maps and unmaps up to 64 MB, so making
+/// one per match made `gsub(perl = TRUE)` spend most of its time in `mmap`.
+struct Perl {
+    regex: PerlRegex,
+    locations: RefCell<CaptureLocations>,
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2779,7 +2787,8 @@ impl Matcher {
                     .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
-            Matcher::Perl(regex) => regex
+            Matcher::Perl(perl) => perl
+                .regex
                 .find_at(text.as_bytes(), from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(perl_matching_error),
@@ -2829,9 +2838,10 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Perl(regex) => {
-                let mut locations = regex.capture_locations();
-                let found = regex
+            Matcher::Perl(perl) => {
+                let mut locations = perl.locations.borrow_mut();
+                let found = perl
+                    .regex
                     .captures_read_at(&mut locations, text.as_bytes(), from)
                     .map_err(perl_matching_error)?;
                 Ok(found.map(|_| {
@@ -2850,7 +2860,7 @@ impl Matcher {
             Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
-            Matcher::Perl(regex) => regex.captures_len().saturating_sub(1),
+            Matcher::Perl(perl) => perl.regex.captures_len().saturating_sub(1),
         }
     }
 
@@ -2863,7 +2873,8 @@ impl Matcher {
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
                 .collect(),
-            Matcher::Perl(regex) => regex
+            Matcher::Perl(perl) => perl
+                .regex
                 .capture_names()
                 .iter()
                 .skip(1)
@@ -2895,7 +2906,10 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
         // long subject such as 5,000 repeats of `(a|b)+`.
         .max_jit_stack_size(Some(64 * 1024 * 1024));
     match builder.build(pattern) {
-        Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
+        Ok(regex) => Ok(Matcher::Perl(Rc::new(Perl {
+            locations: RefCell::new(regex.capture_locations()),
+            regex,
+        }))),
         Err(failure) => {
             // The crate prefixes PCRE2's message with its own text, which GNU R does not print.
             // GNU R prints the message and the rest of the pattern from the error's byte offset.

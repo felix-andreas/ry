@@ -31,12 +31,12 @@ The quality bar is four things.
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
-- **Strings:** `paste(collapse =)` 1.7x, `format` 1.25x, `sub` 1.2x, `gsub(perl = TRUE)` 1.15x. `as.character(double)` looks infinitely slower because GNU R defers it through ALTREP. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
+- **Strings:** `paste(collapse =)` 1.7x, `format` 1.25x, `sub` 1.2x. `gsub(perl = TRUE)` runs at about half GNU R's time now that PCRE2 capture locations are reused per pattern. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings takes 1.1 s against GNU R's 0.46 s (one thread), whatever the collection budget.
 - **Grouping:** `order` on two keys is at parity. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
 - **Matrix and time series:** `apply` over rows 1.9x and xts `period.apply` 1.3x are both per-call interpreter cost (about 33k `mean(xt[i])` calls through `[.xts`), which the tier-0 work owns; zoo `rollmean` 1.4x.
-- **Heap-state dependence (heap work):** with 1e7 live strings already in the session, `formatC` went from 5.9 s to 7.8 s on ry while GNU R stays level, because the session-wide string table's probes miss cache. `values::StringMemo` hides this per call in `substr` and `formatC`, but every other string producer still pays it. ry's `gc.time()` returns zeros, so collector time cannot be attributed from R.
-- **Peak memory** (`run.py --memory`) is 1.0 to 1.4 times GNU R's at 1e6 rows (`format` 1.40, `paste0` 1.30, the rest mostly 1.0 to 1.15), and kernels that allocate little sit about 13 MB above GNU R, which is the start-up gap in file-backed code pages (`decisions.md`, "Peak memory comes from what the heap keeps alive"). Allocator retention is not the cause: the peaks are the same with glibc `malloc` in libR. Still open:
-  - **Base `order` on several keys** peaks about 13% above GNU R at 1e6 rows (166 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
+- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.1 times GNU R's for `paste0` (1.07), `format` (1.10), `sprintf`, `formatC` and most kernels, and kernels that allocate little sit about 4 MB above GNU R (`decisions.md`, "Start-up memory: release relocation tables and preflight code pages"). Still above 1.15:
+  - `paste(collapse =)` 1.37, `xts period.apply` 1.36, `order(chr)` 1.26, `gsub(perl = TRUE)` 1.20, `sort`/`order` on doubles 1.18 to 1.19, `unsplit` 1.18, `merge` and `as.character(double)` 1.17.
+  - Base `order` on two keys is at 1.07 (157 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
 
 ## Open: the package loader
 
