@@ -154,6 +154,11 @@ kept <- sales |>
   LazyFrame.filter(col("units") > 1L) |>
   LazyFrame.select("units")
 #++++
+path: character
+sales: DataFrame
+kept: LazyFrame
+90..94 warning[unused] `kept` is assigned but never used.
+98..149 error[strict] strict mode: the columns of this frame are unknown, so the column names and types this query uses are not checked. Annotate it with a type that lists its columns, as in `DataFrame{units: TYPE}`
 
 #---- strict_mode_reports_a_bare_frame_parameter
 # typing: strict
