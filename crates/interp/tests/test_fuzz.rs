@@ -14,8 +14,8 @@ use {
     interp::{
         deparse, lower,
         testing::{
-            check_bytecode_agreement, check_lowering_input, check_unserialize_input,
-            with_interpreter,
+            check_bytecode_agreement, check_lowering_input, check_render_drawing,
+            check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -117,5 +117,15 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
     let mut rng = SplitMix64(0xb17e_c0de);
     for _ in 0..fuzz_iterations(300) {
         check_bytecode_agreement(&mut rng);
+    }
+}
+
+/// Random drawings, with nested and dangling definitions and degenerate geometry, render to
+/// every format without panicking and render identically twice.
+#[test]
+fn fuzz_render_drawing() {
+    let mut rng = SplitMix64(0x9a7_7e51);
+    for _ in 0..fuzz_iterations(40) {
+        check_render_drawing(&mut rng);
     }
 }

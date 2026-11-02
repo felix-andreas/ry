@@ -282,7 +282,7 @@ const OPERATORS: [Operator; 25] = [
 ];
 
 impl Operator {
-    fn from_code(code: c_int) -> Option<Operator> {
+    pub(crate) fn from_code(code: c_int) -> Option<Operator> {
         usize::try_from(code - 1)
             .ok()
             .and_then(|index| OPERATORS.get(index).copied())
@@ -404,10 +404,24 @@ pub fn write_pages(
     title: &str,
     quality: u8,
 ) -> std::io::Result<()> {
+    let files = render_files(format, drawing, size, resolution, title, quality)?;
+    for (index, bytes) in files.iter().enumerate() {
+        std::fs::write(file_for_page(file, index + 1), bytes)?;
+    }
+    Ok(())
+}
+
+/// The contents of the files [`write_pages`] writes, in page order.
+pub fn render_files(
+    format: Format,
+    drawing: &Drawing,
+    size: [f64; 2],
+    resolution: f64,
+    title: &str,
+    quality: u8,
+) -> std::io::Result<Vec<Vec<u8>>> {
     match format {
-        Format::Pdf => {
-            return std::fs::write(file_for_page(file, 1), pdf_document(drawing, size, title));
-        }
+        Format::Pdf => return Ok(vec![pdf_document(drawing, size, title)]),
         Format::Postscript {
             onefile: true,
             paper,
@@ -415,12 +429,13 @@ pub fn write_pages(
         } => {
             let document =
                 postscript_document(&drawing.pages, size, paper, landscape, false, title);
-            return std::fs::write(file_for_page(file, 1), document);
+            return Ok(vec![document]);
         }
         _ => {}
     }
-    for (index, page) in drawing.pages.iter().enumerate() {
-        let bytes = match format {
+    let mut files = Vec::with_capacity(drawing.pages.len());
+    for page in &drawing.pages {
+        files.push(match format {
             Format::Svg => svg_document(page, &drawing.definitions, size).into_bytes(),
             Format::Png | Format::Bmp | Format::Tiff | Format::Jpeg => {
                 let pixels = rasterize(page, &drawing.definitions, size, resolution)
@@ -443,10 +458,9 @@ pub fn write_pages(
                 postscript_document(page, size, paper, landscape, true, title)
             }
             Format::Postscript { onefile: true, .. } | Format::Pdf => Vec::new(),
-        };
-        std::fs::write(file_for_page(file, index + 1), bytes)?;
+        });
     }
-    Ok(())
+    Ok(files)
 }
 
 /// A file name with its `%d` (or `%03d`) conversion filled in with `page`, `%%` unescaped,
@@ -1984,12 +1998,12 @@ fn coverage(
     let mut coverage = tiny_skia::Mask::new(width, height)?;
     match item.clip {
         Clip::Rect(rect) => {
-            let path = skia_path(&rect_outline(rect))?;
+            let path = skia_path(&rect_outline(rect), to_pixels)?;
             coverage.fill_path(&path, tiny_skia::FillRule::Winding, false, to_pixels.skia());
         }
         Clip::Path(index) => {
             if let Some(Definition::ClipPath { outline, rule }) = definitions.get(index)
-                && let Some(path) = skia_path(outline)
+                && let Some(path) = skia_path(outline, to_pixels)
             {
                 coverage.fill_path(&path, skia_rule(*rule), true, to_pixels.skia());
             }
@@ -2035,7 +2049,7 @@ fn draw_mark(
             rule,
             stroke,
         } => {
-            let Some(path) = skia_path(outline) else {
+            let Some(path) = skia_path(outline, to_pixels) else {
                 return;
             };
             let source = match painted(fill) {
@@ -2101,7 +2115,7 @@ fn draw_mark(
                 return;
             };
             let outline = text_outline(face, text, *points, *origin, *rotation, *hadj);
-            if let Some(path) = skia_path(&outline) {
+            if let Some(path) = skia_path(&outline, to_pixels) {
                 canvas.fill_path(
                     &path,
                     &solid_paint(*colour),
@@ -2300,7 +2314,24 @@ fn skia_rule(rule: FillRule) -> tiny_skia::FillRule {
     }
 }
 
-fn skia_path(outline: &[Segment]) -> Option<tiny_skia::Path> {
+/// The outline as a tiny-skia path, or `None` when it is empty or any of its points lands
+/// outside the finite range of `f32` once mapped `to_pixels`, which tiny-skia's rasterizer
+/// assumes never happens.
+fn skia_path(outline: &[Segment], to_pixels: Affine) -> Option<tiny_skia::Path> {
+    let finite = |point: &[f64; 2]| {
+        to_pixels
+            .apply(*point)
+            .iter()
+            .all(|value| (*value as f32).is_finite())
+    };
+    let all_finite = outline.iter().all(|segment| match segment {
+        Segment::Move(to) | Segment::Line(to) => finite(to),
+        Segment::Cubic(first, second, end) => [first, second, end].into_iter().all(finite),
+        Segment::Close => true,
+    });
+    if !all_finite {
+        return None;
+    }
     let mut builder = tiny_skia::PathBuilder::new();
     let point = |[x, y]: [f64; 2]| (x as f32, y as f32);
     for segment in outline {
