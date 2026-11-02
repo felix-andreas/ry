@@ -455,7 +455,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !valid(compiled(activation), machine(activation).env, false) {
+                    if !valid(compiled(activation), machine.env, false) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
