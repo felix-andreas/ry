@@ -20,7 +20,7 @@
 use {
     crate::{
         env::Frame,
-        object::{Sexp, SexpType, flag_bits, gc_bits},
+        object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
     },
     std::ptr::NonNull,
 };
@@ -99,6 +99,9 @@ pub(crate) struct Space {
     empty_pages: Vec<u32>,
     /// Pages a cursor entered since the last collection: the only ones that can hold young objects.
     touched: Vec<u32>,
+    /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
+    /// counted as marking reaches each object because its header is in cache then.
+    pub marked_vector_cells: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +164,7 @@ impl Space {
             available: Default::default(),
             empty_pages: Vec::new(),
             touched: Vec::new(),
+            marked_vector_cells: 0,
         }
     }
 
@@ -293,8 +297,11 @@ impl Space {
         };
         // A major collection marks every live object again, so the test keeps it from storing
         // into the header of each one that is already old.
-        if unmarked && unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
-            unsafe { object.set_gc_bit(gc_bits::OLD, true) };
+        if unmarked {
+            if unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
+                unsafe { object.set_gc_bit(gc_bits::OLD, true) };
+            }
+            self.marked_vector_cells += unsafe { vector_cells(object) };
         }
         unmarked
     }
@@ -572,6 +579,20 @@ fn run_mask(bit: usize, run: usize) -> u64 {
     } else {
         ((1u64 << run) - 1) << bit
     }
+}
+
+/// The 8-byte cells `object`'s vector data takes, as GNU R's `Vcells` count it, or zero for an
+/// object that is not a vector. An ALTREP vector's data lives in the objects it points at.
+unsafe fn vector_cells(object: Sexp) -> u64 {
+    let kind = unsafe { object.kind() };
+    if kind.shape() != Shape::Vector || unsafe { object.is_altrep() } {
+        return 0;
+    }
+    let Some(element) = kind.element_size() else {
+        return 0;
+    };
+    let elements = unsafe { object.length() } as usize + usize::from(kind == SexpType::Char);
+    (elements * element).div_ceil(8) as u64
 }
 
 /// The slots of word `word` that exist in a page of `slots` slots.

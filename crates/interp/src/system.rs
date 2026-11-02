@@ -257,10 +257,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("capabilities", 0, do_capabilities),
     internal("capabilitiesX11", 0, |_| unsafe { scalar_bool(false) }),
     internal("gc", 3, do_gc),
-    internal("gcinfo", 1, |_| unsafe { scalar_bool(false) }).invisible(),
+    internal("gcinfo", 1, do_gcinfo).invisible(),
     internal("gctorture", 1, do_gctorture).invisible(),
     internal("gctorture2", 3, do_gctorture2).invisible(),
-    builtin("gc.time", -1, |_| unsafe { values::real_vector(&[0.0; 5]) }),
+    builtin("gc.time", -1, do_gc_time),
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
@@ -3070,28 +3070,90 @@ unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
-    crate::heap().collect(heap::Collection::Major);
+/// `gc(verbose, reset, full)`: runs a collection, a major one unless `full` is false, and
+/// returns GNU R's fourteen numbers: objects (`Ncells`) and vector cells (`Vcells`) in use, the
+/// same in megabytes, the trigger of the next major collection in both units and in megabytes,
+/// the limits (none, so `NA`), and the peak usage in both units and in megabytes.
+unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
+    let verbose = values::as_logical_scalar(call.arg(0)) == 1;
+    let reset = values::as_logical_scalar(call.arg(1)) == 1;
+    let full = values::as_logical_scalar(call.arg(2)) != 0;
+    let kind = if full {
+        heap::Collection::Major
+    } else {
+        heap::Collection::Minor
+    };
+    let heap = crate::heap();
+    heap.collect(kind);
+    if verbose && heap.policy().reporter.is_none() {
+        write_collection_report(&heap.report(kind));
+    }
     (interp().hooks.run_finalizers)();
     crate::frame::release_worker_memory();
-    let stats = crate::heap().stats();
+    let heap = crate::heap();
+    if reset {
+        heap.reset_max_usage();
+    }
+    let usage = heap.usage();
     let result = values::real_vector(&[
-        stats.live_objects as f64,
-        0.0,
-        (stats.live_bytes as f64) / 1048576.0,
-        0.0,
+        usage.objects as f64,
+        usage.vector_cells as f64,
+        usage.object_megabytes,
+        usage.vector_megabytes,
+        usage.object_trigger as f64,
+        usage.vector_trigger as f64,
+        usage.object_trigger_megabytes,
+        usage.vector_trigger_megabytes,
         NA_REAL,
         NA_REAL,
-        NA_REAL,
-        NA_REAL,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
+        usage.max_objects as f64,
+        usage.max_vector_cells as f64,
+        usage.max_object_megabytes,
+        usage.max_vector_megabytes,
     ])?;
     Ok(result)
+}
+
+/// `gcinfo(verbose)`: whether each collection prints a report to the console. Returns the
+/// previous setting.
+unsafe fn do_gcinfo(call: &Call<'_>) -> R<Sexp> {
+    let heap = crate::heap();
+    let previous = heap.policy().reporter.is_some();
+    let verbose = values::as_logical_scalar(call.arg(0));
+    if verbose != NA_LOGICAL {
+        heap.update_policy(|policy| {
+            policy.reporter = (verbose == 1).then_some(write_collection_report as unsafe fn(&str));
+        });
+    }
+    scalar_bool(previous)
+}
+
+unsafe fn write_collection_report(text: &str) {
+    (interp().hooks.write_console)(text.as_bytes(), true);
+}
+
+/// `gc.time(on = TRUE)`: the user, system and elapsed seconds spent collecting while timing
+/// was on, then two zeros where GNU R reports child processes' collection time, which ry has
+/// none of. Timing starts with the first call, as GNU R's does.
+unsafe fn do_gc_time(call: &Call<'_>) -> R<Sexp> {
+    let on = if call.is_empty() {
+        true
+    } else {
+        match values::as_logical_scalar(call.arg(0)) {
+            NA_LOGICAL => return Err(call.error("invalid 'on' argument")),
+            on => on == 1,
+        }
+    };
+    let heap = crate::heap();
+    heap.update_policy(|policy| policy.timing = on);
+    let stats = heap.stats();
+    values::real_vector(&[
+        stats.user_time.as_secs_f64(),
+        stats.system_time.as_secs_f64(),
+        stats.elapsed_time.as_secs_f64(),
+        0.0,
+        0.0,
+    ])
 }
 
 /// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
