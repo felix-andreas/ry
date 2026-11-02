@@ -3,11 +3,10 @@
 #@ param GROUPS int 3 12
 #@ param THRESHOLD float 0.2 0.8 2
 # Grouped aggregation, joins and reshaping on data.table.
-#: @alias Events@ID@ {data.table{id: integer[], group: character[], amount: double[], flag: logical[]}}
-#: @alias FeaturedEvents@ID@ {data.table{id: integer[], group: character[], amount: double[], flag: logical[], rank_in_group: integer[], size_class: character[], z: double[]}}
+alias Events@ID@ = data.table{id: integer[], group: character[], amount: double[], flag: logical[]}
+alias FeaturedEvents@ID@ = data.table{id: integer[], group: character[], amount: double[], flag: logical[], rank_in_group: integer[], size_class: character[], z: double[]}
 
-#: fn([rows]: integer, [groups]: integer, [seed]: integer) -> Events@ID@
-make_events_@ID@ <- function(rows = @ROWS@L, groups = @GROUPS@L, seed = 1L) {
+make_events_@ID@ <- function(rows: integer = @ROWS@L, groups: integer = @GROUPS@L, seed: integer = 1L) -> Events@ID@ {
   set.seed(seed)
   data.table::data.table(
     id = seq_len(rows),
@@ -17,13 +16,11 @@ make_events_@ID@ <- function(rows = @ROWS@L, groups = @GROUPS@L, seed = 1L) {
   )
 }
 
-#: fn(events: Events@ID@) -> data.table{group: character[], n: integer[], total: double[], share_flagged: double[]}
-summarise_groups_@ID@ <- function(events) {
+summarise_groups_@ID@ <- function(events: Events@ID@) -> data.table{group: character[], n: integer[], total: double[], share_flagged: double[]} {
   events[, .(n = .N, total = sum(amount), share_flagged = mean(flag)), by = group][order(-total)]
 }
 
-#: fn(events: Events@ID@) -> FeaturedEvents@ID@
-add_features_@ID@ <- function(events) {
+add_features_@ID@ <- function(events: Events@ID@) -> FeaturedEvents@ID@ {
   out <- data.table::copy(events)
   out[, rank_in_group := data.table::frank(-amount, ties.method = "first"), by = group]
   out[, size_class := data.table::fcase(amount < 25, "small", amount < 75, "medium", default = "large")]
@@ -31,13 +28,11 @@ add_features_@ID@ <- function(events) {
   out[]
 }
 
-#: fn(events: Events@ID@, labels: data.table{group: character[], label: character[]}) -> data.table
-join_labels_@ID@ <- function(events, labels) {
+join_labels_@ID@ <- function(events: Events@ID@, labels: data.table{group: character[], label: character[]}) -> data.table {
   merge(events, labels, by = "group", all.x = TRUE)
 }
 
-#: fn(events: FeaturedEvents@ID@) -> data.table
-reshape_wide_@ID@ <- function(events) {
+reshape_wide_@ID@ <- function(events: FeaturedEvents@ID@) -> data.table {
   shape <- group ~ size_class
   data.table::dcast(events, shape, value.var = "amount", fun.aggregate = sum)
 }
