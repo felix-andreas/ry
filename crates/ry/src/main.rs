@@ -115,6 +115,10 @@ static LAZY_ARENA_COMMIT: extern "C" fn() = {
 };
 
 fn main() -> ExitCode {
+    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
+    if rcmd::front_end::invoked_as_front_end() {
+        return rcmd::front_end::main(env::args().skip(1).collect());
+    }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(

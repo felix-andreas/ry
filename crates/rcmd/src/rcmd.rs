@@ -35,6 +35,7 @@ mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
 
+pub mod front_end;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -308,7 +309,7 @@ pub struct HomeSources<'a> {
     pub include: &'a Path,
     /// ry's built `libR.so`, which holds the interpreter.
     pub libr: &'a Path,
-    /// The `ry-rcmd` binary that `bin/R` and `bin/Rscript` run.
+    /// The front end that `bin/R` and `bin/Rscript` run: `ry-rcmd`, or `ry` itself.
     pub rcmd: &'a Path,
     /// The GNU R installation (`R RHOME`) whose base packages, `share/` and `etc/` files the
     /// home links to.
@@ -421,8 +422,13 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         }
     }
 
+    // The scripts run the front end through a link named `ry-rcmd`, which is how a multi-call
+    // `ry` knows to act as the front end (`front_end::invoked_as_front_end`).
+    let front_end = root.join("bin/exec/ry-rcmd");
+    fs::create_dir_all(root.join("bin/exec")).map_err(io_error(&root.join("bin/exec")))?;
+    link(sources.rcmd, &front_end)?;
+    let rcmd = format!("{}/bin/exec/ry-rcmd", home.display());
     let home = home.display();
-    let rcmd = sources.rcmd.display();
     let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
     // `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR` stay plain `NAME='value'` lines: the
@@ -515,21 +521,21 @@ exec "$cmd" $extra "$@"
 }
 
 /// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
-/// ([`cached_home`]) from `libr`, the `ry-rcmd` front end that ships beside it, and the base R
-/// of `gnu_r_home`.
+/// ([`cached_home`]) from `libr`, a front end, and the base R of `gnu_r_home`. The front end is
+/// the `ry-rcmd` beside `libr` when there is one (a development build), and otherwise the
+/// running executable, which is `ry` (a release, whose runtime is extracted from `ry` itself) or
+/// a front end already.
 pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
-    let rcmd = libr.with_file_name(if cfg!(windows) {
+    let beside = libr.with_file_name(if cfg!(windows) {
         "ry-rcmd.exe"
     } else {
         "ry-rcmd"
     });
-    if !rcmd.is_file() {
-        return Err(Error::Package(format!(
-            "ry's R front end {} is missing; it ships beside {}",
-            rcmd.display(),
-            libr.display()
-        )));
-    }
+    let rcmd = if beside.is_file() {
+        beside
+    } else {
+        std::env::current_exe().map_err(io_error(&beside))?
+    };
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .filter(|directory| !directory.is_empty())
         .map(PathBuf::from)
@@ -656,7 +662,11 @@ fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Pat
     ] {
         let path = root.join(front_end);
         remove_file_if_present(&path)?;
-        fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        // `ry.exe` carries the runtime when it is the front end, so a link saves its size six
+        // times over.
+        if fs::hard_link(sources.rcmd, &path).is_err() {
+            fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        }
     }
     for library in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
         let from = gnu.join("bin/x64").join(library);

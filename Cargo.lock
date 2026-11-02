@@ -3628,6 +3628,7 @@ dependencies = [
  "rcmd",
  "reedline",
  "syntax",
+ "zstd",
 ]
 
 [[package]]

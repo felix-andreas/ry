@@ -314,6 +314,56 @@ fn r_home() -> Result<&'static PathBuf, String> {
     .map_err(Clone::clone)
 }
 
+/// A `ry` with the runtime embedded, as a release ships it, alone in a directory of its own.
+/// It is built with `RY_EMBED_RUNTIME` (`crates/repl/build.rs`) and copied away, and then `ry`
+/// is built again without it, so the binary the other scenarios run is the usual one and the
+/// next `cargo test` has nothing to rebuild. Scenarios run one after another, so none of them
+/// sees the swap.
+fn single_ry() -> Result<&'static PathBuf, String> {
+    static SINGLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    SINGLE
+        .get_or_init(|| {
+            let libr = libr_path()?;
+            let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
+                .parent()
+                .ok_or("the ry binary has no directory")?;
+            let release = profile_directory
+                .file_name()
+                .is_some_and(|name| name == "release");
+            let build = |embed: Option<&Path>| -> Result<(), String> {
+                let mut command = Command::new(env!("CARGO"));
+                command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
+                if release {
+                    command.arg("--release");
+                }
+                match embed {
+                    Some(library) => command.env("RY_EMBED_RUNTIME", library),
+                    None => command.env_remove("RY_EMBED_RUNTIME"),
+                };
+                let status = command
+                    .status()
+                    .map_err(|error| format!("building ry: {error}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("building ry failed".to_owned())
+                }
+            };
+            build(Some(libr))?;
+            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry");
+            fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            let single = directory.join("ry");
+            let copied = fs::copy(env!("CARGO_BIN_EXE_ry"), &single)
+                .map(|_| ())
+                .map_err(|error| format!("copying ry: {error}"));
+            build(None)?;
+            copied?;
+            Ok(single)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -775,17 +825,23 @@ impl Journey {
                     Err(format!("{path} lacks `{needle}`:\n{text}"))
                 }
             }
-            ["run", "ry", arguments @ ..] => {
-                // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test only
-                // builds it for the scenario's R home.
-                if matches!(arguments.first(), Some(&("build" | "install"))) {
-                    r_home()?;
-                }
+            ["run", program @ ("ry" | "single-ry"), arguments @ ..] => {
+                let executable = if *program == "single-ry" {
+                    single_ry()?.clone()
+                } else {
+                    // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test
+                    // only builds it for the scenario's R home.
+                    if matches!(arguments.first(), Some(&("build" | "install"))) {
+                        r_home()?;
+                    }
+                    PathBuf::from(env!("CARGO_BIN_EXE_ry"))
+                };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+                let output = Command::new(executable)
                     .args(arguments)
                     .current_dir(&self.root)
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .env_remove("RY_LIBR")
                     .output()
                     .map_err(|error| format!("running ry: {error}"))?;
                 self.last_run = Some(Run {

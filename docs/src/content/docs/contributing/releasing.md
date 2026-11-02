@@ -11,19 +11,27 @@ it, and publishes the GitHub release and the VS Code extension. The workflow is
 
 ## What a release ships
 
-Each archive holds `ry` and ry's runtime side by side, so `ry run` finds the runtime without
+Each archive holds `ry` alone, with ry's runtime built into it, so `ry run` needs no
 configuration:
 
 | Archive | Contents |
 | --- | --- |
-| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `LICENSE` |
-| `ry-aarch64-unknown-linux-gnu.tar.gz` | `ry`, `libR.so`, `LICENSE` |
-| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
-| `ry-x86_64-apple-darwin.tar.gz` | `ry`, `libR.dylib`, `LICENSE` |
-| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `R.dll`, `LICENSE` |
+| `ry-x86_64-unknown-linux-gnu.tar.gz` | `ry`, `LICENSE` |
+| `ry-aarch64-unknown-linux-gnu.tar.gz` | `ry`, `LICENSE` |
+| `ry-aarch64-apple-darwin.tar.gz` | `ry`, `LICENSE` |
+| `ry-x86_64-apple-darwin.tar.gz` | `ry`, `LICENSE` |
+| `ry-x86_64-pc-windows-gnullvm.zip` | `ry.exe`, `LICENSE` |
 
-ry looks for its runtime beside the executable and in `../lib/ry/`, so an installer may place
-`ry` in `bin/` and the library in `lib/ry/`. At run time, `ry run`, `ry R` and `ry load` also need
+`just package` builds the runtime first and then `ry` with `RY_EMBED_RUNTIME` naming it, which
+embeds it zstd-compressed (`crates/repl/build.rs`), along with `libR.dll.a` on Windows. On first
+use `ry` extracts it into `ry/runtime/<hash>/` of the user's cache. `ry` is also the R front end
+that `ry-rcmd` is in a development build: ry's R home runs it through a link named `ry-rcmd`
+(on Windows, hard links named `R.exe`, `Rscript.exe` and so on), and `ry` acts as the front end
+when started under such a name.
+
+ry looks for a runtime beside the executable, in `deps/` and in `../lib/ry/` before it falls back
+to the built-in one, so an installer may still place `ry` in `bin/` and the library in `lib/ry/`.
+At run time, `ry run`, `ry R` and `ry load` also need
 a GNU R installation built as a shared library, because ry's runtime reads base R from it. `ry
 check`, `ry fmt` and `ry server` need nothing else.
 
@@ -68,6 +76,6 @@ therefore the one counter across channels: never release `0.4.0-beta` and `0.4.0
 6. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
    hand and run `ry --version`.
 7. Update [Installation](/installation). For the first release from the workflow that means: each
-   archive holds `ry` and the runtime, which must stay side by side (or the runtime goes in
-   `../lib/ry/`); the Windows archive is now `ry-x86_64-pc-windows-gnullvm.zip` and carries `R.dll` (say that `ry run` and `ry load` work on Windows only if the Windows smoke test passed); Linux needs glibc
+   archive holds `ry` alone, with the runtime built in; the Windows archive is now
+   `ry-x86_64-pc-windows-gnullvm.zip` (say that `ry run` and `ry load` work on Windows only if the Windows smoke test passed); Linux needs glibc
    2.35; and Linux arm64 and Intel macOS archives exist.

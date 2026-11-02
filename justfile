@@ -176,9 +176,10 @@ bump-version $version:
     git add Cargo.toml Cargo.lock editors/code/package.json
     git commit -m "chore: release {{ version }}"
 
-# Build a release archive into release/VERSION: `ry` and ry's runtime (libR) side by side. TARGET
-# defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with an LLVM mingw toolchain
-# (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages share the UCRT.
+# Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) embedded in it,
+# and the license. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
+# an LLVM mingw toolchain (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages
+# share the UCRT.
 package version target="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -189,7 +190,14 @@ package version target="":
     stage="$dir/ry-$target"
     rm -rf "$stage"
     mkdir -p "$stage"
-    cargo build --release --locked --target "$target" -p ry-lang -p libr -p rcmd
+    case "$target" in
+    	*windows*) library=R.dll executable=ry.exe ;;
+    	*apple*) library=libR.dylib executable=ry ;;
+    	*) library=libR.so executable=ry ;;
+    esac
+    # The runtime is built first, because `ry` embeds it (crates/repl/build.rs).
+    cargo build --release --locked --target "$target" -p libr
+    RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" cargo build --release --locked --target "$target" -p ry-lang
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and
@@ -200,13 +208,11 @@ package version target="":
     			echo "error: ry.exe or R.dll imports a toolchain runtime the archive lacks: $runtimes" >&2
     			exit 1
     		fi
-    		cp "$build/ry.exe" "$build/R.dll" "$build/ry-rcmd.exe" LICENSE "$stage/"
-    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe R.dll ry-rcmd.exe LICENSE >/dev/null)
+    		cp "$build/ry.exe" LICENSE "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
     		;;
     	*)
-    		library=libR.so
-    		case "$target" in *apple*) library=libR.dylib ;; esac
-    		cp "$build/ry" "$build/$library" "$build/ry-rcmd" LICENSE "$stage/"
+    		cp "$build/ry" LICENSE "$stage/"
     		tar -czf "$dir/ry-$target.tar.gz" -C "$stage" .
     		;;
     esac

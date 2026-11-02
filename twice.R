@@ -1,0 +1,1 @@
+library(twice, lib.loc = "")\ncat(twice(21), "\\n")\n

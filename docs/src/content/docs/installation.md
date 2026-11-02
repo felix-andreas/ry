@@ -99,10 +99,13 @@ Windows the libraries are R's own `bin/x64/Rblas.dll` and `Rlapack.dll`. On Linu
 installs links the same libraries, because ry's R home takes `BLAS_LIBS` and `LAPACK_LIBS` from
 GNU R's `Makeconf`.
 
-From 0.4.0-beta on, the release archives hold `ry`, ry's runtime (`libR.so`, `libR.dylib` or
-`R.dll`), and `ry-rcmd`, which `ry load` uses to compile a package's `src/`. Keep them in the same
-directory, or put the runtime and `ry-rcmd` together in `../lib/ry/` relative to `ry`. The
-Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
+From 0.4.0-beta on, a release archive holds `ry` alone: ry's runtime (`libR.so`, `libR.dylib` or
+`R.dll`) is built into it. The first command that needs the runtime extracts it into
+`~/.cache/ry/runtime/` (`$XDG_CACHE_HOME`, or `%LOCALAPPDATA%` on Windows), once per release. If
+that directory cannot hold a library (it is read-only, or mounted `noexec`), set `XDG_CACHE_HOME`
+to another directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in
+`deps/`, or in `../lib/ry/` takes precedence over the built-in one, which is how a development
+build and a distribution's package find theirs. The Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
 `ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `msvc` one, without
 a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
 it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.

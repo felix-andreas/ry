@@ -18,6 +18,10 @@ nu-ansi-term.workspace = true
 rcmd = { path = "../rcmd" }
 reedline.workspace = true
 syntax = { path = "../syntax" }
+zstd = "0.13"
+
+[build-dependencies]
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
