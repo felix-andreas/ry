@@ -507,6 +507,32 @@ fn native_functions_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // Small callees compile into their callers: their locals stay their own, a `break`
+        // inside one leaves only its own loop, and a failure inside one fails the caller.
+        (
+            "ia <- function(x) { s <- x * 2; s + 1 }\nib <- function(x) { s <- 10; for (k in 1:3) { if (k > 2) break; s <- s + ia(k + x) }; s }",
+            "s <- 0\nfor (i in 1:n) s <- s + ib(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "ic <- function(x) { t <- 0L; for (k in 1:x) { if (k > 4L) break; t <- t + k }; t }\nid <- function(x) { t <- 0L; for (j in 1:3) t <- t + ic(x + j); t }",
+            "s <- 0L\nfor (i in 1:n) s <- s + id(i %% 9L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "ie <- function(x) x + 1L\nif2 <- function(x) ie(ie(x)) * 2L\nig <- function(x) if2(x) - ie(x)",
+            "s <- 0L\nfor (i in 1:n) s <- s + ig(if (i == 400L) 2147483646L else i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "fr <- function(x) if (x < 2L) x else fr(x - 1L) + fr(x - 2L)\nih <- function(x) fr(x) + fr(x + 1L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + ih(i %% 12L)\ns",
+            "(n = 600L)",
+            false,
+        ),
         // Loops and vector reads: a native function takes a plain vector as its object.
         (
             "dot <- function(x, y) { s <- 0; for (i in seq_along(x)) s <- s + x[[i]] * y[i]; s }",

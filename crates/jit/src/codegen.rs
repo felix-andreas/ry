@@ -68,7 +68,9 @@ const ALTREP_FLAG: i64 = 1 << 1;
 const ARRAY_FLAG: i64 = 1 << 4;
 const OBJECT_FLAG: i64 = 1 << 0;
 
-pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>), Refusal> {
+/// Compiles `plan` and returns its entry point, its deoptimization exits and the size of its
+/// machine code in bytes.
+pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>, u32), Refusal> {
     MODULE.with(|cell| {
         let mut module_slot = cell.borrow_mut();
         if module_slot.is_none() {
@@ -102,6 +104,7 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>), R
             }
             return Err(Refusal("Cranelift rejected the function"));
         }
+        let size = code_size(&context);
         module.clear_context(&mut context);
         module
             .finalize_definitions()
@@ -111,8 +114,16 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>), R
         Ok((
             unsafe { std::mem::transmute::<*const u8, Entry>(pointer) },
             exits,
+            size,
         ))
     })
+}
+
+/// The size in bytes of the machine code `context` holds after `define_function`.
+pub(crate) fn code_size(context: &cranelift_codegen::Context) -> u32 {
+    context
+        .compiled_code()
+        .map_or(0, |code| code.code_info().total_size)
 }
 
 /// Runs `f` with the session's code module, creating it on first use.

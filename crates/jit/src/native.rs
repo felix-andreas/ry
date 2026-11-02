@@ -104,6 +104,10 @@ const MAX_REFUSALS: usize = 65536;
 
 /// How deep a body's expressions may nest, which bounds the compiler's own recursion.
 const MAX_NESTING: usize = 200;
+/// The most calls and operators a callee's body may hold to be compiled into its caller.
+const MAX_INLINE_SIZE: usize = 24;
+/// How deeply inlined bodies may nest.
+const MAX_INLINE_DEPTH: usize = 3;
 
 /// The native function for calling `function` with unboxed arguments of types `params`,
 /// compiling it on first use. `None` when the closure is not a scalar function of them.
@@ -204,7 +208,8 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         ));
     }
     let speculations = second.speculations;
-    let address = codegen::with_module(|module| {
+    let started = std::time::Instant::now();
+    let (address, size) = codegen::with_module(|module| {
         let call_conv = module.isa().default_call_conv();
         let id = module
             .declare_anonymous_function(&signature(params, guess, call_conv))
@@ -227,14 +232,18 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         module
             .define_function(id, &mut context)
             .map_err(|_| Refusal("Cranelift rejected the function"))?;
+        let size = codegen::code_size(&context);
         module.clear_context(&mut context);
         module
             .finalize_definitions()
             .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
-        Ok(module.get_finalized_function(id) as usize)
+        Ok((module.get_finalized_function(id) as usize, size))
     })?;
     if std::env::var_os("RY_JIT_LOG").is_some() {
-        eprintln!("jit: native function for {params:?} -> {guess:?}");
+        eprintln!(
+            "jit: native function for {params:?} -> {guess:?} in {} us, {size} bytes",
+            started.elapsed().as_micros()
+        );
     }
     Ok(Native {
         address,
@@ -430,6 +439,11 @@ impl Operation {
 /// function; with one it also emits the code, so both make the same decisions.
 struct Walker<'p> {
     function: Sexp,
+    /// Where the body being walked looks up the functions it calls: the function's own
+    /// environment, or an inlined callee's.
+    environment: Sexp,
+    /// The callees whose bodies enclose the expression being walked, innermost last.
+    inlined: SmallVec<[Sexp; 2]>,
     /// The function's own result type, once known.
     own_result: Option<Ty>,
     parameters: &'p [(Sexp, Ty)],
@@ -466,6 +480,9 @@ impl<'p> Walker<'p> {
     fn new(function: Sexp, parameters: &'p [(Sexp, Ty)], own_result: Option<Ty>) -> Walker<'p> {
         Walker {
             function,
+            // SAFETY: `function` is a closure, whose tag is its environment.
+            environment: unsafe { function.tag() },
+            inlined: SmallVec::new(),
             own_result,
             parameters,
             locals: parameters
@@ -571,7 +588,7 @@ impl<'p> Walker<'p> {
                 if self.locals.iter().any(|(symbol, _, _)| *symbol == head) {
                     return Err(Refusal("a call of a local variable"));
                 }
-                let speculation = resolve_function(head, self.function.tag())
+                let speculation = resolve_function(head, self.environment)
                     .ok_or(Refusal("a function the lookup cannot resolve"))?;
                 let callee = speculation.function;
                 self.speculations.push(speculation);
@@ -652,6 +669,12 @@ impl<'p> Walker<'p> {
             .ok_or(Refusal("a call of a closure that is not a native function"))?;
         self.speculations
             .extend(native.speculations.iter().cloned());
+        if self.inlined.len() < MAX_INLINE_DEPTH && !self.inlined.contains(&callee) {
+            let body = bytecode::closure_body(callee);
+            if inlinable(body) {
+                return self.inline(emitter, callee, native, body, &types, &arguments);
+            }
+        }
         let value = emitter
             .as_mut()
             .map(|emitter| emitter.call(Callee::Other(native), &arguments))
@@ -660,6 +683,58 @@ impl<'p> Walker<'p> {
             kind: Kind::Known(native.result),
             value,
         })
+    }
+
+    /// A call of a small native function compiled into the caller: its body walked in its own
+    /// scope with its parameters bound to the argument values. The call is invisible in either
+    /// form, so this only saves the call and lets the caller's code see the callee's.
+    unsafe fn inline(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        callee: Sexp,
+        native: &Native,
+        body: Sexp,
+        types: &[Ty],
+        arguments: &[Value],
+    ) -> Result<Val, Refusal> {
+        let mut locals: SmallVec<[(Sexp, Ty, Option<Variable>); 8]> = SmallVec::new();
+        for (index, (&(symbol, _), &ty)) in values::pairlist_items(callee.car())
+            .iter()
+            .zip(types)
+            .enumerate()
+        {
+            let variable = match emitter.as_mut() {
+                Some(emitter) => {
+                    let argument = *arguments
+                        .get(index)
+                        .ok_or(Refusal("an inlined call without its argument"))?;
+                    let variable = emitter.builder.declare_var(machine_type(ty));
+                    emitter.builder.def_var(variable, argument);
+                    Some(variable)
+                }
+                None => None,
+            };
+            locals.push((symbol, ty, variable));
+        }
+        let caller_locals = std::mem::replace(&mut self.locals, locals);
+        let caller_breaks = std::mem::take(&mut self.breaks);
+        let caller_environment = std::mem::replace(&mut self.environment, callee.tag());
+        let caller_nesting = std::mem::take(&mut self.nesting);
+        self.inlined.push(callee);
+        let value = self.expression(emitter, body);
+        self.inlined.pop();
+        self.nesting = caller_nesting;
+        self.environment = caller_environment;
+        self.breaks = caller_breaks;
+        self.locals = caller_locals;
+        let value = value?;
+        match value.kind {
+            Kind::Known(ty) if ty == native.result => Ok(value),
+            Kind::Never => Ok(value),
+            _ => Err(Refusal(
+                "an inlined body of a different type than its function",
+            )),
+        }
     }
 
     unsafe fn builtin(
@@ -1204,7 +1279,7 @@ impl<'p> Walker<'p> {
                 .iter()
                 .any(|(symbol, _, _)| *symbol == expression.car())
         {
-            let speculation = resolve_function(expression.car(), self.function.tag())
+            let speculation = resolve_function(expression.car(), self.environment)
                 .ok_or(Refusal("a function the lookup cannot resolve"))?;
             let operation = base_builtin(speculation.function, expression.car())
                 .and_then(|name| Operation::of(&name))
@@ -1408,6 +1483,25 @@ enum Source {
     Vector(Value),
     /// A walk that only types the body.
     Typing,
+}
+
+/// Whether a native function's body is small enough to compile into its callers, and has no
+/// `return`, which would leave the caller instead.
+unsafe fn inlinable(body: Sexp) -> bool {
+    unsafe fn visit(expression: Sexp, budget: &mut usize) -> bool {
+        if expression.kind() != SexpType::Language {
+            return true;
+        }
+        if *budget == 0 || expression.car() == values::symbols().return_ {
+            return false;
+        }
+        *budget -= 1;
+        values::pairlist_items(expression.cdr())
+            .iter()
+            .all(|&(_, argument)| visit(argument, budget))
+    }
+    let mut budget = MAX_INLINE_SIZE;
+    visit(body, &mut budget)
 }
 
 /// Emits the body of a native function into `builder`.

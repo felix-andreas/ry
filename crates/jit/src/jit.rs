@@ -276,7 +276,7 @@ unsafe fn compile_in<'a>(
         if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
             return Err(Refusal(analysis::NOTHING_NATIVE));
         }
-        let (entry, exits) = codegen::compile(&plan, machine.code)?;
+        let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
             // The instructions left to tier 0 are where compiled code is slow.
@@ -302,7 +302,7 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {} speculations; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations; tier 0 runs: {})",
                 describe(machine.code),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
