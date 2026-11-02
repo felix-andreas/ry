@@ -631,7 +631,7 @@ effectively a two-core number.
 
 ### A first strict `ry load` costs the strict check's wall time
 
-- On typed finbench (4 cores), a load with no usable check record takes 2.5 to 2.7 s, against about 0.6 s untyped, and 0.55 to 0.64 s after `ry check` or a previous load (`decisions.md`, "The strict load check shares the check record"). The gap is analysis CPU: about 5.3 CPU-s for 380,000 lines of `R/` (parse 1 s, item HIR 0.9 s, folds 0.5 s, type check 2.2 s), so the lever left is the analysis core's own speed.
+- On typed finbench (4 cores), a load with no usable check record takes 2.0 to 2.2 s at full size, against 0.6 to 1.2 s untyped and 0.6 to 0.7 s after `ry check`; at 60,000 lines it is 0.45 to 0.55 s against 0.25 to 0.35 s untyped (`decisions.md`, "The strict load check analyses only the package"). The check skips tests and scripts and frees its memos off the verdict path, so what is left is checker CPU: at 60,000 lines the check alone is about 0.85 CPU-s (parse about 100 ms, `item_annotations` 63 ms, `file_annotation_references` 48 ms, folds 43 ms, parse-stage diagnostics 40 ms, HIR 39 ms, lints 37 ms). Lowering the thread's priority and changing the worker count were measured without gain, so the lever left is the analysis core's own speed.
 
 ### Corpus reports that more precise types now reach
 

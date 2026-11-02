@@ -73,7 +73,7 @@ expect stderr "median"
 
 run ry check
 expect exit 0
-expect stderr "no problems"
+expect stdout "no problems"
 
 run ry check R
 expect stderr "median"
