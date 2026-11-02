@@ -2,9 +2,9 @@
 #@ param ROWS int 3 25
 # Tabular files in three formats, written to and read back from a scratch directory.
 #@ typed
-write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@) -> Record{csv: character, xlsx: character, txt: character, table: data.frame} {
+write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@L) -> Record{csv: character, xlsx: character, txt: character, table: data.frame} {
 #@ untyped
-write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@) -> list{csv: character, xlsx: character, txt: character, table: data.frame} {
+write_tables_@ID@ <- function(directory: character, rows: integer = @ROWS@L) -> list{csv: character, xlsx: character, txt: character, table: data.frame} {
 #@ end
   fs::dir_create(directory)
   table: data.frame <- data.frame(

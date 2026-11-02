@@ -344,8 +344,12 @@ these rules:
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
   `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
-  types below it in the promotion order, as the checker does. A list type admits any list, a
-  function type any function, and a union any of its members. Vector shape, element types, and
+  types below it in the promotion order, as the checker does. A parameter whose type admits
+  `integer` also admits a `double` scalar holding a whole number, because the checker accepts a
+  whole-number literal there (`f(10)` for `n: integer`) and storage cannot tell a literal from a
+  computed value; a return value gets no such allowance. A list type admits any R list, a
+  `Record{...}` or `Tuple{...}` type any ry record or tuple, a function type any function, and a
+  union any of its members. Vector shape, element types, and
   attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
   parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
   have the annotated type.

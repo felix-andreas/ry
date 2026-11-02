@@ -465,6 +465,17 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     if mask == 0 || admits(mask, value) {
         return Ok(());
     }
+    // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
+    // `n: integer`). Storage cannot tell a literal from a computed value, so every whole-number
+    // `double` scalar passes, which keeps the check at least as loose as the static type. The
+    // compilers decide from the argument's actual storage, so none of them assumes `integer` here.
+    if slot != RETURN_SLOT
+        && mask & ARRAY == 0
+        && mask & bit(SexpType::Integer) != 0
+        && is_whole_double_scalar(value)
+    {
+        return Ok(());
+    }
     let expected = text_at(signature, slot);
     let found = describe(value);
     let message = if slot == REST_SLOT {
@@ -500,6 +511,13 @@ unsafe fn admits(mask: Mask, value: Sexp) -> bool {
         return value.is_array() && (items == 0 || items & bit(value.kind()) != 0);
     }
     mask & bit(value.kind()) != 0
+}
+
+unsafe fn is_whole_double_scalar(value: Sexp) -> bool {
+    value.kind() == SexpType::Real
+        && !value.is_array()
+        && value.attrib() == nil()
+        && matches!(values::reals(value), [number] if number.is_finite() && number.fract() == 0.0)
 }
 
 /// A value's storage type as a reader of the annotation thinks of it.

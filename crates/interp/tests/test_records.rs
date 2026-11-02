@@ -126,6 +126,15 @@ const PRINTS: &[(&str, &str)] = &[
         "{ f <- function() -> Record{x: double} list(x = 1); f() }",
         "Error in f() : the function must return `Record{x: double}`, not `list`\n",
     ),
+    // A whole-number double passes an `integer` parameter, as the checker's literal rule allows.
+    (
+        "{ f <- function(n: integer = 50) -> double n * 2; f() + f(3) }",
+        "[1] 106\n",
+    ),
+    (
+        "{ f <- function(n: integer) n; f(2.5) }",
+        "Error in f(2.5) : argument `n` must be `integer`, not `double`\n",
+    ),
     // Inline type definitions and nominal constructors exist only for the checker.
     ("@UserId(7L)", "[1] 7\n"),
     ("deparse(quote(@UserId(7L)))", "[1] \"(7L)\"\n"),

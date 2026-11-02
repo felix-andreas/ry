@@ -2993,6 +2993,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: findings from the records, library and frame round
 
+- **A record prints a classed field as its bare data.** `print((first = as.Date("2024-01-01"),))` shows `(first = 19723,)`, because the record printer deparses each field without its class. Print a classed field through `format()`, as `print.default` does for a list element.
 - **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
   as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
   which makes a diagnostic differ from the user's own definition. Show the declaration order.
