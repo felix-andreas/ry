@@ -4904,3 +4904,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `current_exe` in production; `Simulation::start_as` passes the scenario's `ry` binary, since the
   simulated server runs inside the test binary. `ClientOptions::cold` starts a simulated session
   before the warm-up, and the seeded sessions draw it.
+
+## Compiled function lookups also check the activation's own frame
+
+- **Previous shape.** A compiled body's speculations resolve a called name from the closure's
+  enclosure, because the compiler proves the body never binds the name itself. Validation
+  (`runtime::valid`) re-resolved from the same place whenever the binding epoch moved.
+- **What was weak.** R can bind a name in a function frame without any assignment in the body:
+  `assign` into `parent.frame()`, a default argument, or the locals `UseMethod` copies into the
+  method's frame. The epoch moved, but the re-resolution skipped the frame, so the cached global
+  function kept being called (oracle case `environments__hidden_function_bindings`).
+- **Target shape.** `valid` takes the activation's frame and refuses when a speculation that starts
+  at the body's enclosure finds a binding in that frame that may hold a function. Defining a
+  watched name in a function frame already moves the epoch, so the fast path is unchanged. A loop
+  entry, and the first run after a compile, walk the speculations regardless of the epoch, because
+  that frame may have bound the name before the compiler watched it.
+- **Impact.** Correct shadowing at no cost on the hot path; pinned by the oracle case and
+  `run_time_binding_shadows_cached_global_function` in `crates/jit/tests/test_tiers.rs`.

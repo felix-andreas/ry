@@ -1,7 +1,7 @@
 use {
     crate::{
         check_cache::{self, CacheUse, FileOutcome, Fingerprint, Plan},
-        config::{self, ExperimentalFeatures},
+        config,
         diagnostics::{apply_suppressions, document_diagnostics},
         namespace,
         position::LineIndex,
