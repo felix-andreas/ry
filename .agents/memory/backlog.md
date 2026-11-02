@@ -2342,11 +2342,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
   - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
-  build: 63 of 66 end with GNU R's exit status, 26 print exactly its output). Two divergences are
-  accepted: d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e prints `env.profile`
-  bucket counts that depend on GNU R's string hash. reg-large needs tens of gigabytes and times
-  out at debug speed, and utf8 and reg-examples1 come close to the 300 s limit, so confirm them
-  with a release build.
+  build: 64 of 66 end with GNU R's exit status, 35 print exactly its output). Two divergences are
+  accepted. d-p-q-r-tst-2 checks `pf` to the last bit, and reg-tests-1e stops at a
+  `fisher.test` table where GNU R's FEXACT overflows its hash keys and errors but ry computes the
+  exact p-value; it also prints `env.profile` bucket counts that depend on GNU R's string hash.
+  reg-large needs tens of gigabytes and times out at debug speed, and utf8 and reg-examples1
+  come close to the 300 s limit, so confirm them with a release build. The remaining output
+  differences are mostly accepted noise (timings, unseeded random numbers, `runmed` and `kmeans`
+  debug traces) plus these gaps:
+  - A parse error message lacks GNU R's `<text>:1:3: unexpected ...` layout with the source line
+    and caret.
+  - A finalizer error prints no `Calls:` traceback, and `gc()` errors name `gc(...)` where GNU R
+    names `.Internal(gc(...))`.
+  - Deparsing a long pairlist breaks lines at different places, and `dput` of an S4 generator
+    call prints the class name with its `package` attribute.
+  - `memCompress(type = "gzip")` output differs byte for byte at level 9 (zlib-rs picks
+    different matches than zlib), though it decompresses to the same data.
+  - `serialize` writes a compact integer sequence (`1:n`) expanded, where GNU R writes the
+    ALTREP form, so the bytes differ though both unserialize to the same vector.
 - **The help server is not implemented** (`tools::startDynamicHelp`). `Rprof` samples only the
   call stack, without memory, GC or line profiling.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
