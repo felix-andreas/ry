@@ -912,8 +912,32 @@ fn check_item_in<'db>(
         } else {
             TypeScheme::monomorphic(unknown(db))
         };
-        top_level_bindings.push((info.name, binding_scheme));
+        top_level_bindings.push((id, info.name, binding_scheme));
     }
+    // A loop variable that shares its name with another exported slot leaves no record of
+    // which slot is live at the end of the item, so that name exports as undetermined.
+    let ambiguous: FxHashSet<_> = top_level_bindings
+        .iter()
+        .filter(|(id, name, _)| {
+            naming.loop_bound_slots.contains(id)
+                && top_level_bindings
+                    .iter()
+                    .any(|(other, other_name, _)| other != id && other_name == name)
+        })
+        .map(|(_, name, _)| *name)
+        .collect();
+    let mut exported: FxHashSet<_> = FxHashSet::default();
+    let top_level_bindings: Vec<_> = top_level_bindings
+        .into_iter()
+        .filter_map(|(_, name, scheme)| {
+            if !ambiguous.contains(&name) {
+                return Some((name, scheme));
+            }
+            exported
+                .insert(name)
+                .then(|| (name, TypeScheme::monomorphic(unknown(db))))
+        })
+        .collect();
     let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
@@ -3273,8 +3297,11 @@ impl<'db> Checker<'db, '_> {
             return self.instantiate(&scheme);
         }
         // A package's export list or the project's imports name the binding, but no stub
-        // types it. An unresolved name is not an origin: naming reports it.
+        // types it. An unresolved name is not an origin: naming reports it. A base name with no
+        // stub is an intrinsic such as `c`, `list` or `[[` whose calls are typed specially, so
+        // reading it as a value is left unchecked rather than reported.
         if let Some(name) = naming.non_locals.get(&id)
+            && !is_base_export(self.db, name)
             && (self
                 .globals
                 .is_some_and(|globals| globals.library_candidates(name).is_some())
@@ -5002,7 +5029,8 @@ impl<'db> Checker<'db, '_> {
                         );
                     }
                 }
-                return variable_written;
+                // The pass that wrote the variable never converged either.
+                return variable_written.map(|_| unknown(self.db));
             }
             // Not yet stable: this pass ran under a stale entry state, so its diagnostics are
             // discarded.
@@ -16238,6 +16266,15 @@ fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<Inferenc
 /// A base operator read as a value, as in `Reduce(`+`, xs)` or `sweep(m, 2, s, `*`)`. Its result
 /// depends on R's coercion and dispatch rules for the operand types, which one signature cannot
 /// state, so it takes and returns `Any`.
+fn is_base_export(db: &dyn Db, name: &str) -> bool {
+    stubs(db).is_some_and(|library| {
+        library
+            .exports_by_namespace
+            .get("base")
+            .is_some_and(|exports| exports.contains(name))
+    })
+}
+
 fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
     const OPERATORS: &[&str] = &[
         "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",

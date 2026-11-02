@@ -85,6 +85,7 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
+- **Writes cut off by `break` or `next` are lost at loop joins.** `x <- "a"; if (c) break; x <- 1L` in a loop body leaves `x` without `character` after the loop, for loop-carried variables and for the loop variable alike (`check_loop_body` joins only the end-of-body state). Naming also calls the write before `next` unused. A nested loop that reuses its outer loop's variable name drops the outer loop's `NULL` (`for (m in xs) { for (m in 1:2) {} }; m` is `integer`).
 - Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
   unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
   message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no

@@ -364,11 +364,14 @@ total <- function(xs) Reduce(`+`, xs)
 scaled <- function(m, s) sweep(m, 2, s, `*`)
 #: fn(a: double, b: double) -> double
 added <- function(a, b) `+`(a, b)
+#: fn(xs: list[double]) -> list[Any]
+flattened <- function(xs) lapply(xs, c)
 #++++
 == R/main.R
 total: fn(xs: double[]) -> double
 scaled: fn(m: matrix, s: double[]) -> matrix
 added: fn(a: double, b: double) -> double
+flattened: fn(xs: list[double]) -> list[Any]
 
 #==== strict_top_level_loop_variable
 #---- a_later_statement_reads_the_loop_variable_type
@@ -379,6 +382,10 @@ last_value <- value
 for (index in 1:3) {}
 last_index <- index
 print(c(last_value, last_index))
+if (TRUE) { label <- "s"; for (label in 1:3) {} }
+#: integer
+last_label <- label
+print(last_label)
 #++++
 == scripts/run.R
 values: double[]
@@ -387,3 +394,6 @@ last_value: double | NULL
 NULL
 last_index: integer
 double[]
+NULL
+last_label: integer
+integer

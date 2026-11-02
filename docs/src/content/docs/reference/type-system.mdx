@@ -2616,11 +2616,13 @@ loop variable is re-initialized from the source on every iteration, so an assign
 body does not carry over into the next iteration.
 
 After the loop, R keeps the variable's last value, or sets it to `NULL` when the source was empty.
-A read there is therefore the element type joined with `NULL`, and with whatever the body assigns
-to the variable. A `from:to` range always has at least one element, so after
+A read there is therefore the element type joined with `NULL`, and with the variable's type at the
+end of the body when the body assigns it. A write that a `break` or `next` cuts off from the end of
+the body is not counted, which is a known gap, and so is a nested loop that reuses the name. A `from:to` range always has at least one element, so after
 `for (i in 1:n) {}` the variable `i` is `integer`, while after `for (value in x) {}` with
 `x: double[]` it is `double | NULL`. A loop at the top level of a file leaves its variable bound
-like a top-level assignment, so a later statement or item reads the same type.
+like a top-level assignment, so a later statement or item reads the same type. When the item also
+binds the name in another way, the name exports as `Unknown`.
 
 ### `while`
 
@@ -2862,9 +2864,12 @@ Manifests follow the way R exposes each namespace:
   While the namespace is inactive, its names stay unknown, bare and qualified alike.
 - A read satisfied only by an import still counts as a use for the unused check. A read with no
   known type, bare or qualified, is a strict-mode origin, whether it is a call or a value read such
-  as `template <- glue`.
-- A base operator read as a value, such as `` `+` `` in ``Reduce(`+`, xs)``, is
-  `fn(e1: Any, [e2]: Any) -> Any`, because its result depends on the operands' classes.
+  as `template <- glue`. A bare `base` name read as a value, such as `c` in `lapply(xs, c)`, is
+  the exception: it is `Unknown` and not reported, because those names are intrinsics whose calls
+  are typed specially.
+- An arithmetic, comparison or logical operator read as a value, such as `` `+` `` in
+  ``Reduce(`+`, xs)``, is `fn(e1: Any, [e2]: Any) -> Any`, because its result depends on the
+  operands' classes.
 
 ### Replacement-form assignment
 
