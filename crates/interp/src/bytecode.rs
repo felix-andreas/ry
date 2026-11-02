@@ -24,6 +24,12 @@
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found.
 //!
+//! A closure's argument that is a call compiles too, into a code object of its own whose source
+//! is the argument. A promise made from it keeps that code in its attribute slot, which a
+//! promise otherwise never uses, while its code slot keeps the expression for `substitute`,
+//! `PRCODE` and every other reader. Forcing the promise runs the code in the frame it was
+//! compiled for, through the same lookups and caches as the body (see [`Compiler::call_site`]).
+//!
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
 //! pointer to its window, stores its boxed values there (which roots them), and on
@@ -129,7 +135,7 @@ pub enum TierExit {
 
 /// One activation of compiled bytecode as the interpreter sees it: what [`Tier`] receives.
 pub struct Machine<'a> {
-    /// The closure whose body `code` is.
+    /// The closure whose body `code` is, or `NULL` for a promise's code.
     pub function: Sexp,
     pub code: Sexp,
     pub env: Sexp,
@@ -268,7 +274,7 @@ pub unsafe fn source_body(function: Sexp) -> Sexp {
     }
 }
 
-unsafe fn source_of(code: Sexp) -> Sexp {
+pub unsafe fn source_of(code: Sexp) -> Sexp {
     code.cdr().element(SOURCE)
 }
 
@@ -298,6 +304,37 @@ unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
     false
 }
 
+/// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
+/// constant, whose evaluation needs nothing of the code that made it. `break`, `next` and
+/// `return` act on the activation that evaluates them, which for a promise is not the one that
+/// made it, and a loop or a function definition is left out so that promise code never runs a
+/// back edge or carries a body of its own.
+unsafe fn compiles_as_promise(expression: Sexp) -> bool {
+    unsafe fn free_of_control(expression: Sexp, depth: u32) -> bool {
+        match expression.kind() {
+            SexpType::Symbol => !matches!(
+                &*symbol_name(expression),
+                "break" | "next" | "return" | "function" | "for" | "while" | "repeat"
+            ),
+            SexpType::Language => {
+                if depth == 0 {
+                    return false;
+                }
+                let mut cell = expression;
+                while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+                    if !free_of_control(cell.car(), depth - 1) {
+                        return false;
+                    }
+                    cell = cell.cdr();
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+    expression.kind() == SexpType::Language && free_of_control(expression, LOOP_SEARCH_DEPTH)
+}
+
 /// A body is worth compiling when it does more than evaluate one constant or symbol.
 unsafe fn worth_compiling(body: Sexp) -> bool {
     body.kind() == SexpType::Language
@@ -322,7 +359,9 @@ pub enum Op {
     /// `dst function call base count`: calls a builtin with the values in registers
     /// `base..base + count`, tagged as in `call`.
     CallBuiltin,
-    /// `dst function call`: any other call, with the AST evaluator's argument handling.
+    /// `dst function call`: any other call, with the AST evaluator's argument handling. The
+    /// constant after `call` holds the arguments a closure's promises are made from
+    /// ([`Compiler::call_site`]).
     CallGeneric,
     /// `dst expression`: evaluates an expression the compiler did not compile.
     Ast,
@@ -555,45 +594,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         rebinding: None,
         tail_update: tail_update(body, function),
     };
-    let result = compiler.allocate();
-    compiler.expression(body, result)?;
-    compiler.emit(Op::Return, &[result]);
-    let heap = crate::heap();
-    let words = values::alloc(SexpType::Integer, compiler.code.len())?;
-    for (index, word) in compiler.code.iter().enumerate() {
-        values::ints_mut(words)[index] = *word as i32;
-    }
-    let constants = values::alloc(SexpType::List, FIRST_CONSTANT + compiler.constants.len())?;
-    heap.set_element(constants, SOURCE, body);
-    let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
-    values::reals_mut(epochs).fill(-1.0);
-    heap.set_element(constants, EPOCHS, epochs);
-    let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
-    values::ints_mut(feedback).fill(0);
-    heap.set_element(constants, FEEDBACK, feedback);
-    let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
-    values::ints_mut(profile).fill(0);
-    heap.set_element(constants, PROFILE, profile);
-    heap.set_element(constants, TIER1, nil());
-    let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
-    for (index, entry) in compiler.loops.iter().enumerate() {
-        let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
-        slots.copy_from_slice(&[
-            entry.start as i32,
-            entry.end as i32,
-            entry.exit as i32,
-            entry.step as i32,
-        ]);
-    }
-    heap.set_element(constants, LOOPS, loops);
-    let registers = values::scalar_integer(compiler.registers as i32)?;
-    heap.set_element(constants, REGISTERS, registers);
-    for (index, constant) in compiler.constants.iter().enumerate() {
-        heap.set_element(constants, FIRST_CONSTANT + index, *constant);
-    }
-    let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
-    let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
-    Ok(Some(code))
+    compiler.assemble(body).map(Some)
 }
 
 /// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
@@ -808,6 +809,102 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
 }
 
 impl Compiler {
+    /// Compiles `source` as the whole code of a new code object, and builds that object.
+    unsafe fn assemble(&mut self, source: Sexp) -> R<Sexp> {
+        let result = self.allocate();
+        self.expression(source, result)?;
+        self.emit(Op::Return, &[result]);
+        let compiler = &*self;
+        let heap = crate::heap();
+        let words = values::alloc(SexpType::Integer, compiler.code.len())?;
+        for (index, word) in compiler.code.iter().enumerate() {
+            values::ints_mut(words)[index] = *word as i32;
+        }
+        let constants = values::alloc(SexpType::List, FIRST_CONSTANT + compiler.constants.len())?;
+        heap.set_element(constants, SOURCE, source);
+        let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
+        values::reals_mut(epochs).fill(-1.0);
+        heap.set_element(constants, EPOCHS, epochs);
+        let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
+        values::ints_mut(feedback).fill(0);
+        heap.set_element(constants, FEEDBACK, feedback);
+        let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
+        values::ints_mut(profile).fill(0);
+        heap.set_element(constants, PROFILE, profile);
+        heap.set_element(constants, TIER1, nil());
+        let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
+        for (index, entry) in compiler.loops.iter().enumerate() {
+            let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
+            slots.copy_from_slice(&[
+                entry.start as i32,
+                entry.end as i32,
+                entry.exit as i32,
+                entry.step as i32,
+            ]);
+        }
+        heap.set_element(constants, LOOPS, loops);
+        let registers = values::scalar_integer(compiler.registers as i32)?;
+        heap.set_element(constants, REGISTERS, registers);
+        for (index, constant) in compiler.constants.iter().enumerate() {
+            heap.set_element(constants, FIRST_CONSTANT + index, *constant);
+        }
+        let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
+        let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
+        Ok(code)
+    }
+
+    /// The constant for a call that may call a closure, followed by the arguments its promises
+    /// are made from: the call's arguments with each one worth compiling replaced by its code
+    /// object, or `NULL` when none is. [`Op::CallGeneric`] reads the second at the next index.
+    unsafe fn call_site(&mut self, call: Sexp) -> R<u32> {
+        let index = self.constant(call);
+        let arguments = self.promise_arguments(call.cdr())?;
+        self.constant(arguments);
+        Ok(index)
+    }
+
+    /// A promise runs in the frame of the code that made it, so its code compiles with this
+    /// compiler's view of that frame: the same local symbols, formals and enclosure.
+    unsafe fn promise_arguments(&mut self, arguments: Sexp) -> R<Sexp> {
+        let items = values::pairlist_items(arguments);
+        if !items.iter().any(|(_, value)| compiles_as_promise(*value)) {
+            return Ok(nil());
+        }
+        let heap = crate::heap();
+        let mut list = nil();
+        for (tag, value) in items.iter().rev() {
+            let value = if compiles_as_promise(*value) {
+                let mut promise = Compiler {
+                    local_symbols: self.local_symbols.take(),
+                    formals: std::mem::take(&mut self.formals),
+                    code: Vec::new(),
+                    constants: Vec::new(),
+                    caches: 0,
+                    loops: Vec::new(),
+                    open_loops: Vec::new(),
+                    registers: 0,
+                    next_register: 0,
+                    enclosure: self.enclosure,
+                    srcref: self.srcref,
+                    rebinding: None,
+                    tail_update: None,
+                };
+                let code = promise.assemble(*value);
+                self.local_symbols = promise.local_symbols;
+                self.formals = promise.formals;
+                // An argument the compiler rejects still runs, as a promise of its expression.
+                code.unwrap_or(*value)
+            } else {
+                *value
+            };
+            heap.root(value);
+            list = values::cons(value, list)?;
+            heap.set_tag(list, *tag);
+            heap.root(list);
+        }
+        Ok(list)
+    }
+
     unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
         self.local_symbols
             .as_ref()
@@ -1393,7 +1490,7 @@ impl Compiler {
                 let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
-                let call_constant = self.constant(immediate_call);
+                let call_constant = self.call_site(immediate_call)?;
                 self.emit(Op::CallGeneric, &[dst, function, call_constant]);
                 self.release_to(mark);
             }
@@ -1536,7 +1633,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call)?;
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -1581,7 +1678,7 @@ impl Compiler {
             _ => None,
         };
         let symbol = self.constant(head);
-        let call_constant = self.constant(call);
+        let call_constant = self.call_site(call)?;
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -1727,6 +1824,12 @@ pub unsafe fn loop_count(code: Sexp) -> usize {
     length(code.cdr().element(LOOPS)) / 4
 }
 
+/// Runs a compiled promise's code in `env`, the frame it was compiled for. The optimizing tier
+/// is not entered: promise code has no loops and no closure of its own.
+pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    run(nil(), code, env)
+}
+
 unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     heap.root(code);
@@ -1749,8 +1852,8 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         loops: &mut loops,
     };
     let entered = match interp().bytecode.tier {
-        Some(tier) => (tier.enter)(&mut machine),
-        None => None,
+        Some(tier) if function != nil() => (tier.enter)(&mut machine),
+        _ => None,
     };
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
@@ -1985,7 +2088,14 @@ unsafe fn step(
         Op::CallGeneric => {
             let function = register(operand(1));
             let call = constants.element(operand(2));
-            let value = eval::apply_call(call, function, call.cdr(), env)?;
+            let compiled = constants.element(operand(2) + 1);
+            // Only a closure's arguments become promises; a special reads them as expressions.
+            let arguments = if compiled != nil() && function.kind() == SexpType::Closure {
+                compiled
+            } else {
+                call.cdr()
+            };
+            let value = eval::apply_call(call, function, arguments, env)?;
             decoded.record(at, value);
             set(operand(0), value);
         }

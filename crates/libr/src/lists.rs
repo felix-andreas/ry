@@ -402,7 +402,19 @@ macro_rules! promise_writer {
 }
 
 promise_writer!(SET_PRVALUE, set_car);
-promise_writer!(SET_PRCODE, set_cdr);
+/// A promise compiled by the bytecode interpreter keeps its code in the attribute slot, and
+/// that code must not outlive the expression it was compiled from.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_PRCODE(object: Sexp, value: Sexp) {
+    enter(|| {
+        checked_kind(object, SexpType::Promise, "SET_PRCODE")?;
+        let heap = &mut runtime().heap;
+        heap.set_cdr(object, value);
+        let nil = heap.known().nil;
+        heap.set_attrib(object, nil);
+        Ok(())
+    })
+}
 promise_writer!(SET_PRENV, set_tag);
 
 #[unsafe(no_mangle)]

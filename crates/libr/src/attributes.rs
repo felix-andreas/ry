@@ -490,6 +490,10 @@ pub unsafe extern "C" fn Rf_inherits(object: Sexp, class: *const c_char) -> Rboo
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ATTRIB(object: Sexp) -> Sexp {
+    // A promise's attribute slot holds its compiled code, which GNU R keeps in `PRCODE` instead.
+    if object.kind() == SexpType::Promise {
+        return runtime().heap.known().nil;
+    }
     object.attrib()
 }
 
