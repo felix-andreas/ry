@@ -2190,7 +2190,7 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         }
         None
     } else {
-        let text = translate_regex(&String::from_utf8_lossy(&needle));
+        let text = translate_byte_regex(&String::from_utf8_lossy(&needle));
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
         let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
             call.error(format!(
@@ -2899,6 +2899,17 @@ pub(crate) struct Translation {
 }
 
 pub(crate) fn translate(pattern: &str) -> Translation {
+    translate_classes(pattern, true)
+}
+
+/// A pattern for `grepRaw`, which GNU R compiles with TRE's byte interface, so its classes
+/// cover ASCII only.
+pub fn translate_byte_regex(pattern: &str) -> String {
+    translate_classes(pattern, false).pattern
+}
+
+/// Translates a POSIX pattern whose classes (`\s`, `[[:space:]]`) follow Unicode, or only ASCII.
+fn translate_classes(pattern: &str, unicode: bool) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
     let mut problem = None;
     let mut minimal = false;
@@ -2921,13 +2932,13 @@ pub(crate) fn translate(pattern: &str) -> Translation {
         let start = output.len();
         match character {
             '\\' => {
-                index = translate_escape(&chars, index, &mut output, &mut problem);
+                index = translate_escape(&chars, index, unicode, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
             }
             '[' => {
-                index = translate_class(&chars, index, &mut output, &mut problem);
+                index = translate_class(&chars, index, unicode, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
@@ -3089,12 +3100,15 @@ const POSIX_BLANK: &str = r"\t \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F
 const WORD: &str = r"\p{Alphabetic}\p{Nd}_";
 /// TRE's `\d` is ASCII even though its other classes follow the locale.
 const DIGIT: &str = "0-9";
+const ASCII_WORD: &str = "0-9A-Za-z_";
+const ASCII_SPACE: &str = r"\t\n\x0B\f\r ";
 
 /// Translates the escape at `index` (outside a bracket expression) and returns the index after
 /// it.
 fn translate_escape(
     chars: &[char],
     index: usize,
+    unicode: bool,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3105,7 +3119,7 @@ fn translate_escape(
         return index + 1;
     };
     let next = index + 2;
-    if let Some(class) = escape_class(escaped) {
+    if let Some(class) = escape_class(escaped, unicode) {
         output.push('[');
         output.push_str(&class);
         output.push(']');
@@ -3130,6 +3144,18 @@ fn translate_escape(
             output.push_str(&format!(r"\x{{{point:X}}}"));
             end
         }
+        // TRE quotes `\Q...\E` as PCRE does.
+        'Q' => {
+            let mut cursor = next;
+            while cursor < chars.len() {
+                if chars[cursor] == '\\' && chars.get(cursor + 1) == Some(&'E') {
+                    return cursor + 2;
+                }
+                output.push_str(&regex::escape(chars[cursor].encode_utf8(&mut [0; 4])));
+                cursor += 1;
+            }
+            cursor
+        }
         character => {
             output.push_str(&regex::escape(character.encode_utf8(&mut [0; 4])));
             next
@@ -3138,11 +3164,13 @@ fn translate_escape(
 }
 
 /// The class contents an escape such as `\d` stands for, written to sit inside brackets.
-fn escape_class(escaped: char) -> Option<String> {
-    let contents = match escaped.to_ascii_lowercase() {
-        'd' => DIGIT,
-        'w' => WORD,
-        's' => POSIX_SPACE,
+fn escape_class(escaped: char, unicode: bool) -> Option<String> {
+    let contents = match (escaped.to_ascii_lowercase(), unicode) {
+        ('d', _) => DIGIT,
+        ('w', true) => WORD,
+        ('w', false) => ASCII_WORD,
+        ('s', true) => POSIX_SPACE,
+        ('s', false) => ASCII_SPACE,
         _ => return None,
     };
     Some(if escaped.is_ascii_uppercase() {
@@ -3189,6 +3217,7 @@ fn hex_escape(chars: &[char], start: usize) -> (u32, usize) {
 fn translate_class(
     chars: &[char],
     index: usize,
+    unicode: bool,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3205,12 +3234,12 @@ fn translate_class(
             return cursor + 1;
         }
         first = false;
-        let (item, next) = class_item(chars, cursor, problem);
+        let (item, next) = class_item(chars, cursor, unicode, problem);
         let range_end = match item {
             ClassItem::Literal(_) if chars.get(next) == Some(&'-') => chars
                 .get(next + 1)
                 .filter(|&&end| end != ']')
-                .map(|_| class_item(chars, next + 1, problem)),
+                .map(|_| class_item(chars, next + 1, unicode, problem)),
             _ => None,
         };
         match (item, range_end) {
@@ -3243,13 +3272,14 @@ enum ClassItem {
 fn class_item(
     chars: &[char],
     index: usize,
+    unicode: bool,
     problem: &mut Option<&'static str>,
 ) -> (ClassItem, usize) {
     let character = chars[index];
     if character == '['
         && let Some((kind, name, end)) = bracket_term(chars, index)
     {
-        let set = match (kind, posix_class(&name)) {
+        let set = match (kind, posix_class(&name, unicode)) {
             (':', Some(set)) => set,
             (':', None) => {
                 problem.get_or_insert("Unknown character class name");
@@ -3287,14 +3317,18 @@ fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
 }
 
 /// The class contents for `[:name:]`, or `None` for an unknown name. The classes follow the
-/// Unicode properties, as glibc's do in a UTF-8 locale.
-fn posix_class(name: &str) -> Option<String> {
+/// Unicode properties, as glibc's do in a UTF-8 locale, or are ASCII, which the `regex`
+/// crate's own `[:name:]` classes match.
+fn posix_class(name: &str, unicode: bool) -> Option<String> {
     const NAMES: &[&str] = &[
         "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
         "upper", "xdigit", "word",
     ];
     if !NAMES.contains(&name) {
         return None;
+    }
+    if !unicode {
+        return Some(format!("[:{name}:]"));
     }
     Some(
         match name {
