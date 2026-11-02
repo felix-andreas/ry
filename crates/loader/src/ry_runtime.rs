@@ -704,9 +704,7 @@ unsafe fn lower_handle_code(handle: Sexp, position: Position) -> R<Sexp> {
     let mut srcfile = handle.external_protected();
     if srcfile.kind() != SexpType::Environment {
         let text = match &file.source {
-            Source::Tree(tree) => SyntaxNode::new_root(tree.green().clone())
-                .text()
-                .to_string(),
+            Source::Tree(tree) => tree.syntax_node().text().to_string(),
             Source::Text(text) => text.to_string(),
         };
         srcfile = file_srcfile(&file.path, &text)?;
@@ -771,7 +769,7 @@ fn line_prefix(node: &SyntaxNode) -> String {
 /// The outermost node of `tree` spanning exactly `start..end`.
 fn node_spanning(tree: &syntax::Parse, start: u32, end: u32) -> R<SyntaxNode> {
     let missing = || error("a definition's code is not in its source file");
-    let root = SyntaxNode::new_root(tree.green().clone());
+    let root = tree.syntax_node();
     if start > end
         || !root
             .text_range()
@@ -804,7 +802,7 @@ fn sole_node(text: &str, start: u32) -> R<SyntaxNode> {
     if !parse.errors().is_empty() {
         return Err(missing());
     }
-    let root = SyntaxNode::new_root(parse.green().clone());
+    let root = parse.syntax_node();
     let range = TextRange::new(TextSize::from(start), root.text_range().end());
     root.children()
         .find(|node| node.text_range() == range)

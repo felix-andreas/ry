@@ -725,7 +725,7 @@ item's span in constant time, and `item_spans` itself is consumed per file. Incr
 holds:
 every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
 diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
-stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
+stated bar. Re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
 binary search.
 
 ### Two measurement lessons from this review
@@ -3087,12 +3087,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   with wall time unchanged within noise (median about 1.34 s). The
   1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
   self cost. What is left is structural:
-  - rowan itself: `GreenNode::new` costs about 660 instructions per node, and red nodes are still
-    built by metadata's namespace and call scans, `item_declared_pure`, `lower_type`,
-    `statement_annotations` and the inline-annotation sites. A flat green tree of our own (one
-    node array per file, children as index ranges) would remove both.
-  - salsa's per-query edge bookkeeping, about 2.5% of instructions, which only fewer and coarser
-    queries remove.
-  - checker work itself: `infer_ordinary_call` is about a fifth of all instructions inclusive.
+  - Done: rowan is replaced by ry's own flat preorder tree with windowed item trees, one-shot name
+    lookups read the project maps once per query, unlisted frame binders are built once per item,
+    and overload probes reject by call shape before instantiating (`decisions.md`, "The syntax
+    tree is ry's own flat preorder arena" and "Overload probes reject by call shape first"). The
+    finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
+    callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
+    build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
+  - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
+    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut.
+  - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
+    and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
     times on the slice), which a small-buffer type would absorb.

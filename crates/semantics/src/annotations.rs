@@ -13,12 +13,11 @@ use {
             native_record, null, scalar, substitute_rigid, union_of, unknown,
         },
     },
-    rowan::{Language, NodeOrToken},
     rustc_hash::FxHashSet,
     std::mem::take,
     syntax::{
-        GreenRef, RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize, ast,
-        is_green_inline_annotation, matching_nodes, node_text,
+        NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation_kind,
+        matching_nodes, node_text,
     },
 };
 
@@ -202,11 +201,11 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
 /// parameter's `: TYPE`, or `-> TYPE`, a type definition (`type Name = TYPE`), or a
 /// nominal constructor (`@Name(value)`).
 pub fn is_inline_site(node: &SyntaxNode) -> bool {
-    is_green_inline_site(GreenRef::new(&node.green()))
+    is_inline_site_ref(node.node_ref())
 }
 
-/// [`is_inline_site`] on the green tree, for searches that skip building red nodes.
-pub fn is_green_inline_site(node: GreenRef<'_>) -> bool {
+/// [`is_inline_site`] on a borrowed node, for whole-file searches.
+pub fn is_inline_site_ref(node: NodeRef<'_>) -> bool {
     match node.kind() {
         SyntaxKind::TYPE_DEFINITION | SyntaxKind::NEW_EXPR => true,
         SyntaxKind::BINARY_EXPR => node.has_child(SyntaxKind::TYPE_ASCRIPTION),
@@ -342,7 +341,7 @@ pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
 /// about the whole annotation never covers the value or the body.
 fn inline_range(site: &SyntaxNode) -> TextRange {
     let mut parts = matching_nodes(site, |node, parent| {
-        is_green_inline_annotation(node.kind(), parent.map(GreenRef::kind))
+        is_inline_annotation_kind(node.kind(), parent.map(NodeRef::kind))
     })
     .into_iter()
     .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
@@ -852,30 +851,16 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
         return Some(BlockRefusal::Unparsed);
     }
     // Markers come from all descendant tokens, not just direct children: a line continuing a
-    // still-open node puts its marker inside that node. The walk reads the green tree, because
-    // every annotation block runs this and a red walk builds a node per element.
+    // still-open node puts its marker inside that node.
     let mut markers: Vec<TextSize> = Vec::new();
-    let green = node.green();
-    let mut stack = vec![(green.children(), node.text_range().start())];
-    while let Some((children, next_start)) = stack.last_mut() {
-        let Some(child) = children.next() else {
-            stack.pop();
-            continue;
-        };
-        let start = *next_start;
-        *next_start += child.text_len();
-        match child {
-            NodeOrToken::Node(child) => {
-                if RLanguage::kind_from_raw(child.kind()) == SyntaxKind::ERROR {
-                    return Some(BlockRefusal::Unparsed);
-                }
-                stack.push((child.children(), start));
-            }
-            NodeOrToken::Token(token) => {
-                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::ANNOTATION_MARKER {
-                    markers.push(start);
-                }
-            }
+    for element in node.node_ref().descendants().skip(1) {
+        if element.kind() == SyntaxKind::ERROR {
+            return Some(BlockRefusal::Unparsed);
+        }
+    }
+    for token in node.node_ref().tokens() {
+        if token.kind == SyntaxKind::ANNOTATION_MARKER {
+            markers.push(token.range.start());
         }
     }
     let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
@@ -1016,22 +1001,16 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
         .and_then(|name| name.text())
 }
 
-/// Read off the green tree, since type lowering asks this of most annotation nodes and red
-/// children are an allocation each.
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.green().children().any(|child| {
-        child
-            .into_token()
-            .is_some_and(|token| RLanguage::kind_from_raw(token.kind()) == kind)
-    })
+    node.node_ref()
+        .child_tokens()
+        .any(|token| token.kind == kind)
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {
-    node.green().children().any(|child| {
-        child.into_token().is_some_and(|token| {
-            RLanguage::kind_from_raw(token.kind()) == SyntaxKind::IDENT && token.text() == word
-        })
-    })
+    node.node_ref()
+        .child_tokens()
+        .any(|token| token.kind == SyntaxKind::IDENT && token.text == word)
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the
