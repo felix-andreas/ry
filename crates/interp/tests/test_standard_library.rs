@@ -872,6 +872,19 @@ const PRINTS: &[(&str, &str)] = &[
         "[1]  1.797693e+308 -1.797693e+308\n",
     ),
     ("Num.to_integer(-3.7)", "[1] -3\n"),
+    ("c(Num.infinity, -Num.infinity)", "[1]  Inf -Inf\n"),
+    (
+        "(function() { xs <- List.reserve(list(1L, 2L), 10L); ys <- List.release_excess_capacity(xs); List.to_vector(ys) })()",
+        "[1] 1 2\n",
+    ),
+    (
+        "(function() { d <- Dict.reserve(Dict.single(\"a\", 1L), 20L); c(Dict.capacity(d) >= 21L, Dict.capacity(Dict.release_excess_capacity(d)), Dict.len(d), Dict.capacity(Dict.empty())) })()",
+        "[1] 1 1 1 0\n",
+    ),
+    (
+        "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",
+        "[1] 7 2 1\n",
+    ),
     ("Num.to_integer(7L)", "[1] 7\n"),
     // Bool.
     ("c(Bool.true, Bool.false)", "[1]  TRUE FALSE\n"),

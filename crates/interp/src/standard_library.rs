@@ -162,6 +162,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.concat_utf8", list_concat_utf8).reusing_first_argument(),
     library("List.with_capacity", list_with_capacity),
     library("List.reserve", list_reserve).reusing_first_argument(),
+    library("List.release_excess_capacity", list_release_excess_capacity),
     library("Str.is_empty", str_is_empty),
     library("Str.concat", str_concat),
     library("Str.join_with", str_join_with),
@@ -292,6 +293,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.walk_until", dict_walk_until),
     library("Dict.join_map", dict_join_map),
     library("Dict.reserve", dict_reserve).reusing_first_argument(),
+    library("Dict.capacity", dict_capacity),
+    library("Dict.release_excess_capacity", dict_release_excess_capacity),
     library("Dict.clear", dict_clear),
     library("Set.empty", set_empty),
     library("Set.single", set_single),
@@ -312,6 +315,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.walk_until", set_walk_until),
     library("Set.join_map", set_join_map),
     library("Set.reserve", set_reserve).reusing_first_argument(),
+    library("Set.capacity", set_capacity),
+    library("Set.release_excess_capacity", set_release_excess_capacity),
 ];
 
 /// The library's values that are not functions, which `attach` binds beside the builtins.
@@ -326,6 +331,7 @@ pub const CONSTANTS: &[(&str, Constant)] = &[
     ("Num.min_integer", Constant::Integer(-i32::MAX)),
     ("Num.max_double", Constant::Double(f64::MAX)),
     ("Num.min_double", Constant::Double(f64::MIN)),
+    ("Num.infinity", Constant::Double(f64::INFINITY)),
 ];
 
 #[derive(Clone, Copy)]
@@ -1996,6 +2002,21 @@ unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
         crate::heap().set_element(grown, at, item);
     }
     Ok(grown)
+}
+
+/// The list with no room beyond its elements: the list itself when it has none to give back.
+unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    let items = list_elements(call, "list", list)?;
+    if list.is_array() || !crate::heap().is_resizable(list) || list.capacity() as usize <= items.len()
+    {
+        return Ok(list);
+    }
+    let exact = resizable(SexpType::List, items.len(), items.len())?;
+    for (at, &item) in items.iter().enumerate() {
+        crate::heap().set_element(exact, at, item);
+    }
+    Ok(exact)
 }
 
 // Str.
@@ -4183,7 +4204,53 @@ unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
     Collection::new(NativeKind::Dict).write()
 }
 
+/// How many entries the collection holds before it must grow its storage.
+unsafe fn collection_capacity(object: Sexp) -> R<Sexp> {
+    let capacity = match object.record_handle(0) {
+        Some(keys) if crate::heap().is_resizable(keys) => keys.capacity() as usize,
+        Some(keys) => length(keys),
+        None => 0,
+    };
+    scalar_integer(i32::try_from(capacity).unwrap_or(i32::MAX))
+}
+
+/// The collection with no room beyond its entries: the collection itself when it has none.
+unsafe fn release_collection(object: Sexp) -> R<Sexp> {
+    let count = entry_count(object);
+    let index = records::slot_value(object, index_slot(records::native_kind(object)))?;
+    let excess = object
+        .record_handle(0)
+        .is_some_and(|keys| crate::heap().is_resizable(keys) && keys.capacity() as usize > count)
+        || length(index) > (count * 2).next_power_of_two().max(8);
+    if !excess {
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
+    collection.rebuild_index()?;
+    collection.write()
+}
+
+unsafe fn dict_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    collection_capacity(dict(call, object)?)
+}
+
+unsafe fn dict_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    release_collection(dict(call, object)?)
+}
+
 // Set.
+
+unsafe fn set_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    collection_capacity(set(call, object)?)
+}
+
+unsafe fn set_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["set"])?;
+    release_collection(set(call, object)?)
+}
 
 unsafe fn set(call: &Call<'_>, value: Sexp) -> R<Sexp> {
     collection(call, "set", value, NativeKind::Set)

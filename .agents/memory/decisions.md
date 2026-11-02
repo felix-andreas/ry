@@ -2933,13 +2933,21 @@ first lines R had already read, leaving R mid-command.
     `NA`, so wrapping would have to stop at that one value, and the code that wants wrapping
     (hashing) wants it total.
   - Per-width conversions and limits (`to_i8`, `min_i32`, `int_cast`, `f64_to_parts`, `Dec`):
-    R has one integer and one double type.
+    R has one integer and one double type, so the limits are the four unsized
+    `Num.max_integer`, `min_integer`, `max_double`, `min_double`, plus `Num.infinity`; Roc's
+    `nan_f64` is skipped because no library function takes or returns `NaN` on purpose.
   - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
-  - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
-    and strings are immutable.
-  - `List.range`: `seq_len` and `seq` cover it.
+  - `Str` capacity functions: R strings are immutable.
   - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
     first key fixes the key type.
+- **Taken later:** `List.range` (`seq` returns a vector, not a `list[integer]`),
+  `List.keep_if_try`, `Num.to_integer`, and `Dict.capacity`, `Set.capacity` and
+  `release_excess_capacity` on `List`, `Dict` and `Set`. They were first skipped on the claim
+  that the heap shrinks collections, but it never shrinks a resizable vector, so after a
+  `reserve` the room stays until the value dies.
+- **`NaN` is never a result.** A `NaN` from an unchecked function (`Num.sin(Inf)`,
+  `Num.pow(-1, 0.5)`, a `List.sum` of `Inf` and `-Inf`) is an error, and a `_checked` function
+  returns `:Err(:Undefined)`, which its signature names.
 - **Unchecked operations error where Roc crashes or returns `NaN`.** `Num.add`, `div`, `sqrt`,
   `log`, `asin`, `acos`, `pow_int` and the rest were first skipped because they produce `NaN` or
   overflow for part of their domain. They are taken with an R error there that names the

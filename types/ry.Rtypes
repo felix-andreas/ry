@@ -268,6 +268,9 @@ List.with_capacity : <T> fn(capacity: integer) -> list[T]
 #' The list with room for `spare` more elements.
 List.reserve : <T> fn(list: Array<T>, spare: integer) -> Array<T>
 List.reserve : <T> fn(list: list[T], spare: integer) -> list[T]
+#' The list with no room beyond its elements.
+List.release_excess_capacity : <T> fn(list: Array<T>) -> Array<T>
+List.release_excess_capacity : <T> fn(list: list[T]) -> list[T]
 #' The total of the numbers. An integer total that overflows is an error.
 List.sum : <T: scalar numeric> fn(list: Array<T>) -> T
 List.sum : <T: scalar numeric> fn(list: list[T]) -> T
@@ -511,6 +514,8 @@ Num.min_integer : integer
 Num.max_double : double
 #' The most negative finite double, `-Num.max_double`.
 Num.min_double : double
+#' Positive infinity, `Inf`.
+Num.infinity : double
 
 # Bool
 
@@ -577,6 +582,10 @@ Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict
 Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 #' The dictionary with room for `spare` more entries. An empty dictionary reserves nothing.
 Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
+#' How many entries the dictionary holds before its storage must grow.
+Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> integer
+#' The dictionary with no room beyond its entries.
+Dict.release_excess_capacity : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 #' An empty dictionary of the same type.
 Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 
@@ -620,6 +629,10 @@ Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 #' The set with room for `spare` more elements. An empty set reserves nothing.
 Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
+#' How many elements the set holds before its storage must grow.
+Set.capacity : <T: key> fn(set: Set<T>) -> integer
+#' The set with no room beyond its elements.
+Set.release_excess_capacity : <T: key> fn(set: Set<T>) -> Set<T>
 
 # DataFrame
 #

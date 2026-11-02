@@ -53,6 +53,8 @@ Dict.map
 Dict.remove
 Dict.remove_all
 Dict.reserve
+Dict.capacity
+Dict.release_excess_capacity
 Dict.single
 Dict.to_list
 Dict.update
@@ -141,6 +143,7 @@ List.repeat
 List.range
 List.replace
 List.reserve
+List.release_excess_capacity
 List.reverse
 List.set
 List.single
@@ -200,6 +203,7 @@ Num.max_double
 Num.max_integer
 Num.min_double
 Num.min_integer
+Num.infinity
 Num.floor
 Num.is_approx_eq
 Num.is_even
@@ -267,6 +271,8 @@ Set.len
 Set.map
 Set.remove
 Set.reserve
+Set.capacity
+Set.release_excess_capacity
 Set.single
 Set.to_list
 Set.union
