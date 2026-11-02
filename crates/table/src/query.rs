@@ -434,6 +434,7 @@ fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
 }
 
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
+    let query = bind_group_columns(query);
     let sums = grouped_integer_sums(&table.schema(), table.key(), &query)?;
     let mut warnings = Vec::new();
     let output = run(table, query, kernels, &mut warnings)?;
@@ -509,6 +510,67 @@ fn grouped_integer_sums(
         }
     }
     Ok(sums)
+}
+
+/// data.table evaluates `j` once per group with each grouping column bound to the group's single
+/// value, so by `b`, `sum(a) * b` is one value per group and `sum(b)` and `length(b)` read that
+/// one value. A reference in `j` to a column grouped under its own name therefore reads the
+/// group's first value, which every row of the group shares.
+fn bind_group_columns(mut query: Query) -> Query {
+    let keys: Vec<PlSmallStr> = query
+        .by
+        .iter()
+        .filter(|(name, expr)| matches!(expr, Expr::Column(source) if source == name))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if keys.is_empty() {
+        return query;
+    }
+    fn bind(expr: &mut Expr, keys: &[PlSmallStr]) {
+        match expr {
+            Expr::Column(name) if keys.contains(name) => {
+                let column = std::mem::replace(expr, Expr::Count);
+                *expr = Expr::Aggregate {
+                    function: Aggregate::First,
+                    arg: Box::new(column),
+                    na_rm: false,
+                };
+            }
+            Expr::Column(_)
+            | Expr::Integer(_)
+            | Expr::Double(_)
+            | Expr::Logical(_)
+            | Expr::Character(_)
+            | Expr::Na(_)
+            | Expr::Count => {}
+            Expr::Unary(_, arg) | Expr::Head(arg, _) => bind(arg, keys),
+            Expr::Aggregate { arg, .. } => bind(arg, keys),
+            Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+                bind(left, keys);
+                bind(right, keys);
+            }
+            Expr::IfElse(test, yes, no) => {
+                bind(test, keys);
+                bind(yes, keys);
+                bind(no, keys);
+            }
+        }
+    }
+    match &mut query.select {
+        Select::All => {}
+        Select::Value(expr) => bind(expr, &keys),
+        Select::Columns(columns) => {
+            for (_, expr) in columns {
+                bind(expr, &keys);
+            }
+        }
+        Select::Assign(assignments) => {
+            for expr in assignments.iter_mut().filter_map(|(_, expr)| expr.as_mut()) {
+                bind(expr, &keys);
+            }
+        }
+    }
+    query
 }
 
 fn run(
@@ -1186,6 +1248,7 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
 /// The lazy plan for a query that does not assign, so tests and `explain` can inspect what the
 /// planner receives.
 pub fn plan(table: &Table, query: Query) -> Result<LazyFrame> {
+    let query = bind_group_columns(query);
     if let Rows::Join(join) = &query.rows
         && join.each_i
     {
