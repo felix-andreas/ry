@@ -203,7 +203,7 @@ fn nolint_allowed(rest: &str) -> Allowed {
 /// The ry codes that report what a lintr linter reports. lintr accepts a name with or without
 /// its `_linter` suffix. A linter ry has no counterpart for maps to nothing, so naming it
 /// suppresses nothing.
-fn lintr_codes(name: &str) -> &'static [&'static str] {
+pub(crate) fn lintr_codes(name: &str) -> &'static [&'static str] {
     let name = name.strip_suffix("_linter").unwrap_or(name);
     match name {
         "assignment" => &["assignment-operator"],

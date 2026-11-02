@@ -89,6 +89,29 @@ the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is th
 named, or the parent of `R/` for a file directly inside `R/`, or else the file's own directory. In
 the editor it is the first workspace folder.
 
+## A lintr `.lintr` file
+
+A package set up for lintr keeps its lint choices without a `ry.toml`. ry reads the `linters` field
+of the nearest `.lintr`, searching up from the checked file and no higher than the directory of the
+`ry.toml` in use, and fills every lint level that `ry.toml` leaves unset:
+
+```
+linters: linters_with_defaults(
+    line_length_linter(120),
+    commented_code_linter = NULL,
+    any_is_na_linter()
+  )
+```
+
+A linter called in the field turns on the ry lints that report the same thing, so this file turns
+on `any-is-na` and `line-length` with a limit of 120. A linter set to `NULL` turns its lints off.
+`linters_with_defaults()` also turns on lintr's defaults that are off in ry: `commented-code`,
+`line-length` at 80, `naming-style` in snake_case, `redundant-return` and `single-quotes`.
+`object_name_linter(styles = "camelCase")` sets camelCase. ry warns once for each linter it has no
+lint for, except lintr's whitespace and layout linters, which `ry format` covers. The other fields,
+such as `exclusions`, are not read. The language server re-reads a `.lintr` in the workspace folder
+when it changes.
+
 ## `inline-annotations`
 
 Inline annotations, such as `count: integer <- 0L` and `function(x: integer) -> integer`, are on by

@@ -141,6 +141,61 @@ pub struct LintConfig {
     pub object_systems_disabled: bool,
 }
 
+/// Each lint's config key, which is also its code, with its level, for code that sets levels by
+/// name, such as reading lintr's configuration.
+pub fn lint_levels_mut(config: &mut LintConfig) -> Vec<(&'static str, &mut LintLevel)> {
+    vec![
+        ("assignment-operator", &mut config.assignment_operator),
+        ("boolean-shorthand", &mut config.boolean_shorthand),
+        ("trailing-comma", &mut config.trailing_comma),
+        ("unused-parameter", &mut config.unused_parameter),
+        ("unused-import", &mut config.unused_import),
+        ("shadows-builtin", &mut config.shadows_builtin),
+        ("shadows-namespace", &mut config.shadows_namespace),
+        ("object-system", &mut config.object_system),
+        ("equals-na", &mut config.equals_na),
+        ("vector-logic", &mut config.vector_logic),
+        ("length-sequence", &mut config.length_sequence),
+        ("class-equals", &mut config.class_equals),
+        ("commented-code", &mut config.commented_code),
+        ("redundant-return", &mut config.redundant_return),
+        ("duplicate-argument", &mut config.duplicate_argument),
+        ("unreachable-code", &mut config.unreachable_code),
+        ("sprintf-arguments", &mut config.sprintf_arguments),
+        ("any-is-na", &mut config.any_is_na),
+        ("paste-sep", &mut config.paste_sep),
+        ("lengths", &mut config.lengths),
+        ("literal-coercion", &mut config.literal_coercion),
+        ("redundant-equals", &mut config.redundant_equals),
+        ("single-quotes", &mut config.single_quotes),
+        ("testthat-expectation", &mut config.testthat_expectation),
+        ("condition-message", &mut config.condition_message),
+        ("comparison-negation", &mut config.comparison_negation),
+        ("outer-negation", &mut config.outer_negation),
+        ("fixed-regex", &mut config.fixed_regex),
+        ("which-grepl", &mut config.which_grepl),
+        ("length-levels", &mut config.length_levels),
+        ("browser-call", &mut config.browser_call),
+        ("numeric-leading-zero", &mut config.numeric_leading_zero),
+        ("length-test", &mut config.length_test),
+        ("implicit-assignment", &mut config.implicit_assignment),
+        ("while-true", &mut config.while_true),
+        ("scalar-in", &mut config.scalar_in),
+        ("order-subset", &mut config.order_subset),
+        ("matrix-apply", &mut config.matrix_apply),
+        ("empty-assignment", &mut config.empty_assignment),
+        ("unnecessary-lambda", &mut config.unnecessary_lambda),
+        ("yoda-test", &mut config.yoda_test),
+        ("nzchar", &mut config.nzchar),
+        ("sample-int", &mut config.sample_int),
+        (
+            "unnecessary-concatenation",
+            &mut config.unnecessary_concatenation,
+        ),
+        ("line-length", &mut config.line_length),
+    ]
+}
+
 /// Sorted by position.
 pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diagnostic> {
     let syntax = file_syntax_lints(db, file, *config);

@@ -172,7 +172,8 @@ lintr's comments work too, so code written for lintr keeps its suppressions. `# 
 every finding on its line except a syntax error, `# nolint start` and `# nolint end` do the same for
 the lines between them, and either can name lintr linters, as in `# nolint: seq_linter.`. A named
 linter silences the ry code that reports the same thing, such as `length-sequence` for
-`seq_linter`, and a linter ry has no counterpart for silences nothing.
+`seq_linter`, and a linter ry has no counterpart for silences nothing. A `.lintr` file's `linters` field carries
+over too, as [configuration](/reference/configuration#a-lintr-lintr-file) describes.
 
 ## In CI
 

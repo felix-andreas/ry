@@ -4791,7 +4791,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - lintr's `# nolint` comments are honored (`apply_suppressions` in `crates/ry/src/diagnostics.rs`),
   because 15 packages in the CRAN corpus carry them and the mandate is that existing code keeps
   working. A bare `# nolint` keeps syntax errors, and lintr names map to ry codes in `lintr_codes`;
-  keep that table in step when a lint is ported.
+  keep that table in step when a lint is ported. A `.lintr` file's `linters` field is read too
+  (`apply_lintr` in `crates/ry/src/config.rs`): it fills only the levels `ry.toml` leaves at
+  `Default`, so `ry.toml` always wins, and an unreadable field is a warning, never an error,
+  because the file is lintr's. `lint_levels_mut` in `lints.rs` is the one name-to-field table, and
+  a unit test pins it against the struct's fields.
 - Call lints are gated in the green pre-check by `callee_may_lint`, which knows which enabled lint
   reads each bare callee, so common callees (`length`, `stop`, `which`) cost nothing while their
   opt-in lints are off. A fix whose replacement binds more loosely than what it replaces goes
