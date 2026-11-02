@@ -1770,7 +1770,11 @@ code 26, which GNU R leaves unused and native code never receives). A cell's add
 as long as anything references it, so compiled code can watch one and still hold it safely after
 `rm()`. The base environment and base namespace keep their cells on the symbols, as GNU R keeps
 base bindings in `SYMVALUE`, so a base lookup is one load. Small frames scan; above eight bindings a
-frame keeps a hash index.
+frame keeps a hash index. Every frame also keeps a 64-bit symbol filter (one bit per bound symbol,
+picked by a multiplicative hash of the symbol's address), so a lookup that walks through frames
+which do not bind the name costs one AND per frame instead of a scan. Removing a binding leaves its
+bit set, which only costs a scan. The filter took one inline binding slot (eight, not nine) to keep
+the frame in the 192-byte size class; it halved `frame_cell`'s cost per `sd(x)`.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
@@ -3002,9 +3006,12 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** libr's `Runtime` held its own options environment that nothing wrote, so `Rf_GetOption1` always returned `NULL` and packages (data.table's `datatable.*` options) saw defaults only.
 - **Target shape.** `Rf_GetOption1` walks `interp::envir::options()`, the interpreter's `.Options` pairlist, which is the single store `options()` writes.
 
-## parallel's natives without fork
+## parallel's fork routines
 
-- `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.
+- `crates/interp/src/parallel.rs` implements all of parallel's `.Call` routines: the L'Ecuyer stream jumps and the `mc_*` fork routines behind `mcfork`, `mclapply` and `mcparallel`. The pipe protocol is GNU R's (a native-endian `R_xlen_t` length, then the bytes; a zero length means the child is exiting), because parallel's R code drives it unchanged.
+- **Fork safety.** The runtime starts no helper threads (no GC, JIT or I/O threads), so `fork()` copies a consistent interpreter and no lock can be held by a thread that does not exist in the child. What would be copied wrongly is buffered output, so `mc_fork` first flushes standard output and error and every file connection's write buffer (`connections::flush_pending_writes`). The child closes its siblings' pipes, so a sibling's standard input still reaches its end. `mc_exit` ends the child with `_exit`, so the master's exit handlers and buffers are not run twice.
+- **Reaping without SIGCHLD.** GNU R reaps from a SIGCHLD handler, and its children wait for SIGUSR1 before exiting. ry does neither: a child exits at once, and the master calls `waitpid(WNOHANG)` on released children at the start of each routine. A child is released (its pipes closed) only once its pipe reaches its end or it is removed, detached or estranged, so its pid cannot be reused while it still names a tended child. `mc_children` lists tended children only, which `mccollect`'s loop needs in order to end.
+- **Cleanup scopes.** `mc_prepare_cleanup` pushes a mark, and each child records the innermost mark at its fork. `mc_cleanup` acts on the children forked since the innermost mark (all children when there is none) and pops the mark only when it signals or detaches, because `mccollect`'s `cleanup(FALSE, FALSE)` runs inside `mclapply`'s scope and must not end it.
 
 ## Corpus package tests: compatibility details that are easy to get wrong
 
@@ -4512,6 +4519,20 @@ check` releases its trees once, and memoized records are compact" below).
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
 
+## The C API draws from the interpreter's generator
+
+- **Before.** `libr` kept its own Mersenne Twister for `unif_rand`, `norm_rand`, `exp_rand` and
+  `R_unif_index`, beside the interpreter's `interp::random`, which implements every RNG kind. The
+  two shared only `.Random.seed`, so a package calling `unif_rand` after `RNGkind("Marsaglia-Multicarry")`
+  read a seed its copy could not parse (doParallel's stress test failed with "'.Random.seed' is not
+  a valid integer vector"), and `R_sample_kind` always answered `Rejection`.
+- **Now.** `libr::arith`'s `Rng` delegates every draw to `interp::random`, and
+  `GetRNGstate`/`PutRNGstate` are the interpreter's `get_rng_state`/`put_rng_state`.
+  `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
+  hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
+- **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
+  exactly as under GNU R, and every kind the interpreter supports works from C at no extra cost.
+
 ## Typed checking costs per name, not per file
 
 - **Before.** Each file built `visible_type_definitions`, a merged map of every stub and project type
@@ -4571,7 +4592,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`qnchisq` stops at a relative accuracy of 1e-13**, as GNU R's results do. A full-precision search round-trips some quantiles exactly, and `all.equal` leaves exact matches out of its mean, so `d-p-q-r-tests` line 188 failed on a more precise answer.
 - **Accepted numeric divergence**: `pf(x, 1, 1, ncp = 20, lower = FALSE, log = TRUE)` is -17.1486, which an independent mixture sum confirms, while GNU R's less precise noncentral beta gives -17.1318 and `d-p-q-r-tst-2` line 302 asserts GNU R's range.
 - **Native `loess`** (`crates/interp/src/stats_loess.rs`) is written from the documented method and black-box checks against GNU R. Fits, robustness weights and `predict` match GNU R; the kd-tree vertex interpolation is a cubic Hermite blend along edges and, in two dimensions, a Coons patch (edge curves plus cross-edge slopes, minus the corner tensor product), found by fitting candidates to GNU R's predictions. Three or more predictors use the tensor product alone, unverified. With `span > 1` the neighbourhood radius is the largest distance times `sqrt(span)`. The approximate statistics (`enp`, `one.delta`, `two.delta`) are computed exactly rather than with GNU R's interpolation table, so they differ in the third digit; above 1000 observations the deltas use a cheaper approximation.
-- **URL transfers use `reqwest`, not libcurl** (`crates/interp/src/http.rs`). The blocking client was already linked through polars, honors the proxy variables and reads the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body when it opens and then reads from memory, like `unz()`. Failures are reported with libcurl's codes and wording, because R code and GNU R's tests match on them. Each request runs on a scoped thread (`on_transfer_thread`), since the blocking client panics inside an async runtime an embedder may own; a transfer thread that dies reports libcurl's "Failed initialization" instead of unwinding into R. `curlGetHeaders` follows redirects hop by hop, so it reports each hop's headers, but not the proxy's CONNECT response that libcurl adds. `curlVersion()` still returns an empty string.
+- **URL transfers use `reqwest`, not libcurl** (`crates/interp/src/http.rs`). The blocking client was already linked through polars, honors the proxy variables and reads the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body when it opens and then reads from memory, like `unz()`. Failures are reported with libcurl's codes and wording, because R code and GNU R's tests match on them. Each request runs on a scoped thread (`on_transfer_thread`), since the blocking client panics inside an async runtime an embedder may own; a transfer thread that dies reports libcurl's "Failed initialization" instead of unwinding into R. `curlGetHeaders` follows redirects hop by hop, so it reports each hop's headers, but not the proxy's CONNECT response that libcurl adds. `libcurlVersion()` reports 8.5.0, the libcurl release whose wording and behavior the transfers follow, so version checks in packages pass; its attributes say what ry really uses (`ssl_version` "rustls", no `libssh_version`, protocols file, http and https).
+- **Socket connections are `std::net` streams in blocking mode** (`Device::Socket` and `Device::ServerSocket` in `crates/interp/src/connections.rs`). A non-blocking R connection does not switch the OS socket to non-blocking mode: its read first polls with a zero timeout and, with nothing to read, marks the connection incomplete and returns no bytes, which is how `readLines` holds back a partial line. A blocking read waits up to `socketTimeout()` seconds through the stream's read timeout. Each read refills a 64 KiB buffer with one receive, so `socketSelect()` counts buffered input as ready without asking the OS. Polling is `platform::poll_sockets` (`poll(2)`, `WSAPoll` on Windows). Messages follow GNU R's, with two deliberate differences: `serverSocket(70000)` is an "invalid 'port' argument" where GNU R silently truncates the port to 16 bits, and `socketAccept(timeout =)` gives up after the timeout where GNU R waits forever. With these, `parallel::makeCluster()` works (oracle case `parallel__socket_cluster`). Workers start from `R.home("bin")/Rscript`, so under ry's own R home (`just ry-home`) they run on ry, while under plain `ry run`, whose `R.home()` is GNU R's, they are GNU R processes speaking the same serialization.
+- **Unserializing from a connection reads one object** (`unserialize_connection` in `crates/interp/src/serialize.rs`), so several objects on one connection, or a peer's next message on a socket, stay unread. An ASCII string reads exactly its length, which leaves the newline after it unread as GNU R does; an ASCII object that ends in a string is therefore followed by that newline, which the next ASCII header (`\nA\n`) accepts and a binary one does not.
 - **`warning(immediate. = TRUE)` signals like any warning**; a flag on the interpreter makes only the default handler print it at once, so calling handlers and `assertWarning` still see it.
 - **`Cstack_info()`** reports a fixed size of 7969177 bytes, current use from the remaining native stack, and the evaluation depth from the frame stack, since scripts only compare these against each other.
 - **`sort.list` is never an S3 method**: dispatch skips base's own `sort.list` closure when looking for a method of `sort`, because GNU R treats it as a plain function and `sort(x)` on a classed `x` must not reach it.
@@ -4653,6 +4676,107 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
+
+## Native scalar functions: frameless calls with checks proven at compile time
+
+- **Previous shape.** A compiled call of a closure that could not be inlined (any body with an
+  `if`, so every recursive function) went through `runtime::jit_call`: a frame, promises holding
+  the evaluated arguments, the callee's own compiled entry, and boxed results. Annotation checks
+  were skipped only when `entry_for` proved them, and the result was refined by a guard. Typed and
+  untyped code ran at the same speed, because the profiles already knew what the types said.
+- **Target shape.** `crates/jit/src/native.rs` compiles a closure whose body is a pure scalar
+  computation (constants, parameters, locals, `if`, `&&`/`||`, arithmetic, comparisons, `abs`,
+  `sqrt`, `exp`, `log`, `floor`, `ceiling`, and calls of itself or other such closures) to a
+  machine function `fn(budget, args...) -> (status, value)` over unboxed `i32`/`f64` values,
+  specialized per closure and argument types. A compiled caller with unboxed arguments emits
+  `Action::NativeCall` instead of `Action::Call`; recursion stays in machine code.
+- **Why no frame is observable.** The body reads only its parameters and locals, has no effect,
+  and calls nothing that could look at a frame. Everything that would warn or raise in R (an `NA`
+  condition, integer overflow, `sqrt`/`log` of a negative, the expression-depth limit, a pending
+  interrupt) returns `FAILED` before anything visible has happened, and the caller hands the call
+  to tier 0, which reruns it and reports the problem exactly as R does. The depth budget is
+  `max_depth - frames.len()` at the outermost call, decremented per nested call, so the limit
+  matches tier 0's call for call. A left `NA` operand of `&&`/`||` also fails, rather than
+  reproducing R's three-valued rule. Closure arguments are evaluated eagerly, which R's promises
+  make observable only through an assignment or a `return` inside the argument, so those refuse.
+- **Annotations.** Argument checks are decided by `entry_for` and the return check by
+  `annotations::return_admits` when the native compiles, from the specialization's types; a
+  function whose checks would fail is never compiled, so its calls go the checked way.
+  `entry_for` and `admits_inline` now refuse an `Array` mask for a plain scalar.
+- **Invalidation.** A native's function lookups (its callees' included) join every caller's
+  speculations, and the cache revalidates them on each lookup, recompiling when a callee was
+  rebound. Compiled natives keep their closure rooted (the cache key is its address) and are
+  capped at 4096 per session.
+- **Impact.** why-ry `fib` (`fib(30)`) runs in 0.007 s against GNU R's 1.12 s; `fib(25)` went
+  from 0.072 s through `jit_call` to under 0.001 s. It speeds typed and untyped code equally: types make no scalar function faster than its
+  profile already does, they only decide at compile time what an untyped function never checks.
+  Next: unboxed records, tuples and tagged unions as native arguments and results.
+
+## Range formatting is a cut of the whole-file format
+
+- Previously the formatter had only a whole-file entry point, and an unfinished range formatter
+  formatted the selected text on its own, so a selection and the file could disagree about a line
+  (indentation, a brace added by auto-bracing, a comment's attachment).
+- Range formatting (`format::format_range`) formats the whole file, pairs source and formatted trees
+  statement by statement, and returns the formatted text of the statements the selection touches.
+  The formatted file is the single source of truth, so restriction and additivity hold by
+  construction and the range invariant battery (`check_range_format_invariants`, also a fuzz target)
+  can check them. Cost is a whole-file format per request, which is cheap next to analysis.
+- On-type formatting reuses it: a line break formats the line just finished, `}` the construct it
+  closes. The language server advertises both unconditionally; the experimental-features registry
+  that gated them was removed, and its config key still parses with a warning.
+
+## Bug lints are on by default, style lints are opt-in
+
+- A lint is on by default when the code it flags behaves differently from how it reads
+  (`equals-na`, `vector-logic`, `length-sequence`, `class-equals`, `trailing-comma`, `T`/`F`), and
+  off when it only flags taste (`redundant-return`, `commented-code`, naming, shadowing). lintr turns
+  both kinds on, which teaches users to ignore it; ry's defaults must stay clean on a tidy codebase.
+- A fix that changes behavior on purpose (`x == NA` to `is.na(x)`, `&` to `&&`) is unsafe even when
+  it is almost certainly what the author meant, because `ry check --fix` applies safe fixes unseen.
+  `redundant-return` is safe: `return()` keeps its argument's visibility, so
+  `return(x <- 1)` and a trailing `x <- 1` are both invisible.
+- The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
+  the contract.
+
+## `ry check` keeps an on-disk record of its findings
+
+- **Measured first.** On 4 cores, a cold check of the 300,000-line finance bench takes about 1.45 s
+  wall and 5 CPU seconds. Every pass already spreads over the cores: deriving the syntax facts used
+  3.8 cores, naming 3.6, and the item check 3.7. Releasing the trees (0.05 s) and setup (0.05 s) are
+  the only serial parts. More parallelism therefore has no headroom on this machine, and a cold run
+  under 1 s needs about a third less CPU work, not more threads.
+- **Previous shape.** Each run started from nothing. The salsa memos live only in memory, and
+  salsa 0.28 neither exposes its dependency graph nor persists memos without serde on every value,
+  including the global `Ty` table.
+- **Target shape.** `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`) records the findings,
+  not the memos. Each file's record holds its content fingerprint, its surface fingerprint (the
+  text without top-level function bodies, unless a body can write or declare outside its frame),
+  the files its check read through interface edges, and the `NAMESPACE` imports it uses. The whole
+  record is keyed by the ry binary (hashed by its bytes), the configuration, `NAMESPACE`,
+  `DESCRIPTION`, the data files and the stubs. With no changed file, every finding replays. When
+  every changed file keeps its surface, only the changed files and their dependents are checked.
+  Anything else checks all files. A directory with no `ry.toml` or `DESCRIPTION` gets no record.
+  The architecture page's "The check cache" section has the details.
+- **Why the surface rule is sound.** One file's check reads other files without an interface edge
+  only through name-keyed project-wide maps. Those are folds of per-file shares, so the surface
+  fingerprints each share as `diagnostics::project_fold_shares` spells it, beside the text outside
+  function bodies. A text rule alone was not enough: a `UseMethod` call or a `#: @type` inside a
+  body feeds the S3-generic and type-declaration folds, and a review reproduced both as stale
+  findings before the shares were added. Inferred schemes are the remaining body-dependent fact,
+  and the recorded interface dependencies cover them. On all three benches, a file's dependency
+  closure has a median size of 0, a 90th percentile of 1 and a maximum of 1.
+- **Measured.** On the finance bench, a replay takes 0.10 s (57 MB peak), a body edit 0.45 s, and a
+  cold run with the record written 0.1 s more than `--no-cache`. The data-science and biostatistics
+  benches replay in 0.09 s and 0.07 s. The output is byte-identical to a run with `--no-cache`.
+- **Floor of a partial run.** It still parses every file, because the project-wide folds read every
+  file's item tree. It warms those folds on all cores, and keeps its trees instead of releasing
+  them: releasing walks every item serially and cost more than it saved.
+- **Checked.** With invariants on, every run that reuses findings is compared against a fresh run
+  and panics on a difference. A seeded simulation drives that comparison with body and signature
+  edits, `<<-`, `library`, `assign`, `setClass`, `UseMethod` and S3 methods, `#: @type` in and
+  outside bodies, script files, and added and removed files
+  (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).
 
 ## Corpus-driven stub and overload fixes
 
@@ -4759,3 +4883,20 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
   invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
   detached, cancellable db clone so the first reload does not pay for it.
+
+## Compiled function lookups also check the activation's own frame
+
+- **Previous shape.** A compiled body's speculations resolve a called name from the closure's
+  enclosure, because the compiler proves the body never binds the name itself. Validation
+  (`runtime::valid`) re-resolved from the same place whenever the binding epoch moved.
+- **What was weak.** R can bind a name in a function frame without any assignment in the body:
+  `assign` into `parent.frame()`, a default argument, or the locals `UseMethod` copies into the
+  method's frame. The epoch moved, but the re-resolution skipped the frame, so the cached global
+  function kept being called (oracle case `environments__hidden_function_bindings`).
+- **Target shape.** `valid` takes the activation's frame and refuses when a speculation that starts
+  at the body's enclosure finds a binding in that frame that may hold a function. Defining a
+  watched name in a function frame already moves the epoch, so the fast path is unchanged. A loop
+  entry, and the first run after a compile, walk the speculations regardless of the epoch, because
+  that frame may have bound the name before the compiler watched it.
+- **Impact.** Correct shadowing at no cost on the hot path; pinned by the oracle case and
+  `run_time_binding_shadows_cached_global_function` in `crates/jit/tests/test_tiers.rs`.

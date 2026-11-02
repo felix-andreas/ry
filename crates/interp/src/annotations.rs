@@ -260,7 +260,7 @@ pub unsafe fn entry_for(function: Sexp, kinds: &[Option<SexpType>]) -> Entry {
         if mask != 0 {
             match kinds.get(slot - FIRST_FORMAL_SLOT) {
                 Some(&Some(kind))
-                    if formal.tag() != values::symbols().dots && mask & bit(kind) != 0 => {}
+                    if formal.tag() != values::symbols().dots && plain_admits(mask, kind) => {}
                 _ => return Entry::Unchecked,
             }
         }
@@ -384,7 +384,7 @@ pub unsafe fn admits_inline(
     };
     let masks = values::ints(signature.element(MASKS));
     let admitted = |mask: i32, kind: Option<SexpType>| {
-        mask == 0 || kind.is_some_and(|kind| mask as Mask & bit(kind) != 0)
+        mask == 0 || kind.is_some_and(|kind| plain_admits(mask as Mask, kind))
     };
     let formal_masks = masks.get(FIRST_FORMAL_SLOT..).unwrap_or(&[]);
     formal_masks.len() == arguments.len()
@@ -393,6 +393,21 @@ pub unsafe fn admits_inline(
             .zip(arguments)
             .all(|(&mask, &kind)| admitted(mask, kind))
         && admitted(masks.get(RETURN_SLOT).copied().unwrap_or(0), result)
+}
+
+/// Whether a closure's return annotation admits a plain value of storage type `kind`, which a
+/// compiler that proves the result's type checks before the call runs.
+pub unsafe fn return_admits(function: Sexp, kind: SexpType) -> bool {
+    let Some(signature) = signature_of(function) else {
+        return true;
+    };
+    let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
+    mask == 0 || plain_admits(mask, kind)
+}
+
+/// Whether a check admits a value of storage type `kind` that is not an `Array`.
+fn plain_admits(mask: Mask, kind: SexpType) -> bool {
+    mask & ARRAY == 0 && mask & bit(kind) != 0
 }
 
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {

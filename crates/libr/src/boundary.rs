@@ -514,7 +514,8 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_write_console(text: *const c_char, length: usize, is_error: c_int) {
     let bytes = std::slice::from_raw_parts(text as *const u8, length);
-    write_console(bytes, is_error != 0);
+    // `Rprintf` and `REprintf` follow `sink`, as GNU R's do; the host console sits behind it.
+    interp::write_console(bytes, is_error != 0);
 }
 
 #[unsafe(no_mangle)]
