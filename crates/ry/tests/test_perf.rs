@@ -80,7 +80,12 @@ fn wait_with_peak(pid: u32) -> (i32, i64) {
     // pointers, which live for the call.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let reaped = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
-    assert_eq!(reaped, pid, "wait4 failed: {}", std::io::Error::last_os_error());
+    assert_eq!(
+        reaped,
+        pid,
+        "wait4 failed: {}",
+        std::io::Error::last_os_error()
+    );
     let exit = if libc::WIFEXITED(status) {
         libc::WEXITSTATUS(status)
     } else {

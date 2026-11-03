@@ -1102,11 +1102,7 @@ fn expression_annotations<'db>(
     let mut attachments = Vec::new();
     for (statement, comment) in targets {
         let range = hir::significant_range(&statement);
-        let Some(index) = module
-            .ranges()
-            .iter()
-            .position(|&candidate| candidate == range)
-        else {
+        let Some(index) = module.ranges().position(|candidate| candidate == range) else {
             continue;
         };
         let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
@@ -1880,13 +1876,13 @@ fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct InterfaceReads<'db> {
     /// Binders in the item's own file that a read reaches.
-    pub frame: Vec<Item<'db>>,
+    pub frame: ThinVec<Item<'db>>,
     /// Names whose read may continue past the file into the project's layers, sorted and
     /// unique.
-    pub layered: Vec<Symbol>,
+    pub layered: ThinVec<Symbol>,
     /// Names whose read continues past the file to a definition only (`earlier_binding`),
     /// sorted and unique.
-    pub earlier: Vec<Symbol>,
+    pub earlier: ThinVec<Symbol>,
 }
 
 /// A firewall: whole-project walks depend on this rather than the full naming, so a body edit
@@ -1894,10 +1890,13 @@ pub struct InterfaceReads<'db> {
 /// item spells is here, so a cycle through them never closes inside salsa.
 #[salsa::tracked(returns(ref))]
 pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceReads<'db> {
-    let mut reads = InterfaceReads::default();
     let Some(naming) = item_naming(db, item) else {
-        return reads;
+        return InterfaceReads::default();
     };
+    // Gathered in vectors and copied out exactly sized, since every item keeps its reads.
+    let mut frame_reads: Vec<Item<'db>> = Vec::new();
+    let mut layered: Vec<Symbol> = Vec::new();
+    let mut earlier: Vec<Symbol> = Vec::new();
     let package = *item.file(db).kind(db) == DocumentKind::Package;
     // `(name, deferred)` reads through the item's frame first, the rest straight from the
     // layers (`enclosing_scheme`, and `namespace_scheme` outside a package file).
@@ -1907,7 +1906,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     for (id, &name) in naming.non_locals.iter() {
         lookups.push((name, naming.deferred_non_locals.contains(id)));
         if !package {
-            reads.layered.push(name);
+            layered.push(name);
         }
     }
     for (id, &name) in naming.quiet_reads.iter() {
@@ -1916,7 +1915,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     for name in naming.namespace_reads.values().filter_map(|read| read.name) {
         match package {
             true => lookups.push((name, false)),
-            false => reads.layered.push(name),
+            false => layered.push(name),
         };
     }
     let top_level = |slot: &naming::BindingId| {
@@ -1934,7 +1933,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         };
         if top_level(slot) || fallback.outer.iter().any(top_level) {
             if !package {
-                reads.layered.push(binding.name);
+                layered.push(binding.name);
             }
         } else {
             lookups.push((binding.name, fallback.deferred));
@@ -1967,9 +1966,9 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
     for name in item_side_names(db, item) {
         match frame_definition(name, false) {
-            Some(binder) => push_unique(&mut reads.frame, binder),
+            Some(binder) => push_unique(&mut frame_reads, binder),
             None => {
-                reads.earlier.push(name);
+                earlier.push(name);
             }
         }
     }
@@ -1978,21 +1977,25 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     for (name, deferred) in lookups {
         let binder = frame_definition(name, deferred);
         match binder.map(|binder| binder_source(db, binder, name.as_str())) {
-            Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
+            Some(Source::Definition(binder)) => push_unique(&mut frame_reads, binder),
             Some(Source::Statement(binder)) => {
-                push_unique(&mut reads.frame, binder);
-                reads.layered.push(name);
+                push_unique(&mut frame_reads, binder);
+                layered.push(name);
             }
             Some(Source::Conditional(_)) | None => {
-                reads.layered.push(name);
+                layered.push(name);
             }
         }
     }
-    for names in [&mut reads.layered, &mut reads.earlier] {
+    for names in [&mut layered, &mut earlier] {
         names.sort_unstable();
         names.dedup();
     }
-    reads
+    InterfaceReads {
+        frame: ThinVec::from(frame_reads),
+        layered: ThinVec::from(layered),
+        earlier: ThinVec::from(earlier),
+    }
 }
 
 fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
@@ -2058,7 +2061,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
 /// order `SalsaGlobals` resolves them. Memoized per item so the reachability walks of every
 /// item share one edge list each.
 #[salsa::tracked(returns(ref))]
-pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'db>> {
+pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> ThinVec<Item<'db>> {
     let test = matches!(
         *item.file(db).kind(db),
         DocumentKind::Test | DocumentKind::TestHelper
@@ -2066,9 +2069,9 @@ pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'
     // An incremental host serves `name_layer` from per-name projections: a new top-level name
     // anywhere changes the project-wide maps, and reading them would re-run every item's edges.
     let reads = item_interface_reads(db, item);
-    let mut targets: Vec<Item<'db>> = reads.frame.clone();
+    let mut targets: Vec<Item<'db>> = reads.frame.to_vec();
     let Some(files) = ProjectFiles::try_get(db) else {
-        return targets;
+        return ThinVec::from(targets);
     };
     let test_lookup = test.then(|| NameLookup::new(db, files, true));
     let package_lookup = NameLookup::new(db, files, false);
@@ -2111,7 +2114,7 @@ pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'
             push_unique(&mut targets, winner);
         }
     }
-    targets
+    ThinVec::from(targets)
 }
 
 /// Whether the item's top-level writes are at most its own binding, read off its syntax so the
@@ -2165,9 +2168,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
             | SyntaxKind::MINUS_GREATER2
             | SyntaxKind::COLON_EQ
             | SyntaxKind::FOR_KW => true,
-            SyntaxKind::EQ => {
-                token.parent().map(NodeRef::kind) == Some(SyntaxKind::BINARY_EXPR)
-            }
+            SyntaxKind::EQ => token.parent().map(NodeRef::kind) == Some(SyntaxKind::BINARY_EXPR),
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
             SyntaxKind::IDENT => matches!(
                 token.text().trim_matches('`'),
@@ -2777,25 +2778,27 @@ fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
 /// check per read, and a union of dozens of unrelated types helps no diagnostic.
 const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 
-/// Indexed by name: scanning the item list per lookup is quadratic in items × references.
+/// Every top-level name the file's items bind, as `(name, position in the item tree, item)`
+/// sorted by name and then position, so a lookup is a binary search rather than a scan of the
+/// item list. One exactly sized array, because every file keeps it for the whole run, and a
+/// map of per-name vectors cost four times the memory.
 #[salsa::tracked(returns(ref))]
-fn file_binders<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> FxHashMap<Symbol, Vec<(usize, Item<'db>)>> {
-    let mut binders: FxHashMap<Symbol, Vec<(usize, Item<'db>)>> = FxHashMap::default();
+fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32, Item<'db>)> {
+    let mut binders = Vec::new();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
+        let index = u32::try_from(index).expect("a file holds fewer than u32::MAX items");
         let own_name = item.name(db).as_deref().map(Symbol::new);
         if let Some(name) = own_name {
-            binders.entry(name).or_default().push((index, item));
+            binders.push((name, index, item));
         }
         for &name in item_top_level_names(db, item) {
             if own_name != Some(name) {
-                binders.entry(name).or_default().push((index, item));
+                binders.push((name, index, item));
             }
         }
     }
-    binders
+    binders.sort_unstable_by_key(|&(name, index, _)| (name, index));
+    ThinVec::from(binders)
 }
 
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).
@@ -2865,7 +2868,7 @@ fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders
 /// dependency edge, and an item looks up dozens of names.
 struct FrameBinders<'db> {
     item: Item<'db>,
-    binders: &'db FxHashMap<Symbol, Vec<(usize, Item<'db>)>>,
+    binders: &'db [(Symbol, u32, Item<'db>)],
     test: bool,
     /// The item's position in its file's item tree.
     position: usize,
@@ -2889,15 +2892,21 @@ impl<'db> FrameBinders<'db> {
     }
 
     fn binder(&self, name: Symbol, deferred: bool) -> Option<Item<'db>> {
-        let binders = self.binders.get(&name)?;
-        if deferred && self.test && binders.iter().any(|&(_, binder)| binder == self.item) {
+        let start = self
+            .binders
+            .partition_point(|&(binder, _, _)| binder < name);
+        let length = self.binders[start..].partition_point(|&(binder, _, _)| binder == name);
+        let binders = &self.binders[start..start + length];
+        if deferred && self.test && binders.iter().any(|&(_, _, binder)| binder == self.item) {
             return Some(self.item);
         }
         let visible = match deferred {
-            true => &binders[..],
-            false => &binders[..binders.partition_point(|&(at, _)| at < self.position)],
+            true => binders,
+            false => {
+                &binders[..binders.partition_point(|&(_, at, _)| (at as usize) < self.position)]
+            }
         };
-        visible.last().map(|&(_, item)| item)
+        visible.last().map(|&(_, _, item)| item)
     }
 }
 
@@ -3015,23 +3024,17 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
     fn layers(&self, name: types::Name<'db>) -> impl Iterator<Item = NameLayer<'db>> {
         let test = self
             .files
-            .filter(|_| {
-                matches!(
-                    self.kind,
-                    DocumentKind::Test | DocumentKind::TestHelper
-                )
-            })
+            .filter(|_| matches!(self.kind, DocumentKind::Test | DocumentKind::TestHelper))
             .map(|files| self.layer(&self.test_layers, &self.test_lookup, files, name, true));
-        let sourced =
-            (*self
-                .sources_files
-                .get_or_init(|| !sourced_files(self.db, self.file).is_empty()))
-            .then(|| *sourced_name_definition(self.db, self.file, name.symbol()))
-            .flatten()
-            .map(|winner| NameLayer {
-                winner: Some(winner),
-                conditional_writers: &[],
-            });
+        let sourced = (*self
+            .sources_files
+            .get_or_init(|| !sourced_files(self.db, self.file).is_empty()))
+        .then(|| *sourced_name_definition(self.db, self.file, name.symbol()))
+        .flatten()
+        .map(|winner| NameLayer {
+            winner: Some(winner),
+            conditional_writers: &[],
+        });
         sourced
             .into_iter()
             .chain(test)

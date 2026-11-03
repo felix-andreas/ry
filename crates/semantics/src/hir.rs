@@ -8,15 +8,15 @@ use {
         fmt,
         hash::{Hash, Hasher},
         marker::PhantomData,
+        mem::MaybeUninit,
         num::NonZeroU32,
-        ops,
+        ops, ptr, slice,
         sync::{LazyLock, Mutex},
     },
     syntax::{
         ElementRef, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenRef,
         ast::{is_expression_kind, name_text},
     },
-    thin_vec::ThinVec,
 };
 
 /// An expression's index in its [`Module`]. It stores the index plus one, so an
@@ -313,25 +313,309 @@ impl fmt::Debug for Symbol {
 }
 
 /// One item's expressions and patterns as dense arrays. An expression is an `ExprId` index
-/// into `kinds` and `ranges`, which are split because inference walks kinds and only
+/// into the kinds and ranges, which are split because inference walks kinds and only
 /// diagnostics read ranges. Every variable-length child list lives in one side array per
-/// element type and an expression holds a [`Span`] into it, so lowering an item makes a
-/// handful of allocations rather than one per list, and every kind is `Copy`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// element type and an expression holds a [`Span`] into it, so every kind is `Copy`.
+///
+/// All the arrays share one allocation, laid out as a header and then one section per array.
+/// A project holds one module per item for as long as it runs, so a dozen separate vectors
+/// would cost a dozen allocations, headers and size-class remainders per item, which together
+/// came to a quarter of the HIR's memory. Ranges are item-relative, and an item shorter than
+/// 64 KiB stores each in one word, half of a `TextRange`.
+#[derive(Clone)]
 pub struct Module {
-    kinds: ThinVec<ExpressionKind>,
-    ranges: ThinVec<TextRange>,
-    patterns: ThinVec<Pattern>,
-    arguments: ThinVec<Argument>,
-    parameters: ThinVec<Parameter>,
-    expression_lists: ThinVec<ExprId>,
-    record_fields: ThinVec<RecordField>,
-    arms: ThinVec<MatchArm>,
-    pattern_lists: ThinVec<PatId>,
-    pattern_fields: ThinVec<PatternField>,
-    name_sites: ThinVec<NameSite>,
-    text: String,
+    words: Box<[MaybeUninit<u32>]>,
     pub root: Option<ExprId>,
+}
+
+/// The header's words: the text's length in bytes, then where each section starts and where
+/// the last one ends, in words.
+const TEXT_LENGTH: usize = 0;
+const SECTION_STARTS: usize = 1;
+const SECTIONS: usize = 12;
+const HEADER_WORDS: usize = SECTION_STARTS + SECTIONS + 1;
+
+const KINDS: usize = 0;
+const RANGES: usize = 1;
+const PATTERNS: usize = 2;
+const ARGUMENTS: usize = 3;
+const PARAMETERS: usize = 4;
+const EXPRESSION_LISTS: usize = 5;
+const RECORD_FIELDS: usize = 6;
+const ARMS: usize = 7;
+const PATTERN_LISTS: usize = 8;
+const PATTERN_FIELDS: usize = 9;
+const NAME_SITES: usize = 10;
+const TEXT: usize = 11;
+
+/// An element type a [`Module`] section can hold: plain data whose size is whole words and
+/// whose alignment a word satisfies, so a section of words reads back as a slice of it.
+///
+/// # Safety
+///
+/// `size_of::<Self>()` must be a nonzero multiple of four and `align_of::<Self>()` at most
+/// four.
+unsafe trait Element: Copy {}
+
+macro_rules! element {
+    ($($element:ty),*) => {
+        $(
+            const _: () = assert!(
+                size_of::<$element>() % 4 == 0 && size_of::<$element>() > 0 && align_of::<$element>() <= 4
+            );
+            // SAFETY: the assertion above checks the size and alignment.
+            unsafe impl Element for $element {}
+        )*
+    };
+}
+
+element!(
+    ExpressionKind,
+    TextRange,
+    u32,
+    Pattern,
+    Argument,
+    Parameter,
+    ExprId,
+    RecordField,
+    MatchArm,
+    PatId,
+    PatternField,
+    NameSite
+);
+
+/// The arrays lowering appends to, sealed into a [`Module`] once the item is done.
+#[derive(Default)]
+struct Parts {
+    kinds: Vec<ExpressionKind>,
+    ranges: Vec<TextRange>,
+    patterns: Vec<Pattern>,
+    arguments: Vec<Argument>,
+    parameters: Vec<Parameter>,
+    expression_lists: Vec<ExprId>,
+    record_fields: Vec<RecordField>,
+    arms: Vec<MatchArm>,
+    pattern_lists: Vec<PatId>,
+    pattern_fields: Vec<PatternField>,
+    name_sites: Vec<NameSite>,
+    text: String,
+}
+
+impl Parts {
+    fn seal(&self, root: ExprId) -> Module {
+        let narrow = self
+            .ranges
+            .iter()
+            .all(|range| u32::from(range.end()) <= u32::from(u16::MAX));
+        let narrow_ranges: Vec<u32> = match narrow {
+            true => self
+                .ranges
+                .iter()
+                .map(|range| u32::from(range.start()) | u32::from(range.len()) << 16)
+                .collect(),
+            false => Vec::new(),
+        };
+        let text = text_bytes(&self.text);
+        let sections: [&[MaybeUninit<u8>]; SECTIONS] = [
+            element_bytes(&self.kinds),
+            match narrow {
+                true => element_bytes(&narrow_ranges),
+                false => element_bytes(&self.ranges),
+            },
+            element_bytes(&self.patterns),
+            element_bytes(&self.arguments),
+            element_bytes(&self.parameters),
+            element_bytes(&self.expression_lists),
+            element_bytes(&self.record_fields),
+            element_bytes(&self.arms),
+            element_bytes(&self.pattern_lists),
+            element_bytes(&self.pattern_fields),
+            element_bytes(&self.name_sites),
+            text,
+        ];
+        // Sized exactly before the first push: mimalloc keeps a block that a vector shrinks
+        // into when the new size is at least half the old one, so growing and then boxing
+        // would retain up to twice the memory.
+        let total = HEADER_WORDS
+            + sections
+                .iter()
+                .map(|bytes| bytes.len().div_ceil(4))
+                .sum::<usize>();
+        let mut words = Vec::with_capacity(total);
+        words.resize(HEADER_WORDS, MaybeUninit::new(0));
+        for (section, bytes) in sections.into_iter().enumerate() {
+            words[SECTION_STARTS + section] = MaybeUninit::new(to_u32(words.len()));
+            let start = words.len();
+            words.resize(start + bytes.len().div_ceil(4), MaybeUninit::new(0));
+            // SAFETY: the destination was just resized to hold `bytes`, and the two never
+            // overlap because `bytes` borrows another buffer.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    words[start..].as_mut_ptr().cast::<MaybeUninit<u8>>(),
+                    bytes.len(),
+                );
+            }
+        }
+        words[SECTION_STARTS + SECTIONS] = MaybeUninit::new(to_u32(words.len()));
+        words[TEXT_LENGTH] = MaybeUninit::new(to_u32(self.text.len()));
+        Module {
+            words: words.into_boxed_slice(),
+            root: Some(root),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.kinds.clear();
+        self.ranges.clear();
+        self.patterns.clear();
+        self.arguments.clear();
+        self.parameters.clear();
+        self.expression_lists.clear();
+        self.record_fields.clear();
+        self.arms.clear();
+        self.pattern_lists.clear();
+        self.pattern_fields.clear();
+        self.name_sites.clear();
+        self.text.clear();
+    }
+}
+
+fn to_u32(count: usize) -> u32 {
+    u32::try_from(count).expect("an item's HIR is shorter than u32::MAX words")
+}
+
+/// An element slice's bytes, padding included, which is why they stay `MaybeUninit`.
+fn element_bytes<T: Element>(elements: &[T]) -> &[MaybeUninit<u8>] {
+    // SAFETY: any byte of a live value may be read as a `MaybeUninit<u8>`, and the length is
+    // the slice's size in bytes.
+    unsafe {
+        slice::from_raw_parts(
+            elements.as_ptr().cast::<MaybeUninit<u8>>(),
+            size_of_val(elements),
+        )
+    }
+}
+
+fn text_bytes(text: &str) -> &[MaybeUninit<u8>] {
+    // SAFETY: initialized bytes are valid `MaybeUninit<u8>`s.
+    unsafe { slice::from_raw_parts(text.as_ptr().cast::<MaybeUninit<u8>>(), text.len()) }
+}
+
+/// The arrays a sealed [`Module`] and the lowering's growing [`Parts`] both read through, for
+/// the walks lowering needs over what it has built so far.
+trait Arrays {
+    fn kind_array(&self) -> &[ExpressionKind];
+    fn pattern_array(&self) -> &[Pattern];
+    fn argument_array(&self) -> &[Argument];
+    fn pattern_list_array(&self) -> &[PatId];
+    fn pattern_field_array(&self) -> &[PatternField];
+}
+
+impl Arrays for Parts {
+    fn kind_array(&self) -> &[ExpressionKind] {
+        &self.kinds
+    }
+
+    fn pattern_array(&self) -> &[Pattern] {
+        &self.patterns
+    }
+
+    fn argument_array(&self) -> &[Argument] {
+        &self.arguments
+    }
+
+    fn pattern_list_array(&self) -> &[PatId] {
+        &self.pattern_lists
+    }
+
+    fn pattern_field_array(&self) -> &[PatternField] {
+        &self.pattern_fields
+    }
+}
+
+impl Arrays for Module {
+    fn kind_array(&self) -> &[ExpressionKind] {
+        self.section(KINDS)
+    }
+
+    fn pattern_array(&self) -> &[Pattern] {
+        self.section(PATTERNS)
+    }
+
+    fn argument_array(&self) -> &[Argument] {
+        self.section(ARGUMENTS)
+    }
+
+    fn pattern_list_array(&self) -> &[PatId] {
+        self.section(PATTERN_LISTS)
+    }
+
+    fn pattern_field_array(&self) -> &[PatternField] {
+        self.section(PATTERN_FIELDS)
+    }
+}
+
+impl Default for Module {
+    fn default() -> Module {
+        let mut words = vec![MaybeUninit::new(0); HEADER_WORDS];
+        for start in &mut words[SECTION_STARTS..] {
+            *start = MaybeUninit::new(HEADER_WORDS as u32);
+        }
+        Module {
+            words: words.into_boxed_slice(),
+            root: None,
+        }
+    }
+}
+
+impl PartialEq for Module {
+    fn eq(&self, other: &Module) -> bool {
+        self.root == other.root
+            && self.kinds() == other.kinds()
+            && self.ranges().eq(other.ranges())
+            && self.patterns() == other.patterns()
+            && self.section::<Argument>(ARGUMENTS) == other.section::<Argument>(ARGUMENTS)
+            && self.section::<Parameter>(PARAMETERS) == other.section::<Parameter>(PARAMETERS)
+            && self.section::<ExprId>(EXPRESSION_LISTS) == other.section::<ExprId>(EXPRESSION_LISTS)
+            && self.section::<RecordField>(RECORD_FIELDS)
+                == other.section::<RecordField>(RECORD_FIELDS)
+            && self.section::<MatchArm>(ARMS) == other.section::<MatchArm>(ARMS)
+            && self.section::<PatId>(PATTERN_LISTS) == other.section::<PatId>(PATTERN_LISTS)
+            && self.section::<PatternField>(PATTERN_FIELDS)
+                == other.section::<PatternField>(PATTERN_FIELDS)
+            && self.section::<NameSite>(NAME_SITES) == other.section::<NameSite>(NAME_SITES)
+            && self.text() == other.text()
+    }
+}
+
+impl Eq for Module {}
+
+impl fmt::Debug for Module {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Module")
+            .field("kinds", &self.kinds())
+            .field("ranges", &self.ranges().collect::<Vec<_>>())
+            .field("patterns", &self.patterns())
+            .field("arguments", &self.section::<Argument>(ARGUMENTS))
+            .field("parameters", &self.section::<Parameter>(PARAMETERS))
+            .field(
+                "expression_lists",
+                &self.section::<ExprId>(EXPRESSION_LISTS),
+            )
+            .field("record_fields", &self.section::<RecordField>(RECORD_FIELDS))
+            .field("arms", &self.section::<MatchArm>(ARMS))
+            .field("pattern_lists", &self.section::<PatId>(PATTERN_LISTS))
+            .field(
+                "pattern_fields",
+                &self.section::<PatternField>(PATTERN_FIELDS),
+            )
+            .field("name_sites", &self.section::<NameSite>(NAME_SITES))
+            .field("text", &self.text())
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 /// One expression of a [`Module`], as a scan over [`Module::expressions`] yields it.
@@ -425,7 +709,7 @@ impl ops::Index<NameId> for Module {
     type Output = NameSite;
 
     fn index(&self, id: NameId) -> &NameSite {
-        &self.name_sites[id.index()]
+        &self.section::<NameSite>(NAME_SITES)[id.index()]
     }
 }
 
@@ -433,7 +717,7 @@ impl ops::Index<&NameId> for Module {
     type Output = NameSite;
 
     fn index(&self, id: &NameId) -> &NameSite {
-        &self.name_sites[id.index()]
+        &self[*id]
     }
 }
 
@@ -441,7 +725,7 @@ impl ops::Index<Text> for Module {
     type Output = str;
 
     fn index(&self, text: Text) -> &str {
-        &self.text[text.range()]
+        &self.text()[text.range()]
     }
 }
 
@@ -449,17 +733,17 @@ impl ops::Index<&Text> for Module {
     type Output = str;
 
     fn index(&self, text: &Text) -> &str {
-        &self.text[text.range()]
+        &self[*text]
     }
 }
 
 macro_rules! side_array {
-    ($element:ty, $field:ident) => {
+    ($element:ty, $section:ident) => {
         impl ops::Index<Span<$element>> for Module {
             type Output = [$element];
 
             fn index(&self, span: Span<$element>) -> &[$element] {
-                &self.$field[span.range()]
+                &self.section::<$element>($section)[span.range()]
             }
         }
 
@@ -467,39 +751,23 @@ macro_rules! side_array {
             type Output = [$element];
 
             fn index(&self, span: &Span<$element>) -> &[$element] {
-                &self.$field[span.range()]
+                &self[*span]
             }
         }
     };
 }
 
-side_array!(Argument, arguments);
-side_array!(Parameter, parameters);
-side_array!(ExprId, expression_lists);
-side_array!(RecordField, record_fields);
-side_array!(MatchArm, arms);
-side_array!(PatId, pattern_lists);
-side_array!(PatternField, pattern_fields);
+side_array!(Argument, ARGUMENTS);
+side_array!(Parameter, PARAMETERS);
+side_array!(ExprId, EXPRESSION_LISTS);
+side_array!(RecordField, RECORD_FIELDS);
+side_array!(MatchArm, ARMS);
+side_array!(PatId, PATTERN_LISTS);
+side_array!(PatternField, PATTERN_FIELDS);
 
 impl Module {
-    fn clear(&mut self) {
-        self.kinds.clear();
-        self.ranges.clear();
-        self.patterns.clear();
-        self.arguments.clear();
-        self.parameters.clear();
-        self.expression_lists.clear();
-        self.record_fields.clear();
-        self.arms.clear();
-        self.pattern_lists.clear();
-        self.pattern_fields.clear();
-        self.name_sites.clear();
-        self.text.clear();
-        self.root = None;
-    }
-
     pub fn kind(&self, id: ExprId) -> &ExpressionKind {
-        &self.kinds[id.index()]
+        &self.kinds()[id.index()]
     }
 
     pub fn expression(&self, id: ExprId) -> Expression<'_> {
@@ -510,25 +778,33 @@ impl Module {
     }
 
     pub fn range(&self, id: ExprId) -> TextRange {
-        self.ranges[id.index()]
+        let index = id.index();
+        match self.narrow_ranges() {
+            Some(ranges) => narrow_range(ranges[index]),
+            None => self.section::<TextRange>(RANGES)[index],
+        }
     }
 
     /// Every expression's kind, indexed by `ExprId`.
     pub fn kinds(&self) -> &[ExpressionKind] {
-        &self.kinds
+        self.section(KINDS)
     }
 
-    /// Every expression's significant source range, indexed by `ExprId`.
-    pub fn ranges(&self) -> &[TextRange] {
-        &self.ranges
+    /// Every expression's significant source range, in `ExprId` order.
+    pub fn ranges(&self) -> impl ExactSizeIterator<Item = TextRange> + Clone + '_ {
+        let (narrow, wide) = match self.narrow_ranges() {
+            Some(ranges) => (ranges, &[][..]),
+            None => (&[][..], self.section::<TextRange>(RANGES)),
+        };
+        Ranges { narrow, wide }
     }
 
     /// Every expression with its id order, for a scan that reads both kind and range.
     pub fn expressions(&self) -> impl ExactSizeIterator<Item = Expression<'_>> + Clone {
-        self.kinds
+        self.kinds()
             .iter()
-            .zip(&self.ranges)
-            .map(|(kind, &range)| Expression { kind, range })
+            .zip(self.ranges())
+            .map(|(kind, range)| Expression { kind, range })
     }
 
     pub fn name(&self, id: NameId) -> Symbol {
@@ -548,26 +824,107 @@ impl Module {
     }
 
     pub fn expression_count(&self) -> usize {
-        self.kinds.len()
+        self.kinds().len()
     }
 
     pub fn expression_ids(&self) -> impl Iterator<Item = ExprId> + use<> {
-        (0..self.kinds.len()).map(ExprId::new)
+        (0..self.kinds().len()).map(ExprId::new)
     }
 
     /// Every pattern, indexed by `PatId`.
     pub fn patterns(&self) -> &[Pattern] {
-        &self.patterns
+        self.section(PATTERNS)
     }
 
     pub fn pattern_count(&self) -> usize {
-        self.patterns.len()
+        self.patterns().len()
     }
 
     pub fn pattern(&self, id: PatId) -> &Pattern {
-        &self.patterns[id.index()]
+        &self.patterns()[id.index()]
     }
 
+    fn text(&self) -> &str {
+        let words = self.section_words(TEXT);
+        let length = (self.header(TEXT_LENGTH) as usize).min(size_of_val(words));
+        // SAFETY: sealing copied a whole `str` to the start of this section and recorded its
+        // length, so these bytes are initialized UTF-8.
+        unsafe {
+            std::str::from_utf8_unchecked(slice::from_raw_parts(
+                words.as_ptr().cast::<u8>(),
+                length,
+            ))
+        }
+    }
+
+    /// The ranges when the item is short enough to store each in one word.
+    fn narrow_ranges(&self) -> Option<&[u32]> {
+        let ranges = self.section_words(RANGES);
+        (ranges.len() == self.kinds().len()).then(|| {
+            // SAFETY: sealing wrote one initialized word per narrow range.
+            unsafe { slice::from_raw_parts(ranges.as_ptr().cast::<u32>(), ranges.len()) }
+        })
+    }
+
+    fn section<T: Element>(&self, section: usize) -> &[T] {
+        let words = self.section_words(section);
+        // SAFETY: sealing copied a slice of `T` to the start of this section, and `Element`
+        // guarantees `T` is whole words with an alignment a word satisfies, so the section's
+        // words are exactly that slice. The wide and narrow range encodings are told apart
+        // before a range section is read as either.
+        unsafe {
+            slice::from_raw_parts(
+                words.as_ptr().cast::<T>(),
+                size_of_val(words) / size_of::<T>(),
+            )
+        }
+    }
+
+    fn section_words(&self, section: usize) -> &[MaybeUninit<u32>] {
+        let start = self.header(SECTION_STARTS + section) as usize;
+        let end = self.header(SECTION_STARTS + section + 1) as usize;
+        &self.words[start..end]
+    }
+
+    fn header(&self, index: usize) -> u32 {
+        // SAFETY: both `seal` and `default` initialize every header word.
+        unsafe { self.words[index].assume_init() }
+    }
+}
+
+/// A narrow range: the start in the low half-word, the length in the high one.
+fn narrow_range(word: u32) -> TextRange {
+    TextRange::at(TextSize::from(word & 0xFFFF), TextSize::from(word >> 16))
+}
+
+#[derive(Clone)]
+struct Ranges<'a> {
+    narrow: &'a [u32],
+    wide: &'a [TextRange],
+}
+
+impl Iterator for Ranges<'_> {
+    type Item = TextRange;
+
+    fn next(&mut self) -> Option<TextRange> {
+        if let Some((&first, rest)) = self.narrow.split_first() {
+            self.narrow = rest;
+            return Some(narrow_range(first));
+        }
+        let (&first, rest) = self.wide.split_first()?;
+        self.wide = rest;
+        Some(first)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let length = self.narrow.len() + self.wide.len();
+        (length, Some(length))
+    }
+}
+
+impl ExactSizeIterator for Ranges<'_> {}
+
+impl Module {
     /// The direct child expressions of `id`, in source order.
     pub fn for_each_child(&self, id: ExprId, mut visit: impl FnMut(ExprId)) {
         match *self.kind(id) {
@@ -663,61 +1020,69 @@ impl Module {
 
     /// The names a pattern binds, as `NameRef` expressions, in source order.
     pub fn pattern_bindings(&self, pattern: PatId) -> Vec<ExprId> {
-        let mut bindings = Vec::new();
-        self.collect_pattern_bindings(pattern, &mut bindings);
-        bindings
+        pattern_bindings(self, pattern)
     }
+}
 
-    fn collect_pattern_bindings(&self, pattern: PatId, bindings: &mut Vec<ExprId>) {
-        match self.pattern(pattern).kind {
+fn pattern_bindings(arrays: &impl Arrays, pattern: PatId) -> Vec<ExprId> {
+    fn collect(arrays: &impl Arrays, pattern: PatId, bindings: &mut Vec<ExprId>) {
+        match arrays.pattern_array()[pattern.index()].kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
             PatternKind::Bind(name) => bindings.push(name),
             PatternKind::Tag { payload, .. } => {
                 if let Some(payload) = payload {
-                    self.collect_pattern_bindings(payload, bindings);
+                    collect(arrays, payload, bindings);
                 }
             }
             // Every alternative binds the same names (naming reports it otherwise), and each
             // alternative's leaf is its own write site, so all of them are listed.
             PatternKind::Tuple(items) | PatternKind::Or(items) => {
-                for &item in &self[items] {
-                    self.collect_pattern_bindings(item, bindings);
+                for &item in &arrays.pattern_list_array()[items.range()] {
+                    collect(arrays, item, bindings);
                 }
             }
             PatternKind::Record { fields, .. } => {
-                for field in &self[fields] {
-                    self.collect_pattern_bindings(field.pattern, bindings);
+                for field in &arrays.pattern_field_array()[fields.range()] {
+                    collect(arrays, field.pattern, bindings);
                 }
             }
         }
     }
+    let mut bindings = Vec::new();
+    collect(arrays, pattern, &mut bindings);
+    bindings
 }
 
 /// The names a zeallot pattern binds, in order; `None` unless the pattern is `c()` or `list()`
 /// of names and nested patterns (a computed element makes it an ordinary operator call).
 pub fn destructure_leaves(module: &Module, pattern: ExprId) -> Option<Vec<ExprId>> {
-    fn collect(module: &Module, pattern: ExprId, leaves: &mut Vec<ExprId>) -> Option<()> {
-        let ExpressionKind::Call { callee, arguments } = *module.kind(pattern) else {
+    leaves_of(module, pattern)
+}
+
+fn leaves_of(arrays: &impl Arrays, pattern: ExprId) -> Option<Vec<ExprId>> {
+    fn collect(arrays: &impl Arrays, pattern: ExprId, leaves: &mut Vec<ExprId>) -> Option<()> {
+        let kinds = arrays.kind_array();
+        let ExpressionKind::Call { callee, arguments } = kinds[pattern.index()] else {
             return None;
         };
-        let ExpressionKind::NameRef(name) = module.kind(callee) else {
+        let ExpressionKind::NameRef(name) = kinds[callee.index()] else {
             return None;
         };
         if name != "c" && name != "list" {
             return None;
         }
-        for argument in &module[arguments] {
+        for argument in &arrays.argument_array()[arguments.range()] {
             let value = argument.value?;
-            match module.kind(value) {
+            match kinds[value.index()] {
                 ExpressionKind::NameRef(_) => leaves.push(value),
-                ExpressionKind::Call { .. } => collect(module, value, leaves)?,
+                ExpressionKind::Call { .. } => collect(arrays, value, leaves)?,
                 _ => return None,
             }
         }
         Some(())
     }
     let mut leaves = Vec::new();
-    collect(module, pattern, &mut leaves)?;
+    collect(arrays, pattern, &mut leaves)?;
     Some(leaves)
 }
 
@@ -957,26 +1322,10 @@ pub struct PatternField {
 pub fn lower_item(root: &SyntaxNode) -> Module {
     let mut lowering = LOWERING.take();
     let root_id = lowering.lower_expression(root.node_ref());
-    let scratch = &mut lowering.module;
-    // The module lives as long as the project, so it gets exact-size copies; the scratch
-    // arrays keep their capacity for the next item this thread lowers, which saves both the
-    // doubling slack and the reallocation churn of growing fresh vectors per item.
-    let module = Module {
-        kinds: scratch.kinds.as_slice().into(),
-        ranges: scratch.ranges.as_slice().into(),
-        patterns: scratch.patterns.as_slice().into(),
-        arguments: scratch.arguments.as_slice().into(),
-        parameters: scratch.parameters.as_slice().into(),
-        expression_lists: scratch.expression_lists.as_slice().into(),
-        record_fields: scratch.record_fields.as_slice().into(),
-        arms: scratch.arms.as_slice().into(),
-        pattern_lists: scratch.pattern_lists.as_slice().into(),
-        pattern_fields: scratch.pattern_fields.as_slice().into(),
-        name_sites: scratch.name_sites.as_slice().into(),
-        text: scratch.text.as_str().into(),
-        root: Some(root_id),
-    };
-    scratch.clear();
+    // The scratch arrays keep their capacity for the next item this thread lowers, which saves
+    // the reallocation churn of growing fresh vectors per item.
+    let module = lowering.parts.seal(root_id);
+    lowering.parts.clear();
     LOWERING.set(lowering);
     module
 }
@@ -992,7 +1341,7 @@ thread_local! {
 /// keeps every list contiguous at the top of its stack.
 #[derive(Default)]
 struct Lowering {
-    module: Module,
+    parts: Parts,
     expression_stack: Vec<ExprId>,
     argument_stack: Vec<Argument>,
     parameter_stack: Vec<Parameter>,
@@ -1003,7 +1352,7 @@ struct Lowering {
 }
 
 /// Moves `stack[mark..]` to the end of `store`.
-fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut ThinVec<T>) -> Span<T> {
+fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
     let start = store.len() as u32;
     store.extend(stack.drain(mark..));
     Span {
@@ -1015,15 +1364,15 @@ fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut ThinVec<T>) -> Span<T> {
 
 impl Lowering {
     fn allocate(&mut self, kind: ExpressionKind, range: TextRange) -> ExprId {
-        let id = ExprId::new(self.module.kinds.len());
-        self.module.kinds.push(kind);
-        self.module.ranges.push(range);
+        let id = ExprId::new(self.parts.kinds.len());
+        self.parts.kinds.push(kind);
+        self.parts.ranges.push(range);
         id
     }
 
     fn name_site(&mut self, name: Symbol, range: TextRange) -> NameId {
-        let id = NameId::new(self.module.name_sites.len());
-        self.module.name_sites.push(NameSite { name, range });
+        let id = NameId::new(self.parts.name_sites.len());
+        self.parts.name_sites.push(NameSite { name, range });
         id
     }
 
@@ -1046,7 +1395,7 @@ impl Lowering {
                 self.allocate(ExpressionKind::NameRef(name), range)
             }
             SyntaxKind::LITERAL => {
-                let kind = literal_kind(node, &mut self.module.text);
+                let kind = literal_kind(node, &mut self.parts.text);
                 self.allocate(ExpressionKind::Literal(kind), range)
             }
             // `@Name(value)` is its value in parentheses once the nominal head is erased;
@@ -1065,7 +1414,7 @@ impl Lowering {
                 let statements = seal(
                     &mut self.expression_stack,
                     mark,
-                    &mut self.module.expression_lists,
+                    &mut self.parts.expression_lists,
                 );
                 // A trailing `;` adds no expression in R's grammar, so
                 // `{ 1L; }` is `1L` and needs no flag here.
@@ -1110,15 +1459,15 @@ impl Lowering {
                     self.argument_stack.truncate(mark);
                     return self.allocate(ExpressionKind::Local { body }, range);
                 }
-                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.parts.arguments);
                 let callee = self.lower_optional(callee_node, range);
                 // R evaluates a string call head by looking up the function of that name, so
                 // `"%in%.integer64"(x, y)` calls exactly what the bare name would.
-                if let Some(callee_kind) = self.module.kinds.get_mut(callee.index())
+                if let Some(callee_kind) = self.parts.kinds.get_mut(callee.index())
                     && let ExpressionKind::Literal(LiteralKind::String(name)) = *callee_kind
                 {
                     *callee_kind =
-                        ExpressionKind::NameRef(Symbol::new(&self.module.text[name.range()]));
+                        ExpressionKind::NameRef(Symbol::new(&self.parts.text[name.range()]));
                 }
                 self.allocate(ExpressionKind::Call { callee, arguments }, range)
             }
@@ -1128,7 +1477,7 @@ impl Lowering {
                 let target = self.lower_optional(target, range);
                 let mark = self.argument_stack.len();
                 self.lower_arguments(node, None);
-                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.parts.arguments);
                 self.allocate(
                     ExpressionKind::Index {
                         double,
@@ -1170,7 +1519,7 @@ impl Lowering {
                 if let Some(list) = child_of_kind(node, SyntaxKind::PARAMETER_LIST) {
                     self.lower_parameters(list);
                 }
-                let parameters = seal(&mut self.parameter_stack, mark, &mut self.module.parameters);
+                let parameters = seal(&mut self.parameter_stack, mark, &mut self.parts.parameters);
                 let body = expression_children(node).next();
                 let body = self.lower_optional(body, range);
                 self.allocate(ExpressionKind::Function { parameters, body }, range)
@@ -1246,7 +1595,7 @@ impl Lowering {
                         seal(
                             &mut self.expression_stack,
                             item_mark,
-                            &mut self.module.expression_lists,
+                            &mut self.parts.expression_lists,
                         )
                     }
                     None => Span::default(),
@@ -1274,7 +1623,7 @@ impl Lowering {
                     let arm = self.lower_arm(arm);
                     self.arm_stack.push(arm);
                 }
-                let arms = seal(&mut self.arm_stack, mark, &mut self.module.arms);
+                let arms = seal(&mut self.arm_stack, mark, &mut self.parts.arms);
                 self.allocate(ExpressionKind::Match { scrutinee, arms }, range)
             }
             _ => self.missing(range),
@@ -1300,7 +1649,7 @@ impl Lowering {
                 let NameSite {
                     name,
                     range: name_range,
-                } = self.module[name];
+                } = self.parts.name_sites[name.index()];
                 let value = match argument.value {
                     Some(value) => value,
                     None => self.missing(name_range),
@@ -1315,7 +1664,7 @@ impl Lowering {
             let fields = seal(
                 &mut self.field_stack,
                 field_mark,
-                &mut self.module.record_fields,
+                &mut self.parts.record_fields,
             );
             return self.allocate(ExpressionKind::Record(fields), range);
         }
@@ -1326,7 +1675,7 @@ impl Lowering {
         let items = seal(
             &mut self.expression_stack,
             item_mark,
-            &mut self.module.expression_lists,
+            &mut self.parts.expression_lists,
         );
         self.allocate(ExpressionKind::Tuple(items), range)
     }
@@ -1340,12 +1689,12 @@ impl Lowering {
             Some(node) => self.lower_pattern(node),
             None => self.allocate_pattern(PatternKind::Missing, range),
         };
-        let bindings = self.module.pattern_bindings(pattern);
-        let start = self.module.expression_lists.len() as u32;
-        self.module.expression_lists.extend(bindings);
+        let bindings = pattern_bindings(&self.parts, pattern);
+        let start = self.parts.expression_lists.len() as u32;
+        self.parts.expression_lists.extend(bindings);
         let bindings = Span {
             start,
-            len: self.module.expression_lists.len() as u32 - start,
+            len: self.parts.expression_lists.len() as u32 - start,
             element: PhantomData,
         };
         let guard = child_of_kind(arm, SyntaxKind::MATCH_GUARD).map(|guard| {
@@ -1363,8 +1712,8 @@ impl Lowering {
     }
 
     fn allocate_pattern(&mut self, kind: PatternKind, range: TextRange) -> PatId {
-        let id = PatId::new(self.module.patterns.len());
-        self.module.patterns.push(Pattern { kind, range });
+        let id = PatId::new(self.parts.patterns.len());
+        self.parts.patterns.push(Pattern { kind, range });
         id
     }
 
@@ -1384,7 +1733,7 @@ impl Lowering {
                     .any(|token| token.kind() == SyntaxKind::MINUS);
                 match child_of_kind(node, SyntaxKind::LITERAL) {
                     Some(literal) => PatternKind::Literal {
-                        literal: literal_kind(literal, &mut self.module.text),
+                        literal: literal_kind(literal, &mut self.parts.text),
                         negative,
                     },
                     None => PatternKind::Missing,
@@ -1441,7 +1790,7 @@ impl Lowering {
                     let fields = seal(
                         &mut self.pattern_field_stack,
                         mark,
-                        &mut self.module.pattern_fields,
+                        &mut self.parts.pattern_fields,
                     );
                     PatternKind::Record { fields, rest }
                 } else {
@@ -1472,11 +1821,7 @@ impl Lowering {
             let item = self.lower_pattern(item);
             self.pattern_stack.push(item);
         }
-        seal(
-            &mut self.pattern_stack,
-            mark,
-            &mut self.module.pattern_lists,
-        )
+        seal(&mut self.pattern_stack, mark, &mut self.parts.pattern_lists)
     }
 
     fn lower_binary(&mut self, node: NodeRef<'_>, range: TextRange) -> ExprId {
@@ -1529,7 +1874,7 @@ impl Lowering {
                         value: Some(value),
                     });
                 }
-                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.parts.arguments);
                 return self.allocate(ExpressionKind::Call { callee, arguments }, range);
             }
             SyntaxKind::PIPE_GREATER => {
@@ -1571,7 +1916,7 @@ impl Lowering {
                 "%->%" => (rhs, lhs),
                 _ => (lhs, lhs),
             };
-            if pattern != value && destructure_leaves(&self.module, pattern).is_some() {
+            if pattern != value && leaves_of(&self.parts, pattern).is_some() {
                 return self.allocate(
                     ExpressionKind::Assign {
                         spelling: AssignSpelling::Destructure,
@@ -1622,7 +1967,7 @@ impl Lowering {
             PipeShape::NamedPlaceholder(index) => Some((index, piped)),
         };
         self.lower_arguments(call, substitute);
-        let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
+        let arguments = seal(&mut self.argument_stack, mark, &mut self.parts.arguments);
         Some(self.allocate(ExpressionKind::Call { callee, arguments }, range))
     }
 

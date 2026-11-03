@@ -410,7 +410,7 @@ fn member_at<'db>(
             _ => {}
         }
     }
-    for (index, (kind, &range)) in hir.kinds().iter().zip(hir.ranges()).enumerate() {
+    for (index, (kind, range)) in hir.kinds().iter().zip(hir.ranges()).enumerate() {
         if !range.contains_inclusive(relative) {
             continue;
         }

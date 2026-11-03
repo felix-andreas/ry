@@ -99,8 +99,8 @@ fn collect_rewrites(
             expressions: hir
                 .map(|hir| {
                     let mut expressions = HashMap::new();
-                    for (index, range) in hir.ranges().iter().enumerate() {
-                        expressions.entry(*range).or_insert(ExprId::new(index));
+                    for (index, range) in hir.ranges().enumerate() {
+                        expressions.entry(range).or_insert(ExprId::new(index));
                     }
                     expressions
                 })
