@@ -665,10 +665,8 @@ pub(crate) unsafe fn find_symbol(name: &str, package: &str) -> Option<DlFunc> {
                 return Some(routine.function);
             }
         }
-        if dll.use_dynamic_symbols
-            && let Ok(c_name) = CString::new(name)
-        {
-            let symbol = platform::library_symbol(dll.handle, &c_name);
+        if dll.use_dynamic_symbols {
+            let symbol = any_dynamic_symbol(dll.handle, name);
             if !symbol.is_null() {
                 return Some(std::mem::transmute::<*mut c_void, DlFunc>(symbol));
             }
@@ -779,8 +777,7 @@ pub unsafe fn registered_routine(
             return Some((kind, routine.function, routine.arity));
         }
     }
-    let c_name = CString::new(name).ok()?;
-    let symbol = platform::library_symbol(dll.handle, &c_name);
+    let symbol = any_dynamic_symbol(dll.handle, name);
     (!symbol.is_null()).then(|| {
         (
             RoutineKind::Call,
@@ -788,6 +785,22 @@ pub unsafe fn registered_routine(
             -1,
         )
     })
+}
+
+/// The dynamic symbol `name` for a lookup of any interface, or null. As in GNU R's `R_dlsym`,
+/// a name that is not found is tried again with the underscore a Fortran compiler appends, so
+/// `getNativeSymbolInfo("cubefn")` finds the Fortran subroutine `cubefn`.
+unsafe fn any_dynamic_symbol(handle: *mut c_void, name: &str) -> *mut c_void {
+    for candidate in [name.to_owned(), format!("{name}_")] {
+        let Ok(c_name) = CString::new(candidate) else {
+            return std::ptr::null_mut();
+        };
+        let symbol = platform::library_symbol(handle, &c_name);
+        if !symbol.is_null() {
+            return symbol;
+        }
+    }
+    std::ptr::null_mut()
 }
 
 /// A `NativeSymbolInfo` object for a registered routine: a list of `name`, `address` (an
