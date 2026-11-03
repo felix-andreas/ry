@@ -4,7 +4,7 @@
 use {
     std::panic::catch_unwind,
     syntax::{
-        TextRange, TextSize, lex,
+        NodeOrToken, Parse, SyntaxNode, TextRange, TextSize, lex,
         literate::r_source_of_literate,
         parse, reparse,
         testing::{
@@ -246,6 +246,58 @@ fn program_corpus_holds_invariants() {
         catch_unwind(|| check_invariants(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a parse invariant"));
     }
+}
+
+/// GNU R reads a file with CRLF or lone CR line endings as it reads one with LF endings, and a
+/// Windows checkout can give any embedded or user source CRLF endings. Each ending must parse
+/// into the same tree, with the same errors, as LF, and round-trip byte for byte.
+#[test]
+fn crlf_and_cr_line_endings_parse_like_lf() {
+    let mut sources: Vec<(String, String)> = program_corpus_sources();
+    sources.extend(
+        SEEDS
+            .iter()
+            .map(|seed| ("seed".to_owned(), (*seed).to_owned())),
+    );
+    for (id, source) in sources.iter().filter(|(_, source)| !source.contains('\r')) {
+        let expected = shape(&parse(source));
+        for ending in ["\r\n", "\r"] {
+            let converted = source.replace('\n', ending);
+            let actual = parse(&converted);
+            assert_eq!(actual.text(), converted, "`{id}` with {ending:?} endings");
+            assert_eq!(
+                shape(&actual),
+                expected,
+                "`{id}` with {ending:?} endings parses differently from LF"
+            );
+        }
+    }
+}
+
+/// Every node and token kind in order, with each token's text in LF spelling, and the error
+/// messages: everything about a parse but its offsets.
+fn shape(parse: &Parse) -> (Vec<String>, Vec<String>) {
+    fn walk(node: &SyntaxNode, out: &mut Vec<String>) {
+        out.push(format!("{:?}", node.kind()));
+        for child in node.children_with_tokens() {
+            match child {
+                NodeOrToken::Node(child) => walk(&child, out),
+                NodeOrToken::Token(token) => out.push(format!(
+                    "{:?} {}",
+                    token.kind(),
+                    token.text().replace("\r\n", "\n").replace('\r', "\n")
+                )),
+            }
+        }
+    }
+    let mut elements = Vec::new();
+    walk(&parse.syntax_node(), &mut elements);
+    let errors = parse
+        .errors()
+        .iter()
+        .map(|error| error.message.clone())
+        .collect();
+    (elements, errors)
 }
 
 #[test]
