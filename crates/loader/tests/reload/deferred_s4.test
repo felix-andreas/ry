@@ -141,3 +141,63 @@ placeholders .__C__Sq
 metadata not cached: a definition reads other code
 sync exports
 run .onLoad
+
+#---- a_class_union_of_the_package_classes_is_held_back_with_them
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setClass("Circle", representation(radius = "numeric"))
+setClassUnion("Shape", c("Sq", "Circle"))
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", "Shape", function(shape) 1)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setClass("Circle", representation(radius = "numeric"))
+hold back R/a.R:3 setClassUnion("Shape", c("Sq", "Circle"))
+hold back R/a.R:4 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:5 setMethod("area", "Shape", function(shape) 1)
+placeholders .__C__Circle .__C__Shape .__C__Sq .__T__area:demo area
+sync exports
+run .onLoad
+
+#---- a_class_union_of_other_packages_classes_runs_in_place
+#~~~~ R/a.R
+setClassUnion("NumOrNull", c("numeric", "NULL"))
+setClass("Sq", representation(side = "NumOrNull"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClassUnion("NumOrNull", c("numeric", "NULL"))
+hold back R/a.R:2 setClass("Sq", representation(side = "NumOrNull"))
+placeholders .__C__Sq
+sync exports
+run .onLoad
+
+#---- a_class_union_of_package_and_other_classes_keeps_the_definitions_in_place
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setClassUnion("SqOrNumber", c("Sq", "numeric"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+run R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 setClassUnion("SqOrNumber", c("Sq", "numeric"))
+sync exports
+run .onLoad
+
+#---- methods_on_primitives_and_base_functions_for_a_package_class_are_held_back
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setMethod("length", "Sq", function(x) 4L)
+setMethod("as.list", "Sq", function(x, ...) list(x@side))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setMethod("length", "Sq", function(x) 4L)
+hold back R/a.R:3 setMethod("as.list", "Sq", function(x, ...) list(x@side))
+placeholders .__C__Sq
+forced by other packages' generics as.list length
+sync exports
+run .onLoad

@@ -179,8 +179,36 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                     ("classes".into(), strings(&deferred.classes)),
                     ("generics".into(), strings(&deferred.generics)),
                     (
-                        "foreign_generics".into(),
-                        strings(&deferred.foreign_generics),
+                        "foreign_methods".into(),
+                        RValue::Vector(
+                            deferred
+                                .foreign_methods
+                                .iter()
+                                .map(|method| {
+                                    RValue::List(vec![
+                                        (
+                                            "generic".into(),
+                                            RValue::Character(vec![method.generic.clone()]),
+                                        ),
+                                        (
+                                            "signature".into(),
+                                            RValue::List(
+                                                method
+                                                    .signature
+                                                    .iter()
+                                                    .map(|(argument, class)| {
+                                                        (
+                                                            argument.clone().unwrap_or_default(),
+                                                            RValue::Character(vec![class.clone()]),
+                                                        )
+                                                    })
+                                                    .collect(),
+                                            ),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        ),
                     ),
                     (
                         "cache_key".into(),

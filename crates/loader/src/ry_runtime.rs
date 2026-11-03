@@ -48,7 +48,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderRun", 3, do_run).invisible(),
     internal("ryLoaderForce", 2, do_force),
     internal("ryLoaderAwaitVerdict", 0, do_await_verdict).invisible(),
-    internal("ryLoaderDefer", 5, do_defer).invisible(),
+    internal("ryLoaderDefer", 6, do_defer).invisible(),
     internal("ryLoaderDeferred", 1, do_deferred),
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
@@ -419,9 +419,9 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `.Internal(ryLoaderDefer(root, positions, classes, generics, force))`: holds back the
-/// pending plan's statements at `positions` (1-based, in `run`) and registers `force` to run
-/// when a lookup needs one of `classes` or `generics`.
+/// `.Internal(ryLoaderDefer(root, positions, classes, generics, primitives, force))`:
+/// holds back the pending plan's statements at `positions` (1-based, in `run`) and registers
+/// `force` to run as [`DeferredDefinitions`] describes for the other arguments.
 unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let positions = call.arg(1);
@@ -430,7 +430,12 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
             .map(|index| Box::from(argument.element(index).bytes()))
             .collect()
     };
-    let (classes, generics, force) = (names(call.arg(2)), names(call.arg(3)), call.arg(4));
+    let (classes, generics, primitives, force) = (
+        names(call.arg(2)),
+        names(call.arg(3)),
+        names(call.arg(4)),
+        call.arg(5),
+    );
     if force.kind() != SexpType::Closure {
         return Err(error(
             "ryLoaderDefer needs a function to run the definitions",
@@ -474,6 +479,7 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
         key: root,
         classes,
         generics,
+        primitives,
         force,
     });
     Ok(nil())
