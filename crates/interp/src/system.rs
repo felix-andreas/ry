@@ -4,6 +4,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
+        coerce::parse_real,
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -1153,8 +1154,9 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             break;
         };
         // The POSIX `E` and `O` modifiers ask for a locale's alternative forms, which the C
-        // locale does not have, so they print the plain field; only `%OS` means something else.
-        if spec == 'E' || (spec == 'O' && characters.peek() != Some(&'S')) {
+        // locale does not have, so they print the plain field. The caller has already written
+        // the `%OS` that means fractional seconds.
+        if spec == 'E' || spec == 'O' {
             match characters.next() {
                 Some(base) => spec = base,
                 None => {
@@ -1274,29 +1276,6 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             'n' => output.push('\n'),
             't' => output.push('\t'),
             '%' => output.push('%'),
-            'O' => {
-                if characters.peek() == Some(&'S') {
-                    characters.next();
-                    let digits = characters.peek().and_then(|digit| digit.to_digit(10));
-                    match digits {
-                        Some(digits) => {
-                            characters.next();
-                            let width = 3 + digits as usize;
-                            // GNU R truncates to the digits asked for rather than rounding, so a
-                            // second never prints as 60.
-                            let scale = 10f64.powi(digits as i32);
-                            let second = (time.second * scale).floor() / scale;
-                            output.push_str(&format!(
-                                "{:0width$.digits$}",
-                                second,
-                                width = width,
-                                digits = digits as usize
-                            ));
-                        }
-                        None => output.push_str(&format!("{:02}", time.second.floor() as i64)),
-                    }
-                }
-            }
             other => {
                 output.push('%');
                 output.push(other);
@@ -1780,17 +1759,33 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         let mut format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
-        if second_digits > 0 {
-            let pieces: Vec<&str> = format.split("%OS").collect();
-            let mut widened = pieces[0].to_owned();
-            for piece in &pieces[1..] {
-                widened.push_str("%OS");
-                if !piece.starts_with(|character: char| character.is_ascii_digit()) {
-                    widened.push_str(&second_digits.to_string());
-                }
-                widened.push_str(piece);
-            }
-            format = widened;
+        // GNU R writes the seconds of the first `%OS` itself, with the digits that follow it or
+        // else `second_digits`, at most 6, truncated so that a second never prints as 60. With
+        // no digits it becomes `%S`. Any later `%OS` is left to `strftime`, which reads it as
+        // `%S`, so `"%OS3 %OS2"` prints `07.123 072`.
+        if let Some(at) = format.find("%OS") {
+            let digit = format[at + 3..]
+                .chars()
+                .next()
+                .and_then(|character| character.to_digit(10));
+            let (digits, used) = match digit {
+                Some(digit) => (digit as i32, 4),
+                None => (second_digits, 3),
+            };
+            let digits = digits.min(6);
+            let replacement = if digits > 0 {
+                let second = crate::subset::numeric_element(field(0), index % length(field(0)));
+                let scale = 10f64.powi(digits);
+                let truncated = (second * scale).trunc() / scale;
+                format!(
+                    "{truncated:0width$.digits$}",
+                    width = digits as usize + 3,
+                    digits = digits as usize
+                )
+            } else {
+                "%S".to_owned()
+            };
+            format.replace_range(at..at + used, &replacement);
         }
         // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
         let dst = if length(isdst) > 0 {
@@ -1949,18 +1944,23 @@ fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<Pars
             return None;
         }
     }
+    // As in GNU R's `validate_tm`, whole seconds may reach 60 (a leap second) but not 61, and
+    // `24:00:00` may carry a fraction of a second.
+    let whole_second = fields.second.floor();
     if hour > 24
         || fields.minute > 59
-        || fields.second > 61.0
-        || hour == 24 && (fields.minute > 0 || fields.second > 0.0)
+        || whole_second > 60.0
+        || hour == 24 && (fields.minute > 0 || whole_second > 0.0)
     {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
-    let whole = fields.second.floor();
     Some(ParsedTime {
-        whole: days as f64 * 86400.0 + hour as f64 * 3600.0 + fields.minute as f64 * 60.0 + whole,
-        fraction: fields.second - whole,
+        whole: days as f64 * 86400.0
+            + hour as f64 * 3600.0
+            + fields.minute as f64 * 60.0
+            + whole_second,
+        fraction: fields.second - whole_second,
         offset: fields.offset,
     })
 }
@@ -2015,26 +2015,26 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
                 return None;
             }
             if spec == 'O' && base == 'S' {
-                // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
-                // input its digit is a literal the text must contain.
-                let trimmed = input.trim_start();
-                let integer = trimmed
-                    .chars()
-                    .take(2)
-                    .take_while(char::is_ascii_digit)
-                    .count();
-                if integer == 0 {
-                    return None;
+                // GNU R reads `%OS` with `R_strtod`, so it takes the longest number there (`1e1`
+                // and `0x10` included) and keeps it only between 0 and 61; anything else, or no
+                // number at all, leaves the seconds as they were without failing. `%OSn` is for
+                // output only, so on input its digit is a literal the text must contain.
+                let skipped = input.len() - input.trim_start().len();
+                let candidate = &input[skipped..];
+                let run = candidate
+                    .find(|character: char| character.is_whitespace())
+                    .unwrap_or(candidate.len());
+                let number = candidate[..run]
+                    .char_indices()
+                    .map(|(offset, character)| offset + character.len_utf8())
+                    .rev()
+                    .find_map(|end| parse_real(&candidate[..end]).map(|value| (value, end)));
+                if let Some((value, end)) = number {
+                    if (0.0..=61.0).contains(&value) {
+                        fields.second = value;
+                    }
+                    *input = &candidate[end..];
                 }
-                let fraction = match trimmed[integer..].strip_prefix(['.', ',']) {
-                    Some(rest) => 1 + rest.chars().take_while(char::is_ascii_digit).count(),
-                    None => 0,
-                };
-                fields.second = trimmed[..integer + fraction]
-                    .replace(',', ".")
-                    .parse()
-                    .ok()?;
-                *input = &trimmed[integer + fraction..];
                 continue;
             }
             spec = base;
