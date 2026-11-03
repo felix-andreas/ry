@@ -15,6 +15,12 @@ was declined.
 
 ## Drafts
 
+### [Typed ry as a complete language](/contributing/design/native-types/)
+
+ry's own value types (the thirteen number types, `Bool`, `Str`, `List<T>`) and the record, tag and
+pattern additions that bring typed ry to Roc's level, with a feature-by-feature gap table against
+Roc, the explicit R boundary, the runtime contract, and four taste questions for the user.
+
 ### [Open type-system questions](/contributing/design/open-questions/)
 
 Type-system questions with no settled answer: tagged unions, S3 dispatch, modeling data frames and
