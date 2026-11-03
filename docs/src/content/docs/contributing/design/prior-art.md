@@ -71,13 +71,15 @@ by native code without regard for its reference count.
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
 | Macros | Vx (`macro_rules`), Bend (templates) | **Reject** | ry has no macros, for checking speed; R's own non-standard evaluation keeps working |
-| Types as facts (free) or guesses (one layout check), with a second compiled copy for a failed guess | Bun | **Adopt, keeping errors for non-conforming values** | Typed entry stubs (`typed-runtime.md`, "Facts and guesses") |
+| Types as facts (free) or guesses (one check), with a second compiled copy that reads a guess in place | Bun | **Adopt, keeping errors for non-conforming values** | Typed entry stubs (`typed-runtime.md`, "Facts and guesses") |
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | The typed code cache |
 | A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
 | Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
-| No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first failed check |
+| No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
+| A standalone executable with its machine code mapped from the file | Bun | **Adopt** | `ry build --exe` |
+| Reference counting with no tracing collector, for immutable acyclic values | Roc, Koka, Lean 4 | **Adopt for native typed values** | Typed ry's own values; R values stay under the collector (`typed-runtime.md`, "Memory") |
 
 ## Roc
 
@@ -363,26 +365,27 @@ run fast without trusting values that arrive from untyped code.
 **What ry adopts.** All six, fitted to R (`typed-runtime.md` holds the design):
 
 - **Facts and guesses,** but with ry's contract: an annotation means the value has the type, so a
-  value that does not conform is refused with a type-mismatch error. Only a value that conforms with
-  a different layout, such as a record whose number field R code stored as a pointer, takes the
-  second copy.
+  value that does not conform is refused with a type-mismatch error. A conforming R value takes the
+  second copy, which reads it in place, because typed ry's own values are native values outside the R
+  heap and an R value never has their layout.
 - **Value tracking per namespace.** The typed core of a locked namespace or a strict file has no
   `eval` and its bindings are locked, so it is closed apart from the functions that escape to R
   (exports, registered S3 methods and closures it hands out). Untyped R code is never
   closed, because `eval`, `get` and `assign` reach any binding, so it keeps allocation profiles.
 - **Freezing for ry's standard library.** No existing R code rebinds `List.map`, so its namespaces
-  cannot be unlocked, and a call the checker resolves to it is direct. R's own locked bindings are not frozen, because
-  testthat's `local_mocked_bindings` and `assignInNamespace` rebind them on purpose. Instead,
+  cannot be unlocked, and a call the checker resolves to it is direct. R's own locked bindings are
+  not frozen, because testthat's `local_mocked_bindings` and `assignInNamespace` rebind them on purpose. Instead,
   the binding-unlock primitive discards the compiled code whose direct calls assumed the binding.
 - **Mapped, shared code** for the typed code cache, which matters for CI machines that run several
-  test processes and are bound by memory.
+  test processes and are bound by memory, and for `ry build --exe`, which writes a standalone
+  executable as `bun compile` does.
 - **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
 **What ry rejects.**
 
 - **Compiling every fallback at build time,** because ry has a compiler at run time and compiles a
-  second copy at the first failed check.
+  second copy at the first call that needs it.
 - **Types that never change behavior,** because ry's annotations are checked at the boundary and
   report mismatches.
 

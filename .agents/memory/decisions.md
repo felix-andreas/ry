@@ -7288,3 +7288,39 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** orders 0.50 s (GNU R) / 0.44 s (untyped ry) / 0.034 s (typed), expr_tree 0.33 / 0.34
   / 0.008 s, checksums equal. `fuzz_typed_record_natives_agree_with_tier_zero` in
   `crates/jit/tests/test_tiers.rs` pins agreement across JIT modes.
+
+## Typed values are native, immutable, acyclic and freed by reference counts
+
+- **Previous shape.** Typed natives (`crates/jit/src/native.rs`) build records as R heap objects
+  traced by the mark-sweep collector and rooted through handle marks, and the first draft of
+  `contributing/design/typed-runtime.md` kept typed lists and strings as R vectors and `CHARSXP`s
+  with stack maps for roots.
+- **Chosen shape.** Typed ry's own values (numbers, `Str`, `List`, `Dict`, `Set`, records, tuples,
+  tags, closures) are native values outside the R heap. They are immutable and acyclic (a closure
+  never captures itself; recursion goes through a lifted definition), so compiler-inserted
+  reference counts in the Perceus style free them deterministically, with borrow inference as in
+  Lean 4, field moves, drop specialization and reuse of a uniquely held block. No tracing collector
+  sees them, so compiled frames need no stack maps. R values stay under the collector and meet
+  typed code only at the boundary: an entry stub checks a guess and runs a second compiled copy
+  that reads the R value in place, or the program converts explicitly (`List.from_r`).
+- **Why.** Exact counts make in-place update a count-of-one test, freeing deterministic, and a leak
+  checkable at the end of every test run. Native layouts (inline small strings, unboxed lists of
+  flattened records, a dense-entry `Dict`) are the Rust-shaped data the 1.5 to 2 times Rust bar
+  needs, and R vector headers, intern tables and collector tracing would cost on every operation.
+- **Impact.** A `List<F64>` reaches C only through a copy, and an ALTREP wrapper is the deferred
+  fix if the boundary copy shows up. The design and its test matrix are in
+  `contributing/design/typed-runtime.md`.
+
+## Typed code compiles ahead of time, and `ry build --exe` writes an executable
+
+- **Chosen shape.** `ry run` and `ry load` compile every typed function of a strict file before its
+  first call, and `ry install` compiles a package's at install time, so typed code never starts in
+  an interpreter. Machine code is cached on disk under a hash of the source, the types and the
+  compiler build, one position-independent file per namespace, mapped read-only and shared between
+  processes, with a per-process table for addresses. `ry build --exe` appends that file and the
+  untyped bytecode to ry's runtime as a standalone executable. Plain `ry build` keeps writing a
+  source tarball, as `devtools::build()` does, because existing workflows rely on it.
+- **Tests.** Every typed program runs interpreted, compiled, and compiled with annotations erased,
+  with identical output required, plus `RY_FORCE_GUESS_FAIL`, `RY_CHECK_FACTS` and an empty-pool
+  leak check (from Bun's compiler, `prior-art.md`). `ry check --explain` reports slow paths worst
+  first by loop depth.
