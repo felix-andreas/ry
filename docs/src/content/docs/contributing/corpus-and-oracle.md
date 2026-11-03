@@ -185,13 +185,20 @@ compared with. That makes `compare` the check for a new R release:
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
-On the 125 cases the suite held when it was last run under R 4.6.1, `compare` passed 118 of them,
-against 124 of 125 under 4.3.3 at the time. Today all 203 cases pass under 4.3.3, except the two
-knitr cases on a machine without knitr. Four of the remaining 4.6.1 differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
-and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
-seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
-calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
-and runs it.
+Under GNU R 4.6.2, the 19 cases that differ from their 4.3.3 recordings on ry's bundled base
+(leaving out those that need corpus packages) split as follows. 11 match GNU R 4.6.2 exactly, so
+their differences are R's own changes. One calls `C_pKS2`, a routine R 4.6 removed: GNU R 4.6 fails
+it, while ry keeps every version's routines and runs it. One depends on how that GNU R was built
+(`png()` without X11 or cairo). The rest are R 4.4 to 4.6 changes that ry does not emulate yet, listed
+in `backlog.md` ("Open: R 4.6 behavior ry does not emulate yet"). How GNU R is built also matters:
+OpenBLAS changes the last digits of `lm` and `arima` results, glibc's `mktime` resolves a repeated
+wall-clock time differently after it has seen a time in a spring-forward gap, and the sign of
+`NA^NaN` depends on the compiler.
+
+Without any GNU R, `compare` checks the engine against each case's recorded outcome instead and says
+so on stderr. ry then runs on its bundled base R 4.6.2 while the recordings are 4.3.3 output, so
+the report mixes version differences with ry bugs; set `R_HOME` to a GNU R 4.3.3 home to compare
+like with like.
 
 The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
 `verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing

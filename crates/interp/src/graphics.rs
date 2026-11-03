@@ -1259,30 +1259,23 @@ unsafe fn do_dev_copy(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `dev.capabilities()`: fills the list `dev.capabilities` passes in, in the order of GNU R's
 /// `R_GE_capability_*` indices, with what the device declares; a device of a recent enough
-/// version then refines the list itself.
+/// version then refines the list itself. The list's length is the base R's: R 4.6 added
+/// `variableFonts` as a 14th entry, and an R 4.3 base passes 13.
 unsafe fn do_dev_capabilities(call: &NativeCall<'_>) -> R<Sexp> {
-    const CAPABILITIES: usize = 13;
+    const MINIMUM: usize = 13;
     let dd = graphics_engine::current_device()?;
     let dev = &*(*dd).dev;
     let given = call.arg(0);
-    let capabilities = if given.kind() == SexpType::List && length(given) >= CAPABILITIES {
+    let capabilities = if given.kind() == SexpType::List && length(given) >= MINIMUM {
         given
     } else {
-        alloc(SexpType::List, CAPABILITIES)?
+        alloc(SexpType::List, MINIMUM)?
     };
     crate::heap().root(capabilities);
     let declared = |present: bool, value: c_int| if present { value } else { 1 };
-    let group = if dev.device_version < graphics_engine::VERSION_GROUP {
-        0
-    } else {
-        NA_INTEGER
-    };
-    let glyphs = if dev.device_version < graphics_engine::VERSION_GLYPHS {
-        0
-    } else {
-        NA_INTEGER
-    };
-    let codes: [&[i32]; CAPABILITIES] = [
+    let since = |version: c_int| if dev.device_version < version { 0 } else { NA_INTEGER };
+    let group = since(graphics_engine::VERSION_GROUP);
+    let codes: [&[i32]; MINIMUM + 1] = [
         &[dev.have_transparency],
         &[dev.have_transparent_bg],
         &[declared(dev.raster.is_some(), dev.have_raster)],
@@ -1300,9 +1293,11 @@ unsafe fn do_dev_capabilities(call: &NativeCall<'_>) -> R<Sexp> {
         &[group],
         &[group],
         &[group],
-        &[glyphs],
+        &[since(graphics_engine::VERSION_GLYPHS)],
+        &[since(graphics_engine::VERSION_FONT_VARIATIONS)],
     ];
-    for (index, code) in codes.iter().enumerate() {
+    let filled = length(capabilities).min(codes.len());
+    for (index, code) in codes.iter().take(filled).enumerate() {
         values::set_elt(capabilities, index, values::integer_vector(code)?);
     }
     match dev.capabilities {
