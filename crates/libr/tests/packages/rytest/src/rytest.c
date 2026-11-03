@@ -518,6 +518,16 @@ SEXP rytest_matrix(SEXP rows, SEXP columns)
     return out;
 }
 
+/* nrows() and ncols() of any object. */
+SEXP rytest_extents(SEXP x)
+{
+    SEXP out = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(out)[0] = nrows(x);
+    INTEGER(out)[1] = ncols(x);
+    UNPROTECT(1);
+    return out;
+}
+
 SEXP rytest_environment(void)
 {
     SEXP env = PROTECT(R_NewEnv(R_GlobalEnv, TRUE, 0));
@@ -913,6 +923,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_embedded_nul", (DL_FUNC) &rytest_embedded_nul, 0},
     {"rytest_coerce", (DL_FUNC) &rytest_coerce, 2},
     {"rytest_matrix", (DL_FUNC) &rytest_matrix, 2},
+    {"rytest_extents", (DL_FUNC) &rytest_extents, 1},
     {"rytest_environment", (DL_FUNC) &rytest_environment, 0},
     {"rytest_duplicate", (DL_FUNC) &rytest_duplicate, 1},
     {"rytest_identical", (DL_FUNC) &rytest_identical, 2},

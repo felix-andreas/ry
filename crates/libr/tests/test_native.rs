@@ -49,6 +49,53 @@ fn routines_return_correct_values() {
         .expect("rytest_matrix");
     assert_eq!(r.integers(matrix), vec![2, 3, 1, 1]);
 
+    // GNU R's `nrows` and `ncols` take the length and one column for anything without a
+    // `dim`, `NULL` included, which is how xts's `rbind(x, NULL)` sizes the `NULL`. A data
+    // frame has no `dim`, so it counts its columns as rows. The session has no base R, so the
+    // values are built from primitives.
+    let eval = |function: &str, arguments: &[Sexp]| {
+        let arguments: Vec<(Option<&str>, Sexp)> =
+            arguments.iter().map(|&argument| (None, argument)).collect();
+        r.eval(function, &arguments).expect(function)
+    };
+    let sequence = |count: c_int| eval(":", &[r.integer(1), r.integer(count)]);
+    let with_dim = |count: c_int, extents: &[c_int]| {
+        let extents: Vec<Sexp> = extents.iter().map(|&extent| r.integer(extent)).collect();
+        eval("dim<-", &[sequence(count), eval("c", &extents)])
+    };
+    let columns = eval("list", &[sequence(4), sequence(4)]);
+    let data_frame = eval("class<-", &[columns, r.string("data.frame")]);
+    for (name, value, extents) in [
+        ("NULL", r.nil(), [0, 1]),
+        ("1:5", sequence(5), [5, 1]),
+        ("a string", r.string("a"), [1, 1]),
+        ("list(1, 2, 3)", eval("list", &[r.real(1.0); 3]), [3, 1]),
+        (
+            "expression(1, 2)",
+            eval("expression", &[r.real(1.0); 2]),
+            [2, 1],
+        ),
+        ("a 2 x 3 matrix", with_dim(6, &[2, 3]), [2, 3]),
+        ("a 2 x 3 x 4 array", with_dim(24, &[2, 3, 4]), [2, 3]),
+        ("a one-dimensional array", with_dim(3, &[3]), [3, 1]),
+        ("a data frame of two columns", data_frame, [2, 1]),
+    ] {
+        let result = r.call("rytest_extents", &[value]).expect(name);
+        assert_eq!(r.integers(result), extents, "nrows and ncols of {name}");
+    }
+    let call = r.call_expression("f", &[(None, r.symbol("x"))]);
+    let global = r.data("R_GlobalEnv");
+    let function = r.eval_expression(r.symbol("sum")).expect("sum");
+    for (name, value) in [
+        ("a call", r.quote(call)),
+        ("an environment", global),
+        ("a function", function),
+        ("a symbol", r.quote(r.symbol("a"))),
+    ] {
+        let error = r.call("rytest_extents", &[value]).expect_err(name);
+        assert_eq!(error, "Error: object is not a matrix\n", "{name}");
+    }
+
     let environment = r
         .call("rytest_environment", &[])
         .expect("rytest_environment");

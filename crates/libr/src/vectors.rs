@@ -1490,30 +1490,43 @@ sortedness_api!(REAL_IS_SORTED, REAL_NO_NA);
 sortedness_api!(LOGICAL_IS_SORTED, LOGICAL_NO_NA);
 sortedness_api!(STRING_IS_SORTED, STRING_NO_NA);
 
+/// GNU R's `nrows`: the first extent of a `dim`, or else the length, so `NULL` has none and a
+/// data frame, which has no `dim` attribute, counts its columns. Only the types `isVector` or
+/// `isList` admits have rows, and a pairlist without a `dim` fails as `LENGTH` fails on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_nrows(object: Sexp) -> c_int {
     enter(|| {
-        if object.kind().is_vector() || object.is_altrep() {
-            if let Some(dims) = dims(object)? {
-                return Ok(dims.first().copied().unwrap_or(0));
-            }
-            return Ok(xlength(object)? as c_int);
+        if !has_rows(object) {
+            return Err(error("object is not a matrix"));
         }
-        Err(error("object is not a matrix"))
+        if let Some(dims) = dims(object)? {
+            return Ok(dims.first().copied().unwrap_or(0));
+        }
+        Ok(xlength(object)? as c_int)
     })
 }
 
+/// GNU R's `ncols`: the second extent of a `dim` with two or more, and otherwise one, so
+/// `NULL`, a plain vector and a data frame count as a single column.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ncols(object: Sexp) -> c_int {
     enter(|| {
-        if object.kind().is_vector() || object.is_altrep() {
-            return Ok(match dims(object)? {
-                Some(dims) if dims.len() >= 2 => dims[1],
-                _ => 1,
-            });
+        if !has_rows(object) {
+            return Err(error("object is not a matrix"));
         }
-        Err(error("object is not a matrix"))
+        Ok(match dims(object)? {
+            Some(dims) if dims.len() >= 2 => dims[1],
+            _ => 1,
+        })
     })
+}
+
+/// Whether `nrows` and `ncols` accept `object`: `isVector(s) || isList(s)` in GNU R, which
+/// takes in `NULL` and pairlists but not a `CHARSXP`.
+unsafe fn has_rows(object: Sexp) -> bool {
+    let kind = object.kind();
+    (kind.is_vector() && kind != SexpType::Char)
+        || matches!(kind, SexpType::Nil | SexpType::Pairlist)
 }
 
 macro_rules! predicate {
