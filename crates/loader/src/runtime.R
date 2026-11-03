@@ -576,10 +576,12 @@ View <- function(x, title) {
   }
 }
 
+# Another package's `setMethod()` on the same generic reads every label, so a force can come
+# during this load from a method placed after the statement now running, which has not run.
 .ry_s4_label_placeholder <- function(state, label) {
   delayedAssign(label$label, {
     .ry_force_s4(state)
-    get(label$label, envir = label$table, inherits = FALSE)
+    get0(label$label, envir = label$table, inherits = FALSE)
   }, assign.env = label$table)
 }
 
@@ -589,17 +591,22 @@ View <- function(x, title) {
   for (label in state$s4_labels) {
     if (label$held) {
       assign(label$label, label$value, envir = label$table)
-    } else {
+    } else if (exists(label$label, envir = label$table, inherits = FALSE)) {
+      # Two held-back methods can share a label, as `"A"` and `c("A", "ANY")` do.
       rm(list = label$label, envir = label$table)
     }
   }
   state$s4_labels <- NULL
 }
 
+# A force during the load runs only the definitions before the statement now running, so a
+# name a later one binds is not there yet, and the statement sees what an eager load shows it
+# at that point: the imported or base function `setMethod()` will later make generic.
 .ry_s4_placeholder <- function(state, name) {
   delayedAssign(name, {
     .ry_force_s4(state)
-    get(name, envir = state$ns, inherits = FALSE)
+    bound <- exists(name, envir = state$ns, inherits = FALSE)
+    get(name, envir = if (bound) state$ns else parent.env(state$ns))
   }, assign.env = state$ns)
 }
 

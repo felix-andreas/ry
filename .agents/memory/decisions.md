@@ -5776,13 +5776,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     `methods` labels them (`.ry_s4_label`: `matchSignature` padded with `ANY` to `.SigLength`).
     A dispatch for another class never reads them, so it never forces; `getMethod`,
     `existsMethod` and a dispatch for a held-back class read the label and force. A signature
-    longer than `.SigLength` keeps the unit eager. Forcing restores each table's previous value
+    longer than `.SigLength` keeps the unit eager. Another package's `setMethod()` on the same generic
+    reads every label (`methods:::.resetInheritedMethods`), so it forces the unit; a force during
+    this load from a method after the cursor reads the label with `get0`. Forcing restores each table's previous value
     before the definitions run (`.ry_restore_s4_labels`).
   - A primitive (`length`, `[`): primitives dispatch from C without `standardGeneric`, so
     `s4_dispatch` forces only when a non-promise S4 argument's class is one of the unit's
     classes (`interp::methods::Lookup::Primitive`). A held-back method can apply to nothing
     else, so this is exact.
-  - A function that is not yet generic (`as.list`, `toString`): `setMethod` would make it generic
+  - A function that is not yet generic from another package (`as.list`, `toString`; one of the package's own
+    functions keeps the unit eager, since a placeholder would replace it): `setMethod` would make it generic
     in the package namespace, so that name and `.__T__name:pkg` become placeholders and the name
     joins the forcing generics.
   - Group generics keep the unit eager: a group member dispatches through the group's table,

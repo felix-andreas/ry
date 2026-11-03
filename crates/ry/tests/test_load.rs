@@ -612,6 +612,7 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         "cat('probe:', existsMethod('show', 'Sq'), existsMethod('length', 'Sq'), '\\n')".to_owned(),
         format!("{read}; show(x)"),
         format!("{read}; cat(length(x), x[1], '\\n')"),
+        format!("{read}; cat(x[1], '\\n')"),
         format!("{read}; cat(unlist(as.list(x)), toString(x), '\\n')"),
         "cat('probe: '); print(Sq(side = 2))".to_owned(),
         "cat('probe:', extends('numeric'), is(1, 'NumOrNull'), isVirtualClass('Shape'), '\\n')"
@@ -632,6 +633,56 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         };
         assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
     }
+}
+
+#[test]
+fn package_functions_used_or_made_generic_around_held_back_methods_load_as_eagerly() {
+    if !r_available() {
+        return;
+    }
+    // `as.list` is used at load time before its method is defined, and `describe` is the
+    // package's own function, which its method makes generic in place.
+    let root = package(&[
+        ("DESCRIPTION", "Package: listing\nVersion: 1.0\n"),
+        (
+            "NAMESPACE",
+            "exportPattern(\".\")\nexportMethods(as.list)\n",
+        ),
+        (
+            "R/a.R",
+            "LISTED <- as.list(c(a = 1))\n\
+             describe <- function(x) \"plain\"\n\
+             Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
+             setMethod(\"as.list\", \"Sq\", function(x, ...) list(side = x@side))\n\
+             setMethod(\"describe\", \"Sq\", function(x) \"square\")\n",
+        ),
+    ]);
+    let probe = "cat('probe:', names(LISTED), describe(1), describe(Sq(side = 1)), unlist(as.list(Sq(side = 2))), '\\n')";
+    let load = |lazy: &str| {
+        let reload = format!(
+            "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+            root.path().display().to_string()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .args(["-e", &reload, "-e", probe])
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .output()
+            .expect("run ry load");
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let line = |text: &str| {
+        text.lines()
+            .find(|line| line.starts_with("probe:"))
+            .unwrap_or_else(|| panic!("no probe line in {text}"))
+            .to_owned()
+    };
+    let lazy = load("TRUE");
+    assert_eq!(line(&lazy), "probe: a plain square 2 ", "{lazy}");
+    assert_eq!(line(&lazy), line(&load("FALSE")));
 }
 
 #[test]

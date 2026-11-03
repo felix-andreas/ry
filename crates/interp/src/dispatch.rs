@@ -1480,12 +1480,23 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
     }
     // A package loader may hold back methods for this primitive, which set up its dispatch
     // when they run. They apply only to objects of the classes held back with them, and an
-    // argument not yet evaluated cannot be one of those.
+    // argument not yet evaluated cannot be one of those. A special such as `[` passes its
+    // arguments as promises, the first already forced, so that one's value is what counts.
     if !interp().globals.deferred_definitions.is_empty() {
         let classes: Vec<&[u8]> = args
             .iter()
-            .map(|arg| arg.value)
-            .filter(|value| value.kind() != SexpType::Promise && value.has_gp(gp::S4_OBJECT))
+            .map(|arg| {
+                if arg.value.kind() == SexpType::Promise {
+                    arg.value.car()
+                } else {
+                    arg.value
+                }
+            })
+            .filter(|value| {
+                *value != unbound()
+                    && value.kind() != SexpType::Promise
+                    && value.has_gp(gp::S4_OBJECT)
+            })
             .filter_map(|value| {
                 let class = get_attr(value, symbols().class);
                 (class.kind() == SexpType::String && length(class) > 0)

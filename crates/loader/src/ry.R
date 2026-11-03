@@ -46,7 +46,10 @@
     all(vapply(deferred$foreign_methods, function(method) {
       generic <- get0(method$generic, envir = state$ns, mode = "function")
       kind <- .ry_foreign_generic_kind(generic)
-      !is.na(kind) && (kind != "standard" || !is.na(.ry_s4_label(generic, method$signature)))
+      # A method for one of the package's own plain functions makes a generic of a binding the
+      # load itself makes, which a placeholder would replace.
+      !is.na(kind) && (kind != "standard" || !is.na(.ry_s4_label(generic, method$signature))) &&
+        (kind != "implicit" || !identical(topenv(environment(generic)), state$ns))
     }, NA))
 }
 
