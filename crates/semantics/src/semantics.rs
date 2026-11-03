@@ -838,7 +838,7 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     let files = ProjectFiles::try_get(db);
-    package_scheme_exists_in(stubs::stubs(db), name, |name| {
+    package_scheme_exists_in(db, stubs::stubs(db), name, |name| {
         files.is_some_and(|files| package_binds(db, files, name))
     })
 }
@@ -846,6 +846,7 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
 /// [`package_scheme_exists`] for a caller that already holds the stubs and answers whether the
 /// package binds a name from maps it fetched once.
 pub fn package_scheme_exists_in(
+    db: &dyn Db,
     library: Option<&stubs::StubLibrary<'_>>,
     name: &str,
     package_binds: impl FnOnce(&str) -> bool,
@@ -2095,7 +2096,8 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
         .bindings
         .iter()
         .filter(|(slot, binding)| {
-            binding.kind == naming::BindingKind::TopLevel || naming.extras().loop_bound_slots.contains(*slot)
+            binding.kind == naming::BindingKind::TopLevel
+                || naming.extras().loop_bound_slots.contains(*slot)
         })
         .map(|(_, binding)| binding.name)
         .collect()

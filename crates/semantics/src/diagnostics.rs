@@ -828,7 +828,7 @@ fn classify_non_local_read(
             definitions.contains_key(&symbol) || conditional.contains_key(&symbol)
         })
     };
-    if crate::package_scheme_exists_in(context.library, name, package_binds)
+    if crate::package_scheme_exists_in(db, context.library, name, package_binds)
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
@@ -1882,7 +1882,7 @@ fn earlier_value_read(
             naming.non_locals.iter().any(|(expression, read)| {
                 *read == name && !naming.deferred_non_locals.contains(expression)
             }) || naming.quiet_reads.iter().any(|(expression, read)| {
-                *read == name && !naming.deferred_quiet_reads.contains(expression)
+                *read == name && !naming.extras().deferred_quiet_reads.contains(expression)
             })
             // A statement that also writes the name, such as a loop doing
             // `rownum <- rownum + 1`, reads the earlier value on the path before its own write.
