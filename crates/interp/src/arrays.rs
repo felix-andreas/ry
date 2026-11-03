@@ -409,6 +409,16 @@ pub unsafe fn item(array: Sexp, position: usize) -> R<Sexp> {
     }
 }
 
+/// A new Array of the items of `array` from `start` up to, not including, `end`, stored like
+/// `array`.
+pub unsafe fn slice(array: Sexp, start: usize, end: usize) -> R<Sexp> {
+    let result = alloc(array.kind(), end.saturating_sub(start))?;
+    for (target, source) in (start..end).enumerate() {
+        copy_item(array, source, result, target);
+    }
+    Ok(finish(result))
+}
+
 unsafe fn copy_item(from: Sexp, source: usize, to: Sexp, target: usize) {
     match from.kind() {
         SexpType::Logical | SexpType::Integer => {

@@ -65,7 +65,7 @@ Set.empty()
 #> Set.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2025)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2105)
 
 ## `Set.with_capacity`
 
@@ -73,14 +73,14 @@ Set.empty()
 <TabItem label="Inline">
 
 ```r
-Set.with_capacity <- function<T: key>(capacity: integer) -> Set<T>
+Set.with_capacity <- function<T: key>(capacity: I64) -> Set<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(capacity: integer) -> Set<T>
+#: <T: key> fn(capacity: I64) -> Set<T>
 Set.with_capacity <- function(capacity)
 ```
 
@@ -95,7 +95,7 @@ Set.capacity(Set.insert(Set.with_capacity(64L), "a"))
 #> 64L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2034)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2114)
 
 ## `Set.single`
 
@@ -124,7 +124,7 @@ Set.single("a")
 #> Set.from_list(list("a"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2042)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2122)
 
 ## `Set.from_list`
 
@@ -132,14 +132,14 @@ Set.single("a")
 <TabItem label="Inline">
 
 ```r
-Set.from_list <- function<T: key>(list: list[T]) -> Set<T>
+Set.from_list <- function<T: key>(list: List<T>) -> Set<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(list: list[T]) -> Set<T>
+#: <T: key> fn(list: List<T>) -> Set<T>
 Set.from_list <- function(list)
 ```
 
@@ -153,7 +153,7 @@ Set.from_list(list(2L, 1L, 2L))
 #> Set.from_list(list(2L, 1L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2050)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2130)
 
 ## `Set.to_list`
 
@@ -161,14 +161,14 @@ Set.from_list(list(2L, 1L, 2L))
 <TabItem label="Inline">
 
 ```r
-Set.to_list <- function<T: key>(set: Set<T>) -> list[T]
+Set.to_list <- function<T: key>(set: Set<T>) -> List<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>) -> list[T]
+#: <T: key> fn(set: Set<T>) -> List<T>
 Set.to_list <- function(set)
 ```
 
@@ -182,7 +182,7 @@ Set.to_list(Set.from_list(list("b", "a")))
 #> list("b", "a")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2058)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2138)
 
 ## `Set.len`
 
@@ -190,14 +190,14 @@ Set.to_list(Set.from_list(list("b", "a")))
 <TabItem label="Inline">
 
 ```r
-Set.len <- function<T: key>(set: Set<T>) -> integer
+Set.len <- function<T: key>(set: Set<T>) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>) -> integer
+#: <T: key> fn(set: Set<T>) -> I64
 Set.len <- function(set)
 ```
 
@@ -211,7 +211,7 @@ Set.len(Set.from_list(list(1L, 1L, 2L)))
 #> 2L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2066)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2146)
 
 ## `Set.is_empty`
 
@@ -219,14 +219,14 @@ Set.len(Set.from_list(list(1L, 1L, 2L)))
 <TabItem label="Inline">
 
 ```r
-Set.is_empty <- function<T: key>(set: Set<T>) -> logical
+Set.is_empty <- function<T: key>(set: Set<T>) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>) -> logical
+#: <T: key> fn(set: Set<T>) -> Bool
 Set.is_empty <- function(set)
 ```
 
@@ -240,7 +240,7 @@ Set.is_empty(Set.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2074)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2154)
 
 ## `Set.contains`
 
@@ -248,14 +248,14 @@ Set.is_empty(Set.empty())
 <TabItem label="Inline">
 
 ```r
-Set.contains <- function<T: key>(set: Set<T>, element: T) -> logical
+Set.contains <- function<T: key>(set: Set<T>, element: T) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>, element: T) -> logical
+#: <T: key> fn(set: Set<T>, element: T) -> Bool
 Set.contains <- function(set, element)
 ```
 
@@ -269,7 +269,7 @@ Set.contains(Set.from_list(list(1L, 2L)), 2L)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2082)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2162)
 
 ## `Set.insert`
 
@@ -298,7 +298,7 @@ Set.insert(Set.single(1L), 2L)
 #> Set.from_list(list(1L, 2L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2090)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2170)
 
 ## `Set.remove`
 
@@ -327,7 +327,7 @@ Set.remove(Set.from_list(list(1L, 2L)), 1L)
 #> Set.from_list(list(2L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2098)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2178)
 
 ## `Set.union`
 
@@ -356,7 +356,7 @@ Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(1L, 2L, 3L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2106)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2186)
 
 ## `Set.intersection`
 
@@ -385,7 +385,7 @@ Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(2L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2114)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2194)
 
 ## `Set.difference`
 
@@ -414,7 +414,7 @@ Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
 #> Set.from_list(list(1L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2122)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2202)
 
 ## `Set.walk`
 
@@ -443,7 +443,7 @@ Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
 #> 6L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2130)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2210)
 
 ## `Set.walk_until`
 
@@ -472,7 +472,7 @@ Set.walk_until(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) if (x > 2
 #> 3L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2138)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2218)
 
 ## `Set.map`
 
@@ -501,7 +501,7 @@ Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
 #> Set.from_list(list(1L, 0L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2146)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2226)
 
 ## `Set.join_map`
 
@@ -530,7 +530,7 @@ Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 
 #> Set.from_list(list(1L, 10L, 2L, 20L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2154)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2234)
 
 ## `Set.keep_if`
 
@@ -538,14 +538,14 @@ Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 
 <TabItem label="Inline">
 
 ```r
-Set.keep_if <- function<T: key>(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+Set.keep_if <- function<T: key>(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+#: <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 Set.keep_if <- function(set, predicate)
 ```
 
@@ -559,7 +559,7 @@ Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 #> Set.from_list(list(2L, 3L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2162)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2242)
 
 ## `Set.drop_if`
 
@@ -567,14 +567,14 @@ Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 <TabItem label="Inline">
 
 ```r
-Set.drop_if <- function<T: key>(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+Set.drop_if <- function<T: key>(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+#: <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 Set.drop_if <- function(set, predicate)
 ```
 
@@ -588,7 +588,7 @@ Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 #> Set.from_list(list(1L))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2170)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2250)
 
 ## `Set.reserve`
 
@@ -596,14 +596,14 @@ Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
 <TabItem label="Inline">
 
 ```r
-Set.reserve <- function<T: key>(set: Set<T>, spare: integer) -> Set<T>
+Set.reserve <- function<T: key>(set: Set<T>, spare: I64) -> Set<T>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
+#: <T: key> fn(set: Set<T>, spare: I64) -> Set<T>
 Set.reserve <- function(set, spare)
 ```
 
@@ -617,7 +617,7 @@ Set.reserve(Set.single("a"), 1000L)
 #> Set.from_list(list("a"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2178)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2258)
 
 ## `Set.capacity`
 
@@ -625,14 +625,14 @@ Set.reserve(Set.single("a"), 1000L)
 <TabItem label="Inline">
 
 ```r
-Set.capacity <- function<T: key>(set: Set<T>) -> integer
+Set.capacity <- function<T: key>(set: Set<T>) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: key> fn(set: Set<T>) -> integer
+#: <T: key> fn(set: Set<T>) -> I64
 Set.capacity <- function(set)
 ```
 
@@ -646,7 +646,7 @@ Set.capacity(Set.reserve(Set.single("a"), 9L))
 #> 10L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2186)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2266)
 
 ## `Set.release_excess_capacity`
 
@@ -676,4 +676,4 @@ Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))
 #> 1L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2195)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2275)

@@ -3106,6 +3106,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAList { found } => {
             format!("expected a list, found `{}`", renderer.render(db, *found))
         }
+        TypeErrorKind::TryNotResult { found } => format!(
+            "`try` needs a result such as `:Ok(value) | :Err(error)`, but this is `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::TryOutsideFunction => "`try` returns an `:Err` early from the function around it, but this one is not inside a function. Use `match` to handle the error here".to_owned(),
+        TypeErrorKind::RecordUpdateBase { found } => format!(
+            "only a record can be updated with `..`, but this is `{}`",
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::NotIterable { found } => format!(
             "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list.",
             renderer.render(db, *found)

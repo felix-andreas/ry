@@ -48,7 +48,7 @@ w <- if (!is.null(v)) Str.trim(v) else ""
 #++++
 lookup: <T> fn(name: character) -> T | NULL
 v: Unknown
-w: Str | character
+w: Str
 
 #---- and_then_meets_a_widened_annotation
 #: @param text {Str}

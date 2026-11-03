@@ -8,11 +8,12 @@
 
 use {
     crate::{
+        arrays,
         builtins::{Arg, BuiltinDef, Call, builtin, special},
         deparse, eval, interp, numbers,
         sort::IdenticalFlags,
         standard_library,
-        unwind::{R, Unwind, error, error_in},
+        unwind::{Jump, R, Unwind, error, error_in, jump},
         values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
     },
     heap::{
@@ -26,6 +27,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".ry_tuple", -1, do_tuple),
     builtin(".ry_tag", -1, do_tag),
     special(".ry_match", -1, do_match).keep_visibility(),
+    special(".ry_try", 1, do_try),
+    builtin(".ry_update", -1, do_update),
+    builtin(".ry_text", 1, do_text),
     builtin("as.record", 1, do_as_record),
     builtin("as.tuple", 1, do_as_tuple),
     builtin("as.tag", -1, do_as_tag),
@@ -180,6 +184,78 @@ unsafe fn do_tag(call: &Call<'_>) -> R<Sexp> {
     let tag = tag_id(name.value).map_err(|message| call.error(message))?;
     let items = arg_items(payload)?;
     make(Some(tag), &items).map_err(|message| call.error(message))
+}
+
+/// `try result`: the payload of an `:Ok`, or a `return` of the whole `:Err` from the function
+/// whose body evaluates it. A payload of several items comes back as a tuple of them.
+unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
+    let value = eval::eval(call.arg(0), call.env)?;
+    let tag = (value.kind() == SexpType::Record)
+        .then(|| layout(value))
+        .and_then(|layout| layout.tag.map(|tag| tag_name(tag)));
+    match tag.as_deref() {
+        Some("Ok") => match value.record_slot_count() {
+            1 => slot_value(value, 0),
+            count => {
+                let mut items = Vec::with_capacity(count);
+                for index in 0..count {
+                    items.push((None, slot_value(value, index)?));
+                }
+                make(None, &items).map_err(|message| call.error(message))
+            }
+        },
+        Some("Err") => {
+            if !interp().frames.iter().any(|frame| frame.env == call.env) {
+                return Err(call.error(
+                    "`try` returns an `:Err` early from the function around it, but it is not inside a function",
+                ));
+            }
+            Err(jump(Jump::Return {
+                env: call.env,
+                value,
+            }))
+        }
+        _ => Err(call.error(format!(
+            "`try` needs `:Ok(value)` or `:Err(error)`, but got `{}`",
+            describe(value)
+        ))),
+    }
+}
+
+/// One interpolation of an f-string as text: a native number without its suffix, a list or
+/// another ry value as its literal, and an R value as `as.character()` writes it.
+unsafe fn do_text(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if let Some(number) = numbers::read(value) {
+        return scalar_string(&numbers::to_text(number));
+    }
+    if value.kind() == SexpType::Record || value.is_array() {
+        return scalar_string(&deparse::deparse_one_line(value));
+    }
+    let as_character = values::install("as.character")?;
+    eval::eval(values::call(as_character, &[value])?, call.env)
+}
+
+/// `(..base, name = value, ...)`: a copy of the record `base` with the named fields replaced.
+unsafe fn do_update(call: &Call<'_>) -> R<Sexp> {
+    let Some((base, fields)) = call.args.split_first() else {
+        return Err(call.error("a record update needs a record after `..`"));
+    };
+    let mut result = base.value;
+    if result.kind() != SexpType::Record || !matches!(native_kind(result), NativeKind::Record) {
+        return Err(call.error(format!(
+            "only a record can be updated with `..`, but got `{}`",
+            describe(result)
+        )));
+    }
+    for (name, value) in arg_items(fields)? {
+        let Some(name) = name else {
+            return Err(call.error("every field of a record update needs a name"));
+        };
+        let index = field_index(result, symbol_name(name).as_bytes(), call.call)?;
+        result = with_slot(result, index, value)?;
+    }
+    Ok(result)
 }
 
 /// The items of a constructor call, each with its field name if it has one.
@@ -689,6 +765,12 @@ unsafe fn matches(
             let name = symbol_name(pattern);
             match name.as_ref() {
                 "_" => Ok(true),
+                _ if name.starts_with("..") && name.len() > 2 => Err(error_in(
+                    call,
+                    format!(
+                        "`{name}` binds the rest of a list, so it may only stand in a list pattern"
+                    ),
+                )),
                 ".." => Err(error_in(
                     call,
                     "`..` may only end a record pattern or stand for a tag's payload",
@@ -726,6 +808,14 @@ unsafe fn matches(
                     matches(arguments[1].1, value, bindings, call)
                 }
                 "(" if arguments.len() == 1 => matches(arguments[0].1, value, bindings, call),
+                ".ry_as" if arguments.len() == 2 => {
+                    if !matches(arguments[0].1, value, bindings, call)? {
+                        return Ok(false);
+                    }
+                    bindings.push((arguments[1].1, value));
+                    Ok(true)
+                }
+                ".ry_array" => array_matches(&arguments, value, bindings, call),
                 ".ry_tuple" | ".ry_record" => {
                     if value.kind() != SexpType::Record {
                         return Ok(false);
@@ -777,6 +867,65 @@ unsafe fn matches(
         | SexpType::Complex
         | SexpType::String => Ok(literal_matches(pattern, value)),
         _ => Err(error_in(call, "invalid pattern in `match`")),
+    }
+}
+
+/// Matches a list pattern: exactly its items, or with a `..` at least the items before and
+/// after it, binding the items in between as a list to `..name`.
+unsafe fn array_matches(
+    items: &[(Sexp, Sexp)],
+    value: Sexp,
+    bindings: &mut Vec<(Sexp, Sexp)>,
+    call: Sexp,
+) -> R<bool> {
+    if !value.is_array() {
+        return Ok(false);
+    }
+    let count = length(value);
+    let rest = items
+        .iter()
+        .position(|(_, item)| rest_name(*item).is_some());
+    let (before, after) = match rest {
+        Some(position) => (&items[..position], &items[position + 1..]),
+        None => (items, &items[items.len()..]),
+    };
+    let fixed = before.len() + after.len();
+    if count < fixed || (rest.is_none() && count != fixed) {
+        return Ok(false);
+    }
+    for (index, (_, item)) in before.iter().enumerate() {
+        if !matches(*item, arrays::item(value, index)?, bindings, call)? {
+            return Ok(false);
+        }
+    }
+    let tail = count - after.len();
+    for (offset, (_, item)) in after.iter().enumerate() {
+        if !matches(*item, arrays::item(value, tail + offset)?, bindings, call)? {
+            return Ok(false);
+        }
+    }
+    if let Some(position) = rest
+        && let Some(Some(name)) = items.get(position).and_then(|(_, item)| rest_name(*item))
+    {
+        let list = arrays::slice(value, before.len(), tail)?;
+        bindings.push((values::install(&name)?, list));
+    }
+    Ok(true)
+}
+
+/// For a rest pattern `..` or `..name`, the name it binds, if any.
+unsafe fn rest_name(pattern: Sexp) -> Option<Option<String>> {
+    if pattern.kind() != SexpType::Symbol {
+        return None;
+    }
+    let name = symbol_name(pattern);
+    let rest = name.strip_prefix("..")?;
+    if rest.is_empty() {
+        Some(None)
+    } else if rest.starts_with(char::is_alphabetic) {
+        Some(Some(rest.to_owned()))
+    } else {
+        None
     }
 }
 

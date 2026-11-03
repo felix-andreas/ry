@@ -1177,17 +1177,25 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         }
         SyntaxKind::FSTRING => format_string(node, source),
         SyntaxKind::TRY_EXPR => match expression_children(node).first() {
-            Some(operand) => lower(operand, source),
+            Some(operand) => values::call(install(".ry_try")?, &[lower(operand, source)?]),
             None => Err(error("expected an expression after `try`")),
         },
         SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
-            if let Some(spread) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
-                .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::RECORD_SPREAD))
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
+                && let Some(spread) = child_of_kind(&arguments, SyntaxKind::RECORD_SPREAD)
             {
-                return Err(error(format!(
-                    "the record update `({}, ...)` does not run in the interpreter",
-                    spread.text()
-                )));
+                let text = spread.text().to_string();
+                let base = text
+                    .trim()
+                    .strip_prefix("..")
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| error("a record update needs a record after `..`"))?;
+                let mut items = vec![
+                    (nil(), install(".ry_update")?),
+                    (nil(), install(&identifier(base))?),
+                ];
+                items.extend(literal_items(&arguments, source)?);
+                return values::pairlist(&items, SexpType::Language);
             }
             let head = if node.kind() == SyntaxKind::RECORD_EXPR {
                 ".ry_record"
@@ -1414,10 +1422,10 @@ unsafe fn literal_items(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<
         .collect()
 }
 
-/// `f"a{x}b"` runs as `paste0("a", as.character(x), "b")`. A text run has its escapes decoded
+/// `f"a{x}b"` runs as `paste0("a", .ry_text(x), "b")`. A text run has its escapes decoded
 /// and its doubled braces halved.
 unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
-    let as_character = install("as.character")?;
+    let text = install(".ry_text")?;
     let mut items = vec![(nil(), install("paste0")?)];
     for child in node.children_with_tokens() {
         match child {
@@ -1442,7 +1450,7 @@ unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp
                     .first()
                     .ok_or_else(|| error("this interpolation is empty"))?;
                 let value = lower(inner, source)?;
-                items.push((nil(), values::call(as_character, &[value])?));
+                items.push((nil(), values::call(text, &[value])?));
             }
             _ => {}
         }
@@ -1566,6 +1574,29 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
                 result = values::call(pipe, &[result, alternative?])?;
             }
             Ok(result)
+        }
+        SyntaxKind::PATTERN_REST => {
+            let text = node.text().to_string();
+            install(&identifier(text.trim()))
+        }
+        SyntaxKind::PATTERN_ARRAY => {
+            let mut items = vec![(nil(), install(".ry_array")?)];
+            for child in node.children() {
+                items.push((nil(), pattern(&child)?));
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::PATTERN_AS => {
+            let inner = node
+                .children()
+                .find(|child| child.kind() != SyntaxKind::NAME)
+                .ok_or_else(|| error("`as` needs a pattern before it"))?;
+            let name = node
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME)
+                .last()
+                .ok_or_else(|| error("`as` needs a name after it"))?;
+            values::call(install(".ry_as")?, &[pattern(&inner)?, name_symbol(&name)?])
         }
         SyntaxKind::PATTERN_PAREN => {
             let inner = node

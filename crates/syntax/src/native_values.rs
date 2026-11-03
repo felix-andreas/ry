@@ -17,6 +17,8 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     ".ry_tag",
     ".ry_array",
     ".ry_is_list",
+    ".ry_update",
+    ".ry_text",
     "as.record",
     "as.tuple",
     "as.tag",

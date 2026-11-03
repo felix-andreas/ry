@@ -658,7 +658,7 @@ action: Add inferred type annotations for the whole file
   edit 19..19 -> "<T: numeric>"
   edit 21..21 -> ": T"
   edit 22..22 -> " -> T"
-completion (68): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
+completion (69): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
 hint @19<T: numeric>
 hint @21: T
 hint @22 -> T
@@ -770,7 +770,7 @@ signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named
 parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
 signature: <T, U> fn(X: list[T] | T[] | formula | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
 parameters: [X: list[T] | T[] | formula | NULL] | FUN: fn(T) -> U | ...: Any
-completion (59): lapply, lag.plot, LazyFrame.explain, LazyFrame.group_by, LazyFrame.pivot, LazyFrame.scan_parquet, LazyGroupBy.agg, List.append
+completion (60): lapply, lag.plot, LazyFrame.explain, LazyFrame.group_by, LazyFrame.pivot, LazyFrame.scan_parquet, LazyGroupBy.agg, List.append
 
 #---- c_unknown
 f <- function(a, b) {

@@ -71,7 +71,7 @@ Dict.empty()
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1803)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1883)
 
 ## `Dict.with_capacity`
 
@@ -79,14 +79,14 @@ Dict.empty()
 <TabItem label="Inline">
 
 ```r
-Dict.with_capacity <- function<K: key, V>(capacity: integer) -> Dict<K, V>
+Dict.with_capacity <- function<K: key, V>(capacity: I64) -> Dict<K, V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(capacity: integer) -> Dict<K, V>
+#: <K: key, V> fn(capacity: I64) -> Dict<K, V>
 Dict.with_capacity <- function(capacity)
 ```
 
@@ -101,7 +101,7 @@ Dict.capacity(Dict.insert(Dict.with_capacity(64L), "a", 1L))
 #> 64L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1812)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1892)
 
 ## `Dict.single`
 
@@ -130,7 +130,7 @@ Dict.single("a", 1)
 #> Dict.from_list(list(("a", 1)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1820)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1900)
 
 ## `Dict.from_list`
 
@@ -138,14 +138,14 @@ Dict.single("a", 1)
 <TabItem label="Inline">
 
 ```r
-Dict.from_list <- function<K: key, V>(pairs: list[Tuple{K, V}]) -> Dict<K, V>
+Dict.from_list <- function<K: key, V>(pairs: List<Tuple{K, V}>) -> Dict<K, V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(pairs: list[Tuple{K, V}]) -> Dict<K, V>
+#: <K: key, V> fn(pairs: List<Tuple{K, V}>) -> Dict<K, V>
 Dict.from_list <- function(pairs)
 ```
 
@@ -159,7 +159,7 @@ Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 #> Dict.from_list(list(("a", 3), ("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1828)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1908)
 
 ## `Dict.to_list`
 
@@ -167,14 +167,14 @@ Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
 <TabItem label="Inline">
 
 ```r
-Dict.to_list <- function<K: key, V>(dict: Dict<K, V>) -> list[Tuple{K, V}]
+Dict.to_list <- function<K: key, V>(dict: Dict<K, V>) -> List<Tuple{K, V}>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> list[Tuple{K, V}]
+#: <K: key, V> fn(dict: Dict<K, V>) -> List<Tuple{K, V}>
 Dict.to_list <- function(dict)
 ```
 
@@ -188,7 +188,7 @@ Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list(("a", 1), ("b", 2))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1836)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1916)
 
 ## `Dict.len`
 
@@ -196,14 +196,14 @@ Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
 <TabItem label="Inline">
 
 ```r
-Dict.len <- function<K: key, V>(dict: Dict<K, V>) -> integer
+Dict.len <- function<K: key, V>(dict: Dict<K, V>) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> integer
+#: <K: key, V> fn(dict: Dict<K, V>) -> I64
 Dict.len <- function(dict)
 ```
 
@@ -217,7 +217,7 @@ Dict.len(Dict.single("a", 1))
 #> 1L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1844)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1924)
 
 ## `Dict.is_empty`
 
@@ -225,14 +225,14 @@ Dict.len(Dict.single("a", 1))
 <TabItem label="Inline">
 
 ```r
-Dict.is_empty <- function<K: key, V>(dict: Dict<K, V>) -> logical
+Dict.is_empty <- function<K: key, V>(dict: Dict<K, V>) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> logical
+#: <K: key, V> fn(dict: Dict<K, V>) -> Bool
 Dict.is_empty <- function(dict)
 ```
 
@@ -246,7 +246,7 @@ Dict.is_empty(Dict.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1852)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1932)
 
 ## `Dict.get`
 
@@ -275,7 +275,7 @@ Dict.get(Dict.single("a", 1), "a")
 #> :Ok(1)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1860)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1940)
 
 ## `Dict.contains`
 
@@ -283,14 +283,14 @@ Dict.get(Dict.single("a", 1), "a")
 <TabItem label="Inline">
 
 ```r
-Dict.contains <- function<K: key, V>(dict: Dict<K, V>, key: K) -> logical
+Dict.contains <- function<K: key, V>(dict: Dict<K, V>, key: K) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>, key: K) -> logical
+#: <K: key, V> fn(dict: Dict<K, V>, key: K) -> Bool
 Dict.contains <- function(dict, key)
 ```
 
@@ -304,7 +304,7 @@ Dict.contains(Dict.single("a", 1), "b")
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1868)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1948)
 
 ## `Dict.insert`
 
@@ -333,7 +333,7 @@ Dict.insert(Dict.single("a", 1), "b", 2)
 #> Dict.from_list(list(("a", 1), ("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1876)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1956)
 
 ## `Dict.remove`
 
@@ -362,7 +362,7 @@ Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
 #> Dict.from_list(list(("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1884)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1964)
 
 ## `Dict.update`
 
@@ -392,7 +392,7 @@ Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default
 #> Dict.from_list(list(("hits", 2L)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1893)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1973)
 
 ## `Dict.keys`
 
@@ -400,14 +400,14 @@ Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default
 <TabItem label="Inline">
 
 ```r
-Dict.keys <- function<K: key, V>(dict: Dict<K, V>) -> list[K]
+Dict.keys <- function<K: key, V>(dict: Dict<K, V>) -> List<K>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> list[K]
+#: <K: key, V> fn(dict: Dict<K, V>) -> List<K>
 Dict.keys <- function(dict)
 ```
 
@@ -421,7 +421,7 @@ Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list("a", "b")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1901)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1981)
 
 ## `Dict.values`
 
@@ -429,14 +429,14 @@ Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
 <TabItem label="Inline">
 
 ```r
-Dict.values <- function<K: key, V>(dict: Dict<K, V>) -> list[V]
+Dict.values <- function<K: key, V>(dict: Dict<K, V>) -> List<V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> list[V]
+#: <K: key, V> fn(dict: Dict<K, V>) -> List<V>
 Dict.values <- function(dict)
 ```
 
@@ -450,7 +450,7 @@ Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
 #> list(1, 2)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1909)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1989)
 
 ## `Dict.walk`
 
@@ -479,7 +479,7 @@ Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) tot
 #> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1917)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1997)
 
 ## `Dict.walk_until`
 
@@ -508,7 +508,7 @@ Dict.walk_until(Dict.from_list(list(("a", 1L), ("b", 5L), ("c", 2L))), 0L, funct
 #> 1L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1925)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2005)
 
 ## `Dict.map`
 
@@ -537,7 +537,7 @@ Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
 #> Dict.from_list(list(("a", 10), ("b", 20)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1933)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2013)
 
 ## `Dict.join_map`
 
@@ -566,7 +566,7 @@ Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.si
 #> Dict.from_list(list((1L, "a"), (2L, "b")))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1941)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2021)
 
 ## `Dict.keep_if`
 
@@ -574,14 +574,14 @@ Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.si
 <TabItem label="Inline">
 
 ```r
-Dict.keep_if <- function<K: key, V>(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+Dict.keep_if <- function<K: key, V>(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+#: <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 Dict.keep_if <- function(dict, predicate)
 ```
 
@@ -595,7 +595,7 @@ Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #> Dict.from_list(list(("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1949)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2029)
 
 ## `Dict.drop_if`
 
@@ -603,14 +603,14 @@ Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 <TabItem label="Inline">
 
 ```r
-Dict.drop_if <- function<K: key, V>(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+Dict.drop_if <- function<K: key, V>(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+#: <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 Dict.drop_if <- function(dict, predicate)
 ```
 
@@ -624,7 +624,7 @@ Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
 #> Dict.from_list(list(("a", 1)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1957)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2037)
 
 ## `Dict.insert_all`
 
@@ -653,7 +653,7 @@ Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
 #> Dict.from_list(list(("a", 5), ("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1965)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2045)
 
 ## `Dict.keep_shared`
 
@@ -682,7 +682,7 @@ Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list((
 #> Dict.from_list(list(("a", 1)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1973)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2053)
 
 ## `Dict.remove_all`
 
@@ -711,7 +711,7 @@ Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
 #> Dict.from_list(list(("b", 2)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1981)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2061)
 
 ## `Dict.reserve`
 
@@ -719,14 +719,14 @@ Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
 <TabItem label="Inline">
 
 ```r
-Dict.reserve <- function<K: key, V>(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
+Dict.reserve <- function<K: key, V>(dict: Dict<K, V>, spare: I64) -> Dict<K, V>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
+#: <K: key, V> fn(dict: Dict<K, V>, spare: I64) -> Dict<K, V>
 Dict.reserve <- function(dict, spare)
 ```
 
@@ -740,7 +740,7 @@ Dict.reserve(Dict.single("a", 1L), 1000L)
 #> Dict.from_list(list(("a", 1L)))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1989)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2069)
 
 ## `Dict.capacity`
 
@@ -748,14 +748,14 @@ Dict.reserve(Dict.single("a", 1L), 1000L)
 <TabItem label="Inline">
 
 ```r
-Dict.capacity <- function<K: key, V>(dict: Dict<K, V>) -> integer
+Dict.capacity <- function<K: key, V>(dict: Dict<K, V>) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <K: key, V> fn(dict: Dict<K, V>) -> integer
+#: <K: key, V> fn(dict: Dict<K, V>) -> I64
 Dict.capacity <- function(dict)
 ```
 
@@ -769,7 +769,7 @@ Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
 #> 10L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1997)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2077)
 
 ## `Dict.release_excess_capacity`
 
@@ -799,7 +799,7 @@ Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L
 #> 1L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2006)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2086)
 
 ## `Dict.clear`
 
@@ -828,4 +828,4 @@ Dict.clear(Dict.single("a", 1L))
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2014)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2094)
