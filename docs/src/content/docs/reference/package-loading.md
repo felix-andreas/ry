@@ -3,8 +3,13 @@ title: Package loading
 description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
 ---
 
-[`ry load`](/guides/running), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
-This page is the exact behavior.
+`ry load`, `ry test`, `ry document`, the `ry run` and `ry R` consoles and `load_all()` all load a
+package the same way. This page is the exact behavior.
+
+In RStudio or another R session, `source(pipe("ry load --r-entry"))` defines a `load_all()` that
+loads the same way; put the line in `~/.Rprofile`. It takes `path`, `export_all` (default `TRUE`),
+`attach`, `full` and `quiet`, and reloads only when you call it, as devtools' does. In a console,
+`load_all(full = TRUE)` rebuilds the namespace from scratch.
 
 ## A load
 
@@ -12,7 +17,7 @@ This page is the exact behavior.
   evaluates only that definition the first time anything uses `name`. When another top-level
   statement writes the same name, as `f <- memoise(f)` does, every writer of it runs in order
   instead.
-- **A constant of a strict file**, `name <- value` in a file under [strict mode](/type-checking/strict-mode)
+- **A constant of a strict file**, `name <- value` in a file under [strict mode](/tutorial/fully-typed#strict-mode)
   whose value calls only pure functions, becomes a promise the same way, unless another statement
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
@@ -76,7 +81,7 @@ This page is the exact behavior.
   valid UTF-8 refuses the load with a message naming the field.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
-- **With [strict mode](/type-checking/strict-mode) on**, in `ry.toml` or in a file's
+- **With [strict mode](/tutorial/fully-typed#strict-mode) on**, in `ry.toml` or in a file's
   `# typing: strict` comment, `ry load` checks the package's `R/` files. If any has a strict-mode
   error, it prints the errors and exits with status 1 before anything with an effect runs. On GNU
   R the check finishes before the load starts. On ry's runtime it runs while the runtime starts
@@ -213,6 +218,20 @@ When a package another development package imports reloads, the importer's impor
 too, so it calls the new definitions without reloading itself. If the importer's `NAMESPACE` no
 longer fits, because it imports a name the reload removed, the reload still succeeds, and the
 importer keeps its old imports with a warning until you reload it.
+
+## Speed
+
+A load parses a function only when something first calls it, and a reload touches only the
+definitions you changed. On a generated package of 326,000 lines in 500 files, against
+`devtools::load_all()` and [loadfast](https://github.com/finccam/loadfast):
+
+| | `load_all()` | `load_fast()` | `ry R` | `ry load` |
+| --- | --- | --- | --- | --- |
+| cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
+| reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
+
+These are medians of several runs of `tools/loader-bench` on a shared machine, with ry built without
+link-time optimization, so the ratios are more reliable than the milliseconds.
 
 ## Timing a load
 

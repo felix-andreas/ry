@@ -1,0 +1,37 @@
+---
+// The theme scrolls `.sidebar-content` instead of the pane Starlight's own persister watches, so
+// without this every page load reset the sidebar to the top. The position is saved when the page is
+// left and restored before the first paint, because this script runs as soon as the sidebar's
+// markup is parsed. If the restored position hides the current page's link (a page reached from
+// search or another site), the link is scrolled into view instead.
+import ThemeSidebar from 'starlight-theme-black/overrides/Sidebar.astro';
+---
+
+<ThemeSidebar />
+
+<script is:inline aria-hidden="true">
+	(() => {
+		const scroller = document.querySelector('#starlight__sidebar .sidebar-content');
+		if (!scroller) return;
+		const key = 'ry-sidebar-scroll';
+		try {
+			const saved = sessionStorage.getItem(key);
+			if (saved !== null) scroller.scrollTop = Number(saved);
+		} catch {}
+		const current = scroller.querySelector('a[aria-current="page"]');
+		if (current && scroller.clientHeight > 0) {
+			const view = scroller.getBoundingClientRect();
+			const link = current.getBoundingClientRect();
+			if (link.top < view.top || link.bottom > view.bottom) {
+				scroller.scrollTop += link.top - view.top - (view.height - link.height) / 2;
+			}
+		}
+		const save = () => {
+			try {
+				sessionStorage.setItem(key, String(scroller.scrollTop));
+			} catch {}
+		};
+		addEventListener('pagehide', save);
+		scroller.addEventListener('click', save);
+	})();
+</script>

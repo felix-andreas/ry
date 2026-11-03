@@ -144,11 +144,11 @@ converted <- as.data.table(prices)
 setDT(df)
 other <- data.table::fread("other.csv")
 #++++
-30..35 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
-59..69 warning[data-table] `data.table` creates a data.table. Its typed equivalent is `DataFrame()`, see https://ry-lang.org/guides/from-data-table/
-126..139 warning[data-table] `as.data.table` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/guides/from-data-table/
-148..153 warning[data-table] `setDT` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/guides/from-data-table/
-179..184 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+30..35 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/reference/from-data-table/
+59..69 warning[data-table] `data.table` creates a data.table. Its typed equivalent is `DataFrame()`, see https://ry-lang.org/reference/from-data-table/
+126..139 warning[data-table] `as.data.table` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/reference/from-data-table/
+148..153 warning[data-table] `setDT` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/reference/from-data-table/
+179..184 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/reference/from-data-table/
 
 #---- other_functions_and_packages_are_clean
 setkey(prices, id)
@@ -162,7 +162,7 @@ fread <- function(path) read.csv(path)
 prices <- fread("prices.csv")
 other <- data.table::fread("other.csv")
 #++++
-90..95 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+90..95 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/reference/from-data-table/
 
 #==== commented-code
 #---- commented_out_code_warns

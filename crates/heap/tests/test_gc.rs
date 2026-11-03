@@ -149,7 +149,15 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
     }
 }
 
+/// `verify` runs the barrier check before every minor collection and makes each reconcile prove
+/// what it would free unreachable with a full collection instead of freeing it. Without it, a
+/// reconcile frees for real, and the contents check after each collection catches a live vector
+/// freed and reused.
 fn run(seed: u64, steps: usize, stress: bool) {
+    run_checked(seed, steps, stress, true);
+}
+
+fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
     heap.update_policy(|policy| {
@@ -157,7 +165,7 @@ fn run(seed: u64, steps: usize, stress: bool) {
         policy.young_large_limit = 4096 + rng.below(256 * 1024);
         // Checks the barrier, and that each header's old bit agrees with its mark, before
         // every minor collection.
-        policy.verify = true;
+        policy.verify = verify_reconcile;
         if stress {
             policy.stress = GcStress::EveryAllocation;
         }
@@ -177,14 +185,18 @@ fn run(seed: u64, steps: usize, stress: bool) {
         for _ in 0..steps {
             let live = model.live();
             sync_roots(&mut heap, &model);
-            // Every live node is rooted while new objects are allocated, because the generator
-            // may still pick it as a child.
-            for &index in &live {
-                heap.root(model.nodes[index].as_ref().expect("live").0);
+            // Without the extra handles, a live node the roots reach only through a counted
+            // field is what a reconcile must leave alone.
+            if verify_reconcile {
+                for &index in &live {
+                    heap.root(model.nodes[index].as_ref().expect("live").0);
+                }
             }
             match rng.below(10) {
                 0..=2 => {
-                    let bound = if rng.chance(1, 10) { 600 } else { 12 };
+                    // A reconcile frees large vectors only, and runs at a large allocation.
+                    let large = if verify_reconcile { 10 } else { 2 };
+                    let bound = if rng.chance(1, large) { 600 } else { 12 };
                     let length = rng.below(bound);
                     let values: Vec<i32> = (0..length).map(|_| rng.next_u64() as i32).collect();
                     let sexp = heap
@@ -204,6 +216,11 @@ fn run(seed: u64, steps: usize, stress: bool) {
                     for (position, child) in children.iter().enumerate() {
                         let child = model.nodes[*child].as_ref().expect("live").0;
                         heap.set_element(sexp, position, child);
+                    }
+                    // A list built from temporaries, as `list(id[keep], v[keep])` is, holds the
+                    // only references to them.
+                    if !verify_reconcile && rng.chance(1, 2) {
+                        model.roots.retain(|root| !children.contains(root));
                     }
                     model.nodes.push(Some((sexp, Node::List(children))));
                     model.roots.push(model.nodes.len() - 1);
@@ -319,6 +336,9 @@ fn run(seed: u64, steps: usize, stress: bool) {
                     let drop = rng.below(model.roots.len());
                     model.roots.swap_remove(drop);
                 }
+                // Collections sweep what a reconcile would free, so the reconcile variant
+                // collects less often.
+                _ if !verify_reconcile && rng.chance(2, 3) => {}
                 _ => {
                     sync_roots(&mut heap, &model);
                     let major = rng.chance(1, 3);
@@ -348,6 +368,289 @@ fn fuzz_object_graphs_survive_collection() {
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
     for_each_seed(8, |seed| run(1000 + seed, 150, true));
+}
+
+#[test]
+fn fuzz_reconciles_free_only_unreachable_vectors() {
+    for_each_seed(40, |seed| run_checked(seed, 400, false, false));
+}
+
+#[test]
+fn fuzz_reconciles_free_only_unreachable_vectors_under_stress() {
+    for_each_seed(10, |seed| run_checked(seed, 200, true, false));
+}
+
+/// Past the bytes a reconcile waits for, so one dead vector runs it.
+const BIG: isize = 600_000;
+
+/// A large vector, filled so a freed and reused one would show.
+unsafe fn big_vector(heap: &mut Heap, fill: f64) -> Sexp {
+    unsafe {
+        let vector = heap.alloc_vector(SexpType::Real, BIG).expect("alloc");
+        vector.slice_mut::<f64>().fill(fill);
+        vector
+    }
+}
+
+/// A list holding `vector` as its only counted reference, with the list rooted and `vector`
+/// not, so dropping it from the list leaves it at count zero.
+unsafe fn held_by_list(heap: &mut Heap, vector: Sexp) -> Sexp {
+    unsafe {
+        let list = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.add_global_root(list);
+        heap.set_element(list, 0, vector);
+        list
+    }
+}
+
+#[derive(Clone)]
+enum Held {
+    Empty,
+    Vector(Sexp, f64),
+    /// A list of vectors stored into the holder, so its release cascades to them.
+    Nested(Sexp, Vec<(Sexp, f64)>),
+}
+
+/// Temporaries the way R code makes them: fresh large vectors stored into rooted lists, shared
+/// between slots, overwritten, nested in lists of their own and protected for a while. After
+/// every step each slot must hold the vector it was given, intact, and over the run the
+/// reconciles must have freed some, without any collection having to.
+#[test]
+fn fuzz_temporaries_are_freed_and_live_vectors_kept() {
+    for_each_seed(fuzz_iterations(20), |seed| {
+        let mut rng = SplitMix64(seed);
+        let mut heap = Heap::new();
+        unsafe {
+            if rng.chance(1, 4) {
+                heap.update_policy(|policy| policy.stress = GcStress::EveryAllocation);
+            }
+            let nil = heap.nil();
+            const HOLDERS: usize = 4;
+            const SLOTS: usize = 4;
+            let holders: Vec<Sexp> = (0..HOLDERS)
+                .map(|_| {
+                    let list = heap
+                        .alloc_vector(SexpType::List, SLOTS as isize)
+                        .expect("alloc");
+                    heap.add_global_root(list);
+                    list
+                })
+                .collect();
+            let mut model = vec![vec![Held::Empty; SLOTS]; HOLDERS];
+            let mut protected: Vec<(Sexp, f64)> = Vec::new();
+            let fresh = |heap: &mut Heap, rng: &mut SplitMix64| {
+                let length = 600 + rng.below(30_000) as isize;
+                let fill = rng.below(1000) as f64;
+                let vector = heap.alloc_vector(SexpType::Real, length).expect("alloc");
+                vector.slice_mut::<f64>().fill(fill);
+                (vector, fill)
+            };
+            for step in 0..300 {
+                let holder = rng.below(HOLDERS);
+                let slot = rng.below(SLOTS);
+                let held = match rng.below(8) {
+                    0..=2 => {
+                        let (vector, fill) = fresh(&mut heap, &mut rng);
+                        Held::Vector(vector, fill)
+                    }
+                    3 => model[rng.below(HOLDERS)][rng.below(SLOTS)].clone(),
+                    4 => {
+                        let mark = heap.handle_mark();
+                        let count = 1 + rng.below(3);
+                        let list = heap
+                            .alloc_vector(SexpType::List, count as isize)
+                            .expect("alloc");
+                        heap.root(list);
+                        let mut items = Vec::new();
+                        for position in 0..count {
+                            let (vector, fill) = fresh(&mut heap, &mut rng);
+                            heap.set_element(list, position, vector);
+                            items.push((vector, fill));
+                        }
+                        heap.release_handles(mark);
+                        Held::Nested(list, items)
+                    }
+                    5 => {
+                        if let Held::Vector(vector, fill) = model[holder][slot] {
+                            heap.roots.protect.protect(vector).expect("protect");
+                            protected.push((vector, fill));
+                        }
+                        continue;
+                    }
+                    6 if !protected.is_empty() => {
+                        heap.roots.protect.unprotect(1).expect("unprotect");
+                        protected.pop();
+                        continue;
+                    }
+                    _ => Held::Empty,
+                };
+                let value = match &held {
+                    Held::Empty => nil,
+                    Held::Vector(vector, _) | Held::Nested(vector, _) => *vector,
+                };
+                heap.set_element(holders[holder], slot, value);
+                model[holder][slot] = held;
+                if rng.chance(1, 40) {
+                    heap.collect(if rng.chance(1, 2) {
+                        Collection::Major
+                    } else {
+                        Collection::Minor
+                    });
+                }
+                let intact = |vector: Sexp, fill: f64| {
+                    let values = vector.slice::<f64>();
+                    values.first() == Some(&fill) && values.last() == Some(&fill)
+                };
+                for (holder, slots) in model.iter().enumerate() {
+                    for (slot, held) in slots.iter().enumerate() {
+                        let stored = holders[holder].element(slot);
+                        match held {
+                            Held::Empty => assert_eq!(stored, nil),
+                            Held::Vector(vector, fill) => {
+                                assert_eq!(stored, *vector, "seed {seed} step {step}");
+                                assert!(intact(*vector, *fill), "seed {seed} step {step}");
+                            }
+                            Held::Nested(list, items) => {
+                                assert_eq!(stored, *list, "seed {seed} step {step}");
+                                for (position, (vector, fill)) in items.iter().enumerate() {
+                                    assert_eq!(list.element(position), *vector);
+                                    assert!(intact(*vector, *fill), "seed {seed} step {step}");
+                                }
+                            }
+                        }
+                    }
+                }
+                for &(vector, fill) in &protected {
+                    assert!(
+                        intact(vector, fill),
+                        "seed {seed} step {step}: a protected vector"
+                    );
+                }
+            }
+            assert!(
+                heap.stats().vectors_released > 0,
+                "seed {seed}: nothing was released"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_dropped_large_vector_is_freed_at_the_next_large_allocation() {
+    let mut heap = Heap::new();
+    unsafe {
+        let mark = heap.handle_mark();
+        let vector = big_vector(&mut heap, 1.5);
+        heap.root(vector);
+        let list = held_by_list(&mut heap, vector);
+        heap.release_handles(mark);
+        let nil = heap.nil();
+        heap.set_element(list, 0, nil);
+        big_vector(&mut heap, 2.5);
+        let stats = heap.stats();
+        assert_eq!(stats.vectors_released, 1);
+        assert_eq!(stats.minor_collections + stats.major_collections, 0);
+    }
+}
+
+#[test]
+fn a_dead_list_gives_up_its_large_elements() {
+    let mut heap = Heap::new();
+    unsafe {
+        let mark = heap.handle_mark();
+        let inner = heap.alloc_vector(SexpType::List, 3).expect("alloc");
+        heap.root(inner);
+        for slot in 0..3 {
+            let vector = big_vector(&mut heap, slot as f64);
+            heap.set_element(inner, slot, vector);
+        }
+        let outer = held_by_list(&mut heap, inner);
+        heap.release_handles(mark);
+        let nil = heap.nil();
+        heap.set_element(outer, 0, nil);
+        big_vector(&mut heap, 9.0);
+        assert_eq!(heap.stats().vectors_released, 3);
+    }
+}
+
+#[test]
+fn a_protected_vector_at_count_zero_is_kept_until_unprotected() {
+    let mut heap = Heap::new();
+    unsafe {
+        let vector = big_vector(&mut heap, 1.5);
+        heap.roots.protect.protect(vector).expect("protect");
+        let list = held_by_list(&mut heap, vector);
+        let nil = heap.nil();
+        heap.set_element(list, 0, nil);
+        big_vector(&mut heap, 2.5);
+        assert_eq!(heap.stats().vectors_released, 0);
+        assert!(vector.slice::<f64>().iter().all(|value| *value == 1.5));
+        // Unprotecting stores nothing, so the vector waits for the next reconcile, which the
+        // next dead vector runs.
+        heap.roots.protect.unprotect(1).expect("unprotect");
+        let mark = heap.handle_mark();
+        let other = big_vector(&mut heap, 3.5);
+        heap.root(other);
+        heap.set_element(list, 0, other);
+        heap.release_handles(mark);
+        heap.set_element(list, 0, nil);
+        big_vector(&mut heap, 4.5);
+        assert_eq!(heap.stats().vectors_released, 2);
+    }
+}
+
+/// Fields of an untracked cell (`DISABLE_REFCNT`) do not count, so the cell is a root for the
+/// reconcile.
+#[test]
+fn an_untracked_holder_keeps_a_vector_at_count_zero() {
+    let mut heap = Heap::new();
+    unsafe {
+        let nil = heap.nil();
+        let cell = heap.cons(nil, nil).expect("cons");
+        heap.add_global_root(cell);
+        heap.untrack_references(cell);
+        let mark = heap.handle_mark();
+        let vector = big_vector(&mut heap, 1.5);
+        heap.root(vector);
+        heap.set_car(cell, vector);
+        let list = held_by_list(&mut heap, vector);
+        heap.release_handles(mark);
+        heap.set_element(list, 0, nil);
+        big_vector(&mut heap, 2.5);
+        heap.collect(Collection::Minor);
+        assert_eq!(heap.stats().vectors_released, 0);
+        assert!(cell.car().slice::<f64>().iter().all(|value| *value == 1.5));
+    }
+}
+
+/// Native code storing through an escaped list's element pointer counts nothing, so the escaped
+/// list's elements are roots until the escape retires and recounts them.
+#[test]
+fn an_escaped_list_keeps_what_native_code_stored_into_it() {
+    let mut heap = Heap::new();
+    unsafe {
+        let escaped = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.add_global_root(escaped);
+        heap.escape(escaped);
+        let mark = heap.handle_mark();
+        let vector = big_vector(&mut heap, 1.5);
+        heap.root(vector);
+        *escaped
+            .slice_mut::<Sexp>()
+            .first_mut()
+            .expect("one element") = vector;
+        let list = held_by_list(&mut heap, vector);
+        heap.release_handles(mark);
+        let nil = heap.nil();
+        heap.set_element(list, 0, nil);
+        big_vector(&mut heap, 2.5);
+        assert_eq!(heap.stats().vectors_released, 0);
+        heap.retire_escaped();
+        assert_eq!(vector.refcount(), 1);
+        heap.set_element(escaped, 0, nil);
+        big_vector(&mut heap, 3.5);
+        assert_eq!(heap.stats().vectors_released, 1);
+    }
 }
 
 #[test]
@@ -1028,7 +1331,10 @@ fn fuzz_mapped_allocator_keeps_contents() {
                     let (block, layout, fill) = blocks[index];
                     let new_size = size(&mut rng);
                     let moved = allocator.realloc(block, layout, new_size);
-                    assert!(!moved.is_null(), "seed {seed}: realloc to {new_size} failed");
+                    assert!(
+                        !moved.is_null(),
+                        "seed {seed}: realloc to {new_size} failed"
+                    );
                     let kept = std::slice::from_raw_parts(moved, layout.size().min(new_size));
                     assert!(
                         kept.iter().all(|&byte| byte == fill),
@@ -1075,7 +1381,10 @@ fn heap_growth_follows_gnu_r_variables() {
     assert_eq!(growth(&[]), HeapGrowth::DEFAULT);
     assert_eq!(growth(&[("R_GC_MEM_GROW", "0")]).grow_increment, 0.0);
     let aggressive = growth(&[("R_GC_MEM_GROW", "3")]);
-    assert_eq!((aggressive.grow_fraction, aggressive.grow_increment), (0.5, 0.4));
+    assert_eq!(
+        (aggressive.grow_fraction, aggressive.grow_increment),
+        (0.5, 0.4)
+    );
     // Out of range, as GNU R ignores it.
     assert_eq!(growth(&[("R_GC_GROWFRAC", "0.9")]), HeapGrowth::DEFAULT);
     assert_eq!(growth(&[("R_GC_GROWFRAC", "0.4")]).grow_fraction, 0.4);
@@ -1089,12 +1398,24 @@ fn heap_growth_follows_gnu_r_variables() {
     let grown = default.next_limit(minimum, 100 * MEGABYTE, minimum);
     assert_eq!(grown, 120 * MEGABYTE + 640_000);
     // Between 30% and 70% full, the limit holds.
-    assert_eq!(default.next_limit(200 * MEGABYTE, 100 * MEGABYTE, minimum), 200 * MEGABYTE);
+    assert_eq!(
+        default.next_limit(200 * MEGABYTE, 100 * MEGABYTE, minimum),
+        200 * MEGABYTE
+    );
     // Below 30% it shrinks by a fifth, never below the minimum.
-    assert_eq!(default.next_limit(500 * MEGABYTE, 100 * MEGABYTE, minimum), 400 * MEGABYTE);
-    assert_eq!(default.next_limit(70 * MEGABYTE, MEGABYTE, minimum), minimum);
+    assert_eq!(
+        default.next_limit(500 * MEGABYTE, 100 * MEGABYTE, minimum),
+        400 * MEGABYTE
+    );
+    assert_eq!(
+        default.next_limit(70 * MEGABYTE, MEGABYTE, minimum),
+        minimum
+    );
     // Without growth, the limit stays a fifth of the minimum above the need, the headroom below
     // which a minor collection escalates to a major one.
     let tight = growth(&[("R_GC_MEM_GROW", "0")]);
-    assert_eq!(tight.next_limit(minimum, 100 * MEGABYTE, minimum), 100 * MEGABYTE + minimum / 5);
+    assert_eq!(
+        tight.next_limit(minimum, 100 * MEGABYTE, minimum),
+        100 * MEGABYTE + minimum / 5
+    );
 }

@@ -1,38 +1,69 @@
 ---
-title: Getting started
-description: A type checker and a fast runtime for R, written in Rust.
+title: Introduction
+description: A type checker, formatter, language server and fast runtime for R, written in Rust
 ---
 
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
-## Type checking
+ry is a toolchain for R, written in Rust. It checks, formats and runs the R code you have, and adds
+static types and its own data types on top. You adopt it in four steps and can stop after any of
+them:
 
-`ry check` finds type errors in plain R before it runs, once `ry.toml` sets `typing = true` under
-`[check]`.
+| Step | You add | ry reports or runs | Runs on GNU R |
+| --- | --- | --- | --- |
+| [1. Check](/tutorial/check) | nothing | unresolved names, syntax errors, lints; formats | yes |
+| [2. Type](/tutorial/types) | `typing = true`, `#:` comments | type errors | yes |
+| [3. Run](/tutorial/runtime) | `ry run` | faster R, inline types, records, tagged unions | no |
+| [4. Go fully typed](/tutorial/fully-typed) | `strict = true` | an error for every value without a known type | no |
+
+## Check
+
+With no configuration, ry resolves every name by R's scoping rules:
 
 ```r
-apply_discount <- function(price, rate) price * (1 - rate)
-apply_discount(100, "0.2")
+net_price <- function(price, rate) {
+  price * (1 - ratee)
+}
+```
+
+```text ry check
+unresolved
+  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+```
+
+## Type
+
+With `typing = true`, ry infers types from use. A `#:` comment pins a contract, and the file stays
+plain R:
+
+```r
+#: fn(price: double, rate: double) -> double
+net_price <- function(price, rate) {
+  price * (1 - rate)
+}
+
+net_price(100, "0.2")
 ```
 
 ```text ry check typing
 type-mismatch
-  x expected a numeric value (`integer` or `double`), found `character`
+  x expected `double`, found `character`
 ```
 
-## Speed
+## Run
 
-Loops and recursion run several times faster on ry's runtime than on GNU R, and vectorized code runs
-about as fast. Typed functions over numbers, records and `match` run as native code, an order of
-magnitude faster again.
+`ry run` runs R on ry's own runtime. Seconds per program, the same plain R on GNU R and on ry, and
+typed in strict mode on ry:
 
-<BenchmarkTable programs={["fib", "drawdown", "orders", "expr_tree", "vector_arith", "log_rank"]} />
+<BenchmarkTable programs={["fib", "drawdown", "loop_sum", "orders", "expr_tree", "vector_arith", "report"]} />
 
-[All benchmarks](/benchmarks)
+Loops and recursion gain the most. Vectorized code already runs in C on GNU R, and code that
+builds strings, like `report`, runs at about the same speed. Typed functions over numbers, records
+and `match` compile to native code. [Benchmarks](/benchmarks) has every program and the method.
 
-## Tagged unions and `match`
+## Model data
 
-A `match` must handle every case of a tagged union.
+ry's records and tagged unions run on its runtime, and `match` must handle every case:
 
 ```r
 alias Payment =
@@ -53,13 +84,12 @@ non-exhaustive-match
   x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
 ```
 
-## Try it
+## Status
 
-```sh
-cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang
-ry check   # report mistakes
-ry fmt     # format every file
-```
+ry is in beta. The checker, formatter, language server and package loader are ready for daily use,
+and diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete:
+code that needs something it lacks stops with an error that names it, and `ry R` runs the same code
+on GNU R.
 
-[Installation](/installation) · [Type checking](/type-checking/overview) ·
-[Records and tags](/type-checking/records-and-tags) · [ry at a glance](/ry) · [Why ry](/why-ry)
+**Next:** [install ry](/installation), then [check your code](/tutorial/check).
+[ry at a glance](/ry) has everything on one page.
