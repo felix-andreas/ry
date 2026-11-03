@@ -118,25 +118,43 @@ miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unkn
 same way, with the closest column as the suggestion. In `NAMESPACE`, an
 `importFrom` of a name the package does not export and an `export` of a name you never define are
 errors, because R refuses to load such a package. Attaching a package ry knows nothing about turns
-off this check for bare names, as [stubs](/type-checking/stubs) explains.
+off this check for bare names, as [stubs](/type-checking/unknown#package-stubs) explains, and that includes a near
+miss of one of your own names, because the package may export it.
 
 **`unused`** (warning): an assignment nothing reads. In a package, top-level definitions are exempt,
-because another file may use them.
+because another file may use them. Some reads do not name the variable as code, and they count too:
+
+- an assignment in tail position, which is the function's value;
+- a formal reassigned before `NextMethod()` or an argument-less `callGeneric()`, which forward the
+  formals' current values;
+- a name inside a formula, such as `lm(ly ~ lx)`, which looks it up in the calling frame;
+- a string naming the variable in `get()`, `get0()`, `exists()` or `clusterExport()`, or in the code
+  that `parse(text = ...)` or `str2lang()` reads.
+
+A function that hands out its own frame with `environment()` gets no finding at all, because the
+caller can reach every local through it. Passing `environment()` to an accessor that names what it
+reads, such as `get()` or `clusterExport()`, is not that.
 
 **`duplicate`** (warning): a top-level name defined in more than one place in a package, where R
-silently keeps whichever is collated last. Both definitions are reported.
+silently keeps whichever is collated last. Both definitions are reported. A rebinding is not a
+duplicate when top-level code between the two reads the earlier value, as in `x <- c(x, 3)`, and
+neither is `setGeneric("f")` after `f <- function(...)`, because it builds the generic from the
+existing function. A read inside a function body does not count, since the body runs after both
+bindings.
 
 **`assignment-operator`** (warning): `=` used for assignment, where `<-` says unambiguously that the
 line assigns rather than passes an argument.
 
 **`boolean-shorthand`** (warning): `T` or `F`, which are ordinary variables that any code can
 reassign, unlike `TRUE` and `FALSE`. A file that binds `T` or `F` itself, even as a parameter, gets
-no finding for that name, because there it may mean the binding.
+no finding for that name, because there it may mean the binding, and neither does the symbol in
+`quote(F)`.
 
 **`trailing-comma`** (warning): a comma after a call's last argument. R reads it as an empty
 argument, which fails only when the callee evaluates it: `c(1, 2, )` stops with "argument 3 is
 empty", while `ngettext(2, "a", "b", )` runs, because the empty argument leaves `domain` at its
-default.
+default. Empty arguments are allowed in `alist()`, where `alist(x = )` declares a formal with no
+default, and in a call whose arguments are all empty, such as `xts(,)`.
 
 **`equals-na`** (warning): a comparison with `NA`, such as `x == NA`, which gives `NA` whatever `x`
 holds, so it never tests whether a value is missing. The fix to `is.na(x)` is unsafe because the
@@ -155,7 +173,8 @@ empty input does.
 **`class-equals`** (warning): `class(x) == "name"` or `!=`, which misses an object whose class
 vector has several entries: a tibble's class is `c("tbl_df", "tbl", "data.frame")`, so the
 comparison gives three values, and since R 4.2 an `if` on it stops with an error. The fix to `inherits(x, "name")` is unsafe because it changes the result for such
-objects.
+objects. A comparison inside `any()`, `all()` or `which()`, or behind a `length(class(x)) == 1`
+guard, already handles several classes and is not reported.
 
 **`unreachable-code`** (warning): statements after `return()`, `stop()`, `break` or `next` in the
 same block, which never run. The range covers every statement from the first unreachable one to

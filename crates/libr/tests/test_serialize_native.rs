@@ -2,6 +2,8 @@
 //! `R_InitOutPStream`/`R_InitInPStream` callbacks over memory and through the `FILE` streams,
 //! with persistence hooks, and the stream structs have GNU R's layout.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

@@ -97,24 +97,42 @@ unsafe impl GlobalAlloc for Allocator {
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
+/// `mi_option_purge_delay` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant either.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
 /// zeroing cost a cold check more time than parsing did. The first arena is reserved before
 /// `main`, so the option is set from a constructor, as a default that
 /// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
 /// same option in `crates/libr/src/libr.rs`.
+///
+/// The purge delay drops from mimalloc v3's default of a second to 10 ms, which is v2's default
+/// (a workspace build links v2, because `libr` asks for it). A cold check runs for
+/// about a second and frees its parse trees file by file, so with the default delay none of that
+/// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
+/// 300,000-line project at no measurable cost in time.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static LAZY_ARENA_COMMIT: extern "C" fn() = {
-    extern "C" fn lazy_arena_commit() {
+static ALLOCATOR_OPTIONS: extern "C" fn() = {
+    extern "C" fn allocator_options() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe {
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, 10);
+        }
     }
-    lazy_arena_commit
+    allocator_options
 };
 
 fn main() -> ExitCode {
+    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
+    if rcmd::front_end::invoked_as_front_end() {
+        return rcmd::front_end::main(env::args().skip(1).collect());
+    }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(
@@ -177,6 +195,25 @@ fn main() -> ExitCode {
     } = &cli.command
     {
         return run_document(path, roclets, *runtime);
+    }
+
+    if let Command::Build {
+        path,
+        output,
+        no_vignettes,
+        runtime,
+    } = &cli.command
+    {
+        return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
+    }
+
+    if let Command::Install {
+        path,
+        library,
+        runtime,
+    } = &cli.command
+    {
+        return run_install(path, library.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -265,6 +302,8 @@ fn main() -> ExitCode {
         | Command::Load { .. }
         | Command::Test { .. }
         | Command::Document { .. }
+        | Command::Build { .. }
+        | Command::Install { .. }
         | Command::DebugAdapter => {
             unreachable!("handled on the main thread above")
         }
@@ -537,6 +576,137 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
     run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
 }
 
+/// `ry build`: writes the package's source tarball to `output`, or beside the package.
+fn run_build(
+    path: &Path,
+    output: Option<&Path>,
+    vignettes: bool,
+    runtime: Option<Runtime>,
+) -> ExitCode {
+    let built = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let output = match output {
+                Some(output) => std::path::absolute(output)
+                    .map_err(|error| format!("cannot resolve {}: {error}", output.display()))?,
+                None => root
+                    .parent()
+                    .ok_or_else(|| format!("{} has no parent directory", root.display()))?
+                    .to_path_buf(),
+            };
+            build_tarball(&home, &root, &output, vignettes)
+        });
+    match built {
+        Ok(tarball) => {
+            println!("{}", tarball.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `ry install`: builds the package into a private directory without rebuilding its vignettes,
+/// as `devtools::install()` does, and installs the tarball with the home's `R CMD INSTALL`.
+fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+    let installed = load::package_root(path)
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            let home = r_home(runtime)?;
+            let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
+            fs::create_dir_all(&staging)
+                .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
+            let result = build_tarball(&home, &root, &staging, false).and_then(|tarball| {
+                let mut command = std::process::Command::new(home.join("bin").join("R"));
+                command.args(["CMD", "INSTALL"]);
+                if let Some(library) = library {
+                    fs::create_dir_all(library)
+                        .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
+                    command.arg("-l").arg(library);
+                }
+                let status = command
+                    .arg(&tarball)
+                    .status()
+                    .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("installing {} failed", root.display()))
+                }
+            });
+            // The tarball is a by-product; a leftover in the temporary directory harms nothing.
+            if let Err(error) = fs::remove_dir_all(&staging) {
+                tracing::debug!("cannot remove {}: {error}", staging.display());
+            }
+            result
+        });
+    match installed {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The R home whose `bin/R` runs the chosen runtime: ry's own home, or GNU R's.
+fn r_home(runtime: Option<Runtime>) -> Result<PathBuf, String> {
+    let runtime_variable = env::var("RY_RUNTIME").ok();
+    let home = match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
+        Runtime::Ry => repl::ry_r_home(),
+        Runtime::GnuR => repl::libr::discover_r_home(),
+    };
+    home.map_err(|error| error.to_string())
+}
+
+/// Runs the home's `R CMD build` on `root` in `output` with `devtools::build()`'s options, and
+/// returns the tarball it wrote.
+fn build_tarball(
+    home: &Path,
+    root: &Path,
+    output: &Path,
+    vignettes: bool,
+) -> Result<PathBuf, String> {
+    let description_path = root.join("DESCRIPTION");
+    let description = rcmd::Description::parse(
+        &fs::read_to_string(&description_path)
+            .map_err(|error| format!("cannot read {}: {error}", description_path.display()))?,
+    );
+    let field = |name: &str| {
+        description
+            .get(name)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} has no {name} field", description_path.display()))
+    };
+    let tarball = output.join(format!(
+        "{}_{}.tar.gz",
+        field("Package")?,
+        field("Version")?
+    ));
+    fs::create_dir_all(output)
+        .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
+    let mut command = std::process::Command::new(home.join("bin").join("R"));
+    command.args(["CMD", "build", "--no-resave-data", "--no-manual"]);
+    if !vignettes {
+        command.arg("--no-build-vignettes");
+    }
+    let status = command
+        .arg(root)
+        .current_dir(output)
+        .status()
+        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+    if !status.success() {
+        return Err(format!("building {} failed", root.display()));
+    }
+    if !tarball.is_file() {
+        return Err(format!("R CMD build did not write {}", tarball.display()));
+    }
+    Ok(tarball)
+}
+
 /// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
 /// `file` against it, and exits with the session's status.
 fn run_load(
@@ -663,12 +833,14 @@ extern "C" fn package_verdict() -> c_int {
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time
 /// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
-/// Classes. In strict mode, `ry load` binds a package's pure constants lazily.
+/// Classes. In strict mode, `ry load` binds a package's pure constants lazily. With the prelude
+/// off, the standard library is reachable only as `std::List.map`.
 fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     repl::RuntimeFlags {
         annotation_checks: config.check.inline_annotations,
         object_systems: config.check.object_systems,
         strict: config.check.strict,
+        prelude: config.check.prelude,
     }
 }
 

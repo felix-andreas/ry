@@ -76,22 +76,18 @@ impl Extension {
             Architecture::X86 => "x86",
             Architecture::X8664 => "x86_64",
         };
-        // Releases before the Windows runtime shipped built ry.exe for MSVC; later ones build it
-        // for gnullvm beside R.dll.
-        let (targets, ext): (&[&str], &str) = match platform {
-            Os::Mac => (&["apple-darwin"], "tar.gz"),
-            Os::Linux => (&["unknown-linux-gnu"], "tar.gz"),
-            Os::Windows => (&["pc-windows-gnullvm", "pc-windows-msvc"], "zip"),
+        let (os, ext) = match platform {
+            Os::Mac => ("apple-darwin", "tar.gz"),
+            Os::Linux => ("unknown-linux-gnu", "tar.gz"),
+            Os::Windows => ("pc-windows-gnullvm", "zip"),
         };
-        let asset_names: Vec<String> = targets
-            .iter()
-            .map(|os| format!("{NAME}-{arch}-{os}.{ext}"))
-            .collect();
+        let asset_name = format!("{NAME}-{arch}-{os}.{ext}");
 
-        let asset = asset_names
+        let asset = release
+            .assets
             .iter()
-            .find_map(|name| release.assets.iter().find(|a| &a.name == name))
-            .ok_or_else(|| format!("no asset found matching {:?}", asset_names))?;
+            .find(|asset| asset.name == asset_name)
+            .ok_or_else(|| format!("no asset found matching {asset_name}"))?;
 
         let version_dir = format!("{NAME}-{}", release.version);
         let path = match platform {

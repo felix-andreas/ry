@@ -4,7 +4,7 @@ edition = "2024"
 rust-version = "1.91"
 version.workspace = true
 description = "A language tool for R: a language server and CLI providing a static type checker, formatter, and linter."
-license.workspace = true
+license = "GPL-2.0-or-later"
 repository.workspace = true
 keywords = ["r", "language-server", "lsp", "formatter", "linter"]
 categories = ["development-tools", "command-line-utilities"]
@@ -48,6 +48,7 @@ format = { path = "../format" }
 ide = { path = "../ide" }
 loader = { path = "../loader" }
 repl = { path = "../repl" }
+rcmd = { path = "../rcmd" }
 semantics = { path = "../semantics" }
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
@@ -64,8 +65,6 @@ libc = "0.2"
 tokio-util.workspace = true
 
 [dev-dependencies]
-# The scenario runner assembles ry's R home to script package installs.
-rcmd = { path = "../rcmd" }
 async-lsp.workspace = true
 unicode-width.workspace = true
 indoc.workspace = true

@@ -178,7 +178,7 @@ impl BuiltinDef {
     }
 
     /// Marks a builtin that takes ry values. The standard library's functions use this instead of
-    /// a list in `syntax`, because their declarations in `types/ry.Rtypes` already tell the
+    /// a list in `syntax`, because their declarations in `types/std.Rtypes` already tell the
     /// checker the same fact.
     pub const fn accepting_native(self) -> BuiltinDef {
         BuiltinDef {

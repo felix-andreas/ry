@@ -7,6 +7,8 @@
 //! Each case runs in a child process, so a crash in one routine is reported, not fatal. Without
 //! a corpus library the test reports that and passes.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

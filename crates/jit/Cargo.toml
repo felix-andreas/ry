@@ -3,7 +3,7 @@ name = "jit"
 description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code with Cranelift"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "GPL-2.0-or-later"
 publish = false
 
 [lib]

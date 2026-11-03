@@ -20,8 +20,10 @@
 //! debug adapter through [`Browse`], a transport that turns typed commands into requests. An
 //! editor that attaches during that prompt takes the stopped program over.
 
+#[cfg(unix)]
+use crate::debugger::{Adapter, Request, response};
 use {
-    crate::debugger::{Adapter, Request, Transport, response},
+    crate::debugger::Transport,
     serde_json::{Value, json},
     std::{
         collections::VecDeque,
@@ -30,6 +32,7 @@ use {
             Mutex, MutexGuard, PoisonError,
             atomic::{AtomicBool, Ordering},
         },
+        time::Duration,
     },
 };
 
@@ -110,6 +113,19 @@ pub enum BrowseInput {
     Attach(Box<dyn Transport>, Value),
 }
 
+/// Blocks until the console has handled the close of `count` connections in all, so a client
+/// that dropped one knows when the console has let go of it, the debugger included. `false`
+/// when `limit` passed first, which only bounds a hang: the wait wakes on each close, never on
+/// a clock.
+pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+    platform::wait_for_closed_connections(count, limit)
+}
+
+/// The number of connections whose close the console has handled.
+pub fn closed_connections() -> u64 {
+    platform::closed_connections()
+}
+
 /// Wakes the console's wait for input, so it answers the help server's queued requests.
 pub fn wake() {
     platform::wake();
@@ -130,6 +146,7 @@ pub unsafe fn show(object: heap::object::Sexp, title: &str) -> Result<(), String
 }
 
 /// Requests any connection may send, answered with R code allowed to run.
+#[cfg(unix)]
 unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
     match request.command.as_str() {
         "ryGlobals" => {
@@ -363,7 +380,12 @@ mod platform {
             Adapter, BrowseInput, READER, Request, SERVICE_REQUESTED, SERVING_REQUEST, Transport,
             answer_plain, lock, read_directly, response,
         },
-        crate::{help_server, interp, unwind::INTERRUPT_REQUESTED},
+        crate::{
+            debugger::evaluate_text,
+            graphics_engine, help_server, interp,
+            unwind::INTERRUPT_REQUESTED,
+            values::{self, global_env},
+        },
         serde_json::{Value, json},
         std::{
             collections::{BTreeMap, VecDeque},
@@ -376,7 +398,7 @@ mod platform {
             path::PathBuf,
             sync::{
                 Condvar, Mutex, PoisonError,
-                atomic::{AtomicBool, Ordering},
+                atomic::{AtomicBool, AtomicU64, Ordering},
             },
             time::Duration,
         },
@@ -411,6 +433,19 @@ mod platform {
     static STASHED_INPUT: Mutex<Option<Option<String>>> = Mutex::new(None);
     /// The connection that owns the debugger, while one is attached.
     static DEBUG_CONNECTION: Mutex<Option<u64>> = Mutex::new(None);
+    static CLOSED: Mutex<u64> = Mutex::new(0);
+    static CLOSED_CHANGED: Condvar = Condvar::new();
+
+    pub fn wait_for_closed_connections(count: u64, limit: Duration) -> bool {
+        let (closed, _) = CLOSED_CHANGED
+            .wait_timeout_while(lock(&CLOSED), limit, |closed| *closed < count)
+            .unwrap_or_else(PoisonError::into_inner);
+        *closed >= count
+    }
+
+    pub fn closed_connections() -> u64 {
+        *lock(&CLOSED)
+    }
 
     /// What the console asked the input thread for: `prompt` is the line it should read next,
     /// and `outstanding` stays set from the request until the interpreter takes the line, so a
@@ -429,6 +464,10 @@ mod platform {
     });
     static ASKED_CHANGED: Condvar = Condvar::new();
     static INPUT_THREAD: AtomicBool = AtomicBool::new(false);
+    /// Whether the editor's default device was offered, which happens once per console.
+    static PLOT_DEVICE_INSTALLED: AtomicBool = AtomicBool::new(false);
+    /// The display-list stamp of the plot last sent to the editors.
+    static PLOTTED_STAMP: AtomicU64 = AtomicU64::new(0);
 
     pub fn start() -> Option<String> {
         let directory = private_directory()?;
@@ -509,7 +548,7 @@ mod platform {
                     push(Event::Closed(id));
                 });
             if spawned.is_err() {
-                lock(&CONNECTIONS).remove(&id);
+                forget(id);
             }
         }
     }
@@ -644,6 +683,7 @@ mod platform {
         }
         // Help requests that arrived while a command ran were left for the prompt.
         serve_help();
+        publish_plot();
         ask(prompt);
         loop {
             let event = match lock(&STASHED_INPUT).take() {
@@ -674,6 +714,107 @@ mod platform {
                 None => {}
             }
         }
+    }
+
+    /// Sends the current plot to the subscribed editors when the command just run changed it.
+    ///
+    /// Each plot is copied from the current device's display list onto an svg device, so the
+    /// editor gets what the engine drew. The default device `install_plot_device` sets up writes
+    /// no file and keeps its display list; a file device such as `png()` keeps none and is left
+    /// alone.
+    unsafe fn publish_plot() {
+        let subscribers = subscribers();
+        if subscribers.is_empty() {
+            return;
+        }
+        let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
+        let mark = crate::heap().handle_mark();
+        match plot_svg() {
+            Ok(Some(svg)) => {
+                for connection in subscribers {
+                    send(
+                        connection,
+                        json!({ "type": "event", "event": "ryPlot", "body": { "svg": svg } }),
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(message) => crate::write_console(
+                format!("ry: sending the plot to the editor failed: {message}\n").as_bytes(),
+                true,
+            ),
+        }
+        crate::heap().release_handles(mark);
+        SERVING_REQUEST.store(serving, Ordering::Relaxed);
+    }
+
+    /// The current plot as svg text, or `None` when it is the one sent last or there is none.
+    unsafe fn plot_svg() -> Result<Option<String>, String> {
+        install_plot_device()?;
+        if graphics_engine::no_devices() {
+            return Ok(None);
+        }
+        // With a device open, the current one is a real device and nothing is opened here.
+        let dd = graphics_engine::current_device()
+            .map_err(|_| "the current device is the null device".to_owned())?;
+        let stamp = graphics_engine::display_list_stamp(dd);
+        if graphics_engine::display_list_is_empty(dd)
+            || PLOTTED_STAMP.swap(stamp, Ordering::Relaxed) == stamp
+        {
+            return Ok(None);
+        }
+        // The copy runs with warnings muffled and closes whatever device it opened on every
+        // path, because a replay that fails or warns would otherwise leave an svg device open
+        // and a warning queued for the user's next command.
+        let svg = evaluate_text(
+            "suppressWarnings(local({ file <- tempfile(fileext = \".svg\"); \
+             from <- grDevices::dev.cur(); before <- grDevices::dev.list(); \
+             on.exit({ for (opened in setdiff(grDevices::dev.list(), before)) \
+             grDevices::dev.off(opened); grDevices::dev.set(from); unlink(file) }); \
+             size <- grDevices::dev.size(); \
+             grDevices::dev.copy(grDevices::svg, file, width = size[1], height = size[2]); \
+             grDevices::dev.off(); \
+             readChar(file, file.size(file), useBytes = TRUE) }))",
+            global_env(),
+        )?;
+        values::as_string_scalar(svg)
+            .ok()
+            .flatten()
+            .map(Some)
+            .ok_or_else(|| "the svg export returned no text".to_owned())
+    }
+
+    /// Makes the default device a `pdf(NULL)` device that keeps its display list, once per
+    /// console, unless the user chose a device. The platform's own interactive defaults (X11,
+    /// quartz, windows) count as unchosen: they would open a window instead of the panel, and on
+    /// a machine without a display they fail.
+    unsafe fn install_plot_device() -> Result<(), String> {
+        if PLOT_DEVICE_INSTALLED.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        evaluate_text(
+            "local({ device <- getOption(\"device\"); \
+             builtin <- c(\"pdf\", \"X11\", \"x11\", \"quartz\", \"windows\"); \
+             namespace <- asNamespace(\"grDevices\"); \
+             unchosen <- is.null(device) || \
+             (is.character(device) && device %in% builtin) || \
+             any(vapply(builtin, function(name) \
+             exists(name, envir = namespace, inherits = FALSE) && \
+             identical(device, get(name, envir = namespace)), logical(1))); \
+             if (unchosen) options(device = function(width = 7, height = 7, ...) { \
+             grDevices::pdf(NULL, width = width, height = height); \
+             grDevices::dev.control(\"enable\") }) })",
+            global_env(),
+        )
+        .map(drop)
+    }
+
+    fn subscribers() -> Vec<u64> {
+        lock(&CONNECTIONS)
+            .iter()
+            .filter(|(_, connection)| connection.subscribed)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Answers help requests while waiting for input. A Ctrl-C that stopped a handler has
@@ -792,11 +933,7 @@ mod platform {
     }
 
     pub unsafe fn show(object: heap::object::Sexp, title: &str) -> Result<(), String> {
-        let subscribers: Vec<u64> = lock(&CONNECTIONS)
-            .iter()
-            .filter(|(_, connection)| connection.subscribed)
-            .map(|(&id, _)| id)
-            .collect();
+        let subscribers = subscribers();
         if subscribers.is_empty() {
             return Err(
                 "View() needs an editor connected to this console: start the console with \
@@ -836,7 +973,17 @@ mod platform {
             if let Some(target) = lock(&CONNECTIONS).get_mut(&connection) {
                 target.subscribed = true;
             }
-            send(connection, response(&request, Ok(json!({}))));
+            // Installed now rather than at the next prompt, so the command typed next already
+            // plots on the device the panel is fed from.
+            let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
+            let mark = crate::heap().handle_mark();
+            let installed = install_plot_device();
+            crate::heap().release_handles(mark);
+            SERVING_REQUEST.store(serving, Ordering::Relaxed);
+            send(
+                connection,
+                response(&request, installed.map(|()| json!({}))),
+            );
             return;
         }
         let serving = SERVING_REQUEST.swap(true, Ordering::Relaxed);
@@ -916,11 +1063,19 @@ mod platform {
     }
 
     unsafe fn closed(connection: u64) {
-        lock(&CONNECTIONS).remove(&connection);
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
             interp().debugger = None;
             *lock(&DEBUG_CONNECTION) = None;
         }
+        forget(connection);
+    }
+
+    /// Drops a connection the console is done with. Every path that ends one comes through here,
+    /// so `closed_connections` counts each connection exactly once.
+    fn forget(connection: u64) {
+        lock(&CONNECTIONS).remove(&connection);
+        *lock(&CLOSED) += 1;
+        CLOSED_CHANGED.notify_all();
     }
 
     /// The attached debugger's side of its connection.
@@ -945,12 +1100,10 @@ mod platform {
                         }
                     },
                     Some(Event::Closed(connection)) if connection == self.connection => {
-                        lock(&CONNECTIONS).remove(&connection);
+                        forget(connection);
                         return None;
                     }
-                    Some(Event::Closed(connection)) => {
-                        lock(&CONNECTIONS).remove(&connection);
-                    }
+                    Some(Event::Closed(connection)) => forget(connection),
                     // A stopped program waits like a prompt, so it answers the help server too.
                     Some(Event::Help) if wait => serve_help(),
                     Some(Event::Help) => {}
@@ -979,13 +1132,21 @@ mod platform {
 
 #[cfg(not(unix))]
 mod platform {
-    use heap::object::Sexp;
+    use {heap::object::Sexp, std::time::Duration};
 
     pub fn start() -> Option<String> {
         None
     }
 
     pub fn finish() {}
+
+    pub fn wait_for_closed_connections(_count: u64, _limit: Duration) -> bool {
+        true
+    }
+
+    pub fn closed_connections() -> u64 {
+        0
+    }
 
     pub fn wake() {}
 

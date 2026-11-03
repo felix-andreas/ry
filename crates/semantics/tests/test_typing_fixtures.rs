@@ -78,6 +78,21 @@ fn fixture_document_kind(path: &str) -> DocumentKind {
 fn render_with_metadata(source: &str) -> String {
     let mut db = RootDatabase::default();
     install_shipped_stubs(&db);
+    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
+    ProjectFiles::new(&db, vec![file]);
+    install_metadata(&mut db, source, &[file]);
+    render_file(&db, file)
+}
+
+fn has_metadata(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| line.starts_with("#namespace ") || line.starts_with("#description "))
+}
+
+/// Reads the package's NAMESPACE and DESCRIPTION from `#namespace `/`#description ` lines
+/// anywhere in the case, and scans attach facts from the sources exactly as the hosts do.
+fn install_metadata(db: &mut RootDatabase, source: &str, files: &[SourceFile]) {
     let mut namespace_source = String::new();
     let mut description_source = String::new();
     for line in source.lines() {
@@ -91,21 +106,17 @@ fn render_with_metadata(source: &str) -> String {
     }
     let namespace_file = parse_namespace(&namespace_source);
     let metadata = PackageMetadata::new(
-        &db,
+        &*db,
         normalized_imports(&namespace_file.imports),
         parse_description_dependencies(&description_source),
         Default::default(),
         parse_description_package(&description_source),
         namespace_file.native_symbols,
     );
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
-    // Attach facts are scanned from the sources exactly as the hosts do.
-    let attached = attached_union(&db, [file]);
+    let attached = attached_union(&*db, files.iter().copied());
     if !attached.is_empty() {
-        metadata.set_attached(&mut db).to(attached);
+        metadata.set_attached(db).to(attached);
     }
-    render_file(&db, file)
 }
 
 fn render_file(db: &RootDatabase, file: SourceFile) -> String {
@@ -172,21 +183,44 @@ fn typing_script_fixtures() {
     });
 }
 
+/// A case with `#namespace `/`#description ` lines gets a fresh database, because the package
+/// metadata is a singleton input the shared fixture database must not keep.
 fn render_with_strict(source: &str) -> String {
-    render_case(source, DocumentKind::Package, &|db, file| {
-        let mut output = String::new();
-        if let Some(mode) = file_typing_mode(db, file) {
-            output.push_str(&format!("typing mode: {mode:?}\n"));
-        }
-        output.push_str(&render_file(db, file));
-        render_diagnostics(&mut output, &strict_diagnostics(db, file));
-        output
-    })
+    if !has_metadata(source) {
+        return render_case(source, DocumentKind::Package, &render_strict_file);
+    }
+    let files =
+        split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let sources: Vec<SourceFile> = files
+        .iter()
+        .map(|(path, text)| SourceFile::new(&db, text.clone(), fixture_document_kind(path)))
+        .collect();
+    ProjectFiles::new(&db, sources.clone());
+    install_metadata(&mut db, source, &sources);
+    let mut output = String::new();
+    for ((path, _), file) in files.iter().zip(&sources) {
+        output.push_str(&format!("== {path}\n"));
+        output.push_str(&render_strict_file(&db, *file));
+    }
+    output
+}
+
+fn render_strict_file(db: &RootDatabase, file: SourceFile) -> String {
+    let mut output = String::new();
+    if let Some(mode) = file_typing_mode(db, file) {
+        output.push_str(&format!("typing mode: {mode:?}\n"));
+    }
+    output.push_str(&render_file(db, file));
+    render_diagnostics(&mut output, &strict_diagnostics(db, file));
+    output
 }
 
 /// A case is one script or several `#~~~~ path` files. A file whose path does not end in `.R`
 /// is a data file, sniffed exactly as the hosts sniff a project's `.csv` files, and each case
-/// gets a fresh database because the data-file and metadata inputs are singletons.
+/// gets a fresh database because the data-file and metadata inputs are singletons. A file with
+/// a `# typing: strict` comment also renders its strict-mode findings.
 fn render_with_data_files(source: &str) -> String {
     let files =
         split_files(source).unwrap_or_else(|| vec![("main.R".to_owned(), source.to_owned())]);
@@ -222,6 +256,7 @@ fn render_with_data_files(source: &str) -> String {
             output.push_str(&format!("== {path}\n"));
         }
         output.push_str(&render_file(&db, *file));
+        render_diagnostics(&mut output, &strict_diagnostics(&db, *file));
     }
     output
 }
@@ -314,7 +349,7 @@ fn top_level_fixtures() {
 fn render_with_inline_annotations_off(source: &str) -> String {
     let db = RootDatabase::default();
     install_shipped_stubs(&db);
-    AnalysisSettings::new(&db, false, true);
+    AnalysisSettings::new(&db, false, true, true);
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
     render_file(&db, file)

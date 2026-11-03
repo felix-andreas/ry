@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// The routines follow L-BFGS-B 3.0 by Ciyou Zhu, Richard Byrd, Jorge Nocedal and Jose Luis
+// Morales, which is released under the BSD License on the condition that publications and
+// commercial products using it cite one of its references; THIRD_PARTY_NOTICES at the
+// repository root carries the full condition and the references.
+
 //! L-BFGS-B, the limited memory quasi-Newton method for bound constrained minimization behind
 //! `optim(method = "L-BFGS-B")` and the C API's `lbfgsb`.
 //!

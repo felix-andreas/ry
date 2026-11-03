@@ -25,7 +25,7 @@ use {
         process::Command,
         sync::{Mutex, MutexGuard},
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -602,8 +602,7 @@ const FORMATS: [(Format, i32); 6] = [
 #[test]
 fn random_objects_round_trip() {
     let _session = session();
-    let iterations = fuzz_iterations(300);
-    for seed in 0..iterations as u64 {
+    for_each_seed(300, |seed| {
         let mark = runtime().heap.handle_mark();
         let mut generator = Generator::new(seed);
         if seed % 16 == 15 {
@@ -634,7 +633,7 @@ fn random_objects_round_trip() {
             .heap
             .update_policy(|policy| policy.stress = GcStress::Off);
         runtime().heap.release_handles(mark);
-    }
+    });
 }
 
 #[test]
@@ -845,9 +844,8 @@ fn installed_lazy_load_databases_read() {
 fn corrupted_streams_fail_cleanly() {
     let _session = session();
     let cases = cases();
-    let iterations = fuzz_iterations(3000);
-    let mut rng = SplitMix64(0x5E81_A112);
-    for iteration in 0..iterations {
+    for_each_seed(3000, |seed| {
+        let mut rng = SplitMix64(0x5E81_A112 ^ seed);
         let source = &cases[rng.below(cases.len())].stream;
         let mut bytes = source.clone();
         for _ in 0..1 + rng.below(4) {
@@ -865,7 +863,7 @@ fn corrupted_streams_fail_cleanly() {
                 _ => bytes.insert(at, rng.next_u64() as u8),
             }
         }
-        if iteration % 64 == 63 {
+        if seed % 64 == 63 {
             runtime()
                 .heap
                 .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
@@ -876,10 +874,10 @@ fn corrupted_streams_fail_cleanly() {
             .update_policy(|policy| policy.stress = GcStress::Off);
         assert!(
             outcome.is_ok(),
-            "iteration {iteration} panicked on {}",
+            "seed {seed} panicked on {}",
             show(&bytes, Format::Xdr)
         );
-    }
+    });
 }
 
 /// The header normalization touches only the writer version, so a corrupted payload byte still

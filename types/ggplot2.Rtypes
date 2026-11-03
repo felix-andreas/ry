@@ -16,8 +16,10 @@
 @type gg
 
 # The grammar's operator. `p + geom_point() + theme_minimal()` chains left to
-# right, so the result stays a plot; `%+%` replaces a plot's data.
-+.ggplot : fn(e1: ggplot, e2: gg) -> ggplot
+# right, so the result stays a plot; `%+%` replaces a plot's data. ggplot2 also adds a
+# list of components one by one and ignores `NULL`, so helpers that return
+# `list(ggtitle(main))` or nothing compose.
++.ggplot : fn(e1: ggplot, e2: gg | list[Any] | NULL) -> ggplot
 # Components combine with each other too, and R dispatches all of it through the
 # single `+.gg` method: `theme_minimal() + theme(...)` builds a house theme, and
 # `geom_col() + geom_line()` a layer pair. Without this, a component pair falls

@@ -818,8 +818,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("is.logical", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Logical)
     }),
+    // A factor is stored as integers, but GNU R does not count it as an integer vector.
     builtin("is.integer", 1, |call| unsafe {
-        scalar_bool(call.arg(0).kind() == SexpType::Integer)
+        let x = call.arg(0);
+        scalar_bool(x.kind() == SexpType::Integer && !values::inherits(x, "factor"))
     }),
     builtin("is.double", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Real)
@@ -1248,7 +1250,7 @@ unsafe fn integers_as_strings(source: &[i32], result: Sexp) -> R<()> {
 }
 
 /// The decimal digits of `value`, written at the end of `buffer`, which fits any `i32`.
-fn integer_digits(value: i32, buffer: &mut [u8; 11]) -> &[u8] {
+pub(crate) fn integer_digits(value: i32, buffer: &mut [u8; 11]) -> &[u8] {
     let mut magnitude = value.unsigned_abs();
     let mut start = buffer.len();
     loop {

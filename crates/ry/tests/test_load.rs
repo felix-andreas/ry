@@ -1308,6 +1308,16 @@ const ROXYGEN: &[(&str, &str)] = &[
         "#' Scale\n#' @inheritParams add\n#' @param factor How much.\n#' @importFrom stats median\n\
          #' @export\nscale_by <- function(x, factor) x * factor\n",
     ),
+    (
+        "R/family.R",
+        "#' Double\n#' @param x A number.\n#' @family arithmetic\n#' @export\n\
+         double_it <- function(x) x * 2\n",
+    ),
+    (
+        "R/half.R",
+        "#' Half\n#' @inheritParams double_it\n#' @family arithmetic\n#' @export\n\
+         halve <- function(x) x / 2\n",
+    ),
 ];
 
 /// Every file under `root` except `.git`, by relative path, with its bytes.
@@ -1333,16 +1343,28 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 /// `ry document` writes what `devtools::document()` writes, byte for byte, on a cold run and on
-/// a run after an edit, which reuses the blocks of the unchanged file.
+/// each run after an edit. The later edits change only topics that unchanged files read, through
+/// `@inheritParams` and `@family`, which the cached topics of those files must not hide.
 #[test]
 fn ry_document_matches_devtools_on_both_runtimes() {
     if !r_available() || !installed("roxygen2") || !installed("devtools") || !installed("R6") {
         return;
     }
-    let edit = |root: &Path| {
-        let path = root.join("R/scale.R");
+    let edits: [(&str, &str, &str); 4] = [
+        ("R/scale.R", "How much.", "How much to scale by."),
+        (
+            "R/add.R",
+            "#' @param x A number.",
+            "#' @param x A real number.",
+        ),
+        ("R/family.R", "@family arithmetic", "@family maths"),
+        ("R/family.R", "#' Double", "#' Double a number"),
+    ];
+    let edit = |root: &Path, (file, from, to): (&str, &str, &str)| {
+        let path = root.join(file);
         let text = fs::read_to_string(&path).expect("read");
-        fs::write(&path, text.replace("How much.", "How much to scale by.")).expect("write");
+        assert!(text.contains(from), "{file} lacks {from}");
+        fs::write(&path, text.replacen(from, to, 1)).expect("write");
     };
     let reference = package(ROXYGEN);
     let devtools = || {
@@ -1352,15 +1374,17 @@ fn ry_document_matches_devtools_on_both_runtimes() {
             .output()
             .expect("run devtools");
         assert!(output.status.success(), "{}", text(&output));
+        tree(reference.path())
     };
-    devtools();
-    let cold = tree(reference.path());
-    edit(reference.path());
-    devtools();
-    let edited = tree(reference.path());
+    let mut expected = vec![devtools()];
+    for step in edits {
+        edit(reference.path(), step);
+        expected.push(devtools());
+    }
     assert!(
-        cold.iter().any(|(path, _)| path == "man/add.Rd"),
-        "{cold:?}"
+        expected[0].iter().any(|(path, _)| path == "man/add.Rd"),
+        "{:?}",
+        expected[0]
     );
     for runtime in RUNTIMES {
         let root = package(ROXYGEN);
@@ -1375,13 +1399,19 @@ fn ry_document_matches_devtools_on_both_runtimes() {
             assert!(output.status.success(), "{runtime}: {}", text(&output));
         };
         document();
-        assert!(tree(root.path()) == cold, "{runtime}: the cold run differs");
-        edit(root.path());
-        document();
         assert!(
-            tree(root.path()) == edited,
-            "{runtime}: the run after an edit differs"
+            tree(root.path()) == expected[0],
+            "{runtime}: the cold run differs"
         );
+        for (index, step) in edits.into_iter().enumerate() {
+            edit(root.path(), step);
+            document();
+            assert!(
+                tree(root.path()) == expected[index + 1],
+                "{runtime}: the run after editing {} differs",
+                step.0
+            );
+        }
     }
 }
 

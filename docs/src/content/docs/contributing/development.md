@@ -12,7 +12,9 @@ together. The editor extensions live in `editors/code` (VS Code) and `editors/ze
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
 API and other unstable features are worth having before they stabilize (the policy is in
 `.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
-downloads that toolchain, with clippy, rustfmt and the `wasm32-wasip2` target, on the first build.
+downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
+exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
+`wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.
 The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
 `rustfmt.toml`, so `cargo fmt` keeps a single `use { ... }` tree per file.
 
@@ -33,6 +35,7 @@ just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
 just release-dry-run                # package and smoke-test this machine's release archive
+just docs-deploy <branch>           # build the docs site and deploy it (main is production)
 ```
 
 The simulators, fuzzers and long oracle runs have their own recipes, which
@@ -135,7 +138,8 @@ has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three
 quoted, because YAML reads the rest of the line as a comment.
 
 Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
-Node 22.23.4 or newer.
+Node 22.23.4 or newer. The live site changes only when someone deploys it with `just docs-deploy` or
+the Docs workflow ([Releasing](/contributing/releasing#deploying-the-docs-site)).
 
 [Formatting rules](/reference/formatting-rules) is generated, so do not edit it by hand. Edit
 `crates/format/tests/formatter.template.md` and regenerate the page with `just format-docs`.

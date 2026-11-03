@@ -3,7 +3,7 @@ name = "rdb"
 description = "Reads installed R packages (lazy-load databases and help pages) for editor navigation"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 publish = false
 
 [lib]

@@ -174,10 +174,10 @@ length : @pure fn(x: Any) -> integer
 lengths : @pure fn(x: Any, [use.names]: logical) -> integer[]
 seq_len : @pure fn(length.out: Any) -> integer[]
 seq_along : @pure fn(along.with: Any) -> integer[]
-seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> Date
-seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
 seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
+seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> Date
+seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
 seq : @pure fn(...: Any) -> Any
 seq.int : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
 seq.int : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
@@ -289,7 +289,7 @@ paste0 : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL, [rec
 sprintf : @pure fn(fmt: character[], ...: Any) -> character
 gettextf : @pure fn(fmt: character[], ...: Any, [domain]: Any) -> character
 format : @pure fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
-formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
+formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any, [replace.zero]: logical, [drop0trailing]: logical) -> character
 prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
@@ -320,7 +320,7 @@ regmatches : @pure fn(x: character[], m: Any, [invert]: Any) -> Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
-strsplit : @pure fn(x: Any, split: character[], [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
+strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
@@ -574,6 +574,9 @@ colMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 # the return stays `Any`; the callback position still checks, and forwarded arguments complete
 # callbacks with more formals.
 apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
+# `sweep` keeps its input's dimensions, so a matrix in is a matrix out.
+sweep : fn(x: matrix, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
+sweep : fn(x: Any, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
 # vector does not fit it at all and takes the general form below, which also takes
@@ -595,7 +598,12 @@ Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logic
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
 invisible : @pure <T> fn([x]: T) -> T
+# The checker types `list(...)` and `c(...)` from their arguments; these declare what a
+# call takes, for signature help, and what the function is as a value.
+list : @pure fn(...: Any) -> list[Any]
+c : @pure fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
 force : <T> fn(x: T) -> T
+withVisible : <T> fn(x: T) -> list{value: T, visible: logical}
 # `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
 # arguments to the callee. `Negate` needs a variadic-generic signature.
@@ -822,3 +830,4 @@ standardGeneric : fn(f: character, [fdef]: Any) -> Any
 getwd : fn() -> character
 system.file : fn(...: Any, [package]: character, [lib.loc]: Any, [mustWork]: logical) -> character
 asNamespace : fn(ns: Any, [base.OK]: logical) -> environment
+loadNamespace : fn(package: character, ...: Any) -> environment

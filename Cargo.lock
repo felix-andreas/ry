@@ -2148,7 +2148,6 @@ dependencies = [
  "salsa",
  "semantics",
  "serde",
- "serde_json",
  "syntax",
  "tempfile",
  "xxhash-rust",
@@ -2336,6 +2335,8 @@ dependencies = [
  "log",
  "mio",
  "notify-types",
+ "objc2-core-foundation",
+ "objc2-core-services",
  "walkdir",
  "windows-sys 0.61.2",
 ]
@@ -2404,6 +2405,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "objc2-core-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -2643,10 +2654,12 @@ dependencies = [
  "polars-compute",
  "polars-core",
  "polars-error",
+ "polars-expr",
  "polars-io",
  "polars-lazy",
  "polars-ops",
  "polars-parquet",
+ "polars-plan",
  "polars-sql",
  "polars-time",
  "polars-utils",
@@ -3621,8 +3634,10 @@ dependencies = [
  "libloading",
  "nu-ansi-term",
  "portable-pty",
+ "rcmd",
  "reedline",
  "syntax",
+ "zstd",
 ]
 
 [[package]]
@@ -4456,6 +4471,7 @@ dependencies = [
  "sniff",
  "syntax",
  "thiserror 2.0.17",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5675,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "zed_ry"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "zed_extension_api",
 ]

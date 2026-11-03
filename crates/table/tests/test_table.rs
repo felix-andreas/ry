@@ -6,10 +6,8 @@ use {
     syntax::testing::{SplitMix64, for_each_seed},
     table::{
         ColumnType, Schema, Table,
-        convert::{
-            self, NA_INTEGER, NA_REAL, RVector, is_na_real, string_to_factor, to_r, to_series,
-        },
-        ffi, io, ops,
+        convert::{self, NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        factor, ffi, io, ops,
         polars::prelude::{IntoColumn, PlSmallStr},
         query::{
             Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query,
@@ -3298,6 +3296,26 @@ fn fuzz_csv_reading() {
     });
 }
 
+/// The `csv` fuzz target's own decoding, `io::check_csv_bytes`, on random option bytes in front of
+/// random and mutated text, so the default suite compiles and runs exactly what the target runs.
+#[test]
+fn fuzz_csv_target_bytes() {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(seed);
+        let text = random_csv(&mut rng);
+        let mut data: Vec<u8> = (0..4).map(|_| rng.next_u64() as u8).collect();
+        if rng.chance(1, 3) {
+            data.extend(syntax::testing::mutate_bytes(&mut rng, &text));
+        } else {
+            data.extend(text.into_bytes());
+        }
+        if rng.chance(1, 10) {
+            data.truncate(rng.below(5));
+        }
+        io::check_csv_bytes(&data);
+    });
+}
+
 /// A comma-separated file of a few dozen rows whose columns each hold one kind of value, with
 /// quoted fields that hold separators, doubled quotes and line breaks, missing values, and now
 /// and then a value deep in the file that the sniffer's sample may miss.
@@ -3551,8 +3569,8 @@ fn a_factor_read_parses_codes_and_matches_reading_text_then_converting() {
 #[test]
 fn a_string_column_becomes_a_factor_with_sorted_levels() {
     let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
-    let factor =
-        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    let factor = factor::from_strings(column.as_materialized_series())
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
         RVector::Factor {
@@ -3565,8 +3583,8 @@ fn a_string_column_becomes_a_factor_with_sorted_levels() {
 #[test]
 fn an_all_missing_string_column_becomes_a_factor_without_levels() {
     let column = column_of("k", strings(&["NA", "NA"]));
-    let factor =
-        string_to_factor(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"));
+    let factor = factor::from_strings(column.as_materialized_series())
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
         RVector::Factor {
@@ -4220,4 +4238,68 @@ fn fuzz_sort_unique_and_runs_against_a_reference() {
             );
         }
     });
+}
+
+#[test]
+fn a_minimum_over_a_group_with_no_values_left_warns() {
+    let minimum = Expr::Aggregate {
+        function: Aggregate::Min,
+        arg: Box::new(column("y")),
+        na_rm: true,
+    };
+    for (kernels, bare) in [(true, false), (false, false), (true, true), (false, true)] {
+        let mut table = frame(vec![
+            ("k", ints(&[1, 1, 2, 2])),
+            ("y", ints(&[3, NA_INTEGER, NA_INTEGER, NA_INTEGER])),
+        ]);
+        let query = Query {
+            select: if bare {
+                Select::Value(minimum.clone())
+            } else {
+                Select::Columns(vec![named("V1", minimum.clone())])
+            },
+            by: vec![named("k", column("k"))],
+            ..Query::default()
+        };
+        let Executed { output, warnings } = if kernels {
+            execute(&mut table, query)
+        } else {
+            execute_with_plans_only(&mut table, query)
+        }
+        .unwrap_or_else(|error| panic!("query failed: {error}"));
+        let Output::Table(mut result) = output else {
+            panic!("expected a table")
+        };
+        assert_eq!(read(&mut result, "V1"), ints(&[3, NA_INTEGER]));
+        assert_eq!(warnings.len(), 1, "kernels: {kernels}, bare: {bare}");
+    }
+}
+
+#[test]
+fn a_rolling_join_keeps_every_exact_match() {
+    let cases = [
+        (Roll::Backward(None), vec![1, 2, 2, 4]),
+        (Roll::Forward(None), vec![1, 2, 3, NA_INTEGER]),
+    ];
+    for (roll, expected) in cases {
+        let mut x = frame(vec![
+            ("k", doubles(&[1.0, 1.0, 3.0, 3.0])),
+            ("v", ints(&[1, 2, 3, 4])),
+        ]);
+        let mut i = frame(vec![("k", doubles(&[1.0, 2.0, 4.0]))]);
+        let rows = join(&mut i, &[("k", "k")], false, roll);
+        let mut result = run_table(
+            &mut x,
+            Query {
+                rows,
+                ..Query::default()
+            },
+        );
+        assert_eq!(read(&mut result, "v"), ints(&expected), "{roll:?}");
+        assert_eq!(
+            read(&mut result, "k"),
+            doubles(&[1.0, 1.0, 2.0, 4.0]),
+            "{roll:?}"
+        );
+    }
 }

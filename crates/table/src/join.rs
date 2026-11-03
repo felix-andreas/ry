@@ -20,8 +20,7 @@
 
 use {
     crate::{
-        Error, Result, Table,
-        convert::factor_levels,
+        Error, Result, Table, factor,
         kernel::{CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map},
         query::{Comparison, Join, Mult, On, Roll, Side, join_layout},
     },
@@ -29,7 +28,7 @@ use {
     polars_arrow::bitmap::Bitmap,
     polars_core::runtime::THREAD_POOL,
     rayon::prelude::*,
-    std::{borrow::Cow, collections::HashMap, ops::Range},
+    std::{borrow::Cow, ops::Range, sync::Arc},
 };
 
 /// The widest code range the kernels index directly: one bucket per code on the built side.
@@ -188,7 +187,9 @@ fn column_codes(x: &Column, i: &Column) -> Option<Keys> {
     match (x.dtype(), i.dtype()) {
         (DataType::Int32, DataType::Int32) => integer_codes(x, i),
         (DataType::Boolean, DataType::Boolean) => logical_codes(x, i),
-        (DataType::Enum(..), DataType::Enum(..)) => factor_codes(x, i),
+        (x_dtype, i_dtype) if factor::is_factor(x_dtype) && factor::is_factor(i_dtype) => {
+            factor_codes(x, i)
+        }
         _ => None,
     }
 }
@@ -285,19 +286,18 @@ fn logical_codes(x: &Column, i: &Column) -> Option<Keys> {
 /// Factors match by label, so `i`'s levels are translated into `x`'s. A level of `i` that `x`
 /// lacks gets a code no row of `x` has.
 fn factor_codes(x: &Column, i: &Column) -> Option<Keys> {
-    let x_levels = factor_levels(x.dtype())?;
-    let i_levels = factor_levels(i.dtype())?;
-    let positions: HashMap<&str, u32> = x_levels
-        .iter()
-        .enumerate()
-        .map(|(position, level)| (level.as_str(), position as u32))
-        .collect();
+    let x_levels = factor::levels(x.dtype())?;
+    let i_levels = factor::levels(i.dtype())?;
     let levels = u32::try_from(x_levels.len()).ok()?;
     let (na, absent) = (levels, levels + 1);
-    let translation: Vec<u32> = i_levels
-        .iter()
-        .map(|level| positions.get(level.as_str()).copied().unwrap_or(absent))
-        .collect();
+    let translation: Vec<u32> = if Arc::ptr_eq(x_levels, i_levels) {
+        (0..levels).collect()
+    } else {
+        i_levels
+            .iter()
+            .map(|level| x_levels.position(level).unwrap_or(absent))
+            .collect()
+    };
     let identity: Vec<u32> = (0..levels).collect();
     let codes = |codes: Codes, translation: &[u32]| {
         let validity = codes.validity;

@@ -3,7 +3,7 @@ name = "sniff"
 description = "Delimited-text dialect and column-type inference, shared by the table engine's reader and the checker"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 publish = false
 
 [lib]

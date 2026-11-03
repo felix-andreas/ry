@@ -107,13 +107,14 @@ pub fn process_runtime() -> String {
 /// same explanation when it is read. A name the session already has, such as `col` or
 /// data.table's `copy`, keeps its meaning.
 fn runtime(transport: &str) -> String {
-    let names: Vec<String> = include_str!("../../../types/ry.exports")
+    let names: Vec<String> = include_str!("../../../types/std.exports")
         .lines()
+        .chain(include_str!("../../../types/ry.exports").lines())
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|name| format!("\"{name}\""))
         .collect();
     // A declaration whose type is not a function type declares a constant.
-    let constants: Vec<String> = include_str!("../../../types/ry.Rtypes")
+    let constants: Vec<String> = include_str!("../../../types/std.Rtypes")
         .lines()
         .filter_map(|line| line.split_once(" : "))
         .filter(|(name, declared)| !name.contains(' ') && !declared.contains("fn("))

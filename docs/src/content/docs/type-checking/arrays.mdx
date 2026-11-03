@@ -41,7 +41,7 @@ type-mismatch
 ```
 
 At run time an Array is the R vector it looks like, with the same unboxed storage, so `sum(xs)`
-works and C code reads it unchanged. That is also why it suits a [DataFrame](/type-checking/dataframes/)
+works and C code reads it unchanged. That is also why it suits a [DataFrame](/guides/dataframes#types)
 column: `DataFrame(price = [12.5, 9.99, 20])` checks each price as a `double` with no `NA`, and
 the frame stores the column as the plain vector, so its schema is `DataFrame{price: double[]}`. The `[...]`
 literal is ry syntax, so it has one spelling; the type is written `Array<double>` in both

@@ -20,7 +20,7 @@ use {
         metadata::{PackageMetadata, attached_union},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
-        testing::{ProbeDatabase, with_fixture_project},
+        testing::{ProbeDatabase, with_fixture_data_project, with_fixture_project},
     },
     std::{cmp::Reverse, path::Path, sync::Arc},
     syntax::{
@@ -65,6 +65,14 @@ fn render(source: &str) -> String {
             .map(|(path, text)| (Some(path), text))
             .collect(),
     };
+    // A file whose path does not end in `.R` is a data file, sniffed as hosts sniff `.csv` files.
+    let (data_files, files): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(path, _)| path.as_deref().is_some_and(|path| !path.ends_with(".R")));
+    let data_files = data_files
+        .into_iter()
+        .filter_map(|(path, text)| Some((path?, text)))
+        .collect();
     let mut cursor = None;
     let mut inputs = Vec::new();
     for (index, (path, text)) in files.iter().enumerate() {
@@ -86,7 +94,7 @@ fn render(source: &str) -> String {
         };
         inputs.push((text, kind));
     }
-    with_fixture_project(inputs, |db, sources| {
+    with_fixture_data_project(inputs, data_files, |db, sources| {
         let Some(project) = ProjectFiles::try_get(db) else {
             return "no project".to_owned();
         };
@@ -625,10 +633,15 @@ fn render_migration(source: &str) -> String {
         for line in original.lines() {
             output.push_str(&format!("- {line}\n"));
         }
-        for line in rewrite.replacement.lines() {
-            output.push_str(&format!("+ {line}\n"));
+        match &rewrite.replacement {
+            Some(replacement) => {
+                for line in replacement.lines() {
+                    output.push_str(&format!("+ {line}\n"));
+                }
+            }
+            None => output.push_str("left alone by the whole-file migration\n"),
         }
-        if rewrite.standalone != rewrite.replacement {
+        if rewrite.replacement.as_ref() != Some(&rewrite.standalone) {
             output.push_str("applied alone:\n");
             for line in rewrite.standalone.lines() {
                 output.push_str(&format!("+ {line}\n"));

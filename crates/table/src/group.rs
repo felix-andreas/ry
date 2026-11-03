@@ -218,7 +218,7 @@ fn group_keys(
         };
         let digit = match schema.column(name) {
             Some(ColumnType::Factor) => {
-                let Some(levels) = crate::convert::factor_levels(column.dtype()) else {
+                let Some(levels) = crate::factor::levels(column.dtype()) else {
                     return Ok(None);
                 };
                 let Some(codes) = Codes::of(column) else {

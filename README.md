@@ -31,6 +31,69 @@ planets <- c("Mercury", "Venus" "Earth", "Mars")
 
 R reports the same mistake as `Error: unexpected string constant in "planets <- c("Mercury", "Venus" "Earth""`.
 
+## Type checking for plain R
+
+ry infers types from how values are used, so it finds this mistake in unannotated code before
+anything runs:
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+```
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+   --[R/discount.R:2:21]
+ 1 | apply_discount <- function(price, rate) price * (1 - rate)
+ 2 | apply_discount(100, "0.2")
+   |                     ^^^^^
+```
+
+Type errors are opt-in with `typing = true` under `[check]` in `ry.toml`. Annotations can be `#:`
+comments, which keep files plain R, or inline, as in `function(price: double, rate: double)`.
+
+## Fast R
+
+ry's own runtime compiles hot code to machine code. Seconds per program, and peak memory of the
+whole process, R's startup included:
+
+<!-- bench-why -->
+| program | GNU R | ry | ry, typed and strict | peak memory, GNU R / ry / typed |
+| --- | ---: | ---: | ---: | ---: |
+| `fib` | 1.312 s | 0.010 s (131.2x) | 0.010 s | 54 / 43 / 43 MiB |
+| `drawdown` | 0.335 s | 0.074 s (4.5x) | 0.079 s | 73 / 133 / 140 MiB |
+| `vector_arith` | 0.290 s | 0.242 s (1.2x) | 0.249 s | 109 / 157 / 164 MiB |
+| `log_rank` | 0.128 s | 0.137 s (0.9x) | 0.136 s | 107 / 56 / 58 MiB |
+<!-- /bench-why -->
+
+[Benchmarks](https://ry-lang.org/benchmarks) has every program, its code, and how it was measured.
+
+## Tagged unions and `match`
+
+ry adds records, tuples and tagged unions, and a `match` that knows every case:
+
+```r
+alias Payment =
+  | :Paid(amount: double)
+  | :Refunded(amount: double)
+  | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+    :Refunded(amount = a) => -a
+  }
+}
+```
+
+```
+non-exhaustive-match
+
+  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
 ## Install
 
 - **VS Code:** the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
@@ -42,26 +105,12 @@ R reports the same mistake as `Error: unexpected string constant in "planets <- 
 ```sh
 ry check    # report problems
 ry fmt      # format in place (--check for CI)
+ry run      # run a script, or open a console that reloads your package as you edit it
 ry server   # the language server; your editor starts it
-ry repl     # an R console with typed completion (needs R)
 ```
 
-## Type checking
-
-ry includes a static type checker for R. It infers types from how values are used, so existing code
-needs no annotations. The ones you write can be `#:` comments, which keep files plain R, or inline
-annotations, which need ry. It is opt-in:
-
-```toml
-# ry.toml
-[check]
-typing = true
-```
-
-R is too dynamic to check completely, so ry checks what can be described statically and treats the
-rest as `Unknown`, which never causes an error by itself. The [type-checking pages](https://ry-lang.org/type-checking/overview/) show the
-type system in short examples, and [limitations](https://ry-lang.org/type-checking/limitations/) says
-what it cannot check.
+Everything else is at [ry-lang.org](https://ry-lang.org): [ry at a glance](https://ry-lang.org/ry)
+puts every feature on one page.
 
 ## Development
 
@@ -71,4 +120,8 @@ and the design.
 
 ## License
 
-[UPL-1.0](LICENSE) © Felix Andreas
+The released `ry` binary is GPL-2.0-or-later, the same terms as GNU R, because parts of its runtime
+are translations of R's own C code. The tooling crates (parser, checker, formatter, IDE) stay
+UPL-1.0, so they can be reused as permissive libraries, and the C headers are LGPL-2.1-or-later, as
+R's are, so packages built against ry keep their own licence.
+[Licensing](https://ry-lang.org/reference/licensing/) has the full breakdown.

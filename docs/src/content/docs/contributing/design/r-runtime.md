@@ -674,7 +674,7 @@ The cost there is the install step, which is exactly what the development loop w
 ### ry's design
 
 The loader is built, ahead of the runtime, on the GNU R backend that `ry R` embeds
-([loading packages](/guides/loading-packages) is the user page). It splits into three parts, and only the
+([loading packages](/guides/running) is the user page). It splits into three parts, and only the
 last one knows which runtime runs the code:
 
 - **The item index** (`semantics::load_index`) is derived from the analysis: per item a content
@@ -1135,8 +1135,8 @@ Each step ends with something real running, and each one is a large, whole chang
    packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
    Magick++. Two package-test rates are tracked, both counting only the packages whose
    tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
-   ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
-   (`.corpus/ry-library`, `oracle packages --installed`), it passes 140 of 164 (85.4%). The rest
+   ry passes the tests of 140 of 144 (97.2%). With the packages ry installed itself
+   (`.corpus/ry-library`, `oracle packages --installed`), it passes 155 of 164 (94.5%). The rest
    fail on interpreter gaps, and the classes are listed in `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
@@ -1148,8 +1148,11 @@ Each step ends with something real running, and each one is a large, whole chang
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
-   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
-   helpers to it is next. On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
+   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine.
+   data.table's readers, writers and helpers (`fread`, `fwrite`, `rbindlist`, `setkey`, `dcast`,
+   `melt` and the rest) run data.table's own C, which under ry is at or below GNU R's time; a
+   helper moves to the engine only where the engine wins end to end, including the conversion
+   back to R vectors (`decisions.md`, "data.table's helpers run data.table's own C"). On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
    faster than data.table on every one (section 7 has the table).
 
 9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
@@ -1284,9 +1287,11 @@ JIT fits around them.
 - **How much of base R to reimplement natively versus reuse as R source.** The plan above reuses the
   R sources, which is less work but ties ry to GNU R's base implementation details.
 
-Settled: **licensing.** Base R's R sources are GPL-2-or-later, so ry loads them at runtime from the
-user's own GNU R installation instead of vendoring them, and needs GNU R installed. The owner
-confirmed this default; the reasoning is in `.agents/memory/decisions.md` ("runtime licensing").
+Settled: **licensing.** The runtime is GPL-2.0-or-later, as GNU R is, because parts of it
+translate R's C sources ([licensing](/reference/licensing/)). ry still loads base R's R sources
+at runtime from the user's own GNU R installation instead of vendoring them, which keeps ry small
+and lets it behave like the R version it finds; the reasoning is in
+`.agents/memory/decisions.md` ("licensing").
 
 ## Sources
 

@@ -1,3 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/main/plotmath.c (the whole file)
+//     Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 1998-2022 The R Core Team
+//     This source code module:
+//     Copyright (C) 1997, 1998 Paul Murrell and Ross Ihaka
+//     Copyright (C) 1998-2015 The R Core Team
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! Mathematical annotation (plotmath): the layout of R expressions such as
 //! `hat(beta) == frac(1, n) * sum(x[i], i == 1, n)` as typeset mathematics.
 //!
@@ -1764,11 +1783,11 @@ impl Layout {
     }
 
     unsafe fn medium_space(&self) -> R<f64> {
-        self.em_fraction(0.222_222_222_222_222_22)
+        self.em_fraction(0.222_222_222_222_222_2)
     }
 
     unsafe fn thick_space(&self) -> R<f64> {
-        self.em_fraction(0.277_777_777_777_777_77)
+        self.em_fraction(0.277_777_777_777_777_8)
     }
 
     unsafe fn mu_space(&self) -> R<f64> {

@@ -81,9 +81,15 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
-        compact_intseq: |length, first, increment| unsafe {
-            crate::altrep::compact_intseq(length as crate::R_xlen_t, first, increment).map(Some)
+        compact_sequence: |kind, length, first, increment| unsafe {
+            let length = length as crate::R_xlen_t;
+            Ok(Some(if kind == SexpType::Integer {
+                crate::altrep::compact_intseq(length, first as i32, increment as i32)?
+            } else {
+                crate::altrep::compact_realseq(length, first, increment)?
+            }))
         },
+        altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
@@ -1496,17 +1502,24 @@ pub const RUN_FLAG_SITE_PROFILE: c_int = 1 << 3;
 /// `--no-init-file`.
 pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 4;
 
+/// Set when the project turns the prelude off, so the standard library is reachable only as
+/// `std::List.map`. Unlike the other switches it is set for the non-default, so `R CMD` and
+/// every host that predates the setting keep the library in scope.
+pub const RUN_FLAG_NO_PRELUDE: c_int = 1 << 5;
+
 /// Every flag `ry_run` and `ry_repl` understand.
 pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_OBJECT_SYSTEMS
     | RUN_FLAG_STRICT
     | RUN_FLAG_SITE_PROFILE
-    | RUN_FLAG_USER_PROFILE;
+    | RUN_FLAG_USER_PROFILE
+    | RUN_FLAG_NO_PRELUDE;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
     loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 

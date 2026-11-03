@@ -6,8 +6,8 @@ use {
     crate::{
         check_cache::CacheUse,
         cli::{
-            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, RelatedNote,
-            analyze_project, check_package_code, render_findings, report, warn_config,
+            CommandError, MinSeverity, OutputFormat, PackageCheck, ProjectAnalysis, Purpose,
+            RelatedNote, analyze_project, check_package_code, render_findings, report, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
@@ -68,7 +68,12 @@ impl Preflight {
     pub fn new(config: Config, path: PathBuf) -> Preflight {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(&db, config.check.inline_annotations, config.check.strict);
+        semantics::AnalysisSettings::new(
+            &db,
+            config.check.inline_annotations,
+            config.check.strict,
+            config.check.prelude,
+        );
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {
@@ -198,6 +203,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
                         config.clone(),
                         std::slice::from_ref(&sources),
                         CacheUse::ReadWrite,
+                        Purpose::Diagnostics,
                     )?;
                     let errors = strict_errors(&analysis);
                     Ok::<_, CommandError>(Checked::Recorded(analysis, errors))

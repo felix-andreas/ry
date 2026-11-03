@@ -1,6 +1,6 @@
 ---
-title: Unknown and Any
-description: What ry does with code it cannot type
+title: Unknown values
+description: What ry does with code it cannot type, how stubs describe packages it does not know, and what it does not check
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -10,8 +10,7 @@ Their values are `Unknown`, which is compatible with everything. ry would rather
 report something false, so one unmodeled construct never causes a cascade of errors.
 
 The cost is that a clean run does not say how much was checked.
-[Strict mode](/type-checking/strict-mode) reports the places a value became `Unknown`, with the
-exceptions listed under its [known gaps](/type-checking/strict-mode#known-gaps).
+[Strict mode](/type-checking/strict-mode) reports the places a value became `Unknown`.
 
 ## Giving a value a type
 
@@ -70,6 +69,106 @@ through `UseMethod()` are `Any`, and strict mode does not report them.
 
 `data.frame()` returns a `data.frame`, but a base data frame's columns are not typed, so
 `df$amount` is `Unknown`. An annotation such as `df: data.frame` checks that a data frame arrives,
-but not which columns it has. ry's built-in [`DataFrame`](/type-checking/dataframes) is the typed
+but not which columns it has. ry's built-in [`DataFrame`](/guides/dataframes#types) is the typed
 alternative, with every column, query and join checked. For analysis code this is the gap that
 matters most, and a column read such as `df$amount` is usually the first place strict mode reports.
+
+## Package stubs
+
+The checker never runs R, so it cannot ask a package what it exports. It reads *stubs* instead: declaration
+files that list a package's names and their types, the way TypeScript reads `.d.ts` files.
+
+### What ships
+
+Base R and its default packages are typed, and so are `data.table`, `dplyr`, `ggplot2`, and
+`testthat`. For the rest of R's own packages, the tidyverse, and `knitr`, `rlang`, `glue`,
+`magrittr`, `scales`, `jsonlite`, and `R6`, ry ships export lists: the names without their types,
+which is enough to keep unresolved-name checks working.
+
+Bare names from base R's default packages always resolve. Every other package counts once your
+project uses it, through a `library()` call, a `DESCRIPTION` dependency, or a `NAMESPACE` import.
+Until then `mutate` is unresolved, as it would be in R.
+
+### A package ry does not know
+
+Attaching a package with no stub means any bare name in the project might be one of its exports. ry
+cannot tell a typo from an export it has never heard of, so it stops reporting unresolved names
+across the whole project:
+
+```r
+library(dbclient)
+reslt <- 1
+print(result)   # not reported
+```
+
+A stub turns the check back on. Put it under `stubs/`, named after the package:
+
+```
+# stubs/dbclient.Rtypes
+@type Session
+connect : fn(host: character) -> Session
+```
+
+Now the typo is reported, and with type checking on, so are calls that do not fit the declarations:
+
+```r
+library(dbclient)
+session <- connect(42)    # expected `character`, found `double`
+print(result)             # I could not resolve `result` in this package, its imports, or builtins.
+dbclient::conect("db")    # `conect` is not exported by `dbclient`.
+```
+
+Declare only what you call: a name you leave out is reported wherever you use it, which tells you
+what to add next. Even an empty stub file turns the unresolved-name check back on.
+
+### Overriding a shipped stub
+
+A declaration under `stubs/` replaces a shipped one with the same name, so you can fix a wrong
+return type, or add a function your version of the package has, without waiting for a release.
+`ry check` reports every line it could not load. [Authoring stubs](/contributing/authoring-stubs) has
+the full format, including overloads, data-masking functions, and `@pure` for functions that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) lets a package constant call.
+
+## Limitations
+
+Most gaps are silent, because a value ry cannot type becomes `Unknown` and its checks are skipped.
+[Strict mode](/type-checking/strict-mode) shows most of the places they occur.
+
+### Not checked
+
+- **Data frame columns.** Everything read out of a base data frame is `Unknown`, so `df$whatever`
+  passes even if the column does not exist. A [`DataFrame`](/guides/dataframes#types) types its
+  columns.
+- **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
+  Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
+- **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through
+  `UseMethod()` return `Any`. Operator methods such as `+.Date` and methods called directly are
+  checked. [Custom types](/type-checking/custom-types#r6-and-s4-objects) shows how to check who
+  receives an object.
+- **Packages without a [stub](/type-checking/unknown#package-stubs).** Their names are `Unknown`, and attaching one
+  switches off unresolved-name reports for the whole project.
+- **`$` on an atomic vector in a package that defines a `$` method.** A classed vector may carry
+  that method, so the read is `Unknown` instead of an error.
+- **Some paths a test elsewhere in the body rules out.** A list member beside a number in
+  arithmetic, a list or `NULL` beside an operand of unknown type, the `NULL` of a computed list
+  field used as a `:` endpoint, and the logical member in the false branch of `isTRUE()` or
+  `isFALSE()` are not reported, because correct R usually guards them in ways ry cannot follow.
+- **A placeholder local.** A variable whose only visible value is `NULL` or a bare `NA`, filled
+  later by `assign()` or `<<-`, is not checked where it is passed as an argument or tested as a
+  condition.
+- **A project's own `%op%` operators**, because one may quote its right operand instead of
+  evaluating it, as magrittr's `%>%` does.
+
+### Where correct code is reported
+
+These are known bugs, not design decisions:
+
+- **A bare `NA` under a declared return type.** A function declared `-> character` that returns
+  `NA` on one path is reported, because `NA` is `logical`. Return `NA_character_` instead.
+- **A trailing comma for rlang's dynamic dots.** dplyr's verbs accept `mutate(d, y = 1, )`, but ry
+  reports the trailing comma as it would for `c(1, 2, )`.
+- **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
+  namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
+- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
+  reported, because type parameters on a function that is not bound to a name are not instantiated.
+  Leave the function's types off, or bind it to a name first.

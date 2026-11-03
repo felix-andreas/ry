@@ -1,0 +1,46 @@
+# A package author leaves `ry test --watch` running and edits a helper that an S3 method calls.
+# The watcher reloads the package and reruns first the test that reaches the helper through
+# dispatch, though the test names neither the helper nor the method, then the rest. The method's
+# name is not `format.shape`, so only its `S3method()` registration ties it to `format`.
+
+requires gnu-r r-package:testthat
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file NAMESPACE
+| export(area)
+| S3method(format, shape, shape_label)
+file R/area.R
+| area <- function(width, height) width * height
+| side_text <- function(side) paste("square of side", side)
+| shape_label <- function(x, ...) side_text(x$side)
+file tests/testthat/test-area.R
+| test_that("area multiplies", expect_equal(area(2, 3), 6))
+file tests/testthat/test-label.R
+| test_that("a shape formats", {
+|   shape <- structure(list(side = 2), class = "shape")
+|   expect_equal(format(shape), "square of side 2")
+| })
+
+spawn ry test --reporter summary --watch --runtime gnu-r
+await stdout "label: ."
+await stderr "Watching for changes"
+
+file R/area.R
+| area <- function(width, height) width * height
+| side_text <- function(side) paste("a square of side", side)
+| shape_label <- function(x, ...) side_text(x$side)
+
+await stdout "label: 1" before "area: ."
+await stdout "area: ."
+
+# Fixing the helper turns the test green again.
+file R/area.R
+| area <- function(width, height) width * height
+| side_text <- function(side) paste("square of side", side)
+| shape_label <- function(x, ...) side_text(x$side)
+
+await stdout "label: ."
+stop
+expect stdout "Expected `format(shape)` to equal \"square of side 2\"."

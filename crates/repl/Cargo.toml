@@ -1,6 +1,7 @@
 [package]
 name = "repl"
 edition = "2024"
+license = "UPL-1.0"
 version.workspace = true
 publish = false
 build = "build.rs"
@@ -15,11 +16,22 @@ crossterm = "0.28"
 dirs = "6"
 libloading = "0.8"
 nu-ansi-term.workspace = true
+rcmd = { path = "../rcmd" }
 reedline.workspace = true
 syntax = { path = "../syntax" }
+zstd = "0.13"
+
+[build-dependencies]
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 portable-pty = "0.9"
+
+# Its `main` either drives sessions or, when the driver starts it as a child, runs the console
+# on its own main thread, which R requires.
+[[test]]
+name = "test_console_session"
+harness = false

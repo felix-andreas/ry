@@ -200,6 +200,61 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 
 [Working with DataFrames](/guides/dataframes/#windows-and-ranks) shows each with its output.
 
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run`, and most queries on a
+`data.table` run on the same engine as [DataFrames](/guides/dataframes). A `data.table` keeps all of data.table's
+behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
+when it can produce exactly what data.table would, meaning the same values, attributes, printing
+and warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, and a table with extra attributes or classes;
+- code inside data.table's own namespace, except a grouped query without `:=`, which is how
+  `dcast` aggregates;
+- a query without `by` that only picks rows and whole columns, such as `x[i]`,
+  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
+  data.table copies them faster and with less memory;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
+- a grouped `sum` of an integer column whose values could overflow while they add up, because
+  data.table then returns doubles even when each group's total fits;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a rolling join with `roll = "nearest"`, a non-equi join whose join columns have different types
+  in the two tables, `by = .EACHI` over a non-equi join or with a `j` that reads a join column,
+  and `:=` together with `nomatch`;
+- a query that warns or fails.
+
+data.table's own test suite, `test.data.table()`, passes in full under ry, with every query either
+answered by ry or handed to data.table.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```text
+[ry] dt[x > 1L, .(n = .N), by = g]
+        g     n
+   <char> <int>
+1:      b     1
+2:      a     1
+[data.table] dt[x > 1L]
+Key: <g>
+        g     x
+   <char> <int>
+1:      a     3
+2:      b     2
+```
+
 ## Finding the data.table code
 
 Set the `data-table` lint to `"warn"` in `ry.toml` to have `ry check` and the editor mark each call
@@ -243,6 +298,26 @@ The DataFrame verbs do not accept a data.table, so a rewritten query, `:=` or `s
 table that is still a data.table converts it first, as in `as.DataFrame(sales) |> DataFrame.filter(...)`.
 The whole-file rewrite leaves the conversion out for a name like `sales` above, whose every
 assignment it rewrites into a DataFrame; a function parameter typed `data.table` keeps it.
+
+The whole-file rewrite never hands a DataFrame to code that still expects a data.table. A
+rewritten table may flow only into other rewritten code, into `$`, `[[` or a shape function such
+as `nrow()` or `names()`, or out of a function as its return value. A query in that last place
+runs on the DataFrame and converts the result back, so the function's callers still receive a
+data.table:
+
+```r
+top <- function(sales: data.table) {
+  return(sales[units > 2L])
+}
+# becomes
+top <- function(sales: data.table) {
+  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
+}
+```
+
+Any other form whose table would reach other code is left as it is, such as `fread()` whose result
+goes to `saveRDS()`, a `data.table()` a function returns, or a table some later `:=` still updates
+in place. The editor still offers each of those as a single code action.
 
 Delete `library(data.table)` once nothing in the file needs it, and run `ry fmt` to break the long
 chains over several lines.

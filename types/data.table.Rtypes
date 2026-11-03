@@ -24,12 +24,12 @@ rbindlist : fn(l: Any, [use.names]: logical | character, [fill]: logical, [idcol
 # The set*() family mutates by reference and returns its input invisibly.
 setDT : fn(x: Any, [keep.rownames]: logical | character, [key]: character[], [check.names]: logical) -> data.table
 setDF : fn(x: Any, [rownames]: character) -> data.frame
-set : fn(x: Any, [i]: integer, [j]: Any, [value]: Any) -> data.table
+set : fn(x: Any, [i]: integer[] | double[] | NULL, [j]: Any, [value]: Any) -> data.table
 setnames : fn(x: Any, old: Any, [new]: Any, [skip_absent]: logical) -> data.table
 # `setkey(DT, id, date)` names columns, not values — the `v`-suffixed forms take
 # a character vector instead, which is why only these need masking.
 setkey : @masked fn(x: Any, ...: Any, [verbose]: logical, [physical]: logical) -> data.table
-setkeyv : fn(x: Any, cols: character[], [verbose]: logical, [physical]: logical) -> data.table
+setkeyv : fn(x: Any, cols: character[] | NULL, [verbose]: logical, [physical]: logical) -> data.table
 setindex : fn(x: Any, ...: Any) -> data.table
 setindexv : fn(x: Any, cols: Any) -> data.table
 setorder : @masked fn(x: Any, ...: Any, [na.last]: logical) -> data.table
