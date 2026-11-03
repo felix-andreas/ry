@@ -284,22 +284,28 @@ pub unsafe fn names_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
 }
 
 pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
     if !object.kind().is_vector() && !object.is_altrep() {
         return Err(error(
             "invalid first argument, must be vector (list or atomic)",
         ));
     }
+    if !matches!(
+        value.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) {
+        return Err(error("invalid second argument, must be vector or NULL"));
+    }
     let length = xlength(object)?;
-    let dims = match value.kind() {
-        SexpType::Integer | SexpType::Real | SexpType::Logical => integers(value)?,
-        _ => return Err(error("invalid second argument, must be vector or NULL")),
-    };
+    // As in GNU R, the coerced vector itself becomes the attribute, names and all (sf's raster
+    // reader names its dimensions "x" and "y" this way), and the object keeps its own names.
+    let dim = crate::vectors::coerce_vector(value, SexpType::Integer)?;
+    runtime().heap.root(dim);
+    let dims = integers(dim)?;
     if dims.is_empty() {
         return Err(error("length-0 dimension vector is invalid"));
     }
     if dims.contains(&NA_INTEGER) {
-        return Err(error("the dims contain missing or negative values"));
+        return Err(error("the dims contain missing values"));
     }
     if dims.iter().any(|&extent| extent < 0) {
         return Err(error("the dims contain negative values"));
@@ -310,13 +316,7 @@ pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
             "dims [product {product}] do not match the length of object [{length}]"
         )));
     }
-    remove_attribute(object, R_NamesSymbol.get());
     remove_attribute(object, R_DimNamesSymbol.get());
-    let dim = runtime
-        .heap
-        .alloc_vector(SexpType::Integer, dims.len() as isize)?;
-    runtime.heap.root(dim);
-    dim.slice_mut::<i32>().copy_from_slice(&dims);
     install_attribute(object, R_DimSymbol.get(), dim)?;
     dim.mark_not_mutable();
     Ok(dim)

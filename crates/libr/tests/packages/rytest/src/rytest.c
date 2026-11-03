@@ -321,6 +321,22 @@ SEXP rytest_dimnames_filled_late(void)
     return VECTOR_ELT(getAttrib(array, R_DimNamesSymbol), 1);
 }
 
+/* GNU R installs the dim vector itself, so its names survive, as stars' C++ code expects. */
+SEXP rytest_named_dim(void)
+{
+    SEXP array = PROTECT(allocVector(REALSXP, 6));
+    SEXP dim = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(dim)[0] = 2;
+    INTEGER(dim)[1] = 3;
+    SEXP names = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(names, 0, mkChar("x"));
+    SET_STRING_ELT(names, 1, mkChar("y"));
+    setAttrib(dim, R_NamesSymbol, names);
+    setAttrib(array, R_DimSymbol, dim);
+    UNPROTECT(3);
+    return getAttrib(getAttrib(array, R_DimSymbol), R_NamesSymbol);
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -967,6 +983,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
     {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
+    {"rytest_named_dim", (DL_FUNC) &rytest_named_dim, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
