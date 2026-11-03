@@ -15,7 +15,10 @@ use {
         unwind::{R, error_in},
         values::{self, length, nil, symbols},
     },
-    heap::object::{Sexp, SexpType},
+    heap::{
+        activity::{self, Activity, Counter},
+        object::{Sexp, SexpType},
+    },
     std::sync::OnceLock,
 };
 
@@ -246,6 +249,12 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
             ),
         ));
     }
+    let _activity = if activity::enabled() {
+        activity::count(Counter::NativeCalls);
+        activity::enter(Activity::Native, activity::label(routine.0))
+    } else {
+        activity::enter(Activity::Native, 0)
+    };
     match implementation_of(routine) {
         Some(function) => function(&native).map(Some),
         None => Err(native.error(format!(

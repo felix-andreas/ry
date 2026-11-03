@@ -16,6 +16,7 @@ use {
     },
     heap::{
         Marker,
+        activity::{self, Counter},
         object::{NA_INTEGER, Sexp, SexpType},
     },
     std::{rc::Rc, sync::atomic::Ordering},
@@ -86,6 +87,7 @@ unsafe fn condition_classes(condition: Sexp) -> Vec<Vec<u8>> {
 /// handlers for `simpleError`, `error` and `condition`, jumps to an exiting one, and otherwise
 /// runs the default error handler. The result is the unwind to propagate.
 pub unsafe fn signal_error(failure: RError) -> Unwind {
+    activity::count(Counter::ConditionsSignalled);
     let call = resolve_call(failure.call);
     let message = failure.message;
     let state = interp();
@@ -458,6 +460,7 @@ pub unsafe fn warning(message: impl Into<String>) -> R<()> {
 
 /// GNU R's default warning handler.
 pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
+    activity::count(Counter::ConditionsSignalled);
     let limit = warning_length();
     let truncated;
     let message = if message.len() >= limit {
@@ -610,6 +613,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
+    activity::count(Counter::HandlersEstablished);
     let classes = call.arg(0);
     let handlers = call.arg(1);
     let parent_env = call.arg(2);
@@ -668,6 +672,7 @@ unsafe fn do_reset_cond_hands(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
+    activity::count(Counter::ConditionsSignalled);
     let condition = call.arg(0);
     let condition_call = call.arg(2);
     let classes = condition_classes(condition);

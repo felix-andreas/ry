@@ -159,7 +159,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect hover PATH "anchor" "needle"` | The hover at the anchor contains the needle. |
 | `expect definition PATH "anchor" TARGET "text"` | Goto-definition lands at the text in the target file. |
 | `expect completion PATH after "anchor" LABEL` | Completion after the anchor offers the label. |
-| `expect buffer PATH [lacks] "needle"` / `expect file PATH "needle"` | Buffer or disk content. |
+| `expect buffer PATH [lacks] "needle"` / `expect file PATH [lacks] "needle"` | Buffer or disk content. |
 | `expect signature PATH after "anchor" "needle"` | Signature help after the anchor contains the needle, with the active parameter in brackets. |
 | `expect symbol PATH "a/b/c"` | The outline has that path of nested symbols. |
 | `expect workspace-symbol QUERY PATH NAME` | The workspace symbol query finds the name in the file. |

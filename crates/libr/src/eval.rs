@@ -682,23 +682,26 @@ unsafe fn native_call(
     let Some(((_, name), rest)) = arguments.split_first() else {
         return Err(error_in(call, "'.NAME' is missing"));
     };
-    let package_symbol = runtime().heap.install(b"PACKAGE")?;
-    let control_symbols = [
-        runtime().heap.install(b"NAOK")?,
-        runtime().heap.install(b"DUP")?,
-        runtime().heap.install(b"ENCODING")?,
-    ];
     let mut package = None;
     let mut na_ok = false;
     let mut values = Vec::new();
     for &(tag, value) in rest {
-        if matches!(kind, RoutineKind::C | RoutineKind::Fortran) && control_symbols.contains(&tag) {
-            if tag == control_symbols[0] {
+        // Most arguments are untagged, so the names are compared only for a tagged one, which
+        // keeps a `.Call` from interning four symbols on every call.
+        let name = if tag.kind() == SexpType::Symbol {
+            tag.car().bytes()
+        } else {
+            b""
+        };
+        if matches!(kind, RoutineKind::C | RoutineKind::Fortran)
+            && matches!(name, b"NAOK" | b"DUP" | b"ENCODING")
+        {
+            if name == b"NAOK" {
                 na_ok = crate::vectors::as_logical(value)? == 1;
             }
             continue;
         }
-        if tag == package_symbol {
+        if name == b"PACKAGE" {
             if value.kind() != SexpType::String || xlength(value)? < 1 {
                 return Err(error_in(
                     call,

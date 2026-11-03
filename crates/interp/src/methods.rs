@@ -17,7 +17,10 @@ use {
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::{
+        activity::{self, Activity, Counter},
+        object::{Sexp, SexpType, gp},
+    },
     rustc_hash::FxHashSet,
     std::rc::Rc,
 };
@@ -83,6 +86,8 @@ pub fn drop_deferred_definitions(key: &str) {
 /// `R_dispatchGeneric`: selects and runs the method of generic `generic` named `name` for the
 /// arguments in the generic's frame `env`.
 pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> {
+    activity::count(Counter::S4Dispatches);
+    let selecting = activity::enter(Activity::S4Dispatch, 0);
     let generic_name = values::first_string(name).unwrap_or_default().into_owned();
     if generic.kind() != SexpType::Closure {
         let class = dispatch::class_of(generic)?;
@@ -123,6 +128,7 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
     if method.is_object() {
         method = load_method(method, name, env)?;
     }
+    drop(selecting);
     match method.kind() {
         SexpType::Closure => {
             if values::inherits(method, "internalDispatchMethod") {

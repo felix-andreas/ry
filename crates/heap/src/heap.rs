@@ -19,6 +19,7 @@
 // takes must point at a live object of the kind the function expects.
 #![allow(clippy::missing_safety_doc)]
 
+pub mod activity;
 pub mod arena;
 pub mod env;
 pub mod object;
@@ -965,7 +966,7 @@ impl Heap {
     ) -> HeapResult<Sexp> {
         // Every field is written below, so zeroing the slot first would store it twice.
         let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
-        std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
+        Frame::write_empty(object.frame_ptr(), bindings);
         self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
@@ -1922,6 +1923,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        let _activity = activity::enter(activity::Activity::Collector, 0);
         let started = self
             .policy
             .timing

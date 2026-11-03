@@ -146,6 +146,17 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     cli::check_experimental_features(cli.experimental_features.as_deref().unwrap_or_default());
 
+    if let Command::Run {
+        profile_summary: Some(path),
+        ..
+    } = &cli.command
+    {
+        // The runtime reads the variable when its session starts, which may be in a child
+        // process; the absolute path keeps it right if the script changes directory.
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        // SAFETY: no other thread exists yet to read the environment concurrently.
+        unsafe { env::set_var("RY_PROFILE_SUMMARY", path) };
+    }
     if let Some(session) = cli.command.session(env::var("RY_RUNTIME").ok().as_deref()) {
         // Embedded R assumes it owns the thread it initializes on, so sessions stay on `main`.
         return match session.mode {

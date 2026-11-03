@@ -35,6 +35,7 @@ pub struct StartOptions {
 
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
+    crate::profile_summary::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
@@ -113,6 +114,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
     conditions::print_warnings()?;
+    crate::profile_summary::mark_ready();
     Ok(())
 }
 
@@ -548,6 +550,9 @@ pub unsafe fn finish() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_memory_profiler() {
+        report_toplevel(unwind);
+    }
+    if let Err(unwind) = crate::profile_summary::finish() {
         report_toplevel(unwind);
     }
     (interp().hooks.run_exit_finalizers)();

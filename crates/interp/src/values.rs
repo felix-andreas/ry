@@ -46,6 +46,8 @@ pub struct Symbols {
     pub tmp: Sexp,
     pub vtmp: Sexp,
     pub value: Sexp,
+    /// The class part of a `generic.default` method name.
+    pub default: Sexp,
     pub dot_generic: Sexp,
     pub dot_class: Sexp,
     pub dot_method: Sexp,
@@ -147,6 +149,7 @@ symbol_table! {
     tmp = "*tmp*",
     vtmp = "*vtmp*",
     value = "value",
+    default = "default",
     dot_generic = ".Generic",
     dot_class = ".Class",
     dot_method = ".Method",

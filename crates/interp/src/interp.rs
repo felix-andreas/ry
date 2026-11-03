@@ -65,6 +65,7 @@ pub mod parse_data;
 pub mod platform;
 pub mod plotmath;
 pub mod print;
+pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
@@ -270,6 +271,9 @@ pub struct Interp {
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
     pub method_cache: dispatch::MethodCache,
+    /// The replacement function's symbol for each getter symbol (`names<-` for `names`), so a
+    /// complex assignment installs no name. Symbols are never freed, so entries need no tracing.
+    pub replacement_symbols: FxHashMap<Sexp, Sexp>,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -393,6 +397,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         annotations: annotations::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
+        replacement_symbols: FxHashMap::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         prelude: true,
@@ -528,6 +533,7 @@ impl RootSource for InterpRoots {
                 conditions::trace_restarts(restarts, marker);
             }
             marker.mark(interp.srcref);
+            dispatch::trace_method_cache(&interp.method_cache, marker);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);

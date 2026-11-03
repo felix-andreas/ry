@@ -729,6 +729,62 @@ change that does not pay.
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
+## Open: untyped R against GNU R
+
+Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
+about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in
+`benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
+FILE` (`crates/interp/src/profile_summary.rs`) gives the time split without revealing code, so a
+user can send one; recalibrate the workloads when a summary from a real code base arrives.
+
+Where the time goes, JIT on, from `--profile-summary` on the nine workloads: tier 0 instructions
+23 to 44%, closure call setup 12 to 24%, builtins about 25%, S3 method lookup up to 17%
+(`timeseries`, xts and zoo), native code 14% (`tables`). Tier 1 runs under 3% of the time on all
+but `functional`: most hot code sits in closures called a few thousand times, under the entry
+threshold, so tier 0 and the call path decide the result.
+
+Data-oriented audit of the call path, measured with `perf` on a tier-0 microbenchmark (3 million
+calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
+
+- **Frame construction by move.** `alloc_environment_uncollected` built the ~170-byte `Frame`
+  (inline binding buffer) on the stack and copied it: 4.5% of the microbenchmark in `memmove`.
+  `Frame::write_empty` initializes it in place.
+- **S3 method names built per dispatch.** Every `UseMethod` formatted `generic.class` per class,
+  interned it, and made `.Generic` with `mk_char`: `mk_char`, `install_char`, `method_symbol`,
+  `char_str` and their mallocs were about 7.5% of `timeseries`. `MethodCache::names` maps the
+  symbol pair to the name.
+- **The method cache flushed on every collection.** Now a GC root, keyed only on the binding epoch.
+- **`.Call` interned four control-argument names per call** (0.5% of `timeseries`).
+- **Tier-0 dispatch** reads the operand width from a table indexed by the opcode word.
+- **`x$name <- v` in tier 0** compiles to the in-place `SubAssign` (kind `Dollar`) when `x` is a
+  local, unshared, classless list that already has the name: 0.76 s to 0.16 s per million
+  (GNU R 0.09 s). `complex_assign` caches `f<-` symbols per getter and allocates no vectors.
+
+Open, largest first:
+
+1. **Allocation per call.** Each argument gets a promise (`closure_args_into`, 3.8%), the frame
+   records a promargs pairlist (`args_pairlist`, 2.7%), and a scalar result allocates
+   (`scalar_real` from `fast_arithmetic`, 2%); sweeping and refilling pages adds 3.4%. Build the
+   promargs list only when `sys.call`, `match.call`, `UseMethod` or native code asks for it
+   (the caller's `Args` outlive the callee), reserve the promises with the frame's batch
+   `reserve`, and reuse an unshared scalar register in place.
+2. **Per-call bookkeeping in `run_closure`** (6% self): the srcref attribute walk, `stacker`'s
+   thread-local stack check, the annotation lookup, three `Rc` clones of the handler and restart
+   stacks, and a 9-field `Frame` push. A per-closure call plan (has a srcref, is typed, formals
+   count) computed once would remove most of it.
+3. **S3 lookup itself:** `lookup_method` still walks the calling frames to the top environment and
+   probes a hash map per class. The per-site polymorphic cache in `prior-art.md` is the next cut.
+4. **Complex assignment** stays 2.7 to 6.6 times slower than GNU R for `names(x) <-`, `attr<-`
+   and nested `x$a$b <-` (a million assignments in a loop, JIT off). Each
+   level builds two `*tmp*` promises and two pairlists and calls the replacement through
+   `apply_call`; GNU R's bytecode has `SETTER_CALL` and `GETTER_CALL` instructions that pass the
+   values without promises. Compile those into tier 0 the same way.
+5. **Tier-0 dispatch:** the one shared indirect jump is about 28% of a scalar loop with the JIT
+   off, which runs about 5 times slower than GNU R. Tail-call handlers need nightly `become`
+   (`prior-art.md`, JavaScriptCore).
+6. **Feedback storage:** one `i32` per code word, operands included; slot it densely
+   (`prior-art.md`, V8).
+
 ## Open: performance and memory
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
