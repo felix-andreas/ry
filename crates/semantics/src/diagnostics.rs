@@ -514,7 +514,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(naming) = item_naming(db, item) else {
             continue;
         };
-        for unused in &naming.unused_assignments {
+        for unused in &naming.extras().unused_assignments {
             let range = unused.range + offset;
             diagnostics.push(Diagnostic::new(
                 range,
@@ -523,7 +523,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 format!("`{}` is assigned but never used.", unused.name),
             ));
         }
-        for target in &naming.invalid_assignment_targets {
+        for target in &naming.extras().invalid_assignment_targets {
             let range = target.range + offset;
             // A trailing operator pulled the next line in only if the break falls after
             // the operator; a break before it is an ordinary continuation.
@@ -549,7 +549,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // The arm body reads every name the pattern binds, so an alternative that leaves one
         // out would run the body with that name unset or holding a stale value.
-        for mismatch in &naming.or_pattern_mismatches {
+        for mismatch in &naming.extras().or_pattern_mismatches {
             diagnostics.push(Diagnostic::new(
                 mismatch.range + offset,
                 Severity::Error,
@@ -780,7 +780,7 @@ fn classify_non_local_read(
     if let Some(&earliest) = context.positions.get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
-            || naming.deferred_quiet_reads.contains(expression))
+            || naming.extras().deferred_quiet_reads.contains(expression))
     {
         return NonLocalRead::Resolvable;
     }
@@ -790,7 +790,11 @@ fn classify_non_local_read(
     if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
+    if native_symbol(
+        db,
+        name,
+        naming.extras().native_routine_reads.contains(expression),
+    ) {
         return NonLocalRead::Resolvable;
     }
     let files = context.files;
@@ -1981,7 +1985,7 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
     for &item in item_tree(db, file) {
         if let Some(naming) = item_naming(db, item) {
-            names.extend(naming.super_globals.iter().copied());
+            names.extend(naming.extras().super_globals.iter().copied());
         }
     }
     names
@@ -2435,12 +2439,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // Quiet reads are never reported unresolved, but at run time they fall back to
         // enclosing bindings, so they keep definers alive.
         for (expression, name) in &naming.quiet_reads {
-            let deferred = naming.deferred_quiet_reads.contains(expression);
+            let deferred = naming.extras().deferred_quiet_reads.contains(expression);
             reads.push((index, *name, deferred));
         }
         // R resolves `%op%` when the expression runs and helper operators are used
         // project-wide, so operator reads count as deferred.
-        for name in &naming.quiet_operator_reads {
+        for name in &naming.extras().quiet_operator_reads {
             reads.push((index, *name, true));
         }
         // A loop's first iteration reads the earlier binding of its carried variable.

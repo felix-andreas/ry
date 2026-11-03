@@ -14,6 +14,7 @@ use {
     std::{
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
+        sync::LazyLock,
     },
     syntax::{SyntaxKind, TextRange, lex},
     thin_vec::ThinVec,
@@ -64,13 +65,25 @@ pub struct ItemNaming {
     /// Unresolved reads in a quiet context (data masking, opaque operators): never reported,
     /// but they keep cross-item bindings alive, since masked code falls back to enclosing ones.
     pub quiet_reads: SortedMap<ExprId, Symbol>,
+    /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
+    pub used_top_level_names: SortedSet<Symbol>,
+    /// Qualified reads outside quiet contexts.
+    pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
+    /// Call heads that resolved to a slot. R looks a called name up as a function, skipping
+    /// every binding that does not hold one, so the checker may fall through to these.
+    pub callee_fallbacks: SortedMap<ExprId, CalleeFallback>,
+    /// The fields most items leave empty, behind one pointer: every item keeps its naming for
+    /// the whole run, so each empty field kept inline would cost eight bytes per item.
+    extras: Option<Box<NamingExtras>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NamingExtras {
     pub deferred_quiet_reads: SortedSet<ExprId>,
     /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
     pub quiet_operator_reads: SortedSet<Symbol>,
     pub unused_assignments: ThinVec<UnusedAssignment>,
     pub unused_parameters: ThinVec<UnusedAssignment>,
-    /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
-    pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: SortedSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
@@ -81,8 +94,6 @@ pub struct ItemNaming {
     /// `assign("name", v)` and `delayedAssign("name", v)` calls and the local slot each binds
     /// to a value ry does not track.
     pub run_time_writes: SortedMap<ExprId, BindingId>,
-    /// Qualified reads outside quiet contexts.
-    pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
     /// Names R creates in the global environment as a side effect: `<<-` targets with no
     /// enclosing binding, and the variables of top-level `for` loops.
     pub super_globals: SortedSet<Symbol>,
@@ -91,9 +102,6 @@ pub struct ItemNaming {
     pub invalid_assignment_targets: ThinVec<InvalidAssignmentTarget>,
     /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
     pub or_pattern_mismatches: ThinVec<OrPatternMismatch>,
-    /// Call heads that resolved to a slot. R looks a called name up as a function, skipping
-    /// every binding that does not hold one, so the checker may fall through to these.
-    pub callee_fallbacks: SortedMap<ExprId, CalleeFallback>,
     /// Bare names read as the routine of `.Call` and the other native interfaces, which a
     /// registering `useDynLib` may bind.
     pub native_routine_reads: SortedSet<ExprId>,
@@ -103,6 +111,14 @@ pub struct ItemNaming {
     /// editor treats it as the variable it copies, since renaming one without the other breaks
     /// the code.
     pub replacement_copies: SortedMap<BindingId, CopySource>,
+}
+
+static NO_EXTRAS: LazyLock<NamingExtras> = LazyLock::new(NamingExtras::default);
+
+impl ItemNaming {
+    pub fn extras(&self) -> &NamingExtras {
+        self.extras.as_deref().unwrap_or(&NO_EXTRAS)
+    }
 }
 
 /// The variable a replacement assignment's local copy starts from.
@@ -152,6 +168,21 @@ struct NamingDraft {
 
 impl NamingDraft {
     fn freeze(self) -> ItemNaming {
+        let extras = NamingExtras {
+            deferred_quiet_reads: self.deferred_quiet_reads.into(),
+            quiet_operator_reads: self.quiet_operator_reads.into(),
+            unused_assignments: ThinVec::from(self.unused_assignments),
+            unused_parameters: ThinVec::from(self.unused_parameters),
+            captured_slots: self.captured_slots.into(),
+            masked_subsets: self.masked_subsets.into(),
+            column_updates: self.column_updates.into(),
+            run_time_writes: self.run_time_writes.into(),
+            super_globals: self.super_globals.into(),
+            invalid_assignment_targets: ThinVec::from(self.invalid_assignment_targets),
+            or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
+            native_routine_reads: self.native_routine_reads.into(),
+            replacement_copies: self.replacement_copies.into(),
+        };
         ItemNaming {
             bindings: self.bindings.into(),
             resolutions: self.resolutions.into(),
@@ -159,22 +190,10 @@ impl NamingDraft {
             non_locals: self.non_locals.into(),
             deferred_non_locals: self.deferred_non_locals.into(),
             quiet_reads: self.quiet_reads.into(),
-            deferred_quiet_reads: self.deferred_quiet_reads.into(),
-            quiet_operator_reads: self.quiet_operator_reads.into(),
-            unused_assignments: ThinVec::from(self.unused_assignments),
-            unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
-            captured_slots: self.captured_slots.into(),
-            masked_subsets: self.masked_subsets.into(),
-            column_updates: self.column_updates.into(),
-            run_time_writes: self.run_time_writes.into(),
             namespace_reads: self.namespace_reads.into(),
-            super_globals: self.super_globals.into(),
-            invalid_assignment_targets: ThinVec::from(self.invalid_assignment_targets),
-            or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             callee_fallbacks: self.callee_fallbacks.into(),
-            native_routine_reads: self.native_routine_reads.into(),
-            replacement_copies: self.replacement_copies.into(),
+            extras: (extras != *NO_EXTRAS).then(|| Box::new(extras)),
         }
     }
 }
@@ -1965,14 +1984,14 @@ mod tests {
     #[test]
     fn conditional_write_joins_and_read_resolves() {
         let naming = naming_of("f <- function(flag) {\n  x <- 1\n  if (flag) x <- 2\n  x\n}");
-        assert!(naming.unused_assignments.is_empty());
+        assert!(naming.extras().unused_assignments.is_empty());
         assert!(naming.maybe_undefined.is_empty());
     }
 
     #[test]
     fn dead_store_is_reported() {
         let naming = naming_of("f <- function() {\n  x <- 1\n  x <- 2\n  x\n}");
-        assert_eq!(naming.unused_assignments.len(), 1);
+        assert_eq!(naming.extras().unused_assignments.len(), 1);
     }
 
     #[test]
@@ -1981,9 +2000,9 @@ mod tests {
             "f <- function(n) {\n  total <- 0\n  for (i in 1:n) total <- total + i\n  total\n}",
         );
         assert!(
-            naming.unused_assignments.is_empty(),
+            naming.extras().unused_assignments.is_empty(),
             "loop accumulator writes reach across iterations: {:?}",
-            naming.unused_assignments
+            naming.extras().unused_assignments
         );
     }
 

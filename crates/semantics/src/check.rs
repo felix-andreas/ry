@@ -2710,7 +2710,7 @@ impl<'db> Checker<'db, '_> {
                 let first_call_error = self.errors.len();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);
-                if let Some(&slot) = self.naming.run_time_writes.get(&id) {
+                if let Some(&slot) = self.naming.extras().run_time_writes.get(&id) {
                     let written = unknown(self.db);
                     self.environment.set(slot, EnvEntry::Mono(written));
                     self.note_captured_write(slot, written);
@@ -3414,7 +3414,7 @@ impl<'db> Checker<'db, '_> {
             // writes (the closure runs later); a top-level slot reads the cross-item binding,
             // materialized so a loop join keeps it as the pre-state.
             None => {
-                if self.naming.captured_slots.contains(&slot) {
+                if self.naming.extras().captured_slots.contains(&slot) {
                     self.forward_captured.insert(slot);
                     if let Some(&join) = self.capture_joins.get(&slot) {
                         return join;
@@ -3570,7 +3570,7 @@ impl<'db> Checker<'db, '_> {
         if !naming.quiet_reads.contains_key(&id) {
             return None;
         }
-        let deferred = naming.deferred_quiet_reads.contains(&id);
+        let deferred = naming.extras().deferred_quiet_reads.contains(&id);
         let scheme = self
             .globals
             .and_then(|globals| globals.scheme(Symbol::new(name), deferred));
@@ -3745,7 +3745,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn note_captured_write(&mut self, slot: BindingId, value_ty: Ty<'db>) {
-        if !self.naming.captured_slots.contains(&slot) {
+        if !self.naming.extras().captured_slots.contains(&slot) {
             return;
         }
         let written = erase_vars(self.db, self.table.resolve(self.db, value_ty));
@@ -10083,7 +10083,7 @@ impl<'db> Checker<'db, '_> {
         // new write of its slot. Naming records the write from the callee's name alone, so a
         // subject that is not a known frame, or a call that turns out to be some other
         // `setnames`, writes the subject's own type back and loses nothing.
-        if let Some(&slot) = self.naming.column_updates.get(&id) {
+        if let Some(&slot) = self.naming.extras().column_updates.get(&id) {
             let written = match (refined, arguments.first().and_then(|first| first.value)) {
                 (Some(ty), _) => Some(ty),
                 (None, Some(subject)) => self.recorded.get(&subject).copied(),
@@ -13485,7 +13485,7 @@ impl<'db> Checker<'db, '_> {
         };
         // Any other subject (a data.table, an unknown) keeps its type through `:=`, and the
         // write still has to land so the statement's binding carries that type forward.
-        if let Some(&slot) = self.naming.column_updates.get(&id) {
+        if let Some(&slot) = self.naming.extras().column_updates.get(&id) {
             let written = if is_query { result } else { target_ty };
             self.environment.set(slot, EnvEntry::Mono(written));
             self.note_captured_write(slot, written);
@@ -13598,7 +13598,7 @@ impl<'db> Checker<'db, '_> {
         // syntax, or a value of no known shape) evaluates its indexes in a frame ry cannot
         // see, where a `NULL` placeholder local names a column.
         let unseen_frame = !double
-            && (self.naming.masked_subsets.contains(&id)
+            && (self.naming.extras().masked_subsets.contains(&id)
                 || match self.table.resolve(self.db, subject).kind(self.db) {
                     TyKind::Unknown | TyKind::Any | TyKind::Var(_) => true,
                     TyKind::Named(name, _) => name.text(self.db) == "data.table",
@@ -13635,7 +13635,7 @@ impl<'db> Checker<'db, '_> {
         }
         // data.table syntax without a data.table-typed subject returns a shape no base
         // rule covers: silent `Unknown`.
-        if self.naming.masked_subsets.contains(&id) {
+        if self.naming.extras().masked_subsets.contains(&id) {
             return unknown(self.db);
         }
         if let TyKind::Named(name, _) = subject.kind(self.db)

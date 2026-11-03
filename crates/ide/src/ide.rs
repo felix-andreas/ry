@@ -2623,7 +2623,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             continue;
         };
 
-        for unused in &naming.unused_assignments {
+        for unused in &naming.extras().unused_assignments {
             let target_range = unused.range + item_offset;
             if !ranges_overlap(target_range, viewport) {
                 continue;
@@ -6912,8 +6912,8 @@ fn target_at<'db>(
 fn copy_origin(naming: &ItemNaming, mut binding: BindingId) -> CopySource {
     // Naming records a copy's source from a strictly enclosing scope, so a chain is no longer
     // than the scope nesting; the bound only keeps a malformed map from hanging the editor.
-    for _ in 0..naming.replacement_copies.len() {
-        let Some(source) = naming.replacement_copies.get(&binding) else {
+    for _ in 0..naming.extras().replacement_copies.len() {
+        let Some(source) = naming.extras().replacement_copies.get(&binding) else {
             break;
         };
         match *source {
@@ -7387,7 +7387,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
             slot_occurrences(db, *item, *binding, &mut result);
             named_argument_occurrences(db, files, *item, *binding, &mut result);
             if let Some(naming) = item_naming(db, *item) {
-                for &copy in naming.replacement_copies.keys() {
+                for &copy in naming.extras().replacement_copies.keys() {
                     if copy_origin(naming, copy) == CopySource::Slot(*binding) {
                         slot_occurrences(db, *item, copy, &mut result);
                     }
@@ -7447,7 +7447,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             slot_occurrences(db, item, *binding, &mut result);
                         }
                     }
-                    for &copy in naming.replacement_copies.keys() {
+                    for &copy in naming.extras().replacement_copies.keys() {
                         let copies_global = match copy_origin(naming, copy) {
                             CopySource::NonLocal(source) => source == *name,
                             CopySource::Slot(origin) => {

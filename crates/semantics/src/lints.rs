@@ -288,7 +288,7 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             if exempt {
                 continue;
             }
-            for unused in &naming.unused_parameters {
+            for unused in &naming.extras().unused_parameters {
                 diagnostics.push(Diagnostic::new(
                     unused.range + span.range.start(),
                     severity,

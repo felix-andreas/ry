@@ -1910,7 +1910,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         }
     }
     for (id, &name) in naming.quiet_reads.iter() {
-        lookups.push((name, naming.deferred_quiet_reads.contains(id)));
+        lookups.push((name, naming.extras().deferred_quiet_reads.contains(id)));
     }
     for name in naming.namespace_reads.values().filter_map(|read| read.name) {
         match package {
@@ -2855,7 +2855,7 @@ fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders
         .non_locals
         .values()
         .chain(naming.quiet_reads.values())
-        .chain(naming.quiet_operator_reads.iter())
+        .chain(naming.extras().quiet_operator_reads.iter())
         .copied()
         .collect();
     names.sort_unstable();
