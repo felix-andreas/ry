@@ -46,6 +46,8 @@ const FAST_PATHS: &[(&str, &[u64])] = &[
     ("validObject", &[0xcfec_1557_eba8_fe90]),
     ("is", &[0xa975_8041_9461_37c4, 0x4826_09db_60cf_b7e5]),
     ("extends", &[0x2df8_66a4_f3b4_1f5e]),
+    ("setGeneric", &[0xe3ac_b876_a896_9c54]),
+    ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
 ];
 
 /// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
@@ -79,12 +81,27 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
             .iter()
             .find(|(known, _)| *known == name)
             .map_or(&[][..], |&(_, hashes)| hashes);
-        let mut installed = false;
+        let prologue = prologues.element(index);
+        let mut prologue_hash = FNV_OFFSET;
+        stable_hash(prologue, &mut prologue_hash);
+        let (mut seen, mut installed) = (false, false);
         for closure in closures {
             if closure.kind() != SexpType::Closure {
                 continue;
             }
-            let body = crate::bytecode::closure_body(closure);
+            seen = true;
+            let mut body = crate::bytecode::closure_body(closure);
+            // ry builds its bundled base R itself, so the methods namespace it saved holds the
+            // closures with their fast paths already in front: hash the original body behind it.
+            let mut already = false;
+            if let Some([(_, first), (_, original)]) = call_args::<2>(body, "{")? {
+                let mut first_hash = FNV_OFFSET;
+                stable_hash(first, &mut first_hash);
+                if first_hash == prologue_hash {
+                    body = original;
+                    already = true;
+                }
+            }
             let mut hash = FNV_OFFSET;
             stable_hash(closure.car(), &mut hash);
             stable_hash(body, &mut hash);
@@ -94,14 +111,15 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
             if !expected.contains(&hash) {
                 continue;
             }
-            let block = lcons(
-                install("{")?,
-                cons(prologues.element(index), cons(body, nil())?)?,
-            )?;
-            crate::heap().set_cdr(closure, block);
+            if !already {
+                let block = lcons(install("{")?, cons(prologue, cons(body, nil())?)?)?;
+                crate::heap().set_cdr(closure, block);
+            }
             installed = true;
         }
-        if !installed {
+        // The source build of the package calls this before it defines its generics, so
+        // `initialize` may have no methods yet; that is not a miss.
+        if seen && !installed {
             missed.push(name);
         }
     }
