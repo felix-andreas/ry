@@ -256,8 +256,8 @@ pub fn cold_refusals(state: i32) -> i32 {
 pub const LOOPS_ONLY: i32 = 1 << 16;
 
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
-/// the entry threshold, so tier 0 stops asking the tier about the body's calls and stops
-/// recording type feedback for them; only its back edges can still make it warm.
+/// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
+/// recording type feedback for them unless the body has a loop that may still compile.
 pub const NEVER_HOT: i32 = i32::MIN;
 
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it

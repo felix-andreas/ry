@@ -854,6 +854,12 @@ pub struct Plan<'a> {
 /// hot, because there the compiled loop control and the native instructions repeat.
 pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
 
+/// The refusal for compiling a fully typed closure at its first call when the call cannot run
+/// long: the body has no loop and calls no closure or native function directly, so the
+/// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
+/// times such a call, so the body waits until it is hot like any other.
+pub const BRIEF: &str = "the first call would end before compiling paid for itself";
+
 impl Plan<'_> {
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
@@ -957,6 +963,16 @@ impl Plan<'_> {
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
         !self.loop_headers.is_empty() || self.native_actions() > 0
+    }
+
+    /// Whether one activation of the body can run long: it has a loop, or it calls a closure
+    /// or native function directly, which may be the body itself.
+    pub fn may_run_long(&self) -> bool {
+        !self.loop_headers.is_empty()
+            || self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
     }
 
     /// How many actions compiled code does itself, and how many it hands to tier 0.

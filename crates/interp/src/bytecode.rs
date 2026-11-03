@@ -2790,7 +2790,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
-    let mut decoded = Decoded::of(machine);
+    let decoded = Decoded::of(machine);
     loop {
         let at = pc;
         match step(machine, &decoded, &mut pc) {
@@ -2809,11 +2809,6 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                 {
                     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
                     profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
-                    if decoded.feedback.is_null()
-                        && profile[profile::BACK_EDGES] >= tier.back_edge_threshold / 2
-                    {
-                        decoded = Decoded::of(machine);
-                    }
                     if profile[profile::BACK_EDGES] >= tier.back_edge_threshold {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
@@ -2936,19 +2931,19 @@ impl Decoded<'_> {
     }
 }
 
-/// Whether tier 0 records type feedback for this code: once it has optimized code, or once it is
-/// halfway to either compile threshold. Recording costs a type test and a store per value, and
-/// most bodies never get near a threshold, so recording from the first entry made every call
-/// of cold package code slower with the optimizing tier installed than without it. Half a
-/// threshold of activations still sees every type a compile would specialize on.
+/// Whether tier 0 records type feedback for this code: always for a body with a loop, and for
+/// any other once it has optimized code or is halfway to the entry threshold. Recording costs a
+/// type test and a store per value, and most bodies never get near a threshold, so recording
+/// from the first entry made every call of cold package code slower with the optimizing tier
+/// installed than without it. Half a threshold of activations still sees every type a compile
+/// would specialize on. A loop is different: it can turn hot inside a body's only activation,
+/// and compiling it needs the types of the instructions that ran before it, once.
 unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
-    if constants.element(TIER1) != nil() {
+    if constants.element(TIER1) != nil() || length(constants.element(LOOPS)) > 0 {
         return true;
     }
     let profile = values::ints(constants.element(PROFILE));
-    profile[profile::TIER_STATE] >= 0
-        && (profile[profile::ENTRIES] >= tier.entry_threshold / 2
-            || profile[profile::BACK_EDGES] >= tier.back_edge_threshold / 2)
+    profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
 }
 
 /// Runs one instruction. `Some(value)` means the body returned.

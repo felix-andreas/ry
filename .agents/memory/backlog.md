@@ -2336,10 +2336,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     flat profile of closure calls, frame setup, argument binding, allocation and builtin dispatch.
     Measured per call against GNU R: a closure call 0.75 µs against 0.35, `pmin` 15.7 against 6.2,
     `vapply` 8.2 against 3.4, `mostattributes<-` 10.6 against 4.0, `diff` 8.1 against 4.8. The JIT
-    makes it worse on these bodies: it compiles functions that are mostly tier-0 steps, so `pmin`
-    runs in about 10 µs with `RY_JIT=off`, and `vapply` over an anonymous function takes 306 µs
-    under `RY_JIT=force`. A gate on the ratio of native to tier-0 steps was tried without a clear
-    win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
+    no longer adds to it: closures from one site share compiled code, bodies that would mostly
+    hand back to tier 0 compile only for loops, and tier 0 records type feedback only for warm
+    bodies (`decisions.md`), so the gallery takes 6.99 s with the JIT on against 7.10 s off.
+    Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
     path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
   build: 64 of 66 end with GNU R's exit status, 35 print exactly its output). Two divergences are

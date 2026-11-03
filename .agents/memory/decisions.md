@@ -6486,3 +6486,23 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** On the finbench slice the gate refuses about four in five compiles and most of the
   compile time, and the JIT-on wall gap against `RY_JIT=off` drops from about 8% to about 4.5%.
   The why-ry programs are unaffected: their bodies are loops or mostly native.
+
+## Tier 0 records type feedback only for warm bodies
+
+- **Previous shape.** With the JIT installed, tier 0 tested the type of every value an
+  instruction produced and stored a bit for it, in every body from its first entry. Almost no
+  body of package code ever reaches a compile threshold, so this was pure overhead: about 25M
+  instructions of a 4.2G ggplot2 render, most of what made the gallery slower with the JIT on.
+- **Target shape.** `Decoded::of` (`crates/interp/src/bytecode.rs`) hands out the feedback
+  pointer only when `warm` holds: the body has a loop, has compiled code, or is halfway to the
+  entry threshold and the tier has not given up on it. A body refused as `MOSTLY_TIER0` gets the
+  entry count `runtime::NEVER_HOT`, so tier 0 stops asking the tier about its calls.
+- **Why loops always record.** A loop can turn hot inside a body's only activation, and its
+  compile needs the types of the instructions that ran before it. Switching recording on at
+  half the back-edge threshold left those without feedback, so the loop was refused as cold
+  every time and the why-ry array programs ran 5 to 40 times slower.
+- **Why half a threshold.** A compile reads the feedback of the activations before it; half the
+  threshold leaves 1,500 entries of history, which sees every type a
+  specialization needs, while cold bodies pay one comparison per activation.
+- **Impact.** The ggplot2 render's JIT overhead fell from +55M to +26M instructions, and the
+  gallery is no slower with the JIT on than off (6.99 s against 7.10 s, three interleaved runs).

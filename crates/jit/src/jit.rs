@@ -135,7 +135,7 @@ unsafe fn fully_typed(machine: &Machine<'_>) -> bool {
 /// counting against it, so it then tiers up like any other body once it is hot.
 unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
     unsafe {
-        let result = compile(machine, true, false);
+        let result = compile(machine, true, Trigger::FirstCall);
         let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
         match result {
             Ok(compiled) => {
@@ -155,7 +155,10 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                 if reason == analysis::MOSTLY_TIER0 {
                     counters[profile::TIER_STATE] |= runtime::LOOPS_ONLY;
                     counters[profile::ENTRIES] = runtime::NEVER_HOT;
-                } else if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
+                } else if reason != analysis::COLD
+                    && reason != analysis::NOTHING_NATIVE
+                    && reason != analysis::BRIEF
+                {
                     counters[profile::TIER_STATE] = -1;
                 }
                 None
@@ -236,7 +239,12 @@ unsafe fn compiled_for<'a>(
             return None;
         }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
-        let result = compile(machine, patient, in_loop);
+        let trigger = if in_loop {
+            Trigger::HotLoop
+        } else {
+            Trigger::HotEntry
+        };
+        let result = compile(machine, patient, trigger);
         // Compiling reads the profile too, so the counters are borrowed again afterwards.
         let counters = values::ints_mut(constants.element(PROFILE));
         match result {
@@ -284,20 +292,32 @@ pub(crate) unsafe fn describe(code: Sexp) -> String {
     }
 }
 
+/// What asked for a compilation, which decides how much the compiled code must save to pay
+/// for itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// A fully typed closure's first call, before anything shows the body is hot.
+    FirstCall,
+    /// The body was entered [`ENTRY_THRESHOLD`] times.
+    HotEntry,
+    /// A loop in the body took [`BACK_EDGE_THRESHOLD`] backward jumps and is running now.
+    HotLoop,
+}
+
 unsafe fn compile<'a>(
     machine: &Machine<'_>,
     patient: bool,
-    in_loop: bool,
+    trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
     ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
-            let compiled = compile_in(&arena, machine, patient, in_loop);
+            let compiled = compile_in(&arena, machine, patient, trigger);
             arena.reset();
             compiled
         }
         // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
         // that ever changes.
-        Err(_) => compile_in(&Bump::new(), machine, patient, in_loop),
+        Err(_) => compile_in(&Bump::new(), machine, patient, trigger),
     })
 }
 
@@ -305,7 +325,7 @@ unsafe fn compile_in<'a>(
     arena: &Bump,
     machine: &Machine<'_>,
     patient: bool,
-    in_loop: bool,
+    trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
@@ -320,14 +340,16 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
-        if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
-            return Err(Refusal(analysis::NOTHING_NATIVE));
-        }
-        if !in_loop
-            && plan.native_actions() < plan.tier0_actions()
-            && MODE.with(Cell::get) != Mode::Force
-        {
-            return Err(Refusal(analysis::MOSTLY_TIER0));
+        if MODE.with(Cell::get) != Mode::Force {
+            if !plan.runs_natively() {
+                return Err(Refusal(analysis::NOTHING_NATIVE));
+            }
+            if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions() {
+                return Err(Refusal(analysis::MOSTLY_TIER0));
+            }
+            if trigger == Trigger::FirstCall && !plan.may_run_long() {
+                return Err(Refusal(analysis::BRIEF));
+            }
         }
         let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
