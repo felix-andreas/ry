@@ -968,6 +968,74 @@ fn fuzz_mapped_vectors_keep_their_elements() {
     });
 }
 
+/// Blocks through the mapping allocator, grown and shrunk across the mapping threshold in both
+/// directions, keep their bytes, and zeroed ones read as zero.
+#[test]
+fn fuzz_mapped_allocator_keeps_contents() {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    let allocator = heap::large::Mapped(System);
+    for_each_seed(fuzz_iterations(8), |seed| {
+        let mut rng = SplitMix64(seed);
+        let mut blocks: Vec<(*mut u8, Layout, u8)> = Vec::new();
+        let size = |rng: &mut SplitMix64| match rng.below(3) {
+            0 => 1 + rng.below(4096),
+            1 => (1 << 20) - 64 + rng.below(128),
+            _ => (1 << 20) + rng.below(3 << 20),
+        };
+        unsafe {
+            for _ in 0..40 {
+                let layout = Layout::from_size_align(size(&mut rng), 16).expect("layout");
+                let fill = rng.next_u64() as u8;
+                let block = if rng.chance(1, 2) {
+                    let block = allocator.alloc_zeroed(layout);
+                    assert!(!block.is_null(), "seed {seed}: alloc_zeroed failed");
+                    let bytes = std::slice::from_raw_parts(block, layout.size());
+                    assert!(
+                        bytes.iter().all(|&byte| byte == 0),
+                        "seed {seed}: a zeroed block of {} bytes was not zero",
+                        layout.size()
+                    );
+                    block
+                } else {
+                    allocator.alloc(layout)
+                };
+                assert!(!block.is_null(), "seed {seed}: alloc failed");
+                std::ptr::write_bytes(block, fill, layout.size());
+                blocks.push((block, layout, fill));
+                if rng.chance(1, 3) {
+                    let index = rng.below(blocks.len());
+                    let (block, layout, fill) = blocks[index];
+                    let new_size = size(&mut rng);
+                    let moved = allocator.realloc(block, layout, new_size);
+                    assert!(!moved.is_null(), "seed {seed}: realloc to {new_size} failed");
+                    let kept = std::slice::from_raw_parts(moved, layout.size().min(new_size));
+                    assert!(
+                        kept.iter().all(|&byte| byte == fill),
+                        "seed {seed}: realloc from {} to {new_size} bytes lost the contents",
+                        layout.size()
+                    );
+                    let new_layout = Layout::from_size_align(new_size, 16).expect("layout");
+                    std::ptr::write_bytes(moved, fill, new_size);
+                    blocks[index] = (moved, new_layout, fill);
+                }
+                if rng.chance(1, 3) {
+                    let (block, layout, fill) = blocks.swap_remove(rng.below(blocks.len()));
+                    let bytes = std::slice::from_raw_parts(block, layout.size());
+                    assert!(
+                        bytes.iter().all(|&byte| byte == fill),
+                        "seed {seed}: a block of {} bytes changed",
+                        layout.size()
+                    );
+                    allocator.dealloc(block, layout);
+                }
+            }
+            for (block, layout, _) in blocks {
+                allocator.dealloc(block, layout);
+            }
+        }
+    });
+}
+
 #[test]
 fn heap_growth_follows_gnu_r_variables() {
     use heap::HeapGrowth;

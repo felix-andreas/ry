@@ -276,6 +276,12 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     match index.kind() {
         SexpType::Integer => {
             let positions = values::ints(index);
+            if positions.iter().all(|&position| position <= 0 && position != NA_INTEGER)
+                && let Some(keep) =
+                    excluded(length(object), positions.iter().map(|&position| -f64::from(position)))
+            {
+                return Ok(Some(gather_kept(object, &keep)?));
+            }
             // Every subscript must be NA or positive; anything else needs the general rules.
             if positions
                 .iter()
@@ -292,6 +298,12 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         SexpType::Real => {
             let positions = values::reals(index);
+            if positions.iter().all(|&position| position < 1.0)
+                && let Some(keep) =
+                    excluded(length(object), positions.iter().map(|&position| -position))
+            {
+                return Ok(Some(gather_kept(object, &keep)?));
+            }
             if positions.iter().any(|&position| position < 1.0) {
                 return Ok(None);
             }
@@ -326,6 +338,38 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         _ => Ok(None),
     }
+}
+
+/// The elements negative subscripts keep, as one flag per element: `excluded` is each subscript
+/// negated. `None` unless every subscript is negative or zero and at least one is negative, the
+/// only case the mask covers; NA, a positive subscript or all zeros take the general rules.
+fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<bool>> {
+    let mut keep = vec![true; extent];
+    let mut any_negative = false;
+    for value in excluded {
+        // A subscript between -1 and 1 truncates to zero, which selects nothing.
+        if value.is_nan() || value <= -1.0 {
+            return None;
+        }
+        let position = value.trunc();
+        if position >= 1.0 {
+            any_negative = true;
+            if position <= extent as f64 {
+                keep[position as usize - 1] = false;
+            }
+        }
+    }
+    any_negative.then_some(keep)
+}
+
+/// The elements of `object` whose flag in `keep` is set, streamed without a position list.
+unsafe fn gather_kept(object: Sexp, keep: &[bool]) -> R<Sexp> {
+    let kept = keep.iter().filter(|&&flag| flag).count();
+    let positions = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &flag)| flag.then_some(position));
+    gather_kind(object, positions, kept)
 }
 
 /// `object[positions]` for a logical, integer, double, character or list vector that is not
