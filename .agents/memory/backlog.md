@@ -528,9 +528,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **ry's tier 0 trails GNU R on whole test suites.** Typed beats untyped at runtime (finbench
   30-file slice, callgrind, analysis excluded: typed 71.5G against untyped 72.1G with the JIT on,
   71.7G against 73.7G off), but wall clock is level with GNU R or up to 15% behind (finbench about
-  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT; the
-  remaining tier cost is Cranelift compile time and `jit_load`/`jit_step` glue. A cold strict
-  check of the typed package costs about 4G instructions (0.5 s) once per binary.
+  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT. With
+  the JIT on, a 3-file finbench slice runs 0.7% more instructions than with it off, 0.4% of it
+  Cranelift, and wall clock is 1 to 3% slower, within run-to-run noise; disabling every compile
+  but the first-call ones closes it, so the residue is hot bodies whose compiled code does not
+  pay for its compile. Raising the entry threshold to 10,000 or 30,000 showed no clear win. A
+  cold strict check of the typed package costs about 4G instructions (0.5 s) once per binary,
+  and a first strict `ry load` of finbench about 1.3 s more than a warm one.
 - **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
   `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
   `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
