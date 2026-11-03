@@ -108,10 +108,10 @@ R's startup included:
 <!-- bench-why -->
 | program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 1.312 s | 0.010 s | 0.010 s | 131.2x | 54 / 43 / 43 MiB |
-| `drawdown` | 0.335 s | 0.074 s | 0.079 s | 4.5x | 73 / 133 / 141 MiB |
-| `vector_arith` | 0.290 s | 0.242 s | 0.249 s | 1.2x | 109 / 157 / 164 MiB |
-| `log_rank` | 0.128 s | 0.137 s | 0.136 s | 0.9x | 107 / 56 / 58 MiB |
+| `fib` | 0.832 s | 0.006 s | 0.006 s | 138.7x | 52 / 45 / 45 MiB |
+| `drawdown` | 0.257 s | 0.048 s | 0.048 s | 5.4x | 71 / 132 / 145 MiB |
+| `vector_arith` | 0.174 s | 0.150 s | 0.148 s | 1.2x | 107 / 159 / 161 MiB |
+| `log_rank` | 0.089 s | 0.051 s | 0.053 s | 1.7x | 105 / 57 / 60 MiB |
 <!-- /bench-why -->
 
 The typed column runs the same program with type annotations in strict mode.

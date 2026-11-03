@@ -529,6 +529,11 @@ pub unsafe extern "C" fn jit_call(
                         value,
                     });
                 }
+                if annotations::is_typed(function)
+                    && let Some(value) = crate::native::call(function, &args)
+                {
+                    return value;
+                }
                 // `signature` is what the compiler decided about the callee's annotation checks:
                 // null when they depend on the values, `NULL` for an untyped callee, otherwise
                 // the signature of a typed callee whose arguments' types already satisfy it.
@@ -844,46 +849,93 @@ pub unsafe extern "C" fn jit_construct(
 ) -> *mut Header {
     unsafe {
         boxed(activation, || {
-            let pairs = std::slice::from_raw_parts(pairs, 2 * count as usize);
-            let heap = heap();
-            let mut slots: SmallVec<[Slot; 4]> = SmallVec::with_capacity(count as usize);
-            // Every box made here stays rooted until the record holds it, because the next
-            // allocation may collect. Slots past the unboxed mask hold handles only.
-            let mut rooted = |value: Sexp| {
-                heap.root(value);
-                Slot::Handle(value)
-            };
-            for (index, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
-                let (kind, bits) = (pair[0] as i32, pair[1]);
-                let wide = index >= UNBOXED_SLOTS;
-                let slot = match kind {
-                    representation::INTEGER if wide => rooted(values::scalar_integer(bits as i32)?),
-                    representation::LOGICAL if wide => rooted(values::scalar_logical(bits as i32)?),
-                    representation::DOUBLE if wide => {
-                        rooted(values::scalar_real(f64::from_bits(bits as u64))?)
-                    }
-                    representation::INTEGER => Slot::Integer(bits as i32),
-                    representation::LOGICAL => Slot::Logical(bits as i32),
-                    representation::DOUBLE => {
-                        let number = f64::from_bits(bits as u64);
-                        let upper = (bits as u64 >> 32) as u32;
-                        // A NaN whose upper half reads as an integer's or logical's tag stays
-                        // boxed, as `slot_for` keeps it.
-                        if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
-                            rooted(values::scalar_real(number)?)
-                        } else {
-                            Slot::Real(number)
-                        }
-                    }
-                    _ => Slot::Handle(
-                        Sexp::from_raw(bits as *mut Header)
-                            .ok_or_else(|| error("compiled code passed a null slot"))?,
-                    ),
-                };
-                slots.push(slot);
-            }
-            Ok(heap.alloc_record_slots(layout as u32, &slots)?)
+            record_from_pairs(
+                layout,
+                std::slice::from_raw_parts(pairs, 2 * count as usize),
+            )
         })
+    }
+}
+
+/// [`jit_construct`] for a native function, which has no activation to park an error in: the
+/// record, rooted until the native function returns, or null when the heap is exhausted, which
+/// fails the native function so that tier 0 reports it.
+pub unsafe extern "C" fn jit_native_record(layout: i32, pairs: *const i64, count: i64) -> i64 {
+    unsafe {
+        let heap = heap();
+        let mark = heap.handle_mark();
+        let record = record_from_pairs(
+            layout,
+            std::slice::from_raw_parts(pairs, 2 * count as usize),
+        );
+        heap.release_handles(mark);
+        match record {
+            Ok(record) => {
+                heap.root(record);
+                record.as_ptr() as i64
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Where the handle stack stands, which a native function that allocates releases to.
+pub extern "C" fn jit_native_mark() -> i64 {
+    heap().handle_mark() as i64
+}
+
+/// Releases the handles a native function rooted since `mark`, keeping `keep` rooted when it is
+/// not null: the record the function returns.
+pub unsafe extern "C" fn jit_native_release(mark: i64, keep: *mut Header) {
+    let heap = heap();
+    heap.release_handles(mark as usize);
+    if let Some(keep) = unsafe { Sexp::from_raw(keep) } {
+        heap.root(keep);
+    }
+}
+
+/// A record of `layout` from `(kind, bits)` pairs in the [`representation`] encoding.
+unsafe fn record_from_pairs(layout: i32, pairs: &[i64]) -> R<Sexp> {
+    unsafe {
+        let count = pairs.len() / 2;
+        let heap = heap();
+        let mut slots: SmallVec<[Slot; 4]> = SmallVec::with_capacity(count);
+        // Every box made here stays rooted until the record holds it, because the next
+        // allocation may collect. Slots past the unboxed mask hold handles only.
+        let mut rooted = |value: Sexp| {
+            heap.root(value);
+            Slot::Handle(value)
+        };
+        for (index, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
+            let (kind, bits) = (pair[0] as i32, pair[1]);
+            let wide = index >= UNBOXED_SLOTS;
+            let slot = match kind {
+                representation::INTEGER if wide => rooted(values::scalar_integer(bits as i32)?),
+                representation::LOGICAL if wide => rooted(values::scalar_logical(bits as i32)?),
+                representation::DOUBLE if wide => {
+                    rooted(values::scalar_real(f64::from_bits(bits as u64))?)
+                }
+                representation::INTEGER => Slot::Integer(bits as i32),
+                representation::LOGICAL => Slot::Logical(bits as i32),
+                representation::DOUBLE => {
+                    let number = f64::from_bits(bits as u64);
+                    let upper = (bits as u64 >> 32) as u32;
+                    // A NaN whose upper half reads as an integer's or logical's tag stays
+                    // boxed, as `slot_for` keeps it.
+                    if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                        rooted(values::scalar_real(number)?)
+                    } else {
+                        Slot::Real(number)
+                    }
+                }
+                _ => Slot::Handle(
+                    Sexp::from_raw(bits as *mut Header)
+                        .ok_or_else(|| error("compiled code passed a null slot"))?,
+                ),
+            };
+            slots.push(slot);
+        }
+        Ok(heap.alloc_record_slots(layout as u32, &slots)?)
     }
 }
 

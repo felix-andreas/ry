@@ -7251,3 +7251,40 @@ Each one trades a narrow class of missed errors for a class of false reports see
   dominated by `.checkGroupSigLength`, which `.updateMethodsInTable` runs for every member of a
   group generic and which rescans the whole group tree each time (1.2 ms per call on ry, 0.8 ms on
   GNU R). The same guarded replacement would apply to it.
+
+## Typed closures run as native functions over records, tags and match
+
+- **Previous shape.** A typed closure ran as any other: tier 0 matched arguments, built promises
+  and an environment, and tier 1 compiled the body once a profile was hot, speculating on boxed
+  `SEXP` values. Natives (`crates/jit/src/native.rs`) existed only for scalar and vector bodies
+  reached from compiled code, and any record, tuple, tag or `match` refused them. Typed programs
+  ran no faster than untyped ones (orders 0.43 s typed vs 0.50 s untyped).
+- **Target shape.**
+  - *Call-time entry.* `Tier.call` (`jit_call` in `runtime.rs`, called from `apply_closure`) runs
+    a typed closure (`annotations::is_typed`) as a native at its first call. Arguments must be
+    positional or name-exact, and each value is read without forcing: a constant, a forced
+    promise, a promise of a constant, or a promise of a symbol bound to a plain value. Its `Ty`
+    comes from the value (scalar, attribute-free vector, plain record as `Rec(layout)`), the
+    native is cached per closure and `Ty` list, and a trampoline cached per machine signature
+    passes words in and boxes the result. Debug, step, trace and moves tracking skip the path.
+    This supersedes the `BRIEF` refusal above for typed closures reached this way.
+  - *Records as pointers.* `Ty::Rec(layout)` holds a record pointer; distinct layouts join to
+    `Ty::Obj`. Field reads speculate from per-layout slot-kind profiles that the heap records at
+    allocation (`heap::records::slot_kind`) and native construction records at compile time; the
+    read checks the unboxed bit and the integer/logical prefix, an empty profile makes the read
+    fail, and a mixed profile refuses the native.
+  - *Construction and match.* A record is built from a stack array of (representation, bits)
+    pairs by `jit_native_record`. Zero-slot tags are shared immutable singletons. `match` with
+    exact-layout patterns, `_` and binds resolves statically on `Rec(L)` and branches on the
+    layout id for `Obj`; a non-exhaustive match fails to tier 0. Guards, `|`, `..`, literals and
+    nested patterns refuse.
+  - *Rooting.* `jit_native_mark`/`jit_native_release` bracket entry, return, failure and loop
+    back edges, except where a loop carries a record into a pre-loop local.
+- **Why not more.** Annotation checks stay storage-only, and a native fails (tier 0 reruns the
+  call) rather than deoptimizing mid-body, which keeps every native side-effect-free until it
+  returns. Uniqueness in-place update, scalar replacement of non-escaping records, strings and
+  the standard library inside natives, vector builtins, and recompiling when a profile widens
+  are not built (`backlog.md`).
+- **Impact.** orders 0.50 s (GNU R) / 0.44 s (untyped ry) / 0.034 s (typed), expr_tree 0.33 / 0.34
+  / 0.008 s, checksums equal. `fuzz_typed_record_natives_agree_with_tier_zero` in
+  `crates/jit/tests/test_tiers.rs` pins agreement across JIT modes.

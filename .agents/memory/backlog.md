@@ -580,6 +580,17 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **Typed natives, the rest of the end shape** (`decisions.md`, "Typed closures run as native
+  functions over records, tags and match"). Typed closures run as natives at their first call over
+  scalars, plain vectors, records, tags and `match`. Not built, by expected gain:
+  scalar replacement of records that never escape a native (each construction allocates today);
+  vector results and vector builtins (`c`, `numeric`, `sum`) inside natives; strings and the
+  standard library (`Str`, `List`, `Dict`) inside natives; uniqueness in-place update of a record
+  or vector whose count is one; recompiling when a slot profile widens (a mixed profile refuses
+  for good); guards, `|`, `..`, literal and nested patterns in `match`.
+  The why-ry programs that gain nothing typed show the order: bond_book needs `seq_len`, `rep` and
+  vector results, report needs `paste`, closures needs captured variables (`a * scale`).
+
 - **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
   comparisons, `if` and calls to other such closures compiles to a frameless native function
   (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
@@ -596,6 +607,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `Native` and roots the closure a second time. Refusals are never retried, so mutual recursion
   (`ev` calls `od` calls `ev`) is refused for good: the inner call hits the `COMPILING` cycle guard.
   Compile a strongly connected group of functions together instead, and root closures weakly.
+  Typed closures compile at their first call, so a typed closure created per iteration
+  (`lapply(xs, function(i) { g <- function(x: double) x + 1; g(i) })`) compiles and roots once per
+  closure and reaches `MAX_NATIVES` (4096), after which natives are off for the session. Key the cache
+  by the closure's body and formals, not the closure, and pass the environment at call time.
 - **Native recursion has no machine-stack check.** It is bounded only by `max_depth`
   (`jit_depth_budget`). That is safe today only because `options(expressions =)` never raises
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)

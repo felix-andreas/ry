@@ -387,7 +387,7 @@ pub unsafe fn plain_tag(object: Sexp) -> Option<u32> {
 /// decides both: `tag` is the tag's name for `.ry_tag`, and `names` holds each item's name
 /// symbol, or `nil()` for an unnamed item. `None` when the call would raise an error, which the
 /// constructor itself then reports.
-pub(crate) unsafe fn constructor_layout(
+pub unsafe fn constructor_layout(
     tag: Option<Sexp>,
     names: &[Sexp],
     record: bool,

@@ -951,6 +951,13 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    if supplied.is_none()
+        && crate::annotations::is_typed(function)
+        && let Some(tier) = bytecode::tier()
+        && let Some(value) = (tier.call)(function, args)
+    {
+        return value;
+    }
     let env = bind_arguments(call, function, args, supplied)?;
     let promargs = args_pairlist(args)?;
     run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)

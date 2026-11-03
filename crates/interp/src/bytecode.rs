@@ -132,6 +132,10 @@ pub struct Tier {
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
+    /// Called before a typed closure gets a frame, with its arguments matched by position or by
+    /// exact name. Returns `None` to let the call proceed as usual, or the value a native
+    /// function computed without a frame, promises or annotation checks.
+    pub call: unsafe fn(function: Sexp, args: &[crate::builtins::Arg]) -> Option<R<Sexp>>,
 }
 
 /// How the optimizing tier hands an activation back to the interpreter.

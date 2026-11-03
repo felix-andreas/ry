@@ -12,8 +12,11 @@ Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
 
 <BenchmarkTable />
 
-Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types do not
-make code faster yet, and ry usually peaks higher in memory than GNU R.
+Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types add
+a second gain where typed functions work on numbers, records and `match`: such a function runs as
+native code from its first call, so `orders` and `expr_tree` run 13 and 80 times faster typed than
+on GNU R. Typed code that builds vectors or strings (`bond_book`, `report`) runs as fast as untyped
+code, and ry usually peaks higher in memory than GNU R.
 
 ## The programs
 

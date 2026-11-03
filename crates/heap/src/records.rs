@@ -102,6 +102,22 @@ pub struct Layouts {
     tag_ids: FxHashMap<Sexp, u32>,
     layouts: Vec<Layout>,
     layout_ids: FxHashMap<Layout, u32>,
+    /// For every slot of every layout, the [`slot_kind`] bits of each value a record of the
+    /// layout has held there. Native code speculates a field's type from them, and checks it.
+    slot_kinds: Vec<u8>,
+    /// Where each layout's slots start in `slot_kinds`, by layout id.
+    kinds_start: Vec<u32>,
+}
+
+/// The kinds of value a record slot may hold, as bits of a layout's slot profile.
+pub mod slot_kind {
+    pub const DOUBLE: u8 = 1 << 0;
+    pub const INTEGER: u8 = 1 << 1;
+    pub const LOGICAL: u8 = 1 << 2;
+    /// A handle to a plain (unclassed, attribute-free) record, tuple or tag.
+    pub const RECORD: u8 = 1 << 3;
+    /// Any other handle.
+    pub const OTHER: u8 = 1 << 4;
 }
 
 impl Layouts {
@@ -127,6 +143,9 @@ impl Layouts {
             return id;
         }
         let id = self.layouts.len() as u32;
+        self.kinds_start.push(self.slot_kinds.len() as u32);
+        self.slot_kinds
+            .extend(std::iter::repeat_n(0, layout.slot_count()));
         self.layouts.push(layout.clone());
         self.layout_ids.insert(layout, id);
         id
@@ -134,5 +153,24 @@ impl Layouts {
 
     pub fn get(&self, id: u32) -> Option<&Layout> {
         self.layouts.get(id as usize)
+    }
+
+    /// The [`slot_kind`] bits of every value a record of layout `id` has held in slot `index`:
+    /// zero for a slot no record has filled yet.
+    pub fn slot_kinds(&self, id: u32, index: usize) -> u8 {
+        self.kinds_start
+            .get(id as usize)
+            .and_then(|&start| self.slot_kinds.get(start as usize + index))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Records that a record of layout `id` holds a value of kind `kind` in slot `index`.
+    pub fn observe(&mut self, id: u32, index: usize, kind: u8) {
+        if let Some(&start) = self.kinds_start.get(id as usize)
+            && let Some(bits) = self.slot_kinds.get_mut(start as usize + index)
+        {
+            *bits |= kind;
+        }
     }
 }

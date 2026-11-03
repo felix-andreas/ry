@@ -31,7 +31,8 @@ use {
     },
     cranelift_codegen::{
         ir::{
-            AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value,
+            AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind,
+            Type, Value,
             condcodes::{FloatCC, IntCC},
             immediates::Ieee64,
             types::{F64, I32, I64},
@@ -40,8 +41,14 @@ use {
     },
     cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
     cranelift_module::Module,
-    heap::object::{NA_INTEGER, NA_REAL_BITS, Sexp, SexpType},
-    interp::{annotations, bytecode, values},
+    heap::{
+        object::{
+            INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
+            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS,
+        },
+        records::{Fields, slot_kind},
+    },
+    interp::{annotations, bytecode, records, values},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     std::{
@@ -69,6 +76,9 @@ pub struct Native {
     /// The function lookups the code assumes, its callees' included: a caller compiled against
     /// it checks them as its own.
     pub speculations: Vec<Speculation>,
+    /// Whether the code allocates records. It roots each one on the handle stack and releases
+    /// them all when it returns, except the record it returns, which it leaves rooted.
+    pub allocates: bool,
 }
 
 /// The machine signature of a native function with these argument and result types.
@@ -149,6 +159,15 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
     compiled
 }
 
+/// Whether `function` has a native function for some argument types.
+pub unsafe fn has_native(function: Sexp) -> bool {
+    NATIVES.with_borrow(|natives| {
+        natives
+            .iter()
+            .any(|((closure, _), native)| *closure == function && native.is_some())
+    })
+}
+
 /// Whether every function lookup `native` assumes still finds the same function.
 unsafe fn still_resolves(native: &Native) -> bool {
     native.speculations.iter().all(|assumed| {
@@ -168,14 +187,16 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
             "the call does not supply every formal positionally",
         ));
     }
-    if !params.iter().all(|ty| ty.is_unboxed() || ty.is_vector()) {
+    if !params
+        .iter()
+        .all(|ty| ty.is_unboxed() || ty.is_vector() || ty.is_record())
+    {
         return Err(Refusal(
-            "an argument is neither a scalar nor a plain vector",
+            "an argument is neither a scalar, a plain vector nor a record",
         ));
     }
-    // The checks test the storage type only, which a vector shares with its elements.
     let storages: SmallVec<[Option<SexpType>; 4]> =
-        params.iter().map(|ty| ty.element().storage()).collect();
+        params.iter().map(|&ty| storage_of(ty)).collect();
     if matches!(
         annotations::entry_for(function, &storages),
         annotations::Entry::Unchecked
@@ -192,22 +213,34 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         .map(|(&(symbol, _), &ty)| (symbol, ty))
         .collect();
     // A recursive call has the function's own result type, which is what the body computes
-    // once that type is known: the first walk leaves it open, the second confirms it.
+    // once that type is known. The first walk types a recursive call as what the `return`s
+    // before it pass back, if any, and each further walk assumes the type the one before
+    // found, until one confirms its assumption: a tagged union's branches widen a variant's
+    // record to any record, and nothing widens further.
     let mut first = Walker::new(function, &parameters, None);
-    let guess = first.walk(None, body)?.kind.known()?;
-    let mut second = Walker::new(function, &parameters, Some(guess));
-    if second.walk(None, body)?.kind != Kind::Known(guess) {
-        return Err(Refusal("the result type depends on the recursion"));
+    let mut guess = first.walk(None, body)?.kind.known()?;
+    let mut confirmed = None;
+    for _ in 0..3 {
+        let mut walker = Walker::new(function, &parameters, Some(guess));
+        let found = walker.walk(None, body)?.kind.known()?;
+        if found == guess {
+            confirmed = Some(walker);
+            break;
+        }
+        guess = found;
     }
-    let storage = guess
-        .storage()
-        .ok_or(Refusal("a result that is not a scalar"))?;
+    let second = confirmed.ok_or(Refusal("the result type depends on the recursion"))?;
+    if !(guess.is_unboxed() || guess.is_record()) {
+        return Err(Refusal("a result that is neither a scalar nor a record"));
+    }
+    let storage = storage_of(guess).ok_or(Refusal("a result without a storage type"))?;
     if !annotations::return_admits(function, storage) {
         return Err(Refusal(
             "the result type fails the closure's return annotation",
         ));
     }
     let speculations = second.speculations;
+    let allocates = second.allocates;
     let started = std::time::Instant::now();
     let (address, size) = codegen::with_module(|module| {
         let call_conv = module.isa().default_call_conv();
@@ -222,6 +255,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         {
             let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
             let mut walker = Walker::new(function, &parameters, Some(guess));
+            walker.allocates = allocates;
             let mut builder = emit(builder, call_conv, own, &mut walker, body)?;
             builder.seal_all_blocks();
             builder.finalize(frontend_config);
@@ -250,14 +284,55 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         params: SmallVec::from_slice(params),
         result: guess,
         speculations,
+        allocates,
     })
 }
 
 fn machine_type(ty: Ty) -> Type {
     match ty {
         Ty::Dbl => F64,
-        _ if ty.is_vector() => I64,
+        _ if ty.is_vector() || ty.is_record() => I64,
         _ => I32,
+    }
+}
+
+/// The storage type the annotation checks test a value of this type against: a vector shares
+/// its elements'.
+fn storage_of(ty: Ty) -> Option<SexpType> {
+    if ty.is_record() {
+        Some(SexpType::Record)
+    } else {
+        ty.element().storage()
+    }
+}
+
+/// The type a native function speculates a field holds, from the kinds every value of the
+/// layout has held in that slot. `None` for a slot no value has filled yet.
+fn field_type(layout: u32, index: usize) -> Result<Option<Ty>, Refusal> {
+    Ok(Some(
+        match interp::heap().layouts.slot_kinds(layout, index) {
+            0 => return Ok(None),
+            slot_kind::DOUBLE => Ty::Dbl,
+            slot_kind::INTEGER => Ty::Int,
+            slot_kind::LOGICAL => Ty::Lgl,
+            slot_kind::RECORD => Ty::Obj,
+            _ => {
+                return Err(Refusal(
+                    "a field that holds values of different types, or not scalars or records",
+                ));
+            }
+        },
+    ))
+}
+
+/// The slot-profile bit of a value of type `ty`.
+fn kind_bit(ty: Ty) -> u8 {
+    match ty {
+        Ty::Dbl => slot_kind::DOUBLE,
+        Ty::Int => slot_kind::INTEGER,
+        Ty::Lgl => slot_kind::LOGICAL,
+        Ty::Rec(_) | Ty::Obj => slot_kind::RECORD,
+        _ => slot_kind::OTHER,
     }
 }
 
@@ -275,6 +350,12 @@ unsafe fn tail_invisible(expression: Sexp) -> bool {
             .iter()
             .skip(1)
             .any(|&(_, branch)| tail_invisible(branch)),
+        ".ry_match" => args.iter().skip(1).any(|&(_, arm)| {
+            arm.kind() == SexpType::Language
+                && values::pairlist_items(arm.cdr())
+                    .last()
+                    .is_some_and(|&(_, body)| tail_invisible(body))
+        }),
         _ => false,
     }
 }
@@ -303,6 +384,10 @@ impl Kind {
             (Kind::Never, kind) | (kind, Kind::Never) => Ok(kind),
             (Kind::Open, kind) | (kind, Kind::Open) => Ok(kind),
             (Kind::Known(a), Kind::Known(b)) if a == b => Ok(self),
+            // The variants of a tagged union are records of different layouts.
+            (Kind::Known(a), Kind::Known(b)) if a.is_record() && b.is_record() => {
+                Ok(Kind::Known(Ty::Obj))
+            }
             _ => Err(Refusal("the branches have different types")),
         }
     }
@@ -349,6 +434,8 @@ enum Operation {
     Log,
     Floor,
     Ceiling,
+    Max,
+    Min,
     For,
     While,
     Repeat,
@@ -394,6 +481,8 @@ impl Operation {
             "log" => Operation::Log,
             "floor" => Operation::Floor,
             "ceiling" => Operation::Ceiling,
+            "max" => Operation::Max,
+            "min" => Operation::Min,
             "for" => Operation::For,
             "while" => Operation::While,
             "repeat" => Operation::Repeat,
@@ -435,6 +524,130 @@ impl Operation {
     }
 }
 
+/// A ry record operation: a construction, a `match`, or a field read with `$`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecordForm {
+    Record,
+    Tuple,
+    Tag,
+    Match,
+    Dollar,
+}
+
+impl RecordForm {
+    unsafe fn of(head: Sexp) -> Option<RecordForm> {
+        Some(match head.car().bytes() {
+            b".ry_record" => RecordForm::Record,
+            b".ry_tuple" => RecordForm::Tuple,
+            b".ry_tag" => RecordForm::Tag,
+            b".ry_match" => RecordForm::Match,
+            b"$" => RecordForm::Dollar,
+            _ => return None,
+        })
+    }
+}
+
+/// A `match` arm's pattern, in the forms native code tests.
+enum Pattern {
+    /// `_`.
+    Any,
+    /// A name, which binds the whole value.
+    Bind(Sexp),
+    /// A record, tuple or tag of exactly this layout, with the name each slot binds.
+    Shape {
+        layout: u32,
+        fields: SmallVec<[(usize, Sexp); 4]>,
+    },
+}
+
+/// The pattern `pattern` is, or a refusal for one native code does not test.
+unsafe fn pattern_of(pattern: Sexp) -> Result<Pattern, Refusal> {
+    let refused = Refusal("a `match` pattern native code does not test");
+    match pattern.kind() {
+        SexpType::Symbol => match pattern.car().bytes() {
+            b"_" => Ok(Pattern::Any),
+            b".." | b"T" | b"F" | b"" | b"..." => Err(refused),
+            _ => Ok(Pattern::Bind(pattern)),
+        },
+        SexpType::Language if pattern.car().kind() == SexpType::Symbol => {
+            let head = pattern.car().car().bytes();
+            let items = values::pairlist_items(pattern.cdr());
+            if head == b"(" {
+                return match items.as_slice() {
+                    [(_, inner)] => pattern_of(*inner),
+                    _ => Err(refused),
+                };
+            }
+            let (tag, payload) = match head {
+                b".ry_tag" => {
+                    let ((name_tag, name), payload) = items.split_first().ok_or(refused)?;
+                    if *name_tag != values::nil() {
+                        return Err(refused);
+                    }
+                    (Some(*name), payload)
+                }
+                b".ry_record" | b".ry_tuple" => (None, &items[..]),
+                _ => return Err(refused),
+            };
+            let names: SmallVec<[Sexp; 4]> = payload.iter().map(|&(tag, _)| tag).collect();
+            let (layout, order) =
+                records::constructor_layout(tag, &names, head == b".ry_record").ok_or(refused)?;
+            let mut fields = SmallVec::new();
+            for (&(_, item), slot) in payload.iter().zip(order) {
+                match pattern_of(item)? {
+                    Pattern::Any => {}
+                    Pattern::Bind(name) => fields.push((slot, name)),
+                    Pattern::Shape { .. } => {
+                        return Err(Refusal("a nested `match` pattern"));
+                    }
+                }
+            }
+            Ok(Pattern::Shape { layout, fields })
+        }
+        _ => Err(refused),
+    }
+}
+
+/// A shared, immutable value of a layout without slots, such as the tag `:North`: one object
+/// serves every construction, so building one allocates nothing.
+unsafe fn singleton(layout: u32) -> Result<Sexp, Refusal> {
+    thread_local! {
+        static SINGLETONS: RefCell<FxHashMap<u32, Sexp>> = RefCell::default();
+    }
+    if let Some(value) = SINGLETONS.with_borrow(|singletons| singletons.get(&layout).copied()) {
+        return Ok(value);
+    }
+    let value = records::construct(layout, &[])
+        .map_err(|_| Refusal("a value without slots that cannot be allocated"))?;
+    value.mark_not_mutable();
+    interp::heap().add_global_root(value);
+    SINGLETONS.with_borrow_mut(|singletons| singletons.insert(layout, value));
+    Ok(value)
+}
+
+/// The slot of `layout` that holds the field `name`.
+/// Whether a layout `$` and `[[` may read is positional (a tuple) or named (a record). A tag's
+/// payload is read only by `match`, and a dict or set has no fields, so the interpreter raises
+/// an error for both and native code leaves them to it.
+unsafe fn plain_fields(layout: u32) -> Result<bool, Refusal> {
+    let refused = Refusal("`$` or `[[` of a tag, a dict or a set");
+    let shape = interp::heap().layouts.get(layout).ok_or(refused)?;
+    match shape.fields {
+        _ if shape.tag.is_some() => Err(refused),
+        Fields::Positional(_) => Ok(true),
+        Fields::Named(_) => Ok(false),
+        Fields::Dict | Fields::Set => Err(refused),
+    }
+}
+
+unsafe fn slot_named(layout: u32, name: Sexp) -> Result<usize, Refusal> {
+    interp::heap()
+        .layouts
+        .get(layout)
+        .and_then(|shape| shape.names().iter().position(|&field| field == name))
+        .ok_or(Refusal("a field the record does not have"))
+}
+
 /// A walk over a body. Without an emitter it types the body and checks that it is a scalar
 /// function; with one it also emits the code, so both make the same decisions.
 struct Walker<'p> {
@@ -465,6 +678,14 @@ struct Walker<'p> {
     /// The join of the types `return` passes back.
     returned: Kind,
     speculations: Vec<Speculation>,
+    /// Whether the body allocates a record, itself or through a callee. The emitting walk gets
+    /// it from the typing walk, and roots and releases accordingly.
+    allocates: bool,
+    /// For each loop enclosing the expression being walked, innermost last: how many locals
+    /// were in scope where it starts, and whether its body assigns a record to one of them.
+    /// Every other record an iteration allocates is dead when the next one starts, so the loop
+    /// releases them there unless it carries one.
+    loop_scopes: SmallVec<[(usize, bool); 4]>,
 }
 
 /// An expression's type, and its machine value when emitting and the expression completes.
@@ -495,6 +716,8 @@ impl<'p> Walker<'p> {
             nesting: 0,
             returned: Kind::Never,
             speculations: Vec::new(),
+            allocates: false,
+            loop_scopes: SmallVec::new(),
         }
     }
 
@@ -577,6 +800,17 @@ impl<'p> Walker<'p> {
                     return Err(Refusal("a call whose function is computed"));
                 }
                 let items = values::pairlist_items(expression.cdr());
+                if let Some(form) = RecordForm::of(head)
+                    && !self.locals.iter().any(|(symbol, _, _)| *symbol == head)
+                {
+                    let speculation = resolve_function(head, self.environment)
+                        .ok_or(Refusal("a function the lookup cannot resolve"))?;
+                    if base_builtin(speculation.function, head).is_none() {
+                        return Err(Refusal("a record operation rebound to another function"));
+                    }
+                    self.speculations.push(speculation);
+                    return self.record_form(emitter, form, &items);
+                }
                 if items.iter().any(|&(tag, value)| {
                     tag != values::nil()
                         || value == values::missing_arg()
@@ -655,7 +889,12 @@ impl<'p> Walker<'p> {
                 .zip(self.parameters)
                 .all(|(&ty, &(_, own))| ty == own);
         if own {
-            let kind = self.own_result.map_or(Kind::Open, Kind::Known);
+            // Before the result type is known, the `return`s walked so far suggest it.
+            let kind = match (self.own_result, self.returned) {
+                (Some(ty), _) => Kind::Known(ty),
+                (None, Kind::Known(ty)) => Kind::Known(ty),
+                (None, _) => Kind::Open,
+            };
             let value = match emitter.as_mut() {
                 Some(emitter) => {
                     let reference = emitter.own;
@@ -669,6 +908,7 @@ impl<'p> Walker<'p> {
             .ok_or(Refusal("a call of a closure that is not a native function"))?;
         self.speculations
             .extend(native.speculations.iter().cloned());
+        self.allocates |= native.allocates;
         if self.inlined.len() < MAX_INLINE_DEPTH && !self.inlined.contains(&callee) {
             let body = bytecode::closure_body(callee);
             if inlinable(body) {
@@ -718,6 +958,7 @@ impl<'p> Walker<'p> {
         }
         let caller_locals = std::mem::replace(&mut self.locals, locals);
         let caller_breaks = std::mem::take(&mut self.breaks);
+        let caller_loops = std::mem::take(&mut self.loop_scopes);
         let caller_environment = std::mem::replace(&mut self.environment, callee.tag());
         let caller_nesting = std::mem::take(&mut self.nesting);
         self.inlined.push(callee);
@@ -726,6 +967,7 @@ impl<'p> Walker<'p> {
         self.nesting = caller_nesting;
         self.environment = caller_environment;
         self.breaks = caller_breaks;
+        self.loop_scopes = caller_loops;
         self.locals = caller_locals;
         let value = value?;
         match value.kind {
@@ -837,6 +1079,9 @@ impl<'p> Walker<'p> {
                 let Kind::Known(vector_ty) = vector.kind else {
                     return Err(Refusal("an index into something other than a vector"));
                 };
+                if vector_ty.is_record() && operation == Operation::Element {
+                    return self.record_item(emitter, vector, *index);
+                }
                 if !vector_ty.is_vector() {
                     return Err(Refusal("an index into something other than a vector"));
                 }
@@ -927,6 +1172,33 @@ impl<'p> Walker<'p> {
                     value,
                 })
             }
+            (Operation::Max | Operation::Min, [left, right]) => {
+                let left = self.expression(emitter, *left)?;
+                if left.kind == Kind::Never {
+                    return Ok(left);
+                }
+                let right = self.expression(emitter, *right)?;
+                if right.kind == Kind::Never {
+                    return Ok(right);
+                }
+                let (Some(a), Some(b)) = (left.kind.numeric()?, right.kind.numeric()?) else {
+                    return Ok(Val {
+                        kind: Kind::Open,
+                        value: None,
+                    });
+                };
+                let integers = a == Ty::Int && b == Ty::Int;
+                let value = match (emitter.as_mut(), left.value, right.value) {
+                    (Some(emitter), Some(x), Some(y)) => {
+                        Some(emitter.extreme(operation == Operation::Max, integers, (a, x), (b, y)))
+                    }
+                    _ => None,
+                };
+                Ok(Val {
+                    kind: Kind::Known(if integers { Ty::Int } else { Ty::Dbl }),
+                    value,
+                })
+            }
             (_, [left, right]) if operation.is_comparison() || operation.is_binary_arithmetic() => {
                 let left = self.expression(emitter, *left)?;
                 if left.kind == Kind::Never {
@@ -970,6 +1242,365 @@ impl<'p> Walker<'p> {
         }
     }
 
+    /// A record construction, a `match`, or `record$field`.
+    unsafe fn record_form(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        form: RecordForm,
+        items: &[(Sexp, Sexp)],
+    ) -> Result<Val, Refusal> {
+        if items
+            .iter()
+            .any(|&(_, value)| value == values::missing_arg() || value == values::symbols().dots)
+        {
+            return Err(Refusal(
+                "a record operation with missing or `...` arguments",
+            ));
+        }
+        match form {
+            RecordForm::Match => self.match_arms(emitter, items),
+            RecordForm::Dollar => {
+                let &[(_, subject), (_, field)] = items else {
+                    return Err(Refusal("a `$` without a record and a field"));
+                };
+                let subject = self.expression(emitter, subject)?;
+                let layout = match subject.kind {
+                    Kind::Never => return Ok(subject),
+                    Kind::Known(Ty::Rec(layout)) => layout,
+                    _ => {
+                        return Err(Refusal(
+                            "`$` of something other than a record of known shape",
+                        ));
+                    }
+                };
+                let name = match field.kind() {
+                    SexpType::Symbol => field,
+                    SexpType::String if values::length(field) == 1 => {
+                        values::install_charsxp(values::string_elt(field, 0))
+                            .map_err(|_| Refusal("a field name that cannot be interned"))?
+                    }
+                    _ => return Err(Refusal("`$` with a computed field")),
+                };
+                plain_fields(layout)?;
+                let index = slot_named(layout, name)?;
+                self.read_field(emitter, subject.value, layout, index)
+            }
+            RecordForm::Record | RecordForm::Tuple | RecordForm::Tag => {
+                self.construct(emitter, form, items)
+            }
+        }
+    }
+
+    /// A record, tuple or tag built from its items, evaluated in source order.
+    unsafe fn construct(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        form: RecordForm,
+        items: &[(Sexp, Sexp)],
+    ) -> Result<Val, Refusal> {
+        let (tag, payload) = if form == RecordForm::Tag {
+            let ((name_tag, name), payload) =
+                items.split_first().ok_or(Refusal("a tag without a name"))?;
+            if *name_tag != values::nil()
+                || name.kind() != SexpType::String
+                || values::length(*name) != 1
+            {
+                return Err(Refusal("a tag whose name is computed"));
+            }
+            (Some(*name), payload)
+        } else {
+            (None, items)
+        };
+        let names: SmallVec<[Sexp; 4]> = payload.iter().map(|&(tag, _)| tag).collect();
+        let (layout, order) = records::constructor_layout(tag, &names, form == RecordForm::Record)
+            .ok_or(Refusal("a construction whose shape R rejects"))?;
+        let mut slots: SmallVec<[(Ty, Value); 4]> = SmallVec::new();
+        let mut placed: SmallVec<[usize; 4]> = SmallVec::new();
+        for (&(_, item), &slot) in payload.iter().zip(&order) {
+            let value = self.expression(emitter, item)?;
+            match value.kind {
+                Kind::Never => return Ok(value),
+                Kind::Known(ty) if ty.is_unboxed() || ty.is_record() => {
+                    interp::heap().layouts.observe(layout, slot, kind_bit(ty));
+                    if let Some(machine) = value.value {
+                        slots.push((ty, machine));
+                        placed.push(slot);
+                    }
+                }
+                Kind::Known(_) => {
+                    return Err(Refusal("a field that is neither a scalar nor a record"));
+                }
+                Kind::Open => {}
+            }
+        }
+        let kind = Kind::Known(Ty::Rec(layout));
+        if order.is_empty() {
+            let value = singleton(layout)?;
+            let value = emitter
+                .as_mut()
+                .map(|emitter| emitter.builder.ins().iconst(I64, value.as_ptr() as i64));
+            return Ok(Val { kind, value });
+        }
+        self.allocates = true;
+        let Some(emitter) = emitter.as_mut() else {
+            return Ok(Val { kind, value: None });
+        };
+        if slots.len() != order.len() {
+            return Err(Refusal("a field without a value"));
+        }
+        let size = u32::try_from(16 * order.len())
+            .map_err(|_| Refusal("a record with too many fields"))?;
+        let pairs = emitter.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        for (&(ty, machine), &slot) in slots.iter().zip(&placed) {
+            let (representation, bits) = match ty {
+                Ty::Dbl => (
+                    runtime::representation::DOUBLE,
+                    emitter
+                        .builder
+                        .ins()
+                        .bitcast(I64, MemFlagsData::new(), machine),
+                ),
+                Ty::Int => (
+                    runtime::representation::INTEGER,
+                    emitter.builder.ins().uextend(I64, machine),
+                ),
+                Ty::Lgl => (
+                    runtime::representation::LOGICAL,
+                    emitter.builder.ins().uextend(I64, machine),
+                ),
+                _ => (runtime::representation::BOXED, machine),
+            };
+            let offset = 16 * slot as i32;
+            let representation = emitter.builder.ins().iconst(I64, i64::from(representation));
+            emitter
+                .builder
+                .ins()
+                .stack_store(I64, representation, pairs, offset);
+            emitter
+                .builder
+                .ins()
+                .stack_store(I64, bits, pairs, offset + 8);
+        }
+        let address = emitter.builder.ins().stack_addr(I64, pairs, 0);
+        let layout_id = emitter.builder.ins().iconst(I32, i64::from(layout));
+        let count = emitter.builder.ins().iconst(I64, order.len() as i64);
+        let record = emitter.helper(
+            runtime::jit_native_record as *const () as usize,
+            &[I32, I64, I64],
+            I64,
+            &[layout_id, address, count],
+        );
+        let failed = emitter.builder.ins().icmp_imm_s(IntCC::Equal, record, 0);
+        emitter.fail_if(failed);
+        Ok(Val {
+            kind,
+            value: Some(record),
+        })
+    }
+
+    /// `record[[index]]` with a constant index: a position into a tuple or a name into a record.
+    unsafe fn record_item(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        record: Val,
+        index: Sexp,
+    ) -> Result<Val, Refusal> {
+        let Kind::Known(Ty::Rec(layout)) = record.kind else {
+            return Err(Refusal("`[[` of a record of unknown shape"));
+        };
+        let refused = Refusal("`[[` of a record with an index native code does not resolve");
+        let positional = plain_fields(layout)?;
+        let slot = match index.kind() {
+            SexpType::String if values::length(index) == 1 && !positional => slot_named(
+                layout,
+                values::install_charsxp(values::string_elt(index, 0))
+                    .map_err(|_| Refusal("a field name that cannot be interned"))?,
+            )?,
+            SexpType::Integer | SexpType::Real if values::length(index) == 1 && positional => {
+                let position = if index.kind() == SexpType::Integer {
+                    f64::from(values::ints(index)[0])
+                } else {
+                    values::reals(index)[0]
+                };
+                let count = interp::heap()
+                    .layouts
+                    .get(layout)
+                    .map_or(0, |shape| shape.slot_count());
+                if !(position >= 1.0 && position < count as f64 + 1.0)
+                    || index.kind() == SexpType::Integer && values::ints(index)[0] == NA_INTEGER
+                {
+                    return Err(refused);
+                }
+                position as usize - 1
+            }
+            _ => return Err(refused),
+        };
+        self.read_field(emitter, record.value, layout, slot)
+    }
+
+    /// Slot `index` of a record of `layout`, typed from the slot's profile and checked.
+    unsafe fn read_field(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        record: Option<Value>,
+        layout: u32,
+        index: usize,
+    ) -> Result<Val, Refusal> {
+        let Some(ty) = field_type(layout, index)? else {
+            // No value of the layout has filled the slot, so nothing predicts its type.
+            if let Some(emitter) = emitter.as_mut() {
+                emitter.builder.ins().jump(emitter.failure, &[]);
+                let dead = emitter.builder.create_block();
+                emitter.builder.switch_to_block(dead);
+            }
+            return Ok(Val {
+                kind: Kind::Never,
+                value: None,
+            });
+        };
+        let value = match (emitter.as_mut(), record) {
+            (Some(emitter), Some(record)) => Some(emitter.field(ty, record, index)?),
+            (Some(_), None) => return Err(Refusal("a record without a value")),
+            (None, _) => None,
+        };
+        Ok(Val {
+            kind: Kind::Known(ty),
+            value,
+        })
+    }
+
+    /// `match (subject) { pattern => body ... }` over a record, tuple or tag.
+    unsafe fn match_arms(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        items: &[(Sexp, Sexp)],
+    ) -> Result<Val, Refusal> {
+        if self.lazy > 0 {
+            return Err(Refusal("a `match` inside a promise"));
+        }
+        let ((_, subject), arms) = items
+            .split_first()
+            .ok_or(Refusal("a `match` without a subject"))?;
+        let mut parsed: SmallVec<[(Pattern, Sexp); 4]> = SmallVec::new();
+        for &(tag, arm) in arms {
+            let parts = if arm.kind() == SexpType::Language
+                && arm.car().kind() == SexpType::Symbol
+                && arm.car().car().bytes() == b"=>"
+            {
+                values::pairlist_items(arm.cdr())
+            } else {
+                Vec::new()
+            };
+            let [(_, pattern), (_, body)] = parts.as_slice() else {
+                return Err(Refusal("a `match` arm with a guard"));
+            };
+            if tag != values::nil() {
+                return Err(Refusal("a named `match` arm"));
+            }
+            parsed.push((pattern_of(*pattern)?, *body));
+        }
+        let subject = self.expression(emitter, *subject)?;
+        let subject_ty = match subject.kind {
+            Kind::Never => return Ok(subject),
+            Kind::Known(ty) if ty.is_record() => ty,
+            _ => return Err(Refusal("a `match` on something other than a record")),
+        };
+        let id = match (emitter.as_mut(), subject.value, subject_ty) {
+            (Some(emitter), Some(record), Ty::Obj) => Some(emitter.builder.ins().load(
+                I32,
+                MemFlagsData::trusted(),
+                record,
+                RECORD_LAYOUT_OFFSET as i32,
+            )),
+            _ => None,
+        };
+        let join = emitter
+            .as_mut()
+            .map(|emitter| emitter.builder.create_block());
+        let mut kind = Kind::Never;
+        let mut exhaustive = false;
+        for (pattern, body) in &parsed {
+            let layout = match pattern {
+                Pattern::Shape { layout, .. } => Some(*layout),
+                _ => None,
+            };
+            if let (Ty::Rec(own), Some(layout)) = (subject_ty, layout)
+                && own != layout
+            {
+                continue;
+            }
+            let otherwise = match (emitter.as_mut(), id, layout) {
+                (Some(emitter), Some(id), Some(layout)) => {
+                    let same =
+                        emitter
+                            .builder
+                            .ins()
+                            .icmp_imm_s(IntCC::Equal, id, i64::from(layout));
+                    let arm = emitter.builder.create_block();
+                    let otherwise = emitter.builder.create_block();
+                    emitter.builder.ins().brif(same, arm, &[], otherwise, &[]);
+                    emitter.builder.switch_to_block(arm);
+                    Some(otherwise)
+                }
+                _ => None,
+            };
+            let scope = self.locals.len();
+            let value = self.arm(emitter, pattern, subject, body)?;
+            self.locals.truncate(scope);
+            kind = kind.join(value.kind)?;
+            if let (Some(emitter), Some(join)) = (emitter.as_mut(), join) {
+                emitter.close_branch(join, value, true)?;
+                if let Some(otherwise) = otherwise {
+                    emitter.builder.switch_to_block(otherwise);
+                }
+            }
+            if layout.is_none() || matches!(subject_ty, Ty::Rec(_)) {
+                exhaustive = true;
+                break;
+            }
+        }
+        let Some(emitter) = emitter.as_mut() else {
+            return Ok(Val { kind, value: None });
+        };
+        let join = join.ok_or(Refusal("a `match` without a join"))?;
+        if !exhaustive {
+            // R raises an error when no arm matches.
+            emitter.builder.ins().jump(emitter.failure, &[]);
+        }
+        emitter.builder.switch_to_block(join);
+        let value = emitter.builder.block_params(join).first().copied();
+        Ok(Val { kind, value })
+    }
+
+    /// One `match` arm whose pattern holds: its bindings, then its body.
+    unsafe fn arm(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        pattern: &Pattern,
+        subject: Val,
+        body: &Sexp,
+    ) -> Result<Val, Refusal> {
+        let subject_ty = subject.kind.known()?;
+        match pattern {
+            Pattern::Any => {}
+            Pattern::Bind(name) => self.bind(emitter, *name, subject_ty, subject.value)?,
+            Pattern::Shape { layout, fields } => {
+                for &(slot, name) in fields {
+                    let field = self.read_field(emitter, subject.value, *layout, slot)?;
+                    let Kind::Known(ty) = field.kind else {
+                        return Ok(field);
+                    };
+                    self.bind(emitter, name, ty, field.value)?;
+                }
+            }
+        }
+        self.expression(emitter, *body)
+    }
+
     unsafe fn block(
         &mut self,
         emitter: &mut Emitting<'_, '_>,
@@ -1008,6 +1639,19 @@ impl<'p> Walker<'p> {
             Kind::Known(ty) => ty,
             Kind::Open => return Err(Refusal("an assignment of an undetermined value")),
         };
+        self.bind(emitter, target, ty, value.value)?;
+        Ok(value)
+    }
+
+    /// Binds the local `target` to a value of type `ty`, as an assignment or a `match` pattern
+    /// does.
+    unsafe fn bind(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        target: Sexp,
+        ty: Ty,
+        machine: Option<Value>,
+    ) -> Result<(), Refusal> {
         let existing = self
             .locals
             .iter()
@@ -1016,6 +1660,11 @@ impl<'p> Walker<'p> {
             Some(index) => {
                 if self.locals[index].1 != ty {
                     return Err(Refusal("a variable assigned values of different types"));
+                }
+                if ty.is_record() {
+                    for (scope, carries) in &mut self.loop_scopes {
+                        *carries |= index < *scope;
+                    }
                 }
                 self.locals[index].2
             }
@@ -1028,11 +1677,11 @@ impl<'p> Walker<'p> {
             }
         };
         if let (Some(emitter), Some(variable), Some(machine)) =
-            (emitter.as_mut(), variable, value.value)
+            (emitter.as_mut(), variable, machine)
         {
             emitter.builder.def_var(variable, machine);
         }
-        Ok(value)
+        Ok(())
     }
 
     /// `if (condition) yes else no`, or without `no` as a statement whose value nobody reads.
@@ -1147,6 +1796,7 @@ impl<'p> Walker<'p> {
                 let index = emitter.builder.declare_var(I64);
                 let zero = emitter.builder.ins().iconst(I64, 0);
                 emitter.builder.def_var(index, zero);
+                let mark = self.allocates.then(|| emitter.handle_mark());
                 emitter.builder.ins().jump(header, &[]);
                 emitter.builder.switch_to_block(header);
                 let current = emitter.builder.use_var(index);
@@ -1170,20 +1820,26 @@ impl<'p> Walker<'p> {
                 };
                 emitter.builder.def_var(target, value);
                 emitter.loops.push((next, exit));
-                Some((index, header, next, exit))
+                Some((index, header, next, exit, mark))
             }
             None => None,
         };
         self.breaks.push(false);
+        self.loop_scopes.push((scope, false));
         self.statement = true;
         let walked = self.expression(emitter, body);
         self.breaks.pop();
+        let carries = self.loop_scopes.pop().is_some_and(|(_, carries)| carries);
         self.locals.truncate(scope);
         walked?;
-        if let (Some(emitter), Some((index, header, next, exit))) = (emitter.as_mut(), blocks) {
+        if let (Some(emitter), Some((index, header, next, exit, mark))) = (emitter.as_mut(), blocks)
+        {
             emitter.loops.pop();
             emitter.builder.ins().jump(next, &[]);
             emitter.builder.switch_to_block(next);
+            if let Some(mark) = mark {
+                self.release_iteration(emitter, mark, carries);
+            }
             emitter.check_interrupt();
             let current = emitter.builder.use_var(index);
             let following = emitter.builder.ins().iadd_imm_s(current, 1);
@@ -1197,6 +1853,31 @@ impl<'p> Walker<'p> {
         })
     }
 
+    /// Releases what an iteration allocated, at a loop's back edge. When the iteration stored a
+    /// record in a local from before the loop, that local's current record must survive, so
+    /// every record local still in scope is rooted again above the mark; the handle stack
+    /// then stays the same size across iterations.
+    fn release_iteration(&self, emitter: &mut Emitter<'_>, mark: Value, carries: bool) {
+        if !carries {
+            emitter.release_handles(mark, None);
+            return;
+        }
+        let mut kept = self
+            .locals
+            .iter()
+            .filter(|(_, ty, _)| ty.is_record())
+            .filter_map(|&(_, _, variable)| variable);
+        let first = kept
+            .next()
+            .map(|variable| emitter.builder.use_var(variable));
+        emitter.release_handles(mark, first);
+        for variable in kept {
+            let value = emitter.builder.use_var(variable);
+            let top = emitter.handle_mark();
+            emitter.release_handles(top, Some(value));
+        }
+    }
+
     /// `while (condition) body`, or `repeat body` without a condition, as a statement.
     unsafe fn loop_body(
         &mut self,
@@ -1205,23 +1886,34 @@ impl<'p> Walker<'p> {
         body: Sexp,
     ) -> Result<Val, Refusal> {
         let scope = self.locals.len();
-        // Every iteration starts at the header, which checks for an interrupt first.
+        // Every iteration starts at the header, which checks for an interrupt first. `next`
+        // goes to the latch, which releases what the iteration allocated.
+        let allocates = self.allocates;
         let blocks = emitter.as_mut().map(|emitter| {
             let header = emitter.builder.create_block();
+            let latch = emitter.builder.create_block();
             let exit = emitter.builder.create_block();
+            let mark = allocates.then(|| emitter.handle_mark());
             emitter.builder.ins().jump(header, &[]);
             emitter.builder.switch_to_block(header);
             emitter.check_interrupt();
-            emitter.loops.push((header, exit));
-            (header, exit)
+            emitter.loops.push((latch, exit));
+            (header, latch, exit, mark)
         });
         self.breaks.push(false);
+        self.loop_scopes.push((scope, false));
         let walked = self.loop_iteration(emitter, condition, body);
         let breaks = self.breaks.pop().unwrap_or(true);
+        let carries = self.loop_scopes.pop().is_some_and(|(_, carries)| carries);
         self.locals.truncate(scope);
         let terminates = walked? || breaks;
-        if let (Some(emitter), Some((header, exit))) = (emitter.as_mut(), blocks) {
+        if let (Some(emitter), Some((header, latch, exit, mark))) = (emitter.as_mut(), blocks) {
             emitter.loops.pop();
+            emitter.builder.ins().jump(latch, &[]);
+            emitter.builder.switch_to_block(latch);
+            if let Some(mark) = mark {
+                self.release_iteration(emitter, mark, carries);
+            }
             emitter.builder.ins().jump(header, &[]);
             emitter.builder.switch_to_block(exit);
         }
@@ -1527,6 +2219,7 @@ unsafe fn emit<'f>(
         .ok_or(Refusal("a native function without a budget"))?;
     let failure = builder.create_block();
     builder.set_cold_block(failure);
+    let result = walker.own_result.unwrap_or(Ty::Int);
     let mut emitter = Emitter {
         builder,
         call_conv,
@@ -1534,7 +2227,12 @@ unsafe fn emit<'f>(
         budget,
         failure,
         loops: Vec::new(),
+        mark: None,
+        returns_record: result.is_record(),
     };
+    if walker.allocates {
+        emitter.mark = Some(emitter.handle_mark());
+    }
     // A call nested deeper than R allows, or a pending interrupt, belongs to the interpreter.
     let exhausted = emitter
         .builder
@@ -1553,9 +2251,13 @@ unsafe fn emit<'f>(
     }
     emitter.builder.ins().jump(failure, &[]);
     emitter.builder.switch_to_block(failure);
+    if let Some(mark) = emitter.mark {
+        emitter.release_handles(mark, None);
+    }
     let status = emitter.builder.ins().iconst(I64, FAILED);
-    let zero = match machine_type(walker.own_result.unwrap_or(Ty::Int)) {
+    let zero = match machine_type(result) {
         F64 => emitter.builder.ins().f64const(0.0),
+        I64 => emitter.builder.ins().iconst(I64, 0),
         _ => emitter.builder.ins().iconst(I32, 0),
     };
     emitter.builder.ins().return_(&[status, zero]);
@@ -1580,6 +2282,10 @@ struct Emitter<'f> {
     failure: cranelift_codegen::ir::Block,
     /// The enclosing loops' blocks for `next` and `break`, innermost last.
     loops: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>,
+    /// Where the handle stack stood on entry, for a function that allocates.
+    mark: Option<Value>,
+    /// Whether the function returns a record, which stays rooted when it returns.
+    returns_record: bool,
 }
 
 impl Emitter<'_> {
@@ -1763,10 +2469,110 @@ impl Emitter<'_> {
 
     /// Returns `value` and continues in a block nothing reaches.
     fn finish(&mut self, value: Value) {
+        if let Some(mark) = self.mark {
+            let keep = self.returns_record.then_some(value);
+            self.release_handles(mark, keep);
+        }
         let status = self.builder.ins().iconst(I64, OK);
         self.builder.ins().return_(&[status, value]);
         let dead = self.builder.create_block();
         self.builder.switch_to_block(dead);
+    }
+
+    /// Where the handle stack stands.
+    fn handle_mark(&mut self) -> Value {
+        self.helper(
+            runtime::jit_native_mark as *const () as usize,
+            &[],
+            I64,
+            &[],
+        )
+    }
+
+    /// Releases every handle rooted since `mark`, then roots `keep`.
+    fn release_handles(&mut self, mark: Value, keep: Option<Value>) {
+        let keep = keep.unwrap_or_else(|| self.builder.ins().iconst(I64, 0));
+        let mut signature = Signature::new(self.call_conv);
+        signature.params.push(AbiParam::new(I64));
+        signature.params.push(AbiParam::new(I64));
+        let signature = self.builder.import_signature(signature);
+        let callee = self
+            .builder
+            .ins()
+            .iconst(I64, runtime::jit_native_release as *const () as i64);
+        self.builder
+            .ins()
+            .call_indirect(signature, callee, &[mark, keep]);
+    }
+
+    /// Slot `index` of `record`, failing unless it holds a value of type `ty`: an unboxed scalar,
+    /// or for [`Ty::Obj`] a handle to a plain record.
+    fn field(&mut self, ty: Ty, record: Value, index: usize) -> Result<Value, Refusal> {
+        let offset = i32::try_from(RECORD_DATA_OFFSET as u64 + index as u64 * 8)
+            .map_err(|_| Refusal("a record field past the addressable slots"))?;
+        let raw = self
+            .builder
+            .ins()
+            .load(I64, MemFlagsData::trusted(), record, offset);
+        let unboxed = if index < UNBOXED_SLOTS {
+            let mask = self.builder.ins().load(
+                I64,
+                MemFlagsData::trusted(),
+                record,
+                RECORD_UNBOXED_OFFSET as i32,
+            );
+            let bit = self.builder.ins().band_imm_u(mask, 1i64 << index);
+            self.builder.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
+        } else {
+            self.builder
+                .ins()
+                .iconst(cranelift_codegen::ir::types::I8, 0)
+        };
+        if ty == Ty::Obj {
+            self.fail_if(unboxed);
+            let kind = self
+                .builder
+                .ins()
+                .uload8(I32, MemFlagsData::trusted(), raw, codegen::KIND);
+            let other =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::NotEqual, kind, SexpType::Record as i64);
+            let bits = self
+                .builder
+                .ins()
+                .uload8(I32, MemFlagsData::trusted(), raw, codegen::FLAGS);
+            let object = self.builder.ins().band_imm_u(bits, codegen::OBJECT_FLAG);
+            let classed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, object, 0);
+            let unusable = self.builder.ins().bor(other, classed);
+            self.fail_if(unusable);
+            return Ok(raw);
+        }
+        let upper = self.builder.ins().ushr_imm_u(raw, 32);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, upper, i64::from(INTEGER_PREFIX));
+        let logical = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, upper, i64::from(LOGICAL_PREFIX));
+        let fits = match ty {
+            Ty::Int => integer,
+            Ty::Lgl => logical,
+            _ => {
+                let either = self.builder.ins().bor(integer, logical);
+                self.builder.ins().icmp_imm_s(IntCC::Equal, either, 0)
+            }
+        };
+        let usable = self.builder.ins().band(unboxed, fits);
+        let unusable = self.builder.ins().bxor_imm_u(usable, 1);
+        self.fail_if(unusable);
+        Ok(if ty == Ty::Dbl {
+            self.builder.ins().bitcast(F64, MemFlagsData::new(), raw)
+        } else {
+            self.builder.ins().ireduce(I32, raw)
+        })
     }
 
     fn fail_if(&mut self, condition: Value) {
@@ -1800,6 +2606,44 @@ impl Emitter<'_> {
         }
         self.builder.ins().jump(join, &[value.into()]);
         Ok(())
+    }
+
+    /// `max(x, y)` or `min(x, y)`, failing on `NA` and `NaN`, whose propagation native code
+    /// leaves to the interpreter. A tie keeps `x`, as R's does.
+    fn extreme(
+        &mut self,
+        maximum: bool,
+        integers: bool,
+        (x_ty, x): (Ty, Value),
+        (y_ty, y): (Ty, Value),
+    ) -> Value {
+        if integers {
+            for value in [x, y] {
+                let missing = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, value, NA_INTEGER as i64);
+                self.fail_if(missing);
+            }
+            let condition = if maximum {
+                IntCC::SignedGreaterThan
+            } else {
+                IntCC::SignedLessThan
+            };
+            let wins = self.builder.ins().icmp(condition, y, x);
+            return self.builder.ins().select(wins, y, x);
+        }
+        let x = self.as_double(x_ty, x);
+        let y = self.as_double(y_ty, y);
+        let unordered = self.builder.ins().fcmp(FloatCC::Unordered, x, y);
+        self.fail_if(unordered);
+        let condition = if maximum {
+            FloatCC::GreaterThan
+        } else {
+            FloatCC::LessThan
+        };
+        let wins = self.builder.ins().fcmp(condition, y, x);
+        self.builder.ins().select(wins, y, x)
     }
 
     fn negate(&mut self, ty: Ty, value: Value) -> Value {
@@ -2030,4 +2874,208 @@ impl Emitter<'_> {
             }
         }
     }
+}
+
+/// Calls a typed closure through its native function when the arguments' values are at hand
+/// without forcing anything and the closure compiles for their types: the call then needs no
+/// frame, no promises and no annotation checks. `None` lets the caller make the call as usual,
+/// which is also what happens when the native function fails, since it has done nothing anyone
+/// can see by then.
+pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
+    use heap::object::gp;
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || interp::moves::tracking()
+    {
+        return None;
+    }
+    let formals = function.car();
+    let mut formal = formals;
+    let mut types: SmallVec<[Ty; 4]> = SmallVec::new();
+    let mut words: SmallVec<[u64; 4]> = SmallVec::new();
+    let mut read: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+    for arg in args {
+        if formal.kind() != SexpType::Pairlist
+            || formal.tag() == values::symbols().dots
+            || arg.tag != values::nil() && arg.tag != formal.tag()
+        {
+            return None;
+        }
+        let value = argument_value(arg.value)?;
+        if arg.value.kind() == SexpType::Promise && arg.value.car() == values::unbound() {
+            read.push((arg.value, value));
+        }
+        let (ty, word) = argument_word(value)?;
+        types.push(ty);
+        words.push(word);
+        formal = formal.cdr();
+    }
+    if formal.kind() == SexpType::Pairlist {
+        return None;
+    }
+    let native = native_for(function, &types)?;
+    let trampoline = trampoline(&native.params, native.result)?;
+    let heap = interp::heap();
+    let mark = heap.handle_mark();
+    let mut out = 0u64;
+    let status = trampoline(
+        native.address,
+        runtime::jit_depth_budget(),
+        words.as_ptr(),
+        &mut out,
+    );
+    if status != OK {
+        heap.release_handles(mark);
+        return None;
+    }
+    let value = match native.result {
+        Ty::Int => values::scalar_integer(out as u32 as i32),
+        Ty::Lgl => values::scalar_logical(out as u32 as i32),
+        Ty::Dbl => values::scalar_real(f64::from_bits(out)),
+        _ => Sexp::from_raw(out as *mut heap::object::Header)
+            .ok_or_else(|| interp::unwind::error("a native function returned no record")),
+    };
+    heap.release_handles(mark);
+    // The call read each unforced argument promise, so it is forced now: a promise shared
+    // through `...` must keep the value this call saw, as if tier 0 had forced it.
+    for (promise, value) in read {
+        heap.set_car(promise, value);
+        heap.set_tag(promise, values::nil());
+    }
+    interp::interp().visible = true;
+    Some(value)
+}
+
+type R<T> = Result<T, interp::unwind::Unwind>;
+
+/// The value an argument has without evaluating anything: a constant, a forced promise's value,
+/// or the binding a promise of a bare variable would read, unless reading it could run code.
+unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
+    if value.kind() != SexpType::Promise {
+        return (value != values::missing_arg()).then_some(value);
+    }
+    if value.car() != values::unbound() {
+        return Some(value.car());
+    }
+    let symbol = value.cdr();
+    if matches!(
+        symbol.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) {
+        // A promise of a constant evaluates to the constant itself.
+        return Some(symbol);
+    }
+    // A checked promise runs its annotation check when forced, which only tier 0 does.
+    if symbol.kind() != SexpType::Symbol
+        || value.tag() == values::nil()
+        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
+    {
+        return None;
+    }
+    let cell = interp::eval::find_cell(symbol, value.tag())?;
+    if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+        return None;
+    }
+    let bound = cell.cdr();
+    match bound.kind() {
+        SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
+        SexpType::Promise => None,
+        _ if bound == values::missing_arg() || bound == values::unbound() => None,
+        _ => Some(bound),
+    }
+}
+
+/// The native type of an argument's value and the 64 bits a native function takes it as.
+unsafe fn argument_word(value: Sexp) -> Option<(Ty, u64)> {
+    let plain = value.attrib() == values::nil() && !value.is_altrep();
+    let scalar = plain && values::length(value) == 1;
+    Some(match value.kind() {
+        SexpType::Integer if scalar => (Ty::Int, values::ints(value)[0] as u32 as u64),
+        SexpType::Logical if scalar => (Ty::Lgl, values::ints(value)[0] as u32 as u64),
+        SexpType::Real if scalar => (Ty::Dbl, values::reals(value)[0].to_bits()),
+        SexpType::Integer if plain => (Ty::IntVec, value.as_ptr() as u64),
+        SexpType::Logical if plain => (Ty::LglVec, value.as_ptr() as u64),
+        SexpType::Real if plain => (Ty::DblVec, value.as_ptr() as u64),
+        SexpType::Record if value.attrib() == values::nil() && !value.is_object() => {
+            (Ty::Rec(value.record_layout()), value.as_ptr() as u64)
+        }
+        _ => return None,
+    })
+}
+
+/// Calls the native function at `address` with the call budget and arguments as 64-bit words,
+/// storing its value's bits in `out` and returning its status.
+type Trampoline = unsafe extern "C" fn(usize, i64, *const u64, *mut u64) -> i64;
+
+/// The trampoline for native functions of this machine signature, compiled on first use.
+unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
+    thread_local! {
+        static TRAMPOLINES: RefCell<FxHashMap<SmallVec<[Type; 6]>, Trampoline>> =
+            RefCell::default();
+    }
+    let mut key: SmallVec<[Type; 6]> = params.iter().map(|&ty| machine_type(ty)).collect();
+    key.push(machine_type(result));
+    if let Some(found) = TRAMPOLINES.with_borrow(|trampolines| trampolines.get(&key).copied()) {
+        return Some(found);
+    }
+    let compiled = codegen::with_module(|module| {
+        let call_conv = module.isa().default_call_conv();
+        let mut outer = Signature::new(call_conv);
+        outer.params.extend([AbiParam::new(I64); 4]);
+        outer.returns.push(AbiParam::new(I64));
+        let id = module
+            .declare_anonymous_function(&outer)
+            .map_err(|_| Refusal("Cranelift rejected the trampoline declaration"))?;
+        let mut context = module.make_context();
+        context.func.signature = outer;
+        let mut function_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut function_context);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            let &[address, budget, words, out] = builder.block_params(entry) else {
+                return Err(Refusal("a trampoline without its parameters"));
+            };
+            let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
+            arguments.push(budget);
+            for (index, &ty) in params.iter().enumerate() {
+                arguments.push(builder.ins().load(
+                    machine_type(ty),
+                    MemFlagsData::trusted(),
+                    words,
+                    8 * index as i32,
+                ));
+            }
+            let inner = builder.import_signature(signature(params, result, call_conv));
+            let call = builder.ins().call_indirect(inner, address, &arguments);
+            let &[status, value] = builder.inst_results(call) else {
+                return Err(Refusal("a native call without a status and a value"));
+            };
+            builder.ins().store(MemFlagsData::trusted(), value, out, 0);
+            builder.ins().return_(&[status]);
+            builder.seal_all_blocks();
+            builder.finalize(module.isa().frontend_config());
+        }
+        module
+            .define_function(id, &mut context)
+            .map_err(|_| Refusal("Cranelift rejected the trampoline"))?;
+        module.clear_context(&mut context);
+        module
+            .finalize_definitions()
+            .map_err(|_| Refusal("Cranelift could not finalize the trampoline"))?;
+        Ok(module.get_finalized_function(id) as usize)
+    });
+    let address = match compiled {
+        Ok(address) => address,
+        Err(Refusal(why)) => {
+            if crate::logging() {
+                eprintln!("jit: no trampoline for {params:?} -> {result:?}: {why}");
+            }
+            return None;
+        }
+    };
+    // SAFETY: the code just compiled has exactly this signature, in the C calling convention.
+    let trampoline = std::mem::transmute::<usize, Trampoline>(address);
+    TRAMPOLINES.with_borrow_mut(|trampolines| trampolines.insert(key, trampoline));
+    Some(trampoline)
 }
