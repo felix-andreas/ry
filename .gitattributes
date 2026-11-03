@@ -1,0 +1,11 @@
+# Check every text file out with LF endings on every platform. ry embeds R sources with
+# include_str!, and GNU R's parse(text = ) rejects a carriage return, so a CRLF checkout on
+# Windows would break the embedded loader and drivers.
+* text=auto eol=lf
+
+# Files committed with CRLF endings, kept byte for byte so the rule above does not rewrite them.
+crates/oracle/cases/io__write_table.expected -text
+.vscode/settings.json -text
+.vscode/tasks.json -text
+editors/code/tsconfig.json -text
+tools/research/data/*.csv -text
