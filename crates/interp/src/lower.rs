@@ -1071,6 +1071,15 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 .into_iter()
                 .next()
                 .ok_or_else(|| error("missing operand"))?;
+            // `-` written before a suffixed literal is part of it, so `-128i8` is the `I8` it
+            // denotes rather than `128i8`, which does not fit, negated.
+            if operator.text() == "-"
+                && operand.kind() == SyntaxKind::LITERAL
+                && let Some(token) = significant_tokens(&operand).into_iter().next()
+                && token.kind() == SyntaxKind::SUFFIXED_NUMBER
+            {
+                return suffixed_number_value(token.text(), true);
+            }
             let operand = lower(&operand, source)?;
             let symbol = install(operator.text())?;
             values::call(symbol, &[operand])
@@ -1825,7 +1834,7 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
     let known = crate::heap().known();
     match token.kind() {
         SyntaxKind::DOUBLE => values::scalar_real(parse_number(text)),
-        SyntaxKind::SUFFIXED_NUMBER => suffixed_number_value(text),
+        SyntaxKind::SUFFIXED_NUMBER => suffixed_number_value(text, false),
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
@@ -1895,11 +1904,12 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
 /// A numeric literal: decimal, hexadecimal, or hexadecimal with a binary exponent.
 /// The value a suffixed number such as `5i64` runs as: an `F64` is an R double, and every other
 /// type is a native number.
-unsafe fn suffixed_number_value(text: &str) -> R<Sexp> {
+unsafe fn suffixed_number_value(text: &str, negative: bool) -> R<Sexp> {
     use {crate::numbers::NumberType as Native, syntax::NumberType as Suffix};
     let (number, suffix) =
         split_number_suffix(text).ok_or_else(|| error(format!("malformed number `{text}`")))?;
     let ty = match suffix {
+        Suffix::F64 if negative => return values::scalar_real(-parse_number(number)),
         Suffix::F64 => return values::scalar_real(parse_number(number)),
         Suffix::I8 => Native::I8,
         Suffix::I16 => Native::I16,
@@ -1914,7 +1924,11 @@ unsafe fn suffixed_number_value(text: &str) -> R<Sexp> {
         Suffix::F32 => Native::F32,
         Suffix::Dec => Native::Dec,
     };
-    crate::numbers::from_text(ty, number)
+    if negative {
+        crate::numbers::from_text(ty, &format!("-{number}"))
+    } else {
+        crate::numbers::from_text(ty, number)
+    }
 }
 
 pub fn parse_number(text: &str) -> f64 {

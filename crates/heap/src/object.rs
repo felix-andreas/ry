@@ -495,7 +495,7 @@ impl Slot {
 
 /// How `value` is stored in slot `index`: raw when it is a length-one double, integer or logical
 /// without attributes, and a handle otherwise. A resizable vector stays a handle, because it is
-/// kept to grow in place.
+/// kept to grow in place, and so does a one-item ry list, whose list flag a raw slot would drop.
 pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
     unsafe {
         if index >= UNBOXED_SLOTS
@@ -507,6 +507,7 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
             )
             || value.length() != 1
             || value.flags() & flag_bits::RESIZABLE != 0
+            || value.is_array()
         {
             return Slot::Handle(value);
         }

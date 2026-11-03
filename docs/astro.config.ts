@@ -43,6 +43,7 @@ export default defineConfig({
 		'/type-checking/stubs': '/type-checking/unknown#package-stubs',
 		'/type-checking/limitations': '/type-checking/unknown#limitations',
 		'/type-checking/dataframes': '/guides/dataframes#types',
+		'/type-checking/arrays': '/type-checking/lists',
 	},
 	integrations: [
 		starlight({
@@ -100,7 +101,7 @@ export default defineConfig({
 					items: [
 						{ slug: 'type-checking/inline-annotations' },
 						{ slug: 'type-checking/records-and-tags' },
-						{ slug: 'type-checking/arrays' },
+						{ slug: 'type-checking/lists' },
 					],
 				},
 				{

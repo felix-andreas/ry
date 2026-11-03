@@ -220,8 +220,8 @@ List.len <- function(list)
 The number of elements.
 
 ```r ry run runtime=ry dput
-List.len(list("a", "b"))
-#> 2L
+List.len(["a", "b"])
+#> 2i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L144)
@@ -249,7 +249,7 @@ List.is_empty <- function(list)
 Whether the list has no elements.
 
 ```r ry run runtime=ry dput
-List.is_empty(list())
+List.is_empty([])
 #> TRUE
 ```
 
@@ -278,7 +278,7 @@ List.get <- function(list, index)
 The element at a 1-based position, or `:Err(:OutOfBounds)`.
 
 ```r ry run runtime=ry dput
-List.get(list("a", "b"), 3L)
+List.get(["a", "b"], 3)
 #> :Err(:OutOfBounds)
 ```
 
@@ -307,8 +307,8 @@ List.set <- function(list, index, value)
 Replaces the element at a position; a position out of range leaves the list unchanged.
 
 ```r ry run runtime=ry dput
-List.set(list("a", "b"), 2L, "z")
-#> list("a", "z")
+List.set(["a", "b"], 2, "z")
+#> ["a", "z"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L168)
@@ -336,8 +336,8 @@ List.update <- function(list, index, f)
 Replaces the element at a position with `f` of it.
 
 ```r ry run runtime=ry dput
-List.update(list(1L, 2L), 1L, function(x) x + 10L)
-#> list(11L, 2L)
+List.update([1, 2], 1, function(x) x + 10)
+#> [11, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L176)
@@ -365,8 +365,8 @@ List.append <- function(list, value)
 Adds an element at the end.
 
 ```r ry run runtime=ry dput
-List.append(list(1L, 2L), 3L)
-#> list(1L, 2L, 3L)
+List.append([1, 2], 3)
+#> [1, 2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L184)
@@ -394,8 +394,8 @@ List.prepend <- function(list, value)
 Adds an element at the start.
 
 ```r ry run runtime=ry dput
-List.prepend(list(1L, 2L), 0L)
-#> list(0L, 1L, 2L)
+List.prepend([1, 2], 0)
+#> [0, 1, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L192)
@@ -423,8 +423,8 @@ List.concat <- function(first, second)
 The elements of `first` followed by those of `second`.
 
 ```r ry run runtime=ry dput
-List.concat(list(1L), list(2L, 3L))
-#> list(1L, 2L, 3L)
+List.concat([1], [2, 3])
+#> [1, 2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L200)
@@ -453,7 +453,7 @@ A list of one element.
 
 ```r ry run runtime=ry dput
 List.single("only")
-#> list("only")
+#> ["only"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L208)
@@ -481,8 +481,8 @@ List.repeat <- function(value, count)
 A list of `count` copies of `value`.
 
 ```r ry run runtime=ry dput
-List.repeat("x", 3L)
-#> list("x", "x", "x")
+List.repeat("x", 3)
+#> ["x", "x", "x"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L216)
@@ -514,10 +514,10 @@ Both `List.range` and `List.repeat` stop with an error when the list would hold 
 2,147,483,647 elements, the longest vector an R integer index reaches.
 
 ```r ry run runtime=ry dput
-List.range(2L, 5L)
-#> list(2L, 3L, 4L, 5L)
-List.range(3L, 1L)
-#> list()
+List.range(2, 5)
+#> [2i64, 3i64, 4i64, 5i64]
+List.range(3, 1)
+#> []
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L230)
@@ -545,8 +545,8 @@ List.reverse <- function(list)
 The elements in reverse order.
 
 ```r ry run runtime=ry dput
-List.reverse(list(1L, 2L, 3L))
-#> list(3L, 2L, 1L)
+List.reverse([1, 2, 3])
+#> [3, 2, 1]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L238)
@@ -574,8 +574,8 @@ List.join <- function(lists)
 Concatenates a list of lists.
 
 ```r ry run runtime=ry dput
-List.join(list(list(1L), list(), list(2L, 3L)))
-#> list(1L, 2L, 3L)
+List.join([[1], [], [2, 3]])
+#> [1, 2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L246)
@@ -603,8 +603,8 @@ List.map <- function(list, f)
 Applies `f` to every element.
 
 ```r ry run runtime=ry dput
-List.map(list(1L, 2L, 3L), function(x) x * 2L)
-#> list(2L, 4L, 6L)
+List.map([1, 2, 3], function(x) x * 2)
+#> [2, 4, 6]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L254)
@@ -632,8 +632,8 @@ List.map_with_index <- function(list, f)
 Applies `f` to every element and its 1-based position.
 
 ```r ry run runtime=ry dput
-List.map_with_index(list("a", "b"), function(x, i) Str.concat(x, Num.to_str(i)))
-#> list("a1", "b2")
+List.map_with_index(["a", "b"], function(x, i) Str.concat(x, Num.to_str(i)))
+#> ["a1", "b2"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L262)
@@ -661,8 +661,8 @@ List.map2 <- function(first, second, f)
 Applies `f` to the elements of two lists pairwise, stopping at the shorter one.
 
 ```r ry run runtime=ry dput
-List.map2(list(1L, 2L, 3L), list(10L, 20L), function(a, b) a + b)
-#> list(11L, 22L)
+List.map2([1, 2, 3], [10, 20], function(a, b) a + b)
+#> [11, 22]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L270)
@@ -690,8 +690,8 @@ List.map3 <- function(first, second, third, f)
 Applies `f` to the elements at each position of three lists, up to the shortest one.
 
 ```r ry run runtime=ry dput
-List.map3(list(1L, 2L), list(10L, 20L), list(100L, 200L), function(a, b, c) a + b + c)
-#> list(111L, 222L)
+List.map3([1, 2], [10, 20], [100, 200], function(a, b, c) a + b + c)
+#> [111, 222]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L278)
@@ -719,8 +719,8 @@ List.map4 <- function(first, second, third, fourth, f)
 Applies `f` to the elements at each position of four lists, up to the shortest one.
 
 ```r ry run runtime=ry dput
-List.map4(list(1L), list(2L), list(3L), list(4L), function(a, b, c, d) a * b * c * d)
-#> list(24L)
+List.map4([1], [2], [3], [4], function(a, b, c, d) a * b * c * d)
+#> [24]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L286)
@@ -748,8 +748,8 @@ List.join_map <- function(list, f)
 Applies `f`, which returns a list, to every element and concatenates the results.
 
 ```r ry run runtime=ry dput
-List.join_map(list(1L, 2L), function(x) list(x, x))
-#> list(1L, 1L, 2L, 2L)
+List.join_map([1, 2], function(x) [x, x])
+#> [1, 1, 2, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L294)
@@ -777,8 +777,8 @@ List.keep_if <- function(list, predicate)
 The elements for which `predicate` is `TRUE`.
 
 ```r ry run runtime=ry dput
-List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
-#> list(5L, 2L)
+List.keep_if([1, 5, 2], function(x) x > 1)
+#> [5, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L302)
@@ -806,9 +806,9 @@ List.keep_if_try <- function(list, predicate)
 The elements for which `predicate` returns `:Ok(TRUE)`, or the first `:Err` it returns.
 
 ```r ry run runtime=ry dput
-List.keep_if_try(list("1", "20", "3"), function(s) Result.map(Str.to_i64(s), function(n) n > 2L))
-#> :Ok(list("20", "3"))
-List.keep_if_try(list("1", "x"), function(s) Result.map(Str.to_i64(s), function(n) n > 2L))
+List.keep_if_try(["1", "20", "3"], function(s) Result.map(Str.to_i64(s), function(n) n > 2))
+#> :Ok(["20", "3"])
+List.keep_if_try(["1", "x"], function(s) Result.map(Str.to_i64(s), function(n) n > 2))
 #> :Err(:InvalidNumStr)
 ```
 
@@ -837,8 +837,8 @@ List.drop_if <- function(list, predicate)
 The elements for which `predicate` is `FALSE`.
 
 ```r ry run runtime=ry dput
-List.drop_if(list(1L, 5L, 2L), function(x) x > 1L)
-#> list(1L)
+List.drop_if([1, 5, 2], function(x) x > 1)
+#> [1]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L320)
@@ -866,8 +866,8 @@ List.keep_oks <- function(list, f)
 Applies `f` to every element and keeps the `:Ok` values.
 
 ```r ry run runtime=ry dput
-List.keep_oks(list("1", "x", "3"), Str.to_i64)
-#> list(1L, 3L)
+List.keep_oks(["1", "x", "3"], Str.to_i64)
+#> [1i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L328)
@@ -895,8 +895,8 @@ List.keep_errs <- function(list, f)
 Applies `f` to every element and keeps the `:Err` values.
 
 ```r ry run runtime=ry dput
-List.keep_errs(list("1", "x"), Str.to_i64)
-#> list(:InvalidNumStr)
+List.keep_errs(["1", "x"], Str.to_i64)
+#> [:InvalidNumStr]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L336)
@@ -924,8 +924,8 @@ List.map_try <- function(list, f)
 Applies `f` to every element and stops at the first `:Err`.
 
 ```r ry run runtime=ry dput
-List.map_try(list("1", "2"), Str.to_i64)
-#> :Ok(list(1L, 2L))
+List.map_try(["1", "2"], Str.to_i64)
+#> :Ok([1i64, 2i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L344)
@@ -953,8 +953,8 @@ List.walk <- function(list, state, f)
 Folds from the first element: `f` gets the state and an element and returns the next state.
 
 ```r ry run runtime=ry dput
-List.walk(list(1L, 2L, 3L), 0L, function(total, x) total + x)
-#> 6L
+List.walk([1, 2, 3], 0, function(total, x) total + x)
+#> 6
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L352)
@@ -982,7 +982,7 @@ List.walk_backwards <- function(list, state, f)
 Folds from the last element.
 
 ```r ry run runtime=ry dput
-List.walk_backwards(list("a", "b", "c"), "", function(text, x) Str.concat(text, x))
+List.walk_backwards(["a", "b", "c"], "", function(text, x) Str.concat(text, x))
 #> "cba"
 ```
 
@@ -1011,8 +1011,8 @@ List.walk_until <- function(list, state, f)
 Folds until `f` returns `:Break(state)`; `:Continue(state)` goes on.
 
 ```r ry run runtime=ry dput
-List.walk_until(list(1L, 2L, 3L, 4L), 0L, function(total, x) if (total >= 3L) :Break(total) else :Continue(total + x))
-#> 3L
+List.walk_until([1, 2, 3, 4], 0, function(total, x) if (total >= 3) :Break(total) else :Continue(total + x))
+#> 3
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L368)
@@ -1040,8 +1040,8 @@ List.walk_backwards_until <- function(list, state, f)
 Folds the list from the last element until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
-List.walk_backwards_until(list(1L, 5L, 2L, 3L), 0L, function(total, x) if (x > 4L) :Break(total) else :Continue(total + x))
-#> 5L
+List.walk_backwards_until([1, 5, 2, 3], 0, function(total, x) if (x > 4) :Break(total) else :Continue(total + x))
+#> 5
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L376)
@@ -1069,8 +1069,8 @@ List.walk_with_index <- function(list, state, f)
 Folds the list, passing `f` each element's 1-based position too.
 
 ```r ry run runtime=ry dput
-List.walk_with_index(list(10L, 20L, 30L), 0L, function(total, x, i) total + x * i)
-#> 140L
+List.walk_with_index([10, 20, 30], 0, function(total, x, i) total + x * i)
+#> 140i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L384)
@@ -1098,7 +1098,7 @@ List.walk_with_index_until <- function(list, state, f)
 Folds the list with positions until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
-List.walk_with_index_until(list("a", "b", "c"), "", function(seen, x, i) if (i > 2L) :Break(seen) else :Continue(Str.concat(seen, x)))
+List.walk_with_index_until(["a", "b", "c"], "", function(seen, x, i) if (i > 2) :Break(seen) else :Continue(Str.concat(seen, x)))
 #> "ab"
 ```
 
@@ -1127,8 +1127,8 @@ List.walk_from <- function(list, index, state, f)
 Folds the list from a 1-based position onwards.
 
 ```r ry run runtime=ry dput
-List.walk_from(list(1L, 2L, 3L, 4L), 3L, 0L, function(total, x) total + x)
-#> 7L
+List.walk_from([1, 2, 3, 4], 3, 0, function(total, x) total + x)
+#> 7
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L400)
@@ -1156,8 +1156,8 @@ List.walk_from_until <- function(list, index, state, f)
 Folds the list from a position until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
-List.walk_from_until(list(1L, 2L, 3L, 4L), 2L, 0L, function(total, x) if (total >= 5L) :Break(total) else :Continue(total + x))
-#> 5L
+List.walk_from_until([1, 2, 3, 4], 2, 0, function(total, x) if (total >= 5) :Break(total) else :Continue(total + x))
+#> 5
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L408)
@@ -1185,7 +1185,7 @@ List.walk_try <- function(list, state, f)
 Folds the list while `f` returns `:Ok(state)`, stopping at the first `:Err`.
 
 ```r ry run runtime=ry dput
-List.walk_try(list("1", "2", "x"), 0L, function(total, s) Result.map(Str.to_i64(s), function(n) total + n))
+List.walk_try(["1", "2", "x"], 0, function(total, s) Result.map(Str.to_i64(s), function(n) total + n))
 #> :Err(:InvalidNumStr)
 ```
 
@@ -1214,7 +1214,7 @@ List.for_each <- function(list, f)
 Calls `f` on each element for its effect, and returns `NULL` invisibly.
 
 ```r ry run runtime=ry
-List.for_each(list("a", "b"), function(x) cat(x, "\n"))
+List.for_each(["a", "b"], function(x) cat(x, "\n"))
 #> a
 #> b
 ```
@@ -1244,8 +1244,8 @@ List.for_each_try <- function(list, f)
 Calls `f` on each element, stopping at the first `:Err`.
 
 ```r ry run runtime=ry dput
-List.for_each_try(list(1L, -2L, 3L), function(x) if (x < 0L) :Err(:Negative(x)) else :Ok(NULL))
-#> :Err(:Negative(-2L))
+List.for_each_try([1, -2, 3], function(x) if (x < 0) :Err(:Negative(x)) else :Ok(NULL))
+#> :Err(:Negative(-2))
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L433)
@@ -1273,7 +1273,7 @@ List.any <- function(list, predicate)
 Whether `predicate` is `TRUE` for some element.
 
 ```r ry run runtime=ry dput
-List.any(list(1L, 5L), function(x) x > 4L)
+List.any([1, 5], function(x) x > 4)
 #> TRUE
 ```
 
@@ -1302,7 +1302,7 @@ List.all <- function(list, predicate)
 Whether `predicate` is `TRUE` for every element; `TRUE` for an empty list.
 
 ```r ry run runtime=ry dput
-List.all(list(1L, 5L), function(x) x > 4L)
+List.all([1, 5], function(x) x > 4)
 #> FALSE
 ```
 
@@ -1331,7 +1331,7 @@ List.contains <- function(list, value)
 Whether some element is `identical()` to `value`.
 
 ```r ry run runtime=ry dput
-List.contains(list("a", "b"), "b")
+List.contains(["a", "b"], "b")
 #> TRUE
 ```
 
@@ -1360,8 +1360,8 @@ List.count_if <- function(list, predicate)
 The number of elements for which `predicate` is `TRUE`.
 
 ```r ry run runtime=ry dput
-List.count_if(list(1L, 5L, 7L), function(x) x > 4L)
-#> 2L
+List.count_if([1, 5, 7], function(x) x > 4)
+#> 2i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L465)
@@ -1389,8 +1389,8 @@ List.find_first <- function(list, predicate)
 The first element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
-List.find_first(list(1L, 5L, 7L), function(x) x > 4L)
-#> :Ok(5L)
+List.find_first([1, 5, 7], function(x) x > 4)
+#> :Ok(5)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L473)
@@ -1418,8 +1418,8 @@ List.find_last <- function(list, predicate)
 The last element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
-List.find_last(list(1L, 5L, 7L), function(x) x > 4L)
-#> :Ok(7L)
+List.find_last([1, 5, 7], function(x) x > 4)
+#> :Ok(7)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L481)
@@ -1447,8 +1447,8 @@ List.find_first_index <- function(list, predicate)
 The position of the first match, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
-List.find_first_index(list(1L, 5L, 7L), function(x) x > 4L)
-#> :Ok(2L)
+List.find_first_index([1, 5, 7], function(x) x > 4)
+#> :Ok(2i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L489)
@@ -1476,7 +1476,7 @@ List.find_last_index <- function(list, predicate)
 The position of the last match, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
-List.find_last_index(list(1L, 5L, 7L), function(x) x > 9L)
+List.find_last_index([1, 5, 7], function(x) x > 9)
 #> :Err(:NotFound)
 ```
 
@@ -1505,7 +1505,7 @@ List.first <- function(list)
 The first element, or `:Err(:ListWasEmpty)`.
 
 ```r ry run runtime=ry dput
-List.first(list("a", "b"))
+List.first(["a", "b"])
 #> :Ok("a")
 ```
 
@@ -1534,7 +1534,7 @@ List.last <- function(list)
 The last element, or `:Err(:ListWasEmpty)`.
 
 ```r ry run runtime=ry dput
-List.last(list())
+List.last([])
 #> :Err(:ListWasEmpty)
 ```
 
@@ -1563,8 +1563,8 @@ List.take_first <- function(list, count)
 The first `count` elements, or all of them if there are fewer.
 
 ```r ry run runtime=ry dput
-List.take_first(list(1L, 2L, 3L), 2L)
-#> list(1L, 2L)
+List.take_first([1, 2, 3], 2)
+#> [1, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L521)
@@ -1592,8 +1592,8 @@ List.take_last <- function(list, count)
 The last `count` elements.
 
 ```r ry run runtime=ry dput
-List.take_last(list(1L, 2L, 3L), 2L)
-#> list(2L, 3L)
+List.take_last([1, 2, 3], 2)
+#> [2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L529)
@@ -1621,8 +1621,8 @@ List.drop_first <- function(list, count)
 Everything but the first `count` elements.
 
 ```r ry run runtime=ry dput
-List.drop_first(list(1L, 2L, 3L), 2L)
-#> list(3L)
+List.drop_first([1, 2, 3], 2)
+#> [3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L537)
@@ -1650,8 +1650,8 @@ List.drop_last <- function(list, count)
 Everything but the last `count` elements.
 
 ```r ry run runtime=ry dput
-List.drop_last(list(1L, 2L, 3L), 2L)
-#> list(1L)
+List.drop_last([1, 2, 3], 2)
+#> [1]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L545)
@@ -1679,8 +1679,8 @@ List.drop_at <- function(list, index)
 Removes the element at a position.
 
 ```r ry run runtime=ry dput
-List.drop_at(list("a", "b", "c"), 2L)
-#> list("a", "c")
+List.drop_at(["a", "b", "c"], 2)
+#> ["a", "c"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L553)
@@ -1708,8 +1708,8 @@ List.sublist <- function(list, start, count)
 `count` elements starting at position `start`.
 
 ```r ry run runtime=ry dput
-List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
-#> list(2L, 3L)
+List.sublist([1, 2, 3, 4], 2, 2)
+#> [2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L561)
@@ -1737,8 +1737,8 @@ List.split_at <- function(list, count)
 The first `count` elements as `before` and the rest as `others`.
 
 ```r ry run runtime=ry dput
-List.split_at(list(1L, 2L, 3L), 1L)
-#> (before = list(1L), others = list(2L, 3L))
+List.split_at([1, 2, 3], 1)
+#> (before = [1], others = [2, 3])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L569)
@@ -1766,8 +1766,8 @@ List.split_first <- function(list, delimiter)
 Splits the list around the first element identical to `delimiter`.
 
 ```r ry run runtime=ry dput
-List.split_first(list("a", "-", "b", "-", "c"), "-")
-#> :Ok((after = list("b", "-", "c"), before = list("a")))
+List.split_first(["a", "-", "b", "-", "c"], "-")
+#> :Ok((after = ["b", "-", "c"], before = ["a"]))
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L577)
@@ -1795,8 +1795,8 @@ List.split_last <- function(list, delimiter)
 Splits the list around the last element identical to `delimiter`.
 
 ```r ry run runtime=ry dput
-List.split_last(list("a", "-", "b", "-", "c"), "-")
-#> :Ok((after = list("c"), before = list("a", "-", "b")))
+List.split_last(["a", "-", "b", "-", "c"], "-")
+#> :Ok((after = ["c"], before = ["a", "-", "b"]))
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L585)
@@ -1824,8 +1824,8 @@ List.split_on <- function(list, delimiter)
 The runs of elements between elements identical to `delimiter`.
 
 ```r ry run runtime=ry dput
-List.split_on(list(1L, 0L, 2L, 3L, 0L, 4L), 0L)
-#> list(list(1L), list(2L, 3L), list(4L))
+List.split_on([1, 0, 2, 3, 0, 4], 0)
+#> [[1], [2, 3], [4]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L593)
@@ -1853,8 +1853,8 @@ List.split_on_list <- function(list, delimiter)
 The runs of elements between occurrences of the sublist `delimiter`.
 
 ```r ry run runtime=ry dput
-List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))
-#> list(list(1L), list(2L, 0L, 3L))
+List.split_on_list([1, 0, 0, 2, 0, 3], [0, 0])
+#> [[1], [2, 0, 3]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L601)
@@ -1882,8 +1882,8 @@ List.chunks_of <- function(list, size)
 Groups of `size` elements; the last group may be shorter.
 
 ```r ry run runtime=ry dput
-List.chunks_of(list(1L, 2L, 3L), 2L)
-#> list(list(1L, 2L), list(3L))
+List.chunks_of([1, 2, 3], 2)
+#> [[1, 2], [3]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L609)
@@ -1911,8 +1911,8 @@ List.intersperse <- function(list, separator)
 Puts `separator` between every two elements.
 
 ```r ry run runtime=ry dput
-List.intersperse(list("a", "b", "c"), "-")
-#> list("a", "-", "b", "-", "c")
+List.intersperse(["a", "b", "c"], "-")
+#> ["a", "-", "b", "-", "c"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L617)
@@ -1940,8 +1940,8 @@ List.sort_with <- function(list, compare)
 A stable sort by `compare`, which returns `:LT`, `:EQ` or `:GT`.
 
 ```r ry run runtime=ry dput
-List.sort_with(list(3L, 1L, 2L), Num.compare)
-#> list(1L, 2L, 3L)
+List.sort_with([3, 1, 2], Num.compare)
+#> [1, 2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L625)
@@ -1969,8 +1969,8 @@ List.sort_asc <- function(list)
 Sorts numbers from smallest to largest.
 
 ```r ry run runtime=ry dput
-List.sort_asc(list(3L, 1L, 2L))
-#> list(1L, 2L, 3L)
+List.sort_asc([3, 1, 2])
+#> [1, 2, 3]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L633)
@@ -1998,8 +1998,8 @@ List.sort_desc <- function(list)
 Sorts numbers from largest to smallest.
 
 ```r ry run runtime=ry dput
-List.sort_desc(list(1.5, 3, 2))
-#> list(3, 2, 1.5)
+List.sort_desc([1.5, 3, 2])
+#> [3, 2, 1.5]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L641)
@@ -2027,8 +2027,8 @@ List.swap <- function(list, first, second)
 Exchanges the elements at two positions; an out-of-range position leaves the list unchanged.
 
 ```r ry run runtime=ry dput
-List.swap(list("a", "b", "c"), 1L, 3L)
-#> list("c", "b", "a")
+List.swap(["a", "b", "c"], 1, 3)
+#> ["c", "b", "a"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L649)
@@ -2056,8 +2056,8 @@ List.replace <- function(list, index, value)
 Replaces the element at a position, returning the new list and the element it replaced.
 
 ```r ry run runtime=ry dput
-List.replace(list("a", "b"), 2L, "z")
-#> (list = list("a", "z"), value = "b")
+List.replace(["a", "b"], 2, "z")
+#> (list = ["a", "z"], value = "b")
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L657)
@@ -2085,8 +2085,8 @@ List.append_if_ok <- function(list, result)
 Adds an `:Ok` value at the end; an `:Err` leaves the list unchanged.
 
 ```r ry run runtime=ry dput
-List.append_if_ok(list(1L), Str.to_i64("2"))
-#> list(1L, 2L)
+List.append_if_ok([1], Str.to_i64("2"))
+#> [1i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L665)
@@ -2114,8 +2114,8 @@ List.prepend_if_ok <- function(list, result)
 Adds an `:Ok` value at the start; an `:Err` leaves the list unchanged.
 
 ```r ry run runtime=ry dput
-List.prepend_if_ok(list(1L), Str.to_i64("x"))
-#> list(1L)
+List.prepend_if_ok([1], Str.to_i64("x"))
+#> [1]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L673)
@@ -2143,8 +2143,8 @@ List.concat_utf8 <- function(list, string)
 Appends the UTF-8 bytes of a string to a list of bytes.
 
 ```r ry run runtime=ry dput
-List.concat_utf8(list(104L), "i")
-#> list(104L, 105L)
+List.concat_utf8([104], "i")
+#> [104u8, 105u8]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L681)
@@ -2172,8 +2172,8 @@ List.with_capacity <- function(capacity)
 An empty list with room for `capacity` elements, so appending that many never copies.
 
 ```r ry run runtime=ry dput
-List.len(List.with_capacity(1000L))
-#> 0L
+List.len(List.with_capacity(1000))
+#> 0i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L689)
@@ -2201,8 +2201,8 @@ List.reserve <- function(list, spare)
 The list with room for `spare` more elements.
 
 ```r ry run runtime=ry dput
-List.reserve(list(1L, 2L), 100L)
-#> list(1L, 2L)
+List.reserve([1, 2], 100)
+#> [1, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L697)
@@ -2231,8 +2231,8 @@ The list with no room beyond its elements, which gives back what `List.reserve` 
 `List.with_capacity` set aside.
 
 ```r ry run runtime=ry dput
-List.release_excess_capacity(List.reserve(list(1L, 2L), 100L))
-#> list(1L, 2L)
+List.release_excess_capacity(List.reserve([1, 2], 100))
+#> [1, 2]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L706)
@@ -2263,8 +2263,8 @@ accumulated like R's `sum()`, with more precision than a plain left-to-right fol
 `List.sum(xs)` and `sum(xs)` give the same number.
 
 ```r ry run runtime=ry dput
-List.sum(list(1L, 2L, 3L))
-#> 6L
+List.sum([1, 2, 3])
+#> 6
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L717)
@@ -2293,7 +2293,7 @@ The product of the elements; `1L` for an empty list. An `integer` product that o
 error, as for `List.sum`.
 
 ```r ry run runtime=ry dput
-List.product(list(2, 2.5))
+List.product([2, 2.5])
 #> 5
 ```
 
@@ -2322,8 +2322,8 @@ List.min <- function(list)
 The smallest element, or `:Err(:ListWasEmpty)`.
 
 ```r ry run runtime=ry dput
-List.min(list(3L, 1L, 2L))
-#> :Ok(1L)
+List.min([3, 1, 2])
+#> :Ok(1)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L734)
@@ -2351,7 +2351,7 @@ List.max <- function(list)
 The largest element, or `:Err(:ListWasEmpty)`.
 
 ```r ry run runtime=ry dput
-List.max(list())
+List.max([])
 #> :Err(:ListWasEmpty)
 ```
 
@@ -2380,7 +2380,7 @@ List.starts_with <- function(list, prefix)
 Whether the list begins with the elements of `prefix`.
 
 ```r ry run runtime=ry dput
-List.starts_with(list(1L, 2L, 3L), list(1L, 2L))
+List.starts_with([1, 2, 3], [1, 2])
 #> TRUE
 ```
 
@@ -2409,7 +2409,7 @@ List.ends_with <- function(list, suffix)
 Whether the list ends with the elements of `suffix`.
 
 ```r ry run runtime=ry dput
-List.ends_with(list(1L, 2L, 3L), list(2L))
+List.ends_with([1, 2, 3], [2])
 #> FALSE
 ```
 

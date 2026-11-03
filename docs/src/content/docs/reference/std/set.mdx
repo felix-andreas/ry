@@ -65,7 +65,7 @@ Set.empty()
 #> Set.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2105)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2096)
 
 ## `Set.with_capacity`
 
@@ -91,11 +91,11 @@ An empty set with room for `capacity` elements, so inserting that many never gro
 is rounded up to a power of two.
 
 ```r ry run runtime=ry dput
-Set.capacity(Set.insert(Set.with_capacity(64L), "a"))
-#> 64L
+Set.capacity(Set.insert(Set.with_capacity(64), "a"))
+#> 64i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2114)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2105)
 
 ## `Set.single`
 
@@ -121,10 +121,10 @@ A set with one element.
 
 ```r ry run runtime=ry dput
 Set.single("a")
-#> Set.from_list(list("a"))
+#> Set.from_list(["a"])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2122)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2113)
 
 ## `Set.from_list`
 
@@ -149,11 +149,11 @@ Set.from_list <- function(list)
 A set of the list's elements, without duplicates, in first-seen order.
 
 ```r ry run runtime=ry dput
-Set.from_list(list(2L, 1L, 2L))
-#> Set.from_list(list(2L, 1L))
+Set.from_list([2, 1, 2])
+#> Set.from_list([2, 1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2130)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2121)
 
 ## `Set.to_list`
 
@@ -178,11 +178,11 @@ Set.to_list <- function(set)
 The elements, in insertion order.
 
 ```r ry run runtime=ry dput
-Set.to_list(Set.from_list(list("b", "a")))
-#> list("b", "a")
+Set.to_list(Set.from_list(["b", "a"]))
+#> ["b", "a"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2138)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2129)
 
 ## `Set.len`
 
@@ -207,11 +207,11 @@ Set.len <- function(set)
 The number of elements.
 
 ```r ry run runtime=ry dput
-Set.len(Set.from_list(list(1L, 1L, 2L)))
-#> 2L
+Set.len(Set.from_list([1, 1, 2]))
+#> 2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2146)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2137)
 
 ## `Set.is_empty`
 
@@ -240,7 +240,7 @@ Set.is_empty(Set.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2154)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2145)
 
 ## `Set.contains`
 
@@ -265,11 +265,11 @@ Set.contains <- function(set, element)
 Whether `element` is in the set.
 
 ```r ry run runtime=ry dput
-Set.contains(Set.from_list(list(1L, 2L)), 2L)
+Set.contains(Set.from_list([1, 2]), 2)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2162)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2153)
 
 ## `Set.insert`
 
@@ -294,11 +294,11 @@ Set.insert <- function(set, element)
 Adds an element.
 
 ```r ry run runtime=ry dput
-Set.insert(Set.single(1L), 2L)
-#> Set.from_list(list(1L, 2L))
+Set.insert(Set.single(1), 2)
+#> Set.from_list([1, 2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2170)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2161)
 
 ## `Set.remove`
 
@@ -323,11 +323,11 @@ Set.remove <- function(set, element)
 Removes an element, if it is there.
 
 ```r ry run runtime=ry dput
-Set.remove(Set.from_list(list(1L, 2L)), 1L)
-#> Set.from_list(list(2L))
+Set.remove(Set.from_list([1, 2]), 1)
+#> Set.from_list([2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2178)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2169)
 
 ## `Set.union`
 
@@ -352,11 +352,11 @@ Set.union <- function(first, second)
 The elements of either set.
 
 ```r ry run runtime=ry dput
-Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#> Set.from_list(list(1L, 2L, 3L))
+Set.union(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#> Set.from_list([1, 2, 3])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2186)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2177)
 
 ## `Set.intersection`
 
@@ -381,11 +381,11 @@ Set.intersection <- function(first, second)
 The elements of both sets.
 
 ```r ry run runtime=ry dput
-Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#> Set.from_list(list(2L))
+Set.intersection(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#> Set.from_list([2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2194)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2185)
 
 ## `Set.difference`
 
@@ -410,11 +410,11 @@ Set.difference <- function(first, second)
 The elements of `first` that are not in `second`.
 
 ```r ry run runtime=ry dput
-Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#> Set.from_list(list(1L))
+Set.difference(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#> Set.from_list([1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2202)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2193)
 
 ## `Set.walk`
 
@@ -439,11 +439,11 @@ Set.walk <- function(set, state, f)
 Folds over the elements.
 
 ```r ry run runtime=ry dput
-Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
-#> 6L
+Set.walk(Set.from_list([1, 2, 3]), 0, function(total, x) total + x)
+#> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2210)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2201)
 
 ## `Set.walk_until`
 
@@ -468,11 +468,11 @@ Set.walk_until <- function(set, state, f)
 Folds the elements until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
-Set.walk_until(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) if (x > 2L) :Break(total) else :Continue(total + x))
-#> 3L
+Set.walk_until(Set.from_list([1, 2, 3]), 0, function(total, x) if (x > 2) :Break(total) else :Continue(total + x))
+#> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2218)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2209)
 
 ## `Set.map`
 
@@ -497,11 +497,11 @@ Set.map <- function(set, f)
 The set of `f` of every element.
 
 ```r ry run runtime=ry dput
-Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
-#> Set.from_list(list(1L, 0L))
+Set.map(Set.from_list([1, 2, 3]), function(x) x %% 2)
+#> Set.from_list([1, 0])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2226)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2217)
 
 ## `Set.join_map`
 
@@ -526,11 +526,11 @@ Set.join_map <- function(set, f)
 Unions the sets `f` returns for each element.
 
 ```r ry run runtime=ry dput
-Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 10L)))
-#> Set.from_list(list(1L, 10L, 2L, 20L))
+Set.join_map(Set.from_list([1, 2]), function(x) Set.from_list([x, x * 10]))
+#> Set.from_list([1, 10, 2, 20])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2234)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2225)
 
 ## `Set.keep_if`
 
@@ -555,11 +555,11 @@ Set.keep_if <- function(set, predicate)
 The elements for which `predicate` is `TRUE`.
 
 ```r ry run runtime=ry dput
-Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
-#> Set.from_list(list(2L, 3L))
+Set.keep_if(Set.from_list([1, 2, 3]), function(x) x > 1)
+#> Set.from_list([2, 3])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2242)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2233)
 
 ## `Set.drop_if`
 
@@ -584,11 +584,11 @@ Set.drop_if <- function(set, predicate)
 The elements for which `predicate` is `FALSE`.
 
 ```r ry run runtime=ry dput
-Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
-#> Set.from_list(list(1L))
+Set.drop_if(Set.from_list([1, 2, 3]), function(x) x > 1)
+#> Set.from_list([1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2250)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2241)
 
 ## `Set.reserve`
 
@@ -613,11 +613,11 @@ Set.reserve <- function(set, spare)
 The set with room for `spare` more elements.
 
 ```r ry run runtime=ry dput
-Set.reserve(Set.single("a"), 1000L)
-#> Set.from_list(list("a"))
+Set.reserve(Set.single("a"), 1000)
+#> Set.from_list(["a"])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2258)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2249)
 
 ## `Set.capacity`
 
@@ -642,11 +642,11 @@ Set.capacity <- function(set)
 How many elements the set holds before its storage must grow.
 
 ```r ry run runtime=ry dput
-Set.capacity(Set.reserve(Set.single("a"), 9L))
-#> 10L
+Set.capacity(Set.reserve(Set.single("a"), 9))
+#> 10i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2266)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2257)
 
 ## `Set.release_excess_capacity`
 
@@ -672,8 +672,8 @@ The set with no room beyond its elements. An empty set keeps its smallest index,
 for 4.
 
 ```r ry run runtime=ry dput
-Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))
-#> 1L
+Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9)))
+#> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2275)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2266)

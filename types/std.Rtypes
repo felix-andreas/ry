@@ -28,7 +28,7 @@
 #' Whether the result is `:Ok`.
 #'
 #' ```r dput
-#' Result.is_ok(:Ok(1L))
+#' Result.is_ok(:Ok(1))
 #' #> TRUE
 #' ```
 Result.is_ok : <T, E> fn(result: Result<T, E>) -> Bool
@@ -36,7 +36,7 @@ Result.is_ok : <T, E> fn(result: Result<T, E>) -> Bool
 #' Whether the result is `:Err`.
 #'
 #' ```r dput
-#' Result.is_err(:Ok(1L))
+#' Result.is_err(:Ok(1))
 #' #> FALSE
 #' ```
 Result.is_err : <T, E> fn(result: Result<T, E>) -> Bool
@@ -44,16 +44,16 @@ Result.is_err : <T, E> fn(result: Result<T, E>) -> Bool
 #' The `:Ok` value, or `default` for an `:Err`.
 #'
 #' ```r dput
-#' Result.with_default(:Err(:Missing), 0L)
-#' #> 0L
+#' Result.with_default(:Err(:Missing), 0)
+#' #> 0
 #' ```
 Result.with_default : <T, E> fn(result: Result<T, E>, default: T) -> T
 
 #' Applies `f` to an `:Ok` value and leaves an `:Err` alone.
 #'
 #' ```r dput
-#' Result.map(:Ok(2L), function(x) x * 10L)
-#' #> :Ok(20L)
+#' Result.map(:Ok(2), function(x) x * 10)
+#' #> :Ok(20)
 #' ```
 Result.map : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> B) -> Result<B, E>
 
@@ -68,7 +68,7 @@ Result.map_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> B) -> Result<T, 
 #' Applies `on_ok` to an `:Ok` value or `on_err` to an `:Err` value.
 #'
 #' ```r dput
-#' Result.map_both(:Err(404L), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
+#' Result.map_both(:Err(404), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
 #' #> :Err("HTTP 404")
 #' ```
 Result.map_both : <A, B, C, D> fn(result: Result<A, B>, on_ok: fn(A) -> C, on_err: fn(B) -> D) -> Result<C, D>
@@ -77,7 +77,7 @@ Result.map_both : <A, B, C, D> fn(result: Result<A, B>, on_ok: fn(A) -> C, on_er
 #'
 #' ```r dput
 #' Result.map2(Str.to_i64("6"), Str.to_i64("7"), function(a, b) a * b)
-#' #> :Ok(42L)
+#' #> :Ok(42i64)
 #' ```
 Result.map2 : <A, B, C, E, F> fn(first: Result<A, E>, second: Result<B, F>, f: fn(A, B) -> C) -> Result<C, E | F>
 
@@ -85,7 +85,7 @@ Result.map2 : <A, B, C, E, F> fn(first: Result<A, E>, second: Result<B, F>, f: f
 #' of the chain joins both, so a step can fail with a reason of its own.
 #'
 #' ```r dput
-#' Result.and_then(Str.to_i64("-3"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+#' Result.and_then(Str.to_i64("-3"), function(n) if (n > 0) :Ok(n) else :Err(:NotPositive))
 #' #> :Err(:NotPositive)
 #' ```
 Result.and_then : <A, B, E, F> fn(result: Result<A, E>, f: fn(A) -> Result<B, F>) -> Result<B, E | F>
@@ -93,8 +93,8 @@ Result.and_then : <A, B, E, F> fn(result: Result<A, E>, f: fn(A) -> Result<B, F>
 #' Recovers from an `:Err`: `f` gets the error and returns the next result.
 #'
 #' ```r dput
-#' Result.on_err(Str.to_i64("x"), function(e) :Ok(0L))
-#' #> :Ok(0L)
+#' Result.on_err(Str.to_i64("x"), function(e) :Ok(0))
+#' #> :Ok(0)
 #' ```
 Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> Result<T, B>
 
@@ -138,15 +138,15 @@ List.to_r : <T: item> fn(list: List<T>) -> list[T]
 #' The number of elements.
 #'
 #' ```r dput
-#' List.len(list("a", "b"))
-#' #> 2L
+#' List.len(["a", "b"])
+#' #> 2i64
 #' ```
 List.len : <T> fn(list: List<T>) -> I64
 
 #' Whether the list has no elements.
 #'
 #' ```r dput
-#' List.is_empty(list())
+#' List.is_empty([])
 #' #> TRUE
 #' ```
 List.is_empty : <T> fn(list: List<T>) -> Bool
@@ -154,7 +154,7 @@ List.is_empty : <T> fn(list: List<T>) -> Bool
 #' The element at a 1-based position, or `:Err(:OutOfBounds)`.
 #'
 #' ```r dput
-#' List.get(list("a", "b"), 3L)
+#' List.get(["a", "b"], 3)
 #' #> :Err(:OutOfBounds)
 #' ```
 List.get : <T> fn(list: List<T>, index: I64) -> Result<T, :OutOfBounds>
@@ -162,40 +162,40 @@ List.get : <T> fn(list: List<T>, index: I64) -> Result<T, :OutOfBounds>
 #' Replaces the element at a position; a position out of range leaves the list unchanged.
 #'
 #' ```r dput
-#' List.set(list("a", "b"), 2L, "z")
-#' #> list("a", "z")
+#' List.set(["a", "b"], 2, "z")
+#' #> ["a", "z"]
 #' ```
 List.set : <T> fn(list: List<T>, index: I64, value: T) -> List<T>
 
 #' Replaces the element at a position with `f` of it.
 #'
 #' ```r dput
-#' List.update(list(1L, 2L), 1L, function(x) x + 10L)
-#' #> list(11L, 2L)
+#' List.update([1, 2], 1, function(x) x + 10)
+#' #> [11, 2]
 #' ```
 List.update : <T> fn(list: List<T>, index: I64, f: fn(T) -> T) -> List<T>
 
 #' Adds an element at the end.
 #'
 #' ```r dput
-#' List.append(list(1L, 2L), 3L)
-#' #> list(1L, 2L, 3L)
+#' List.append([1, 2], 3)
+#' #> [1, 2, 3]
 #' ```
 List.append : <T> fn(list: List<T>, value: T) -> List<T>
 
 #' Adds an element at the start.
 #'
 #' ```r dput
-#' List.prepend(list(1L, 2L), 0L)
-#' #> list(0L, 1L, 2L)
+#' List.prepend([1, 2], 0)
+#' #> [0, 1, 2]
 #' ```
 List.prepend : <T> fn(list: List<T>, value: T) -> List<T>
 
 #' The elements of `first` followed by those of `second`.
 #'
 #' ```r dput
-#' List.concat(list(1L), list(2L, 3L))
-#' #> list(1L, 2L, 3L)
+#' List.concat([1], [2, 3])
+#' #> [1, 2, 3]
 #' ```
 List.concat : <T> fn(first: List<T>, second: List<T>) -> List<T>
 
@@ -203,15 +203,15 @@ List.concat : <T> fn(first: List<T>, second: List<T>) -> List<T>
 #'
 #' ```r dput
 #' List.single("only")
-#' #> list("only")
+#' #> ["only"]
 #' ```
 List.single : <T> fn(value: T) -> List<T>
 
 #' A list of `count` copies of `value`.
 #'
 #' ```r dput
-#' List.repeat("x", 3L)
-#' #> list("x", "x", "x")
+#' List.repeat("x", 3)
+#' #> ["x", "x", "x"]
 #' ```
 List.repeat : <T> fn(value: T, count: I64) -> List<T>
 
@@ -222,91 +222,91 @@ List.repeat : <T> fn(value: T, count: I64) -> List<T>
 #' 2,147,483,647 elements, the longest vector an R integer index reaches.
 #'
 #' ```r dput
-#' List.range(2L, 5L)
-#' #> list(2L, 3L, 4L, 5L)
-#' List.range(3L, 1L)
-#' #> list()
+#' List.range(2, 5)
+#' #> [2i64, 3i64, 4i64, 5i64]
+#' List.range(3, 1)
+#' #> []
 #' ```
 List.range : <T: int> fn(start: T, end: T) -> List<T>
 
 #' The elements in reverse order.
 #'
 #' ```r dput
-#' List.reverse(list(1L, 2L, 3L))
-#' #> list(3L, 2L, 1L)
+#' List.reverse([1, 2, 3])
+#' #> [3, 2, 1]
 #' ```
 List.reverse : <T> fn(list: List<T>) -> List<T>
 
 #' Concatenates a list of lists.
 #'
 #' ```r dput
-#' List.join(list(list(1L), list(), list(2L, 3L)))
-#' #> list(1L, 2L, 3L)
+#' List.join([[1], [], [2, 3]])
+#' #> [1, 2, 3]
 #' ```
 List.join : <T> fn(lists: List<List<T>>) -> List<T>
 
 #' Applies `f` to every element.
 #'
 #' ```r dput
-#' List.map(list(1L, 2L, 3L), function(x) x * 2L)
-#' #> list(2L, 4L, 6L)
+#' List.map([1, 2, 3], function(x) x * 2)
+#' #> [2, 4, 6]
 #' ```
 List.map : <A, B: item> fn(list: List<A>, f: fn(A) -> B) -> List<B>
 
 #' Applies `f` to every element and its 1-based position.
 #'
 #' ```r dput
-#' List.map_with_index(list("a", "b"), function(x, i) Str.concat(x, Num.to_str(i)))
-#' #> list("a1", "b2")
+#' List.map_with_index(["a", "b"], function(x, i) Str.concat(x, Num.to_str(i)))
+#' #> ["a1", "b2"]
 #' ```
 List.map_with_index : <A, B: item> fn(list: List<A>, f: fn(A, I64) -> B) -> List<B>
 
 #' Applies `f` to the elements of two lists pairwise, stopping at the shorter one.
 #'
 #' ```r dput
-#' List.map2(list(1L, 2L, 3L), list(10L, 20L), function(a, b) a + b)
-#' #> list(11L, 22L)
+#' List.map2([1, 2, 3], [10, 20], function(a, b) a + b)
+#' #> [11, 22]
 #' ```
 List.map2 : <A, B, C: item> fn(first: List<A>, second: List<B>, f: fn(A, B) -> C) -> List<C>
 
 #' Applies `f` to the elements at each position of three lists, up to the shortest one.
 #'
 #' ```r dput
-#' List.map3(list(1L, 2L), list(10L, 20L), list(100L, 200L), function(a, b, c) a + b + c)
-#' #> list(111L, 222L)
+#' List.map3([1, 2], [10, 20], [100, 200], function(a, b, c) a + b + c)
+#' #> [111, 222]
 #' ```
 List.map3 : <A, B, C, D: item> fn(first: List<A>, second: List<B>, third: List<C>, f: fn(A, B, C) -> D) -> List<D>
 
 #' Applies `f` to the elements at each position of four lists, up to the shortest one.
 #'
 #' ```r dput
-#' List.map4(list(1L), list(2L), list(3L), list(4L), function(a, b, c, d) a * b * c * d)
-#' #> list(24L)
+#' List.map4([1], [2], [3], [4], function(a, b, c, d) a * b * c * d)
+#' #> [24]
 #' ```
 List.map4 : <A, B, C, D, E: item> fn(first: List<A>, second: List<B>, third: List<C>, fourth: List<D>, f: fn(A, B, C, D) -> E) -> List<E>
 
 #' Applies `f`, which returns a list, to every element and concatenates the results.
 #'
 #' ```r dput
-#' List.join_map(list(1L, 2L), function(x) list(x, x))
-#' #> list(1L, 1L, 2L, 2L)
+#' List.join_map([1, 2], function(x) [x, x])
+#' #> [1, 1, 2, 2]
 #' ```
 List.join_map : <A, B> fn(list: List<A>, f: fn(A) -> List<B>) -> List<B>
 
 #' The elements for which `predicate` is `TRUE`.
 #'
 #' ```r dput
-#' List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
-#' #> list(5L, 2L)
+#' List.keep_if([1, 5, 2], function(x) x > 1)
+#' #> [5, 2]
 #' ```
 List.keep_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> List<T>
 
 #' The elements for which `predicate` returns `:Ok(TRUE)`, or the first `:Err` it returns.
 #'
 #' ```r dput
-#' List.keep_if_try(list("1", "20", "3"), function(s) Result.map(Str.to_i64(s), function(n) n > 2L))
-#' #> :Ok(list("20", "3"))
-#' List.keep_if_try(list("1", "x"), function(s) Result.map(Str.to_i64(s), function(n) n > 2L))
+#' List.keep_if_try(["1", "20", "3"], function(s) Result.map(Str.to_i64(s), function(n) n > 2))
+#' #> :Ok(["20", "3"])
+#' List.keep_if_try(["1", "x"], function(s) Result.map(Str.to_i64(s), function(n) n > 2))
 #' #> :Err(:InvalidNumStr)
 #' ```
 List.keep_if_try : <T, E> fn(list: List<T>, predicate: fn(T) -> Result<Bool, E>) -> Result<List<T>, E>
@@ -314,47 +314,47 @@ List.keep_if_try : <T, E> fn(list: List<T>, predicate: fn(T) -> Result<Bool, E>)
 #' The elements for which `predicate` is `FALSE`.
 #'
 #' ```r dput
-#' List.drop_if(list(1L, 5L, 2L), function(x) x > 1L)
-#' #> list(1L)
+#' List.drop_if([1, 5, 2], function(x) x > 1)
+#' #> [1]
 #' ```
 List.drop_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> List<T>
 
 #' Applies `f` to every element and keeps the `:Ok` values.
 #'
 #' ```r dput
-#' List.keep_oks(list("1", "x", "3"), Str.to_i64)
-#' #> list(1L, 3L)
+#' List.keep_oks(["1", "x", "3"], Str.to_i64)
+#' #> [1i64, 3i64]
 #' ```
 List.keep_oks : <A, B: item, E> fn(list: List<A>, f: fn(A) -> Result<B, E>) -> List<B>
 
 #' Applies `f` to every element and keeps the `:Err` values.
 #'
 #' ```r dput
-#' List.keep_errs(list("1", "x"), Str.to_i64)
-#' #> list(:InvalidNumStr)
+#' List.keep_errs(["1", "x"], Str.to_i64)
+#' #> [:InvalidNumStr]
 #' ```
 List.keep_errs : <A, B, E: item> fn(list: List<A>, f: fn(A) -> Result<B, E>) -> List<E>
 
 #' Applies `f` to every element and stops at the first `:Err`.
 #'
 #' ```r dput
-#' List.map_try(list("1", "2"), Str.to_i64)
-#' #> :Ok(list(1L, 2L))
+#' List.map_try(["1", "2"], Str.to_i64)
+#' #> :Ok([1i64, 2i64])
 #' ```
 List.map_try : <A, B: item, E> fn(list: List<A>, f: fn(A) -> Result<B, E>) -> Result<List<B>, E>
 
 #' Folds from the first element: `f` gets the state and an element and returns the next state.
 #'
 #' ```r dput
-#' List.walk(list(1L, 2L, 3L), 0L, function(total, x) total + x)
-#' #> 6L
+#' List.walk([1, 2, 3], 0, function(total, x) total + x)
+#' #> 6
 #' ```
 List.walk : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> S) -> S
 
 #' Folds from the last element.
 #'
 #' ```r dput
-#' List.walk_backwards(list("a", "b", "c"), "", function(text, x) Str.concat(text, x))
+#' List.walk_backwards(["a", "b", "c"], "", function(text, x) Str.concat(text, x))
 #' #> "cba"
 #' ```
 List.walk_backwards : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> S) -> S
@@ -362,31 +362,31 @@ List.walk_backwards : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> S) -> S
 #' Folds until `f` returns `:Break(state)`; `:Continue(state)` goes on.
 #'
 #' ```r dput
-#' List.walk_until(list(1L, 2L, 3L, 4L), 0L, function(total, x) if (total >= 3L) :Break(total) else :Continue(total + x))
-#' #> 3L
+#' List.walk_until([1, 2, 3, 4], 0, function(total, x) if (total >= 3) :Break(total) else :Continue(total + x))
+#' #> 3
 #' ```
 List.walk_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
 #' Folds the list from the last element until `f` returns `:Break(state)`.
 #'
 #' ```r dput
-#' List.walk_backwards_until(list(1L, 5L, 2L, 3L), 0L, function(total, x) if (x > 4L) :Break(total) else :Continue(total + x))
-#' #> 5L
+#' List.walk_backwards_until([1, 5, 2, 3], 0, function(total, x) if (x > 4) :Break(total) else :Continue(total + x))
+#' #> 5
 #' ```
 List.walk_backwards_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
 #' Folds the list, passing `f` each element's 1-based position too.
 #'
 #' ```r dput
-#' List.walk_with_index(list(10L, 20L, 30L), 0L, function(total, x, i) total + x * i)
-#' #> 140L
+#' List.walk_with_index([10, 20, 30], 0, function(total, x, i) total + x * i)
+#' #> 140i64
 #' ```
 List.walk_with_index : <T, S> fn(list: List<T>, state: S, f: fn(S, T, I64) -> S) -> S
 
 #' Folds the list with positions until `f` returns `:Break(state)`.
 #'
 #' ```r dput
-#' List.walk_with_index_until(list("a", "b", "c"), "", function(seen, x, i) if (i > 2L) :Break(seen) else :Continue(Str.concat(seen, x)))
+#' List.walk_with_index_until(["a", "b", "c"], "", function(seen, x, i) if (i > 2) :Break(seen) else :Continue(Str.concat(seen, x)))
 #' #> "ab"
 #' ```
 List.walk_with_index_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T, I64) -> :Continue(S) | :Break(S)) -> S
@@ -394,23 +394,23 @@ List.walk_with_index_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T, I64)
 #' Folds the list from a 1-based position onwards.
 #'
 #' ```r dput
-#' List.walk_from(list(1L, 2L, 3L, 4L), 3L, 0L, function(total, x) total + x)
-#' #> 7L
+#' List.walk_from([1, 2, 3, 4], 3, 0, function(total, x) total + x)
+#' #> 7
 #' ```
 List.walk_from : <T, S> fn(list: List<T>, index: I64, state: S, f: fn(S, T) -> S) -> S
 
 #' Folds the list from a position until `f` returns `:Break(state)`.
 #'
 #' ```r dput
-#' List.walk_from_until(list(1L, 2L, 3L, 4L), 2L, 0L, function(total, x) if (total >= 5L) :Break(total) else :Continue(total + x))
-#' #> 5L
+#' List.walk_from_until([1, 2, 3, 4], 2, 0, function(total, x) if (total >= 5) :Break(total) else :Continue(total + x))
+#' #> 5
 #' ```
 List.walk_from_until : <T, S> fn(list: List<T>, index: I64, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
 #' Folds the list while `f` returns `:Ok(state)`, stopping at the first `:Err`.
 #'
 #' ```r dput
-#' List.walk_try(list("1", "2", "x"), 0L, function(total, s) Result.map(Str.to_i64(s), function(n) total + n))
+#' List.walk_try(["1", "2", "x"], 0, function(total, s) Result.map(Str.to_i64(s), function(n) total + n))
 #' #> :Err(:InvalidNumStr)
 #' ```
 List.walk_try : <T, S, E> fn(list: List<T>, state: S, f: fn(S, T) -> Result<S, E>) -> Result<S, E>
@@ -418,7 +418,7 @@ List.walk_try : <T, S, E> fn(list: List<T>, state: S, f: fn(S, T) -> Result<S, E
 #' Calls `f` on each element for its effect, and returns `NULL` invisibly.
 #'
 #' ```r
-#' List.for_each(list("a", "b"), function(x) cat(x, "\n"))
+#' List.for_each(["a", "b"], function(x) cat(x, "\n"))
 #' #> a
 #' #> b
 #' ```
@@ -427,15 +427,15 @@ List.for_each : <T> fn(list: List<T>, f: fn(T) -> Any) -> NULL
 #' Calls `f` on each element, stopping at the first `:Err`.
 #'
 #' ```r dput
-#' List.for_each_try(list(1L, -2L, 3L), function(x) if (x < 0L) :Err(:Negative(x)) else :Ok(NULL))
-#' #> :Err(:Negative(-2L))
+#' List.for_each_try([1, -2, 3], function(x) if (x < 0) :Err(:Negative(x)) else :Ok(NULL))
+#' #> :Err(:Negative(-2))
 #' ```
 List.for_each_try : <T, E> fn(list: List<T>, f: fn(T) -> Result<Any, E>) -> Result<NULL, E>
 
 #' Whether `predicate` is `TRUE` for some element.
 #'
 #' ```r dput
-#' List.any(list(1L, 5L), function(x) x > 4L)
+#' List.any([1, 5], function(x) x > 4)
 #' #> TRUE
 #' ```
 List.any : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Bool
@@ -443,7 +443,7 @@ List.any : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Bool
 #' Whether `predicate` is `TRUE` for every element; `TRUE` for an empty list.
 #'
 #' ```r dput
-#' List.all(list(1L, 5L), function(x) x > 4L)
+#' List.all([1, 5], function(x) x > 4)
 #' #> FALSE
 #' ```
 List.all : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Bool
@@ -451,7 +451,7 @@ List.all : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Bool
 #' Whether some element is `identical()` to `value`.
 #'
 #' ```r dput
-#' List.contains(list("a", "b"), "b")
+#' List.contains(["a", "b"], "b")
 #' #> TRUE
 #' ```
 List.contains : <T: eq> fn(list: List<T>, value: T) -> Bool
@@ -459,39 +459,39 @@ List.contains : <T: eq> fn(list: List<T>, value: T) -> Bool
 #' The number of elements for which `predicate` is `TRUE`.
 #'
 #' ```r dput
-#' List.count_if(list(1L, 5L, 7L), function(x) x > 4L)
-#' #> 2L
+#' List.count_if([1, 5, 7], function(x) x > 4)
+#' #> 2i64
 #' ```
 List.count_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> I64
 
 #' The first element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 #'
 #' ```r dput
-#' List.find_first(list(1L, 5L, 7L), function(x) x > 4L)
-#' #> :Ok(5L)
+#' List.find_first([1, 5, 7], function(x) x > 4)
+#' #> :Ok(5)
 #' ```
 List.find_first : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<T, :NotFound>
 
 #' The last element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 #'
 #' ```r dput
-#' List.find_last(list(1L, 5L, 7L), function(x) x > 4L)
-#' #> :Ok(7L)
+#' List.find_last([1, 5, 7], function(x) x > 4)
+#' #> :Ok(7)
 #' ```
 List.find_last : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<T, :NotFound>
 
 #' The position of the first match, or `:Err(:NotFound)`.
 #'
 #' ```r dput
-#' List.find_first_index(list(1L, 5L, 7L), function(x) x > 4L)
-#' #> :Ok(2L)
+#' List.find_first_index([1, 5, 7], function(x) x > 4)
+#' #> :Ok(2i64)
 #' ```
 List.find_first_index : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<I64, :NotFound>
 
 #' The position of the last match, or `:Err(:NotFound)`.
 #'
 #' ```r dput
-#' List.find_last_index(list(1L, 5L, 7L), function(x) x > 9L)
+#' List.find_last_index([1, 5, 7], function(x) x > 9)
 #' #> :Err(:NotFound)
 #' ```
 List.find_last_index : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<I64, :NotFound>
@@ -499,7 +499,7 @@ List.find_last_index : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result
 #' The first element, or `:Err(:ListWasEmpty)`.
 #'
 #' ```r dput
-#' List.first(list("a", "b"))
+#' List.first(["a", "b"])
 #' #> :Ok("a")
 #' ```
 List.first : <T> fn(list: List<T>) -> Result<T, :ListWasEmpty>
@@ -507,7 +507,7 @@ List.first : <T> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 #' The last element, or `:Err(:ListWasEmpty)`.
 #'
 #' ```r dput
-#' List.last(list())
+#' List.last([])
 #' #> :Err(:ListWasEmpty)
 #' ```
 List.last : <T> fn(list: List<T>) -> Result<T, :ListWasEmpty>
@@ -515,184 +515,184 @@ List.last : <T> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 #' The first `count` elements, or all of them if there are fewer.
 #'
 #' ```r dput
-#' List.take_first(list(1L, 2L, 3L), 2L)
-#' #> list(1L, 2L)
+#' List.take_first([1, 2, 3], 2)
+#' #> [1, 2]
 #' ```
 List.take_first : <T> fn(list: List<T>, count: I64) -> List<T>
 
 #' The last `count` elements.
 #'
 #' ```r dput
-#' List.take_last(list(1L, 2L, 3L), 2L)
-#' #> list(2L, 3L)
+#' List.take_last([1, 2, 3], 2)
+#' #> [2, 3]
 #' ```
 List.take_last : <T> fn(list: List<T>, count: I64) -> List<T>
 
 #' Everything but the first `count` elements.
 #'
 #' ```r dput
-#' List.drop_first(list(1L, 2L, 3L), 2L)
-#' #> list(3L)
+#' List.drop_first([1, 2, 3], 2)
+#' #> [3]
 #' ```
 List.drop_first : <T> fn(list: List<T>, count: I64) -> List<T>
 
 #' Everything but the last `count` elements.
 #'
 #' ```r dput
-#' List.drop_last(list(1L, 2L, 3L), 2L)
-#' #> list(1L)
+#' List.drop_last([1, 2, 3], 2)
+#' #> [1]
 #' ```
 List.drop_last : <T> fn(list: List<T>, count: I64) -> List<T>
 
 #' Removes the element at a position.
 #'
 #' ```r dput
-#' List.drop_at(list("a", "b", "c"), 2L)
-#' #> list("a", "c")
+#' List.drop_at(["a", "b", "c"], 2)
+#' #> ["a", "c"]
 #' ```
 List.drop_at : <T> fn(list: List<T>, index: I64) -> List<T>
 
 #' `count` elements starting at position `start`.
 #'
 #' ```r dput
-#' List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
-#' #> list(2L, 3L)
+#' List.sublist([1, 2, 3, 4], 2, 2)
+#' #> [2, 3]
 #' ```
 List.sublist : <T> fn(list: List<T>, start: I64, count: I64) -> List<T>
 
 #' The first `count` elements as `before` and the rest as `others`.
 #'
 #' ```r dput
-#' List.split_at(list(1L, 2L, 3L), 1L)
-#' #> (before = list(1L), others = list(2L, 3L))
+#' List.split_at([1, 2, 3], 1)
+#' #> (before = [1], others = [2, 3])
 #' ```
 List.split_at : <T> fn(list: List<T>, count: I64) -> Record{before: List<T>, others: List<T>}
 
 #' Splits the list around the first element identical to `delimiter`.
 #'
 #' ```r dput
-#' List.split_first(list("a", "-", "b", "-", "c"), "-")
-#' #> :Ok((after = list("b", "-", "c"), before = list("a")))
+#' List.split_first(["a", "-", "b", "-", "c"], "-")
+#' #> :Ok((after = ["b", "-", "c"], before = ["a"]))
 #' ```
 List.split_first : <T> fn(list: List<T>, delimiter: T) -> Result<Record{before: List<T>, after: List<T>}, :NotFound>
 
 #' Splits the list around the last element identical to `delimiter`.
 #'
 #' ```r dput
-#' List.split_last(list("a", "-", "b", "-", "c"), "-")
-#' #> :Ok((after = list("c"), before = list("a", "-", "b")))
+#' List.split_last(["a", "-", "b", "-", "c"], "-")
+#' #> :Ok((after = ["c"], before = ["a", "-", "b"]))
 #' ```
 List.split_last : <T> fn(list: List<T>, delimiter: T) -> Result<Record{before: List<T>, after: List<T>}, :NotFound>
 
 #' The runs of elements between elements identical to `delimiter`.
 #'
 #' ```r dput
-#' List.split_on(list(1L, 0L, 2L, 3L, 0L, 4L), 0L)
-#' #> list(list(1L), list(2L, 3L), list(4L))
+#' List.split_on([1, 0, 2, 3, 0, 4], 0)
+#' #> [[1], [2, 3], [4]]
 #' ```
 List.split_on : <T> fn(list: List<T>, delimiter: T) -> List<List<T>>
 
 #' The runs of elements between occurrences of the sublist `delimiter`.
 #'
 #' ```r dput
-#' List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))
-#' #> list(list(1L), list(2L, 0L, 3L))
+#' List.split_on_list([1, 0, 0, 2, 0, 3], [0, 0])
+#' #> [[1], [2, 0, 3]]
 #' ```
 List.split_on_list : <T> fn(list: List<T>, delimiter: List<T>) -> List<List<T>>
 
 #' Groups of `size` elements; the last group may be shorter.
 #'
 #' ```r dput
-#' List.chunks_of(list(1L, 2L, 3L), 2L)
-#' #> list(list(1L, 2L), list(3L))
+#' List.chunks_of([1, 2, 3], 2)
+#' #> [[1, 2], [3]]
 #' ```
 List.chunks_of : <T> fn(list: List<T>, size: I64) -> List<List<T>>
 
 #' Puts `separator` between every two elements.
 #'
 #' ```r dput
-#' List.intersperse(list("a", "b", "c"), "-")
-#' #> list("a", "-", "b", "-", "c")
+#' List.intersperse(["a", "b", "c"], "-")
+#' #> ["a", "-", "b", "-", "c"]
 #' ```
 List.intersperse : <T> fn(list: List<T>, separator: T) -> List<T>
 
 #' A stable sort by `compare`, which returns `:LT`, `:EQ` or `:GT`.
 #'
 #' ```r dput
-#' List.sort_with(list(3L, 1L, 2L), Num.compare)
-#' #> list(1L, 2L, 3L)
+#' List.sort_with([3, 1, 2], Num.compare)
+#' #> [1, 2, 3]
 #' ```
 List.sort_with : <T> fn(list: List<T>, compare: fn(T, T) -> :LT | :EQ | :GT) -> List<T>
 
 #' Sorts numbers from smallest to largest.
 #'
 #' ```r dput
-#' List.sort_asc(list(3L, 1L, 2L))
-#' #> list(1L, 2L, 3L)
+#' List.sort_asc([3, 1, 2])
+#' #> [1, 2, 3]
 #' ```
 List.sort_asc : <T: number> fn(list: List<T>) -> List<T>
 
 #' Sorts numbers from largest to smallest.
 #'
 #' ```r dput
-#' List.sort_desc(list(1.5, 3, 2))
-#' #> list(3, 2, 1.5)
+#' List.sort_desc([1.5, 3, 2])
+#' #> [3, 2, 1.5]
 #' ```
 List.sort_desc : <T: number> fn(list: List<T>) -> List<T>
 
 #' Exchanges the elements at two positions; an out-of-range position leaves the list unchanged.
 #'
 #' ```r dput
-#' List.swap(list("a", "b", "c"), 1L, 3L)
-#' #> list("c", "b", "a")
+#' List.swap(["a", "b", "c"], 1, 3)
+#' #> ["c", "b", "a"]
 #' ```
 List.swap : <T> fn(list: List<T>, first: I64, second: I64) -> List<T>
 
 #' Replaces the element at a position, returning the new list and the element it replaced.
 #'
 #' ```r dput
-#' List.replace(list("a", "b"), 2L, "z")
-#' #> (list = list("a", "z"), value = "b")
+#' List.replace(["a", "b"], 2, "z")
+#' #> (list = ["a", "z"], value = "b")
 #' ```
 List.replace : <T> fn(list: List<T>, index: I64, value: T) -> Record{list: List<T>, value: T}
 
 #' Adds an `:Ok` value at the end; an `:Err` leaves the list unchanged.
 #'
 #' ```r dput
-#' List.append_if_ok(list(1L), Str.to_i64("2"))
-#' #> list(1L, 2L)
+#' List.append_if_ok([1], Str.to_i64("2"))
+#' #> [1i64, 2i64]
 #' ```
 List.append_if_ok : <T, E> fn(list: List<T>, result: Result<T, E>) -> List<T>
 
 #' Adds an `:Ok` value at the start; an `:Err` leaves the list unchanged.
 #'
 #' ```r dput
-#' List.prepend_if_ok(list(1L), Str.to_i64("x"))
-#' #> list(1L)
+#' List.prepend_if_ok([1], Str.to_i64("x"))
+#' #> [1]
 #' ```
 List.prepend_if_ok : <T, E> fn(list: List<T>, result: Result<T, E>) -> List<T>
 
 #' Appends the UTF-8 bytes of a string to a list of bytes.
 #'
 #' ```r dput
-#' List.concat_utf8(list(104L), "i")
-#' #> list(104L, 105L)
+#' List.concat_utf8([104], "i")
+#' #> [104u8, 105u8]
 #' ```
 List.concat_utf8 : fn(list: List<I64>, string: Str) -> List<I64>
 
 #' An empty list with room for `capacity` elements, so appending that many never copies.
 #'
 #' ```r dput
-#' List.len(List.with_capacity(1000L))
-#' #> 0L
+#' List.len(List.with_capacity(1000))
+#' #> 0i64
 #' ```
 List.with_capacity : <T> fn(capacity: I64) -> List<T>
 
 #' The list with room for `spare` more elements.
 #'
 #' ```r dput
-#' List.reserve(list(1L, 2L), 100L)
-#' #> list(1L, 2L)
+#' List.reserve([1, 2], 100)
+#' #> [1, 2]
 #' ```
 List.reserve : <T> fn(list: List<T>, spare: I64) -> List<T>
 
@@ -700,8 +700,8 @@ List.reserve : <T> fn(list: List<T>, spare: I64) -> List<T>
 #' `List.with_capacity` set aside.
 #'
 #' ```r dput
-#' List.release_excess_capacity(List.reserve(list(1L, 2L), 100L))
-#' #> list(1L, 2L)
+#' List.release_excess_capacity(List.reserve([1, 2], 100))
+#' #> [1, 2]
 #' ```
 List.release_excess_capacity : <T> fn(list: List<T>) -> List<T>
 
@@ -711,8 +711,8 @@ List.release_excess_capacity : <T> fn(list: List<T>) -> List<T>
 #' `List.sum(xs)` and `sum(xs)` give the same number.
 #'
 #' ```r dput
-#' List.sum(list(1L, 2L, 3L))
-#' #> 6L
+#' List.sum([1, 2, 3])
+#' #> 6
 #' ```
 List.sum : <T: number> fn(list: List<T>) -> T
 
@@ -720,7 +720,7 @@ List.sum : <T: number> fn(list: List<T>) -> T
 #' error, as for `List.sum`.
 #'
 #' ```r dput
-#' List.product(list(2, 2.5))
+#' List.product([2, 2.5])
 #' #> 5
 #' ```
 List.product : <T: number> fn(list: List<T>) -> T
@@ -728,15 +728,15 @@ List.product : <T: number> fn(list: List<T>) -> T
 #' The smallest element, or `:Err(:ListWasEmpty)`.
 #'
 #' ```r dput
-#' List.min(list(3L, 1L, 2L))
-#' #> :Ok(1L)
+#' List.min([3, 1, 2])
+#' #> :Ok(1)
 #' ```
 List.min : <T: number> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 
 #' The largest element, or `:Err(:ListWasEmpty)`.
 #'
 #' ```r dput
-#' List.max(list())
+#' List.max([])
 #' #> :Err(:ListWasEmpty)
 #' ```
 List.max : <T: number> fn(list: List<T>) -> Result<T, :ListWasEmpty>
@@ -744,7 +744,7 @@ List.max : <T: number> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 #' Whether the list begins with the elements of `prefix`.
 #'
 #' ```r dput
-#' List.starts_with(list(1L, 2L, 3L), list(1L, 2L))
+#' List.starts_with([1, 2, 3], [1, 2])
 #' #> TRUE
 #' ```
 List.starts_with : <T> fn(list: List<T>, prefix: List<T>) -> Bool
@@ -752,7 +752,7 @@ List.starts_with : <T> fn(list: List<T>, prefix: List<T>) -> Bool
 #' Whether the list ends with the elements of `suffix`.
 #'
 #' ```r dput
-#' List.ends_with(list(1L, 2L, 3L), list(2L))
+#' List.ends_with([1, 2, 3], [2])
 #' #> FALSE
 #' ```
 List.ends_with : <T> fn(list: List<T>, suffix: List<T>) -> Bool
@@ -783,7 +783,7 @@ Str.concat : fn(first: Str, second: Str) -> Str
 #' Joins a list of strings with `separator` between them.
 #'
 #' ```r dput
-#' Str.join_with(list("a", "b", "c"), ", ")
+#' Str.join_with(["a", "b", "c"], ", ")
 #' #> "a, b, c"
 #' ```
 Str.join_with : fn(strings: List<Str>, separator: Str) -> Str
@@ -792,14 +792,14 @@ Str.join_with : fn(strings: List<Str>, separator: Str) -> Str
 #'
 #' ```r dput
 #' Str.split_on("a,b,,c", ",")
-#' #> list("a", "b", "", "c")
+#' #> ["a", "b", "", "c"]
 #' ```
 Str.split_on : fn(string: Str, separator: Str) -> List<Str>
 
 #' `count` copies of the string.
 #'
 #' ```r dput
-#' Str.repeat("ab", 3L)
+#' Str.repeat("ab", 3)
 #' #> "ababab"
 #' ```
 Str.repeat : fn(string: Str, count: I64) -> Str
@@ -920,7 +920,7 @@ Str.split_last : fn(string: Str, separator: Str) -> Result<Record{before: Str, a
 #'
 #' ```r dput
 #' Str.count_utf8_bytes("hé")
-#' #> 3L
+#' #> 3i64
 #' ```
 Str.count_utf8_bytes : fn(string: Str) -> I64
 
@@ -928,14 +928,14 @@ Str.count_utf8_bytes : fn(string: Str) -> I64
 #'
 #' ```r dput
 #' Str.to_utf8("hé")
-#' #> list(104L, 195L, 169L)
+#' #> [104u8, 195u8, 169u8]
 #' ```
 Str.to_utf8 : fn(string: Str) -> List<U8>
 
 #' The string a list of bytes encodes, or `:Err(:BadUtf8)`.
 #'
 #' ```r dput
-#' Str.from_utf8(list(104L, 105L))
+#' Str.from_utf8([104, 105])
 #' #> :Ok("hi")
 #' ```
 Str.from_utf8 : fn(bytes: List<U8>) -> Result<Str, :BadUtf8>
@@ -943,7 +943,7 @@ Str.from_utf8 : fn(bytes: List<U8>) -> Result<Str, :BadUtf8>
 #' Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD.
 #'
 #' ```r dput
-#' Str.from_utf8_lossy(list(104L, 255L, 105L))
+#' Str.from_utf8_lossy([104, 255, 105])
 #' #> "h�i"
 #' ```
 Str.from_utf8_lossy : fn(bytes: List<U8>) -> Str
@@ -991,16 +991,16 @@ Str.caseless_ascii_equals : fn(first: Str, second: Str) -> Bool
 #' Folds the string's UTF-8 bytes: `f(state, byte)` gives the next state.
 #'
 #' ```r dput
-#' Str.walk_utf8("abc", 0L, function(total, byte) total + byte)
-#' #> 294L
+#' Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
+#' #> 294i64
 #' ```
 Str.walk_utf8 : <S> fn(string: Str, state: S, f: fn(S, U8) -> S) -> S
 
 #' Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
 #'
 #' ```r dput
-#' Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
-#' #> list(97L, 196L)
+#' Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num.to_i64(byte) * i))
+#' #> [97i64, 196i64]
 #' ```
 Str.walk_utf8_with_index : <S> fn(string: Str, state: S, f: fn(S, U8, I64) -> S) -> S
 
@@ -1009,7 +1009,7 @@ Str.walk_utf8_with_index : <S> fn(string: Str, state: S, f: fn(S, U8, I64) -> S)
 #'
 #' ```r dput
 #' Str.to_utf16("h\U0001F600")
-#' #> list(104L, 55357L, 56832L)
+#' #> [104u16, 55357u16, 56832u16]
 #' ```
 Str.to_utf16 : fn(string: Str) -> List<U16>
 
@@ -1017,7 +1017,7 @@ Str.to_utf16 : fn(string: Str) -> List<U16>
 #' an R string cannot hold. A number outside 0 to 65535 is an error.
 #'
 #' ```r dput
-#' Str.from_utf16(list(104L, 55357L))
+#' Str.from_utf16([104, 55357])
 #' #> :Err(:BadUtf16)
 #' ```
 Str.from_utf16 : fn(units: List<U16>) -> Result<Str, :BadUtf16>
@@ -1025,7 +1025,7 @@ Str.from_utf16 : fn(units: List<U16>) -> Result<Str, :BadUtf16>
 #' Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
 #'
 #' ```r dput
-#' Str.from_utf16_lossy(list(104L, 105L))
+#' Str.from_utf16_lossy([104, 105])
 #' #> "hi"
 #' ```
 Str.from_utf16_lossy : fn(units: List<U16>) -> Str
@@ -1034,7 +1034,7 @@ Str.from_utf16_lossy : fn(units: List<U16>) -> Str
 #'
 #' ```r dput
 #' Str.to_utf32("h\u00e9")
-#' #> list(104L, 233L)
+#' #> [104u32, 233u32]
 #' ```
 Str.to_utf32 : fn(string: Str) -> List<U32>
 
@@ -1042,7 +1042,7 @@ Str.to_utf32 : fn(string: Str) -> List<U32>
 #' surrogate, a negative number, or one above 1114111) and for zero.
 #'
 #' ```r dput
-#' Str.from_utf32(list(55296L))
+#' Str.from_utf32([55296])
 #' #> :Err(:BadUtf32)
 #' ```
 Str.from_utf32 : fn(code_points: List<U32>) -> Result<Str, :BadUtf32>
@@ -1050,7 +1050,7 @@ Str.from_utf32 : fn(code_points: List<U32>) -> Result<Str, :BadUtf32>
 #' Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
 #'
 #' ```r dput
-#' Str.from_utf32_lossy(list(82L, 121L))
+#' Str.from_utf32_lossy([82, 121])
 #' #> "Ry"
 #' ```
 Str.from_utf32_lossy : fn(code_points: List<U32>) -> Str
@@ -1074,7 +1074,7 @@ Num.to_str : <T: number> fn(number: T) -> Str
 #' `:LT`, `:EQ` or `:GT`, comparing `first` with `second`.
 #'
 #' ```r dput
-#' Num.compare(2L, 1L)
+#' Num.compare(2, 1)
 #' #> :GT
 #' ```
 Num.compare : <T: number> fn(first: T, second: T) -> :LT | :EQ | :GT
@@ -1082,8 +1082,8 @@ Num.compare : <T: number> fn(first: T, second: T) -> :LT | :EQ | :GT
 #' The smaller number.
 #'
 #' ```r dput
-#' Num.min(2L, 1L)
-#' #> 1L
+#' Num.min(2, 1)
+#' #> 1
 #' ```
 Num.min : <T: number> fn(first: T, second: T) -> T
 
@@ -1098,7 +1098,7 @@ Num.max : <T: number> fn(first: T, second: T) -> T
 #' Whether `first < second`.
 #'
 #' ```r dput
-#' Num.is_lt(1L, 2L)
+#' Num.is_lt(1, 2)
 #' #> TRUE
 #' ```
 Num.is_lt : <T: number> fn(first: T, second: T) -> Bool
@@ -1106,7 +1106,7 @@ Num.is_lt : <T: number> fn(first: T, second: T) -> Bool
 #' Whether `first > second`.
 #'
 #' ```r dput
-#' Num.is_gt(1L, 2L)
+#' Num.is_gt(1, 2)
 #' #> FALSE
 #' ```
 Num.is_gt : <T: number> fn(first: T, second: T) -> Bool
@@ -1114,7 +1114,7 @@ Num.is_gt : <T: number> fn(first: T, second: T) -> Bool
 #' Whether `first <= second`.
 #'
 #' ```r dput
-#' Num.is_lte(2, 2L)
+#' Num.is_lte(2, 2)
 #' #> TRUE
 #' ```
 Num.is_lte : <T: number> fn(first: T, second: T) -> Bool
@@ -1147,7 +1147,7 @@ Num.is_zero : <T: number> fn(number: T) -> Bool
 #' Whether the number is greater than zero.
 #'
 #' ```r dput
-#' Num.is_positive(0L)
+#' Num.is_positive(0)
 #' #> FALSE
 #' ```
 Num.is_positive : <T: number> fn(number: T) -> Bool
@@ -1163,7 +1163,7 @@ Num.is_negative : <T: number> fn(number: T) -> Bool
 #' Whether the number is a whole, even number.
 #'
 #' ```r dput
-#' Num.is_even(4L)
+#' Num.is_even(4)
 #' #> TRUE
 #' ```
 Num.is_even : <T: int> fn(number: T) -> Bool
@@ -1171,7 +1171,7 @@ Num.is_even : <T: int> fn(number: T) -> Bool
 #' Whether the number is a whole, odd number.
 #'
 #' ```r dput
-#' Num.is_odd(-3L)
+#' Num.is_odd(-3)
 #' #> TRUE
 #' ```
 Num.is_odd : <T: int> fn(number: T) -> Bool
@@ -1179,7 +1179,7 @@ Num.is_odd : <T: int> fn(number: T) -> Bool
 #' Whether `first` is a whole multiple of `second`. Only zero is a multiple of zero.
 #'
 #' ```r dput
-#' Num.is_multiple_of(12L, 4L)
+#' Num.is_multiple_of(12, 4)
 #' #> TRUE
 #' ```
 Num.is_multiple_of : <T: int> fn(first: T, second: T) -> Bool
@@ -1203,16 +1203,16 @@ Num.is_infinite : <T: frac> fn(number: T) -> Bool
 #' The absolute value.
 #'
 #' ```r dput
-#' Num.abs(-3L)
-#' #> 3L
+#' Num.abs(-3)
+#' #> 3
 #' ```
 Num.abs : <T: number> fn(number: T) -> T
 
 #' The absolute difference of two numbers. An integer result that overflows is an error.
 #'
 #' ```r dput
-#' Num.abs_diff(3L, 10L)
-#' #> 7L
+#' Num.abs_diff(3, 10)
+#' #> 7
 #' ```
 Num.abs_diff : <T: number> fn(first: T, second: T) -> T
 
@@ -1228,7 +1228,7 @@ Num.neg : <T: number> fn(number: T) -> T
 #'
 #' ```r dput
 #' Num.ceiling(1.2)
-#' #> 2
+#' #> 2i64
 #' ```
 Num.ceiling : <T: frac> fn(number: T) -> I64
 
@@ -1236,7 +1236,7 @@ Num.ceiling : <T: frac> fn(number: T) -> I64
 #'
 #' ```r dput
 #' Num.floor(-1.2)
-#' #> -2
+#' #> -2i64
 #' ```
 Num.floor : <T: frac> fn(number: T) -> I64
 
@@ -1244,7 +1244,7 @@ Num.floor : <T: frac> fn(number: T) -> I64
 #'
 #' ```r dput
 #' Num.round(2.5)
-#' #> 3
+#' #> 3i64
 #' ```
 Num.round : <T: frac> fn(number: T) -> I64
 
@@ -1260,7 +1260,7 @@ Num.truncate : <T: frac> fn(number: T) -> I64
 #' error.
 #'
 #' ```r dput
-#' Num.pow(2L, 10L)
+#' Num.pow(2, 10)
 #' #> 1024
 #' ```
 Num.pow : <T: number> fn(base: T, exponent: T) -> T
@@ -1301,7 +1301,7 @@ Num.atan : <T: frac> fn(number: T) -> T
 #' The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
 #'
 #' ```r dput
-#' Num.add_checked(.Machine$integer.max, 1L)
+#' Num.add_checked(2147483647i32, 1i32)
 #' #> :Err(:Overflow)
 #' ```
 Num.add_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
@@ -1309,8 +1309,8 @@ Num.add_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :
 #' The difference, or `:Err(:Overflow)`.
 #'
 #' ```r dput
-#' Num.sub_checked(10L, 3L)
-#' #> :Ok(7L)
+#' Num.sub_checked(10, 3)
+#' #> :Ok(7)
 #' ```
 Num.sub_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 
@@ -1325,24 +1325,24 @@ Num.mul_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :
 #' Adds two numbers, clamping an integer result to the largest or smallest integer.
 #'
 #' ```r dput
-#' Num.add_saturated(2147483647L, 1L)
-#' #> 2147483647L
+#' Num.add_saturated(127i8, 1i8)
+#' #> 127i8
 #' ```
 Num.add_saturated : <T: number> fn(first: T, second: T) -> T
 
 #' Subtracts `second` from `first`, clamping an integer result.
 #'
 #' ```r dput
-#' Num.sub_saturated(-2147483647L, 1L)
-#' #> -2147483647L
+#' Num.sub_saturated(-127i8, 2i8)
+#' #> -128i8
 #' ```
 Num.sub_saturated : <T: number> fn(first: T, second: T) -> T
 
 #' Multiplies two numbers, clamping an integer result.
 #'
 #' ```r dput
-#' Num.mul_saturated(100000L, 100000L)
-#' #> 2147483647L
+#' Num.mul_saturated(100000i32, 100000i32)
+#' #> 2147483647i32
 #' ```
 Num.mul_saturated : <T: number> fn(first: T, second: T) -> T
 
@@ -1373,7 +1373,7 @@ Num.mul_wrap : <T: int> fn(first: T, second: T) -> T
 #' The quotient as a double, or `:Err(:DivByZero)`.
 #'
 #' ```r dput
-#' Num.div_checked(7L, 2L)
+#' Num.div_checked(7, 2)
 #' #> :Ok(3.5)
 #' ```
 Num.div_checked : <T: frac> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
@@ -1382,8 +1382,8 @@ Num.div_checked : <T: frac> fn(first: T, second: T) -> Result<T, :DivByZero | :U
 #' `:Err(:Undefined)`.
 #'
 #' ```r dput
-#' Num.div_trunc_checked(-7L, 2L)
-#' #> :Ok(-3L)
+#' Num.div_trunc_checked(-7, 2)
+#' #> :Ok(-3)
 #' Num.div_trunc_checked(Inf, Inf)
 #' #> :Err(:Undefined)
 #' ```
@@ -1392,16 +1392,16 @@ Num.div_trunc_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero
 #' Divides and rounds up, or `:Err(:DivByZero)`.
 #'
 #' ```r dput
-#' Num.div_ceil_checked(7L, 2L)
-#' #> :Ok(4L)
+#' Num.div_ceil_checked(7, 2)
+#' #> :Ok(4)
 #' ```
 Num.div_ceil_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 
 #' The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
 #'
 #' ```r dput
-#' Num.rem_checked(-7L, 2L)
-#' #> :Ok(-1L)
+#' Num.rem_checked(-7, 2)
+#' #> :Ok(-1)
 #' ```
 Num.rem_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
 
@@ -1455,92 +1455,84 @@ Num.to_f32 : <T: number> fn(number: T) -> F32
 #' The number as a `Dec`. A number a `Dec` cannot hold is an error.
 Num.to_dec : <T: number> fn(number: T) -> Dec
 
-#' The number as an `I8`, a fraction truncated toward zero. A number an `I8` cannot hold is
-#' an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as an `I8`. A number an `I8` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_i8 : <T: number> fn(number: T) -> I8
 
-#' The number as an `I8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly.
 Num.to_i8_checked : <T: number> fn(number: T) -> Result<I8, :OutOfBounds>
 
-#' The number as an `I16`, a fraction truncated toward zero. A number an `I16` cannot hold is
-#' an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as an `I16`. A number an `I16` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_i16 : <T: number> fn(number: T) -> I16
 
-#' The number as an `I16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly.
 Num.to_i16_checked : <T: number> fn(number: T) -> Result<I16, :OutOfBounds>
 
-#' The number as an `I32`, a fraction truncated toward zero. A number an `I32` cannot hold is
-#' an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as an `I32`. A number an `I32` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_i32 : <T: number> fn(number: T) -> I32
 
-#' The number as an `I32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly.
 Num.to_i32_checked : <T: number> fn(number: T) -> Result<I32, :OutOfBounds>
 
-#' The number as an `I128`, a fraction truncated toward zero. A number an `I128` cannot hold is
-#' an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as an `I128`. A number an `I128` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_i128 : <T: number> fn(number: T) -> I128
 
-#' The number as an `I128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly.
 Num.to_i128_checked : <T: number> fn(number: T) -> Result<I128, :OutOfBounds>
 
-#' The number as an `U8`, a fraction truncated toward zero. A number an `U8` cannot hold is
-#' an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as a `U8`. A number a `U8` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_u8 : <T: number> fn(number: T) -> U8
 
-#' The number as an `U8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly.
 Num.to_u8_checked : <T: number> fn(number: T) -> Result<U8, :OutOfBounds>
 
-#' The number as an `U16`, a fraction truncated toward zero. A number an `U16` cannot hold is
-#' an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as a `U16`. A number a `U16` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_u16 : <T: number> fn(number: T) -> U16
 
-#' The number as an `U16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly.
 Num.to_u16_checked : <T: number> fn(number: T) -> Result<U16, :OutOfBounds>
 
-#' The number as an `U32`, a fraction truncated toward zero. A number an `U32` cannot hold is
-#' an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as a `U32`. A number a `U32` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_u32 : <T: number> fn(number: T) -> U32
 
-#' The number as an `U32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly.
 Num.to_u32_checked : <T: number> fn(number: T) -> Result<U32, :OutOfBounds>
 
-#' The number as an `U64`, a fraction truncated toward zero. A number an `U64` cannot hold is
-#' an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as a `U64`. A number a `U64` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_u64 : <T: number> fn(number: T) -> U64
 
-#' The number as an `U64`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly.
 Num.to_u64_checked : <T: number> fn(number: T) -> Result<U64, :OutOfBounds>
 
-#' The number as an `U128`, a fraction truncated toward zero. A number an `U128` cannot hold is
-#' an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
+#' The number as a `U128`. A number a `U128` cannot hold exactly, such as one with a
+#' fraction, is an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
 Num.to_u128 : <T: number> fn(number: T) -> U128
 
-#' The number as an `U128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-#' not fit.
+#' The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly.
 Num.to_u128_checked : <T: number> fn(number: T) -> Result<U128, :OutOfBounds>
 
-#' The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit.
+#' The number as an `I64`, or `:Err(:OutOfBounds)` when an `I64` cannot hold it exactly, such as
+#' a number with a fraction. `Num.truncate` drops a fraction first.
 #'
 #' ```r dput
 #' Num.to_i64_checked(-3.7)
-#' #> :Ok(-3L)
+#' #> :Err(:OutOfBounds)
 #' ```
 Num.to_i64_checked : <T: number> fn(number: T) -> Result<I64, :OutOfBounds>
 
-#' The number truncated toward zero as an integer. A number that does not fit an integer is an
+#' The number as an `I64`. A number an `I64` cannot hold exactly is an
 #' error; `Num.to_i64_checked` returns `:Err(:OutOfBounds)` instead.
 #'
 #' ```r dput
-#' Num.to_i64(-3.7)
-#' #> -3L
+#' Num.to_i64(-3.0)
+#' #> -3i64
 #' ```
 Num.to_i64 : <T: number> fn(number: T) -> I64
 
@@ -1548,8 +1540,8 @@ Num.to_i64 : <T: number> fn(number: T) -> I64
 #' overflow is possible. Unlike `+`, it can be passed by name.
 #'
 #' ```r dput
-#' List.walk(list(1L, 2L, 3L), 0L, Num.add)
-#' #> 6L
+#' List.walk([1, 2, 3], 0, Num.add)
+#' #> 6
 #' ```
 Num.add : <T: number> fn(first: T, second: T) -> T
 
@@ -1557,16 +1549,16 @@ Num.add : <T: number> fn(first: T, second: T) -> T
 #' `NaN` result such as `Inf - Inf`.
 #'
 #' ```r dput
-#' Num.sub(10L, 4L)
-#' #> 6L
+#' Num.sub(10, 4)
+#' #> 6
 #' ```
 Num.sub : <T: number> fn(first: T, second: T) -> T
 
 #' The product. An `integer` product that overflows is an error.
 #'
 #' ```r dput
-#' Num.mul(6L, 7L)
-#' #> 42L
+#' Num.mul(6, 7)
+#' #> 42
 #' ```
 Num.mul : <T: number> fn(first: T, second: T) -> T
 
@@ -1574,7 +1566,7 @@ Num.mul : <T: number> fn(first: T, second: T) -> T
 #' `:Err(:DivByZero)` instead.
 #'
 #' ```r dput
-#' Num.div(7L, 2L)
+#' Num.div(7, 2)
 #' #> 3.5
 #' ```
 Num.div : <T: frac> fn(first: T, second: T) -> T
@@ -1582,24 +1574,24 @@ Num.div : <T: frac> fn(first: T, second: T) -> T
 #' The quotient rounded toward zero. A zero divisor is an error.
 #'
 #' ```r dput
-#' Num.div_trunc(-7L, 2L)
-#' #> -3L
+#' Num.div_trunc(-7, 2)
+#' #> -3
 #' ```
 Num.div_trunc : <T: int> fn(first: T, second: T) -> T
 
 #' The quotient rounded up. A zero divisor is an error.
 #'
 #' ```r dput
-#' Num.div_ceil(7L, 2L)
-#' #> 4L
+#' Num.div_ceil(7, 2)
+#' #> 4
 #' ```
 Num.div_ceil : <T: int> fn(first: T, second: T) -> T
 
 #' The remainder of the truncated division, with the sign of `first`. A zero divisor is an error.
 #'
 #' ```r dput
-#' Num.rem(-7L, 2L)
-#' #> -1L
+#' Num.rem(-7, 2)
+#' #> -1
 #' ```
 Num.rem : <T: int> fn(first: T, second: T) -> T
 
@@ -1607,7 +1599,7 @@ Num.rem : <T: int> fn(first: T, second: T) -> T
 #' `Num.pow` returns a double instead.
 #'
 #' ```r dput
-#' Num.pow_int(3L, 4L)
+#' Num.pow_int(3, 4)
 #' #> 81L
 #' ```
 Num.pow_int : <T: int> fn(base: T, exponent: T) -> T
@@ -1616,7 +1608,7 @@ Num.pow_int : <T: int> fn(base: T, exponent: T) -> T
 #' `:Err(:SqrtOfNegative)` instead.
 #'
 #' ```r dput
-#' Num.sqrt(16L)
+#' Num.sqrt(16)
 #' #> 4
 #' ```
 Num.sqrt : <T: frac> fn(number: T) -> T
@@ -1658,7 +1650,7 @@ Num.is_nan : <T: frac> fn(number: T) -> Bool
 #' The bits set in both integers, in 32-bit two's complement.
 #'
 #' ```r dput
-#' Num.bitwise_and(12L, 10L)
+#' Num.bitwise_and(12, 10)
 #' #> 8L
 #' ```
 Num.bitwise_and : <T: int> fn(first: T, second: T) -> T
@@ -1666,7 +1658,7 @@ Num.bitwise_and : <T: int> fn(first: T, second: T) -> T
 #' The bits set in either integer.
 #'
 #' ```r dput
-#' Num.bitwise_or(12L, 10L)
+#' Num.bitwise_or(12, 10)
 #' #> 14L
 #' ```
 Num.bitwise_or : <T: int> fn(first: T, second: T) -> T
@@ -1675,7 +1667,7 @@ Num.bitwise_or : <T: int> fn(first: T, second: T) -> T
 #' error, because R uses that value for `NA`; the same holds for every bit operation.
 #'
 #' ```r dput
-#' Num.bitwise_xor(12L, 10L)
+#' Num.bitwise_xor(12, 10)
 #' #> 6L
 #' ```
 Num.bitwise_xor : <T: int> fn(first: T, second: T) -> T
@@ -1683,7 +1675,7 @@ Num.bitwise_xor : <T: int> fn(first: T, second: T) -> T
 #' The integer with every bit flipped, which is `-number - 1`.
 #'
 #' ```r dput
-#' Num.bitwise_not(5L)
+#' Num.bitwise_not(5)
 #' #> -6L
 #' ```
 Num.bitwise_not : <T: int> fn(number: T) -> T
@@ -1691,7 +1683,7 @@ Num.bitwise_not : <T: int> fn(number: T) -> T
 #' Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
 #'
 #' ```r dput
-#' Num.shift_left_by(1L, 4L)
+#' Num.shift_left_by(1, 4)
 #' #> 16L
 #' ```
 Num.shift_left_by : <T: int> fn(number: T, bits: T) -> T
@@ -1699,7 +1691,7 @@ Num.shift_left_by : <T: int> fn(number: T, bits: T) -> T
 #' Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative.
 #'
 #' ```r dput
-#' Num.shift_right_by(-16L, 2L)
+#' Num.shift_right_by(-16, 2)
 #' #> -4L
 #' ```
 Num.shift_right_by : <T: int> fn(number: T, bits: T) -> T
@@ -1707,7 +1699,7 @@ Num.shift_right_by : <T: int> fn(number: T, bits: T) -> T
 #' Shifts the bits right by `bits`, filling with zeros.
 #'
 #' ```r dput
-#' Num.shift_right_zf_by(-16L, 28L)
+#' Num.shift_right_zf_by(-16, 28)
 #' #> 15L
 #' ```
 Num.shift_right_zf_by : <T: int> fn(number: T, bits: T) -> T
@@ -1715,7 +1707,7 @@ Num.shift_right_zf_by : <T: int> fn(number: T, bits: T) -> T
 #' The number of set bits.
 #'
 #' ```r dput
-#' Num.count_one_bits(255L)
+#' Num.count_one_bits(255)
 #' #> 8L
 #' ```
 Num.count_one_bits : <T: int> fn(number: T) -> T
@@ -1723,7 +1715,7 @@ Num.count_one_bits : <T: int> fn(number: T) -> T
 #' The number of zero bits above the highest set bit, 32 for zero.
 #'
 #' ```r dput
-#' Num.count_leading_zero_bits(1L)
+#' Num.count_leading_zero_bits(1)
 #' #> 31L
 #' ```
 Num.count_leading_zero_bits : <T: int> fn(number: T) -> T
@@ -1731,7 +1723,7 @@ Num.count_leading_zero_bits : <T: int> fn(number: T) -> T
 #' The number of zero bits below the lowest set bit, 32 for zero.
 #'
 #' ```r dput
-#' Num.count_trailing_zero_bits(8L)
+#' Num.count_trailing_zero_bits(8)
 #' #> 3L
 #' ```
 Num.count_trailing_zero_bits : <T: int> fn(number: T) -> T
@@ -1760,20 +1752,19 @@ Num.tau : F64
 #' ```
 Num.e : F64
 
-#' The largest integer, `2147483647L`. It is a value, not a function.
+#' The largest `I64`, `9223372036854775807i64`. It is a value, not a function.
 #'
 #' ```r dput
 #' Num.max_i64
-#' #> 2147483647L
+#' #> 9223372036854775807i64
 #' ```
 Num.max_i64 : I64
 
-#' The smallest integer, `-2147483647L`. R stores `NA` in the one value below it, so that value is
-#' not an integer here.
+#' The smallest `I64`, `-9223372036854775808i64`. It is a value, not a function.
 #'
 #' ```r dput
 #' Num.min_i64
-#' #> -2147483647L
+#' #> -9223372036854775808i64
 #' ```
 Num.min_i64 : I64
 
@@ -1847,8 +1838,8 @@ Bool.or : fn(first: Bool, second: Bool) -> Bool
 #' The opposite value.
 #'
 #' ```r dput
-#' List.keep_if(list(1L, 2L, 3L), function(x) Bool.not(Num.is_even(x)))
-#' #> list(1L, 3L)
+#' List.keep_if([1, 2, 3], function(x) Bool.not(Num.is_even(x)))
+#' #> [1, 3]
 #' ```
 Bool.not : fn(value: Bool) -> Bool
 
@@ -1857,7 +1848,7 @@ Bool.not : fn(value: Bool) -> Bool
 #' regard to order.
 #'
 #' ```r dput
-#' Bool.is_eq(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 1L)))
+#' Bool.is_eq(Set.from_list([1, 2]), Set.from_list([2, 1]))
 #' #> TRUE
 #' ```
 Bool.is_eq : <T: eq> fn(first: T, second: T) -> Bool
@@ -1865,7 +1856,7 @@ Bool.is_eq : <T: eq> fn(first: T, second: T) -> Bool
 #' Whether two values differ by `identical()`.
 #'
 #' ```r dput
-#' Bool.is_not_eq(list(1L), list(2L))
+#' Bool.is_not_eq([1], [2])
 #' #> TRUE
 #' ```
 Bool.is_not_eq : <T: eq> fn(first: T, second: T) -> Bool
@@ -1886,8 +1877,8 @@ Dict.empty : <K: key, V> fn() -> Dict<K, V>
 #' room is rounded up to a power of two.
 #'
 #' ```r dput
-#' Dict.capacity(Dict.insert(Dict.with_capacity(64L), "a", 1L))
-#' #> 64L
+#' Dict.capacity(Dict.insert(Dict.with_capacity(64), "a", 1))
+#' #> 64i64
 #' ```
 Dict.with_capacity : <K: key, V> fn(capacity: I64) -> Dict<K, V>
 
@@ -1895,23 +1886,23 @@ Dict.with_capacity : <K: key, V> fn(capacity: I64) -> Dict<K, V>
 #'
 #' ```r dput
 #' Dict.single("a", 1)
-#' #> Dict.from_list(list(("a", 1)))
+#' #> Dict.from_list([("a", 1)])
 #' ```
 Dict.single : <K: key, V> fn(key: K, value: V) -> Dict<K, V>
 
 #' A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
 #'
 #' ```r dput
-#' Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
-#' #> Dict.from_list(list(("a", 3), ("b", 2)))
+#' Dict.from_list([("a", 1), ("b", 2), ("a", 3)])
+#' #> Dict.from_list([("a", 3), ("b", 2)])
 #' ```
 Dict.from_list : <K: key, V> fn(pairs: List<Tuple{K, V}>) -> Dict<K, V>
 
 #' The entries as `(key, value)` tuples, in insertion order.
 #'
 #' ```r dput
-#' Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
-#' #> list(("a", 1), ("b", 2))
+#' Dict.to_list(Dict.from_list([("a", 1), ("b", 2)]))
+#' #> [("a", 1), ("b", 2)]
 #' ```
 Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> List<Tuple{K, V}>
 
@@ -1919,7 +1910,7 @@ Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> List<Tuple{K, V}>
 #'
 #' ```r dput
 #' Dict.len(Dict.single("a", 1))
-#' #> 1L
+#' #> 1i64
 #' ```
 Dict.len : <K: key, V> fn(dict: Dict<K, V>) -> I64
 
@@ -1951,15 +1942,15 @@ Dict.contains : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Bool
 #'
 #' ```r dput
 #' Dict.insert(Dict.single("a", 1), "b", 2)
-#' #> Dict.from_list(list(("a", 1), ("b", 2)))
+#' #> Dict.from_list([("a", 1), ("b", 2)])
 #' ```
 Dict.insert : <K: key, V> fn(dict: Dict<K, V>, key: K, value: V) -> Dict<K, V>
 
 #' Removes the entry for `key`, if there is one.
 #'
 #' ```r dput
-#' Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
-#' #> Dict.from_list(list(("b", 2)))
+#' Dict.remove(Dict.from_list([("a", 1), ("b", 2)]), "a")
+#' #> Dict.from_list([("b", 2)])
 #' ```
 Dict.remove : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
 
@@ -1967,31 +1958,31 @@ Dict.remove : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
 #' either; `:Err` removes the entry.
 #'
 #' ```r dput
-#' Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default(r, 0L) + 1L))
-#' #> Dict.from_list(list(("hits", 2L)))
+#' Dict.update(Dict.single("hits", 1), "hits", function(r) :Ok(Result.with_default(r, 0) + 1))
+#' #> Dict.from_list([("hits", 2)])
 #' ```
 Dict.update : <K: key, V> fn(dict: Dict<K, V>, key: K, f: fn(Result<V, :Missing>) -> Result<V, :Missing>) -> Dict<K, V>
 
 #' The keys, in insertion order.
 #'
 #' ```r dput
-#' Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
-#' #> list("a", "b")
+#' Dict.keys(Dict.from_list([("a", 1), ("b", 2)]))
+#' #> ["a", "b"]
 #' ```
 Dict.keys : <K: key, V> fn(dict: Dict<K, V>) -> List<K>
 
 #' The values, in insertion order.
 #'
 #' ```r dput
-#' Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
-#' #> list(1, 2)
+#' Dict.values(Dict.from_list([("a", 1), ("b", 2)]))
+#' #> [1, 2]
 #' ```
 Dict.values : <K: key, V> fn(dict: Dict<K, V>) -> List<V>
 
 #' Folds over the entries: `f` gets the state, a key and its value.
 #'
 #' ```r dput
-#' Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) total + v)
+#' Dict.walk(Dict.from_list([("a", 1), ("b", 2)]), 0, function(total, k, v) total + v)
 #' #> 3
 #' ```
 Dict.walk : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -> S
@@ -1999,80 +1990,80 @@ Dict.walk : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -
 #' Folds the entries until `f` returns `:Break(state)`.
 #'
 #' ```r dput
-#' Dict.walk_until(Dict.from_list(list(("a", 1L), ("b", 5L), ("c", 2L))), 0L, function(total, k, v) if (v > 4L) :Break(total) else :Continue(total + v))
-#' #> 1L
+#' Dict.walk_until(Dict.from_list([("a", 1), ("b", 5), ("c", 2)]), 0, function(total, k, v) if (v > 4) :Break(total) else :Continue(total + v))
+#' #> 1
 #' ```
 Dict.walk_until : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> :Continue(S) | :Break(S)) -> S
 
 #' Replaces every value with `f` of its key and value.
 #'
 #' ```r dput
-#' Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
-#' #> Dict.from_list(list(("a", 10), ("b", 20)))
+#' Dict.map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v * 10)
+#' #> Dict.from_list([("a", 10), ("b", 20)])
 #' ```
 Dict.map : <K: key, A, B> fn(dict: Dict<K, A>, f: fn(K, A) -> B) -> Dict<K, B>
 
 #' Unions the dictionaries `f` returns for each entry; a later entry's value wins.
 #'
 #' ```r dput
-#' Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.single(v, k))
-#' #> Dict.from_list(list((1L, "a"), (2L, "b")))
+#' Dict.join_map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) Dict.single(v, k))
+#' #> Dict.from_list([(1, "a"), (2, "b")])
 #' ```
 Dict.join_map : <K: key, V, X: key, Y> fn(dict: Dict<K, V>, f: fn(K, V) -> Dict<X, Y>) -> Dict<X, Y>
 
 #' The entries for which `predicate` of the key and value is `TRUE`.
 #'
 #' ```r dput
-#' Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
-#' #> Dict.from_list(list(("b", 2)))
+#' Dict.keep_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
+#' #> Dict.from_list([("b", 2)])
 #' ```
 Dict.keep_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 
 #' The entries for which `predicate` is `FALSE`.
 #'
 #' ```r dput
-#' Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
-#' #> Dict.from_list(list(("a", 1)))
+#' Dict.drop_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
+#' #> Dict.from_list([("a", 1)])
 #' ```
 Dict.drop_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> Bool) -> Dict<K, V>
 
 #' The entries of both; where a key is in both, `second`'s value wins.
 #'
 #' ```r dput
-#' Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
-#' #> Dict.from_list(list(("a", 5), ("b", 2)))
+#' Dict.insert_all(Dict.single("a", 1), Dict.from_list([("a", 5), ("b", 2)]))
+#' #> Dict.from_list([("a", 5), ("b", 2)])
 #' ```
 Dict.insert_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 
 #' The entries of `first` whose key and value are both in `second`.
 #'
 #' ```r dput
-#' Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list(("a", 1), ("b", 0))))
-#' #> Dict.from_list(list(("a", 1)))
+#' Dict.keep_shared(Dict.from_list([("a", 1), ("b", 2)]), Dict.from_list([("a", 1), ("b", 0)]))
+#' #> Dict.from_list([("a", 1)])
 #' ```
 Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 
 #' The entries of `first` whose key is not in `second`.
 #'
 #' ```r dput
-#' Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
-#' #> Dict.from_list(list(("b", 2)))
+#' Dict.remove_all(Dict.from_list([("a", 1), ("b", 2)]), Dict.single("a", 0))
+#' #> Dict.from_list([("b", 2)])
 #' ```
 Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
 
 #' The dictionary with room for `spare` more entries.
 #'
 #' ```r dput
-#' Dict.reserve(Dict.single("a", 1L), 1000L)
-#' #> Dict.from_list(list(("a", 1L)))
+#' Dict.reserve(Dict.single("a", 1), 1000)
+#' #> Dict.from_list([("a", 1)])
 #' ```
 Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: I64) -> Dict<K, V>
 
 #' How many entries the dictionary holds before its storage must grow.
 #'
 #' ```r dput
-#' Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
-#' #> 10L
+#' Dict.capacity(Dict.reserve(Dict.single("a", 1), 9))
+#' #> 10i64
 #' ```
 Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> I64
 
@@ -2080,15 +2071,15 @@ Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> I64
 #' which has room for 4.
 #'
 #' ```r dput
-#' Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L)))
-#' #> 1L
+#' Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1), 9)))
+#' #> 1i64
 #' ```
 Dict.release_excess_capacity : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
 
 #' An empty dictionary of the same type.
 #'
 #' ```r dput
-#' Dict.clear(Dict.single("a", 1L))
+#' Dict.clear(Dict.single("a", 1))
 #' #> Dict.empty()
 #' ```
 Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
@@ -2108,8 +2099,8 @@ Set.empty : <T: key> fn() -> Set<T>
 #' is rounded up to a power of two.
 #'
 #' ```r dput
-#' Set.capacity(Set.insert(Set.with_capacity(64L), "a"))
-#' #> 64L
+#' Set.capacity(Set.insert(Set.with_capacity(64), "a"))
+#' #> 64i64
 #' ```
 Set.with_capacity : <T: key> fn(capacity: I64) -> Set<T>
 
@@ -2117,31 +2108,31 @@ Set.with_capacity : <T: key> fn(capacity: I64) -> Set<T>
 #'
 #' ```r dput
 #' Set.single("a")
-#' #> Set.from_list(list("a"))
+#' #> Set.from_list(["a"])
 #' ```
 Set.single : <T: key> fn(element: T) -> Set<T>
 
 #' A set of the list's elements, without duplicates, in first-seen order.
 #'
 #' ```r dput
-#' Set.from_list(list(2L, 1L, 2L))
-#' #> Set.from_list(list(2L, 1L))
+#' Set.from_list([2, 1, 2])
+#' #> Set.from_list([2, 1])
 #' ```
 Set.from_list : <T: key> fn(list: List<T>) -> Set<T>
 
 #' The elements, in insertion order.
 #'
 #' ```r dput
-#' Set.to_list(Set.from_list(list("b", "a")))
-#' #> list("b", "a")
+#' Set.to_list(Set.from_list(["b", "a"]))
+#' #> ["b", "a"]
 #' ```
 Set.to_list : <T: key> fn(set: Set<T>) -> List<T>
 
 #' The number of elements.
 #'
 #' ```r dput
-#' Set.len(Set.from_list(list(1L, 1L, 2L)))
-#' #> 2L
+#' Set.len(Set.from_list([1, 1, 2]))
+#' #> 2i64
 #' ```
 Set.len : <T: key> fn(set: Set<T>) -> I64
 
@@ -2156,7 +2147,7 @@ Set.is_empty : <T: key> fn(set: Set<T>) -> Bool
 #' Whether `element` is in the set.
 #'
 #' ```r dput
-#' Set.contains(Set.from_list(list(1L, 2L)), 2L)
+#' Set.contains(Set.from_list([1, 2]), 2)
 #' #> TRUE
 #' ```
 Set.contains : <T: key> fn(set: Set<T>, element: T) -> Bool
@@ -2164,104 +2155,104 @@ Set.contains : <T: key> fn(set: Set<T>, element: T) -> Bool
 #' Adds an element.
 #'
 #' ```r dput
-#' Set.insert(Set.single(1L), 2L)
-#' #> Set.from_list(list(1L, 2L))
+#' Set.insert(Set.single(1), 2)
+#' #> Set.from_list([1, 2])
 #' ```
 Set.insert : <T: key> fn(set: Set<T>, element: T) -> Set<T>
 
 #' Removes an element, if it is there.
 #'
 #' ```r dput
-#' Set.remove(Set.from_list(list(1L, 2L)), 1L)
-#' #> Set.from_list(list(2L))
+#' Set.remove(Set.from_list([1, 2]), 1)
+#' #> Set.from_list([2])
 #' ```
 Set.remove : <T: key> fn(set: Set<T>, element: T) -> Set<T>
 
 #' The elements of either set.
 #'
 #' ```r dput
-#' Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#' #> Set.from_list(list(1L, 2L, 3L))
+#' Set.union(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#' #> Set.from_list([1, 2, 3])
 #' ```
 Set.union : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
 #' The elements of both sets.
 #'
 #' ```r dput
-#' Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#' #> Set.from_list(list(2L))
+#' Set.intersection(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#' #> Set.from_list([2])
 #' ```
 Set.intersection : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
 #' The elements of `first` that are not in `second`.
 #'
 #' ```r dput
-#' Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
-#' #> Set.from_list(list(1L))
+#' Set.difference(Set.from_list([1, 2]), Set.from_list([2, 3]))
+#' #> Set.from_list([1])
 #' ```
 Set.difference : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
 #' Folds over the elements.
 #'
 #' ```r dput
-#' Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
-#' #> 6L
+#' Set.walk(Set.from_list([1, 2, 3]), 0, function(total, x) total + x)
+#' #> 6
 #' ```
 Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
 
 #' Folds the elements until `f` returns `:Break(state)`.
 #'
 #' ```r dput
-#' Set.walk_until(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) if (x > 2L) :Break(total) else :Continue(total + x))
-#' #> 3L
+#' Set.walk_until(Set.from_list([1, 2, 3]), 0, function(total, x) if (x > 2) :Break(total) else :Continue(total + x))
+#' #> 3
 #' ```
 Set.walk_until : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
 #' The set of `f` of every element.
 #'
 #' ```r dput
-#' Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
-#' #> Set.from_list(list(1L, 0L))
+#' Set.map(Set.from_list([1, 2, 3]), function(x) x %% 2)
+#' #> Set.from_list([1, 0])
 #' ```
 Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 
 #' Unions the sets `f` returns for each element.
 #'
 #' ```r dput
-#' Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 10L)))
-#' #> Set.from_list(list(1L, 10L, 2L, 20L))
+#' Set.join_map(Set.from_list([1, 2]), function(x) Set.from_list([x, x * 10]))
+#' #> Set.from_list([1, 10, 2, 20])
 #' ```
 Set.join_map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> Set<B>) -> Set<B>
 
 #' The elements for which `predicate` is `TRUE`.
 #'
 #' ```r dput
-#' Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
-#' #> Set.from_list(list(2L, 3L))
+#' Set.keep_if(Set.from_list([1, 2, 3]), function(x) x > 1)
+#' #> Set.from_list([2, 3])
 #' ```
 Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 
 #' The elements for which `predicate` is `FALSE`.
 #'
 #' ```r dput
-#' Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
-#' #> Set.from_list(list(1L))
+#' Set.drop_if(Set.from_list([1, 2, 3]), function(x) x > 1)
+#' #> Set.from_list([1])
 #' ```
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 
 #' The set with room for `spare` more elements.
 #'
 #' ```r dput
-#' Set.reserve(Set.single("a"), 1000L)
-#' #> Set.from_list(list("a"))
+#' Set.reserve(Set.single("a"), 1000)
+#' #> Set.from_list(["a"])
 #' ```
 Set.reserve : <T: key> fn(set: Set<T>, spare: I64) -> Set<T>
 
 #' How many elements the set holds before its storage must grow.
 #'
 #' ```r dput
-#' Set.capacity(Set.reserve(Set.single("a"), 9L))
-#' #> 10L
+#' Set.capacity(Set.reserve(Set.single("a"), 9))
+#' #> 10i64
 #' ```
 Set.capacity : <T: key> fn(set: Set<T>) -> I64
 
@@ -2269,7 +2260,7 @@ Set.capacity : <T: key> fn(set: Set<T>) -> I64
 #' for 4.
 #'
 #' ```r dput
-#' Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))
-#' #> 1L
+#' Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9)))
+#' #> 1i64
 #' ```
 Set.release_excess_capacity : <T: key> fn(set: Set<T>) -> Set<T>

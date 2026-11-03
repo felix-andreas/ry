@@ -71,7 +71,7 @@ Dict.empty()
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1883)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1874)
 
 ## `Dict.with_capacity`
 
@@ -97,11 +97,11 @@ An empty dictionary with room for `capacity` entries, so inserting that many nev
 room is rounded up to a power of two.
 
 ```r ry run runtime=ry dput
-Dict.capacity(Dict.insert(Dict.with_capacity(64L), "a", 1L))
-#> 64L
+Dict.capacity(Dict.insert(Dict.with_capacity(64), "a", 1))
+#> 64i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1892)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1883)
 
 ## `Dict.single`
 
@@ -127,10 +127,10 @@ A dictionary with one entry.
 
 ```r ry run runtime=ry dput
 Dict.single("a", 1)
-#> Dict.from_list(list(("a", 1)))
+#> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1900)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1891)
 
 ## `Dict.from_list`
 
@@ -155,11 +155,11 @@ Dict.from_list <- function(pairs)
 A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
 
 ```r ry run runtime=ry dput
-Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
-#> Dict.from_list(list(("a", 3), ("b", 2)))
+Dict.from_list([("a", 1), ("b", 2), ("a", 3)])
+#> Dict.from_list([("a", 3), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1908)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1899)
 
 ## `Dict.to_list`
 
@@ -184,11 +184,11 @@ Dict.to_list <- function(dict)
 The entries as `(key, value)` tuples, in insertion order.
 
 ```r ry run runtime=ry dput
-Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
-#> list(("a", 1), ("b", 2))
+Dict.to_list(Dict.from_list([("a", 1), ("b", 2)]))
+#> [("a", 1), ("b", 2)]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1916)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1907)
 
 ## `Dict.len`
 
@@ -214,10 +214,10 @@ The number of entries.
 
 ```r ry run runtime=ry dput
 Dict.len(Dict.single("a", 1))
-#> 1L
+#> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1924)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1915)
 
 ## `Dict.is_empty`
 
@@ -246,7 +246,7 @@ Dict.is_empty(Dict.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1932)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1923)
 
 ## `Dict.get`
 
@@ -275,7 +275,7 @@ Dict.get(Dict.single("a", 1), "a")
 #> :Ok(1)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1940)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1931)
 
 ## `Dict.contains`
 
@@ -304,7 +304,7 @@ Dict.contains(Dict.single("a", 1), "b")
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1948)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1939)
 
 ## `Dict.insert`
 
@@ -330,10 +330,10 @@ Adds an entry, or replaces the value of an existing key in place.
 
 ```r ry run runtime=ry dput
 Dict.insert(Dict.single("a", 1), "b", 2)
-#> Dict.from_list(list(("a", 1), ("b", 2)))
+#> Dict.from_list([("a", 1), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1956)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1947)
 
 ## `Dict.remove`
 
@@ -358,11 +358,11 @@ Dict.remove <- function(dict, key)
 Removes the entry for `key`, if there is one.
 
 ```r ry run runtime=ry dput
-Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
-#> Dict.from_list(list(("b", 2)))
+Dict.remove(Dict.from_list([("a", 1), ("b", 2)]), "a")
+#> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1964)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1955)
 
 ## `Dict.update`
 
@@ -388,11 +388,11 @@ Sets the entry for `key` from `f`, which gets `:Ok(value)` or `:Err(:Missing)` a
 either; `:Err` removes the entry.
 
 ```r ry run runtime=ry dput
-Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default(r, 0L) + 1L))
-#> Dict.from_list(list(("hits", 2L)))
+Dict.update(Dict.single("hits", 1), "hits", function(r) :Ok(Result.with_default(r, 0) + 1))
+#> Dict.from_list([("hits", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1973)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1964)
 
 ## `Dict.keys`
 
@@ -417,11 +417,11 @@ Dict.keys <- function(dict)
 The keys, in insertion order.
 
 ```r ry run runtime=ry dput
-Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
-#> list("a", "b")
+Dict.keys(Dict.from_list([("a", 1), ("b", 2)]))
+#> ["a", "b"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1981)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1972)
 
 ## `Dict.values`
 
@@ -446,11 +446,11 @@ Dict.values <- function(dict)
 The values, in insertion order.
 
 ```r ry run runtime=ry dput
-Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
-#> list(1, 2)
+Dict.values(Dict.from_list([("a", 1), ("b", 2)]))
+#> [1, 2]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1989)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1980)
 
 ## `Dict.walk`
 
@@ -475,11 +475,11 @@ Dict.walk <- function(dict, state, f)
 Folds over the entries: `f` gets the state, a key and its value.
 
 ```r ry run runtime=ry dput
-Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) total + v)
+Dict.walk(Dict.from_list([("a", 1), ("b", 2)]), 0, function(total, k, v) total + v)
 #> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1997)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1988)
 
 ## `Dict.walk_until`
 
@@ -504,11 +504,11 @@ Dict.walk_until <- function(dict, state, f)
 Folds the entries until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
-Dict.walk_until(Dict.from_list(list(("a", 1L), ("b", 5L), ("c", 2L))), 0L, function(total, k, v) if (v > 4L) :Break(total) else :Continue(total + v))
-#> 1L
+Dict.walk_until(Dict.from_list([("a", 1), ("b", 5), ("c", 2)]), 0, function(total, k, v) if (v > 4) :Break(total) else :Continue(total + v))
+#> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2005)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1996)
 
 ## `Dict.map`
 
@@ -533,11 +533,11 @@ Dict.map <- function(dict, f)
 Replaces every value with `f` of its key and value.
 
 ```r ry run runtime=ry dput
-Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
-#> Dict.from_list(list(("a", 10), ("b", 20)))
+Dict.map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v * 10)
+#> Dict.from_list([("a", 10), ("b", 20)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2013)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2004)
 
 ## `Dict.join_map`
 
@@ -562,11 +562,11 @@ Dict.join_map <- function(dict, f)
 Unions the dictionaries `f` returns for each entry; a later entry's value wins.
 
 ```r ry run runtime=ry dput
-Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.single(v, k))
-#> Dict.from_list(list((1L, "a"), (2L, "b")))
+Dict.join_map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) Dict.single(v, k))
+#> Dict.from_list([(1, "a"), (2, "b")])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2021)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2012)
 
 ## `Dict.keep_if`
 
@@ -591,11 +591,11 @@ Dict.keep_if <- function(dict, predicate)
 The entries for which `predicate` of the key and value is `TRUE`.
 
 ```r ry run runtime=ry dput
-Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
-#> Dict.from_list(list(("b", 2)))
+Dict.keep_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
+#> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2029)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2020)
 
 ## `Dict.drop_if`
 
@@ -620,11 +620,11 @@ Dict.drop_if <- function(dict, predicate)
 The entries for which `predicate` is `FALSE`.
 
 ```r ry run runtime=ry dput
-Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
-#> Dict.from_list(list(("a", 1)))
+Dict.drop_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
+#> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2037)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2028)
 
 ## `Dict.insert_all`
 
@@ -649,11 +649,11 @@ Dict.insert_all <- function(first, second)
 The entries of both; where a key is in both, `second`'s value wins.
 
 ```r ry run runtime=ry dput
-Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
-#> Dict.from_list(list(("a", 5), ("b", 2)))
+Dict.insert_all(Dict.single("a", 1), Dict.from_list([("a", 5), ("b", 2)]))
+#> Dict.from_list([("a", 5), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2045)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2036)
 
 ## `Dict.keep_shared`
 
@@ -678,11 +678,11 @@ Dict.keep_shared <- function(first, second)
 The entries of `first` whose key and value are both in `second`.
 
 ```r ry run runtime=ry dput
-Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list(("a", 1), ("b", 0))))
-#> Dict.from_list(list(("a", 1)))
+Dict.keep_shared(Dict.from_list([("a", 1), ("b", 2)]), Dict.from_list([("a", 1), ("b", 0)]))
+#> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2053)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2044)
 
 ## `Dict.remove_all`
 
@@ -707,11 +707,11 @@ Dict.remove_all <- function(first, second)
 The entries of `first` whose key is not in `second`.
 
 ```r ry run runtime=ry dput
-Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
-#> Dict.from_list(list(("b", 2)))
+Dict.remove_all(Dict.from_list([("a", 1), ("b", 2)]), Dict.single("a", 0))
+#> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2061)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2052)
 
 ## `Dict.reserve`
 
@@ -736,11 +736,11 @@ Dict.reserve <- function(dict, spare)
 The dictionary with room for `spare` more entries.
 
 ```r ry run runtime=ry dput
-Dict.reserve(Dict.single("a", 1L), 1000L)
-#> Dict.from_list(list(("a", 1L)))
+Dict.reserve(Dict.single("a", 1), 1000)
+#> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2069)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2060)
 
 ## `Dict.capacity`
 
@@ -765,11 +765,11 @@ Dict.capacity <- function(dict)
 How many entries the dictionary holds before its storage must grow.
 
 ```r ry run runtime=ry dput
-Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
-#> 10L
+Dict.capacity(Dict.reserve(Dict.single("a", 1), 9))
+#> 10i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2077)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2068)
 
 ## `Dict.release_excess_capacity`
 
@@ -795,11 +795,11 @@ The dictionary with no room beyond its entries. An empty dictionary keeps its sm
 which has room for 4.
 
 ```r ry run runtime=ry dput
-Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L)))
-#> 1L
+Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1), 9)))
+#> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2086)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2077)
 
 ## `Dict.clear`
 
@@ -824,8 +824,8 @@ Dict.clear <- function(dict)
 An empty dictionary of the same type.
 
 ```r ry run runtime=ry dput
-Dict.clear(Dict.single("a", 1L))
+Dict.clear(Dict.single("a", 1))
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2094)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2085)

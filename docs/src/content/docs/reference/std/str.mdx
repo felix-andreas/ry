@@ -155,7 +155,7 @@ Str.join_with <- function(strings, separator)
 Joins a list of strings with `separator` between them.
 
 ```r ry run runtime=ry dput
-Str.join_with(list("a", "b", "c"), ", ")
+Str.join_with(["a", "b", "c"], ", ")
 #> "a, b, c"
 ```
 
@@ -185,7 +185,7 @@ Splits at every occurrence of `separator`.
 
 ```r ry run runtime=ry dput
 Str.split_on("a,b,,c", ",")
-#> list("a", "b", "", "c")
+#> ["a", "b", "", "c"]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L797)
@@ -213,7 +213,7 @@ Str.repeat <- function(string, count)
 `count` copies of the string.
 
 ```r ry run runtime=ry dput
-Str.repeat("ab", 3L)
+Str.repeat("ab", 3)
 #> "ababab"
 ```
 
@@ -649,7 +649,7 @@ The number of bytes in the string's UTF-8 encoding.
 
 ```r ry run runtime=ry dput
 Str.count_utf8_bytes("hé")
-#> 3L
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L925)
@@ -678,7 +678,7 @@ The bytes of the string's UTF-8 encoding.
 
 ```r ry run runtime=ry dput
 Str.to_utf8("hé")
-#> list(104L, 195L, 169L)
+#> [104u8, 195u8, 169u8]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
@@ -706,7 +706,7 @@ Str.from_utf8 <- function(bytes)
 The string a list of bytes encodes, or `:Err(:BadUtf8)`.
 
 ```r ry run runtime=ry dput
-Str.from_utf8(list(104L, 105L))
+Str.from_utf8([104, 105])
 #> :Ok("hi")
 ```
 
@@ -735,7 +735,7 @@ Str.from_utf8_lossy <- function(bytes)
 Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf8_lossy(list(104L, 255L, 105L))
+Str.from_utf8_lossy([104, 255, 105])
 #> "h�i"
 ```
 
@@ -909,8 +909,8 @@ Str.walk_utf8 <- function(string, state, f)
 Folds the string's UTF-8 bytes: `f(state, byte)` gives the next state.
 
 ```r ry run runtime=ry dput
-Str.walk_utf8("abc", 0L, function(total, byte) total + byte)
-#> 294L
+Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
+#> 294i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L997)
@@ -938,8 +938,8 @@ Str.walk_utf8_with_index <- function(string, state, f)
 Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
 
 ```r ry run runtime=ry dput
-Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
-#> list(97L, 196L)
+Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num.to_i64(byte) * i))
+#> [97i64, 196i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1005)
@@ -969,7 +969,7 @@ Multilingual Plane takes two units, a surrogate pair.
 
 ```r ry run runtime=ry dput
 Str.to_utf16("h\U0001F600")
-#> list(104L, 55357L, 56832L)
+#> [104u16, 55357u16, 56832u16]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1014)
@@ -998,7 +998,7 @@ Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate or a z
 an R string cannot hold. A number outside 0 to 65535 is an error.
 
 ```r ry run runtime=ry dput
-Str.from_utf16(list(104L, 55357L))
+Str.from_utf16([104, 55357])
 #> :Err(:BadUtf16)
 ```
 
@@ -1027,7 +1027,7 @@ Str.from_utf16_lossy <- function(units)
 Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf16_lossy(list(104L, 105L))
+Str.from_utf16_lossy([104, 105])
 #> "hi"
 ```
 
@@ -1057,7 +1057,7 @@ The string's Unicode code points, one per character.
 
 ```r ry run runtime=ry dput
 Str.to_utf32("h\u00e9")
-#> list(104L, 233L)
+#> [104u32, 233u32]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1039)
@@ -1086,7 +1086,7 @@ Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that
 surrogate, a negative number, or one above 1114111) and for zero.
 
 ```r ry run runtime=ry dput
-Str.from_utf32(list(55296L))
+Str.from_utf32([55296])
 #> :Err(:BadUtf32)
 ```
 
@@ -1115,7 +1115,7 @@ Str.from_utf32_lossy <- function(code_points)
 Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf32_lossy(list(82L, 121L))
+Str.from_utf32_lossy([82, 121])
 #> "Ry"
 ```
 

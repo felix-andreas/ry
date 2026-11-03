@@ -912,7 +912,7 @@ impl Deparser {
         self.print("]");
     }
 
-    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
+    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list([("a", 1)])` or
     /// `Set.empty()`.
     unsafe fn collection(&mut self, object: Sexp, dict: bool) {
         let module = if dict { "Dict" } else { "Set" };
@@ -927,8 +927,14 @@ impl Deparser {
             self.print(".empty()");
             return;
         }
+        // A dictionary's entries are tuples, which a ry list holds; a set's elements need to be
+        // single values or ry values for the `[...]` literal to rebuild them.
+        let literal = dict
+            || entries
+                .iter()
+                .all(|(key, _)| crate::arrays::is_ry_value(*key) || values::length(*key) == 1);
         self.print(module);
-        self.print(".from_list(list(");
+        self.print(if literal { ".from_list([" } else { ".from_list(list(" });
         self.in_list += 1;
         let mut broken = false;
         let count = entries.len();
@@ -952,7 +958,7 @@ impl Deparser {
             self.indent -= 1;
         }
         self.in_list -= 1;
-        self.print("))");
+        self.print(if literal { "])" } else { "))" });
     }
 
     /// The calls ry's own syntax lowers to, printed back in that syntax.

@@ -3457,7 +3457,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *ty)
         ),
         TypeErrorKind::LiteralOutOfRange { expected } => format!(
-            "this literal is not a `{0}`: a `{0}` cannot hold its value",
+            "this literal does not fit `{}`, which cannot hold its value exactly",
             renderer.render(db, *expected)
         ),
         TypeErrorKind::ArrayMissingValue => "a `List` holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),

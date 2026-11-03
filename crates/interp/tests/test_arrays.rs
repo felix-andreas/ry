@@ -146,13 +146,13 @@ const PRINTS: &[(&str, &str)] = &[
 const ERRORS: &[(&str, &str)] = &[
     (
         "[1, \"a\"]",
-        "Array items must all have one type, but item 1 is double and item 2 is character",
+        "a list's items must all have one type, but item 1 is double and item 2 is character",
     ),
     ("[1, 2L]", "item 1 is double and item 2 is integer"),
-    ("[1, NA]", "an Array cannot hold NA"),
+    ("[1, NA]", "a list cannot hold NA"),
     (
         "[c(1, 2)]",
-        "an Array item must be a single value, not a double vector of length 2",
+        "a list item must be a single value, not a double vector of length 2",
     ),
     ("[NULL]", "not NULL"),
     ("[list(1)]", "not a list"),
@@ -170,12 +170,12 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "xs + [1, 2]",
-        "needs Arrays of the same length, but they have 3 and 2 items",
+        "needs lists of the same length, but they have 3 and 2 items",
     ),
     ("xs + ns", "one is double and the other is integer"),
     (
         "words + \"b\"",
-        "`+` is not defined for an Array of character items",
+        "`+` is not defined for a list of character items",
     ),
     (
         "flags & TRUE & xs",
@@ -183,38 +183,38 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "points == points",
-        "`==` is not defined for an Array of ry value items",
+        "`==` is not defined for a list of ry value items",
     ),
     (
         "points + 1",
-        "`+` is not defined for an Array of ry value items",
+        "`+` is not defined for a list of ry value items",
     ),
     ("[2000000000L] * 2L", "produced a missing value at item 1"),
     ("[0] / [0]", "produced a missing value"),
     (
         "xs[[4]]",
-        "position 4 is out of bounds for an Array of 3 items",
+        "position 4 is out of bounds for a list of 3 items",
     ),
     ("xs[NA_integer_]", "position NA is out of bounds"),
     ("xs[c(-1, 2)]", "cannot mix positive and negative positions"),
     ("xs[[0]]", "takes one whole-number position"),
     (
         "xs[[3.5]]",
-        "position 3.5 is out of bounds for an Array of 3 items",
+        "position 3.5 is out of bounds for a list of 3 items",
     ),
     (
         "xs[\"a\"]",
-        "an Array is indexed by positions or a logical mask, not a character vector",
+        "a list is indexed by positions or a logical mask, not a character vector",
     ),
     (
         "xs[c(TRUE, FALSE)]",
         "a logical mask needs one entry per item",
     ),
-    ("xs[1, 2]", "an Array has one dimension"),
+    ("xs[1, 2]", "a list has one dimension"),
     ("xs[[1:2]]", "takes one whole-number position"),
     (
         "ys <- xs; ys[1:2] <- [1, 2, 3]",
-        "assigns 2 positions but the replacement Array has 3 items",
+        "assigns 2 positions but the replacement list has 3 items",
     ),
     ("ys <- xs; ys[[5]] <- 1", "position 5 is out of bounds"),
     (
@@ -227,7 +227,7 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "List.map(xs, function(x) c(x, x))",
-        "`List.map()` received an Array, so its result must be one: an Array item must be a single value",
+        "`List.map()` received a list, so its result must be one: a list item must be a single value",
     ),
 ];
 

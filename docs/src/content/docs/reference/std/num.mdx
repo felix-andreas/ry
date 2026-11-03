@@ -65,26 +65,26 @@ any other. The bit operations take integers as 32-bit two's complement.
 | [`Num.to_f64`](#numto_f64) | The number as an `F64`. |
 | [`Num.to_f32`](#numto_f32) | The number as an `F32`, rounded to the nearest one. |
 | [`Num.to_dec`](#numto_dec) | The number as a `Dec`. |
-| [`Num.to_i8`](#numto_i8) | The number as an `I8`, a fraction truncated toward zero. |
-| [`Num.to_i8_checked`](#numto_i8_checked) | The number as an `I8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_i16`](#numto_i16) | The number as an `I16`, a fraction truncated toward zero. |
-| [`Num.to_i16_checked`](#numto_i16_checked) | The number as an `I16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_i32`](#numto_i32) | The number as an `I32`, a fraction truncated toward zero. |
-| [`Num.to_i32_checked`](#numto_i32_checked) | The number as an `I32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_i128`](#numto_i128) | The number as an `I128`, a fraction truncated toward zero. |
-| [`Num.to_i128_checked`](#numto_i128_checked) | The number as an `I128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_u8`](#numto_u8) | The number as an `U8`, a fraction truncated toward zero. |
-| [`Num.to_u8_checked`](#numto_u8_checked) | The number as an `U8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_u16`](#numto_u16) | The number as an `U16`, a fraction truncated toward zero. |
-| [`Num.to_u16_checked`](#numto_u16_checked) | The number as an `U16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_u32`](#numto_u32) | The number as an `U32`, a fraction truncated toward zero. |
-| [`Num.to_u32_checked`](#numto_u32_checked) | The number as an `U32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_u64`](#numto_u64) | The number as an `U64`, a fraction truncated toward zero. |
-| [`Num.to_u64_checked`](#numto_u64_checked) | The number as an `U64`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_u128`](#numto_u128) | The number as an `U128`, a fraction truncated toward zero. |
-| [`Num.to_u128_checked`](#numto_u128_checked) | The number as an `U128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_i64_checked`](#numto_i64_checked) | The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit. |
-| [`Num.to_i64`](#numto_i64) | The number truncated toward zero as an integer. |
+| [`Num.to_i8`](#numto_i8) | The number as an `I8`. |
+| [`Num.to_i8_checked`](#numto_i8_checked) | The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly. |
+| [`Num.to_i16`](#numto_i16) | The number as an `I16`. |
+| [`Num.to_i16_checked`](#numto_i16_checked) | The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly. |
+| [`Num.to_i32`](#numto_i32) | The number as an `I32`. |
+| [`Num.to_i32_checked`](#numto_i32_checked) | The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly. |
+| [`Num.to_i128`](#numto_i128) | The number as an `I128`. |
+| [`Num.to_i128_checked`](#numto_i128_checked) | The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly. |
+| [`Num.to_u8`](#numto_u8) | The number as a `U8`. |
+| [`Num.to_u8_checked`](#numto_u8_checked) | The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly. |
+| [`Num.to_u16`](#numto_u16) | The number as a `U16`. |
+| [`Num.to_u16_checked`](#numto_u16_checked) | The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly. |
+| [`Num.to_u32`](#numto_u32) | The number as a `U32`. |
+| [`Num.to_u32_checked`](#numto_u32_checked) | The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly. |
+| [`Num.to_u64`](#numto_u64) | The number as a `U64`. |
+| [`Num.to_u64_checked`](#numto_u64_checked) | The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly. |
+| [`Num.to_u128`](#numto_u128) | The number as a `U128`. |
+| [`Num.to_u128_checked`](#numto_u128_checked) | The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly. |
+| [`Num.to_i64_checked`](#numto_i64_checked) | The number as an `I64`, or `:Err(:OutOfBounds)` when an `I64` cannot hold it exactly, such as a number with a fraction. |
+| [`Num.to_i64`](#numto_i64) | The number as an `I64`. |
 | [`Num.add`](#numadd) | The sum. |
 | [`Num.sub`](#numsub) | `second` subtracted from `first`. |
 | [`Num.mul`](#nummul) | The product. |
@@ -111,8 +111,8 @@ any other. The bit operations take integers as 32-bit two's complement.
 | [`Num.pi`](#numpi) | The ratio of a circle's circumference to its diameter. |
 | [`Num.tau`](#numtau) | The ratio of a circle's circumference to its radius, `2 * Num.pi`. |
 | [`Num.e`](#nume) | Euler's number, the base of the natural logarithm. |
-| [`Num.max_i64`](#nummax_i64) | The largest integer, `2147483647L`. |
-| [`Num.min_i64`](#nummin_i64) | The smallest integer, `-2147483647L`. |
+| [`Num.max_i64`](#nummax_i64) | The largest `I64`, `9223372036854775807i64`. |
+| [`Num.min_i64`](#nummin_i64) | The smallest `I64`, `-9223372036854775808i64`. |
 | [`Num.max_f64`](#nummax_f64) | The largest finite double. |
 | [`Num.min_f64`](#nummin_f64) | The most negative finite double, the negation of `Num.max_f64`. |
 | [`Num.infinity_f64`](#numinfinity_f64) | Positive infinity, R's `Inf`. |
@@ -170,7 +170,7 @@ Num.compare <- function(first, second)
 `:LT`, `:EQ` or `:GT`, comparing `first` with `second`.
 
 ```r ry run runtime=ry dput
-Num.compare(2L, 1L)
+Num.compare(2, 1)
 #> :GT
 ```
 
@@ -199,8 +199,8 @@ Num.min <- function(first, second)
 The smaller number.
 
 ```r ry run runtime=ry dput
-Num.min(2L, 1L)
-#> 1L
+Num.min(2, 1)
+#> 1
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1088)
@@ -257,7 +257,7 @@ Num.is_lt <- function(first, second)
 Whether `first < second`.
 
 ```r ry run runtime=ry dput
-Num.is_lt(1L, 2L)
+Num.is_lt(1, 2)
 #> TRUE
 ```
 
@@ -286,7 +286,7 @@ Num.is_gt <- function(first, second)
 Whether `first > second`.
 
 ```r ry run runtime=ry dput
-Num.is_gt(1L, 2L)
+Num.is_gt(1, 2)
 #> FALSE
 ```
 
@@ -315,7 +315,7 @@ Num.is_lte <- function(first, second)
 Whether `first <= second`.
 
 ```r ry run runtime=ry dput
-Num.is_lte(2, 2L)
+Num.is_lte(2, 2)
 #> TRUE
 ```
 
@@ -419,7 +419,7 @@ Num.is_positive <- function(number)
 Whether the number is greater than zero.
 
 ```r ry run runtime=ry dput
-Num.is_positive(0L)
+Num.is_positive(0)
 #> FALSE
 ```
 
@@ -477,7 +477,7 @@ Num.is_even <- function(number)
 Whether the number is a whole, even number.
 
 ```r ry run runtime=ry dput
-Num.is_even(4L)
+Num.is_even(4)
 #> TRUE
 ```
 
@@ -506,7 +506,7 @@ Num.is_odd <- function(number)
 Whether the number is a whole, odd number.
 
 ```r ry run runtime=ry dput
-Num.is_odd(-3L)
+Num.is_odd(-3)
 #> TRUE
 ```
 
@@ -535,7 +535,7 @@ Num.is_multiple_of <- function(first, second)
 Whether `first` is a whole multiple of `second`. Only zero is a multiple of zero.
 
 ```r ry run runtime=ry dput
-Num.is_multiple_of(12L, 4L)
+Num.is_multiple_of(12, 4)
 #> TRUE
 ```
 
@@ -622,8 +622,8 @@ Num.abs <- function(number)
 The absolute value.
 
 ```r ry run runtime=ry dput
-Num.abs(-3L)
-#> 3L
+Num.abs(-3)
+#> 3
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1209)
@@ -651,8 +651,8 @@ Num.abs_diff <- function(first, second)
 The absolute difference of two numbers. An integer result that overflows is an error.
 
 ```r ry run runtime=ry dput
-Num.abs_diff(3L, 10L)
-#> 7L
+Num.abs_diff(3, 10)
+#> 7
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1217)
@@ -710,7 +710,7 @@ Rounds up to a whole number, keeping the number type.
 
 ```r ry run runtime=ry dput
 Num.ceiling(1.2)
-#> 2
+#> 2i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1233)
@@ -739,7 +739,7 @@ Rounds down to a whole number, as an `I64`.
 
 ```r ry run runtime=ry dput
 Num.floor(-1.2)
-#> -2
+#> -2i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1241)
@@ -768,7 +768,7 @@ Rounds to the nearest whole number, halves away from zero, as an `I64`.
 
 ```r ry run runtime=ry dput
 Num.round(2.5)
-#> 3
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1249)
@@ -826,7 +826,7 @@ Num.pow <- function(base, exponent)
 error.
 
 ```r ry run runtime=ry dput
-Num.pow(2L, 10L)
+Num.pow(2, 10)
 #> 1024
 ```
 
@@ -972,7 +972,7 @@ Num.add_checked <- function(first, second)
 The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
 
 ```r ry run runtime=ry dput
-Num.add_checked(.Machine$integer.max, 1L)
+Num.add_checked(2147483647i32, 1i32)
 #> :Err(:Overflow)
 ```
 
@@ -1001,8 +1001,8 @@ Num.sub_checked <- function(first, second)
 The difference, or `:Err(:Overflow)`.
 
 ```r ry run runtime=ry dput
-Num.sub_checked(10L, 3L)
-#> :Ok(7L)
+Num.sub_checked(10, 3)
+#> :Ok(7)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1315)
@@ -1059,8 +1059,8 @@ Num.add_saturated <- function(first, second)
 Adds two numbers, clamping an integer result to the largest or smallest integer.
 
 ```r ry run runtime=ry dput
-Num.add_saturated(2147483647L, 1L)
-#> 2147483647L
+Num.add_saturated(127i8, 1i8)
+#> 127i8
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1331)
@@ -1088,8 +1088,8 @@ Num.sub_saturated <- function(first, second)
 Subtracts `second` from `first`, clamping an integer result.
 
 ```r ry run runtime=ry dput
-Num.sub_saturated(-2147483647L, 1L)
-#> -2147483647L
+Num.sub_saturated(-127i8, 2i8)
+#> -128i8
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1339)
@@ -1117,8 +1117,8 @@ Num.mul_saturated <- function(first, second)
 Multiplies two numbers, clamping an integer result.
 
 ```r ry run runtime=ry dput
-Num.mul_saturated(100000L, 100000L)
-#> 2147483647L
+Num.mul_saturated(100000i32, 100000i32)
+#> 2147483647i32
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1347)
@@ -1233,7 +1233,7 @@ Num.div_checked <- function(first, second)
 The quotient as a double, or `:Err(:DivByZero)`.
 
 ```r ry run runtime=ry dput
-Num.div_checked(7L, 2L)
+Num.div_checked(7, 2)
 #> :Ok(3.5)
 ```
 
@@ -1263,8 +1263,8 @@ The quotient rounded toward zero, or `:Err(:DivByZero)`; `Inf` divided by `Inf` 
 `:Err(:Undefined)`.
 
 ```r ry run runtime=ry dput
-Num.div_trunc_checked(-7L, 2L)
-#> :Ok(-3L)
+Num.div_trunc_checked(-7, 2)
+#> :Ok(-3)
 Num.div_trunc_checked(Inf, Inf)
 #> :Err(:Undefined)
 ```
@@ -1294,8 +1294,8 @@ Num.div_ceil_checked <- function(first, second)
 Divides and rounds up, or `:Err(:DivByZero)`.
 
 ```r ry run runtime=ry dput
-Num.div_ceil_checked(7L, 2L)
-#> :Ok(4L)
+Num.div_ceil_checked(7, 2)
+#> :Ok(4)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1398)
@@ -1323,8 +1323,8 @@ Num.rem_checked <- function(first, second)
 The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
 
 ```r ry run runtime=ry dput
-Num.rem_checked(-7L, 2L)
-#> :Ok(-1L)
+Num.rem_checked(-7, 2)
+#> :Ok(-1)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1406)
@@ -1549,8 +1549,8 @@ Num.to_i8 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I8`, a fraction truncated toward zero. A number an `I8` cannot hold is
-an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
+The number as an `I8`. A number an `I8` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1460)
 
@@ -1574,10 +1574,9 @@ Num.to_i8_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1464)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1463)
 
 ## `Num.to_i16`
 
@@ -1599,10 +1598,10 @@ Num.to_i16 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I16`, a fraction truncated toward zero. A number an `I16` cannot hold is
-an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
+The number as an `I16`. A number an `I16` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1468)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1467)
 
 ## `Num.to_i16_checked`
 
@@ -1624,10 +1623,9 @@ Num.to_i16_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1472)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1470)
 
 ## `Num.to_i32`
 
@@ -1649,10 +1647,10 @@ Num.to_i32 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I32`, a fraction truncated toward zero. A number an `I32` cannot hold is
-an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
+The number as an `I32`. A number an `I32` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1476)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1474)
 
 ## `Num.to_i32_checked`
 
@@ -1674,10 +1672,9 @@ Num.to_i32_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1480)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1477)
 
 ## `Num.to_i128`
 
@@ -1699,10 +1696,10 @@ Num.to_i128 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I128`, a fraction truncated toward zero. A number an `I128` cannot hold is
-an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
+The number as an `I128`. A number an `I128` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1484)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1481)
 
 ## `Num.to_i128_checked`
 
@@ -1724,10 +1721,9 @@ Num.to_i128_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `I128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1488)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1484)
 
 ## `Num.to_u8`
 
@@ -1749,10 +1745,10 @@ Num.to_u8 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U8`, a fraction truncated toward zero. A number an `U8` cannot hold is
-an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
+The number as a `U8`. A number a `U8` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1492)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1488)
 
 ## `Num.to_u8_checked`
 
@@ -1774,10 +1770,9 @@ Num.to_u8_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U8`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1496)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1491)
 
 ## `Num.to_u16`
 
@@ -1799,10 +1794,10 @@ Num.to_u16 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U16`, a fraction truncated toward zero. A number an `U16` cannot hold is
-an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
+The number as a `U16`. A number a `U16` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1500)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1495)
 
 ## `Num.to_u16_checked`
 
@@ -1824,10 +1819,9 @@ Num.to_u16_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U16`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1504)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1498)
 
 ## `Num.to_u32`
 
@@ -1849,10 +1843,10 @@ Num.to_u32 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U32`, a fraction truncated toward zero. A number an `U32` cannot hold is
-an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
+The number as a `U32`. A number a `U32` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1508)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1502)
 
 ## `Num.to_u32_checked`
 
@@ -1874,10 +1868,9 @@ Num.to_u32_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U32`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1512)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1505)
 
 ## `Num.to_u64`
 
@@ -1899,10 +1892,10 @@ Num.to_u64 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U64`, a fraction truncated toward zero. A number an `U64` cannot hold is
-an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
+The number as a `U64`. A number a `U64` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1516)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1509)
 
 ## `Num.to_u64_checked`
 
@@ -1924,10 +1917,9 @@ Num.to_u64_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U64`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1520)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1512)
 
 ## `Num.to_u128`
 
@@ -1949,10 +1941,10 @@ Num.to_u128 <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U128`, a fraction truncated toward zero. A number an `U128` cannot hold is
-an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
+The number as a `U128`. A number a `U128` cannot hold exactly, such as one with a
+fraction, is an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1524)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1516)
 
 ## `Num.to_u128_checked`
 
@@ -1974,10 +1966,9 @@ Num.to_u128_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number as an `U128`, a fraction truncated toward zero, or `:Err(:OutOfBounds)` when it does
-not fit.
+The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1528)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1519)
 
 ## `Num.to_i64_checked`
 
@@ -1999,14 +1990,15 @@ Num.to_i64_checked <- function(number)
 </TabItem>
 </Tabs>
 
-The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit.
+The number as an `I64`, or `:Err(:OutOfBounds)` when an `I64` cannot hold it exactly, such as
+a number with a fraction. `Num.truncate` drops a fraction first.
 
 ```r ry run runtime=ry dput
 Num.to_i64_checked(-3.7)
-#> :Ok(-3L)
+#> :Err(:OutOfBounds)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1536)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1528)
 
 ## `Num.to_i64`
 
@@ -2028,15 +2020,15 @@ Num.to_i64 <- function(number)
 </TabItem>
 </Tabs>
 
-The number truncated toward zero as an integer. A number that does not fit an integer is an
+The number as an `I64`. A number an `I64` cannot hold exactly is an
 error; `Num.to_i64_checked` returns `:Err(:OutOfBounds)` instead.
 
 ```r ry run runtime=ry dput
-Num.to_i64(-3.7)
-#> -3L
+Num.to_i64(-3.0)
+#> -3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1545)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1537)
 
 ## `Num.add`
 
@@ -2062,11 +2054,11 @@ The sum. An `integer` sum that overflows stops with an error, so use `Num.add_ch
 overflow is possible. Unlike `+`, it can be passed by name.
 
 ```r ry run runtime=ry dput
-List.walk(list(1L, 2L, 3L), 0L, Num.add)
-#> 6L
+List.walk([1, 2, 3], 0, Num.add)
+#> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1554)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1546)
 
 ## `Num.sub`
 
@@ -2092,11 +2084,11 @@ Num.sub <- function(first, second)
 `NaN` result such as `Inf - Inf`.
 
 ```r ry run runtime=ry dput
-Num.sub(10L, 4L)
-#> 6L
+Num.sub(10, 4)
+#> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1563)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1555)
 
 ## `Num.mul`
 
@@ -2121,11 +2113,11 @@ Num.mul <- function(first, second)
 The product. An `integer` product that overflows is an error.
 
 ```r ry run runtime=ry dput
-Num.mul(6L, 7L)
-#> 42L
+Num.mul(6, 7)
+#> 42
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1571)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1563)
 
 ## `Num.div`
 
@@ -2151,11 +2143,11 @@ The quotient as a double. A zero divisor is an error; `Num.div_checked` returns
 `:Err(:DivByZero)` instead.
 
 ```r ry run runtime=ry dput
-Num.div(7L, 2L)
+Num.div(7, 2)
 #> 3.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1580)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1572)
 
 ## `Num.div_trunc`
 
@@ -2180,11 +2172,11 @@ Num.div_trunc <- function(first, second)
 The quotient rounded toward zero. A zero divisor is an error.
 
 ```r ry run runtime=ry dput
-Num.div_trunc(-7L, 2L)
-#> -3L
+Num.div_trunc(-7, 2)
+#> -3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1588)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1580)
 
 ## `Num.div_ceil`
 
@@ -2209,11 +2201,11 @@ Num.div_ceil <- function(first, second)
 The quotient rounded up. A zero divisor is an error.
 
 ```r ry run runtime=ry dput
-Num.div_ceil(7L, 2L)
-#> 4L
+Num.div_ceil(7, 2)
+#> 4
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1596)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1588)
 
 ## `Num.rem`
 
@@ -2238,11 +2230,11 @@ Num.rem <- function(first, second)
 The remainder of the truncated division, with the sign of `first`. A zero divisor is an error.
 
 ```r ry run runtime=ry dput
-Num.rem(-7L, 2L)
-#> -1L
+Num.rem(-7, 2)
+#> -1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1604)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1596)
 
 ## `Num.pow_int`
 
@@ -2268,11 +2260,11 @@ Num.pow_int <- function(base, exponent)
 `Num.pow` returns a double instead.
 
 ```r ry run runtime=ry dput
-Num.pow_int(3L, 4L)
+Num.pow_int(3, 4)
 #> 81L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1613)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1605)
 
 ## `Num.sqrt`
 
@@ -2298,11 +2290,11 @@ The square root. A negative number is an error; `Num.sqrt_checked` returns
 `:Err(:SqrtOfNegative)` instead.
 
 ```r ry run runtime=ry dput
-Num.sqrt(16L)
+Num.sqrt(16)
 #> 4
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1622)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1614)
 
 ## `Num.log`
 
@@ -2332,7 +2324,7 @@ Num.log(Num.e)
 #> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1631)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1623)
 
 ## `Num.asin`
 
@@ -2361,7 +2353,7 @@ Num.asin(1)
 #> 1.5707963267949
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1639)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1631)
 
 ## `Num.acos`
 
@@ -2390,7 +2382,7 @@ Num.acos(1)
 #> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1647)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1639)
 
 ## `Num.is_nan`
 
@@ -2420,7 +2412,7 @@ Num.is_nan(0 / 0)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1656)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1648)
 
 ## `Num.bitwise_and`
 
@@ -2445,11 +2437,11 @@ Num.bitwise_and <- function(first, second)
 The bits set in both integers, in 32-bit two's complement.
 
 ```r ry run runtime=ry dput
-Num.bitwise_and(12L, 10L)
+Num.bitwise_and(12, 10)
 #> 8L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1664)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1656)
 
 ## `Num.bitwise_or`
 
@@ -2474,11 +2466,11 @@ Num.bitwise_or <- function(first, second)
 The bits set in either integer.
 
 ```r ry run runtime=ry dput
-Num.bitwise_or(12L, 10L)
+Num.bitwise_or(12, 10)
 #> 14L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1672)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1664)
 
 ## `Num.bitwise_xor`
 
@@ -2504,11 +2496,11 @@ The bits set in exactly one of the integers. A result whose bit pattern is -2147
 error, because R uses that value for `NA`; the same holds for every bit operation.
 
 ```r ry run runtime=ry dput
-Num.bitwise_xor(12L, 10L)
+Num.bitwise_xor(12, 10)
 #> 6L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1681)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1673)
 
 ## `Num.bitwise_not`
 
@@ -2533,11 +2525,11 @@ Num.bitwise_not <- function(number)
 The integer with every bit flipped, which is `-number - 1`.
 
 ```r ry run runtime=ry dput
-Num.bitwise_not(5L)
+Num.bitwise_not(5)
 #> -6L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1689)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1681)
 
 ## `Num.shift_left_by`
 
@@ -2562,11 +2554,11 @@ Num.shift_left_by <- function(number, bits)
 Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
 
 ```r ry run runtime=ry dput
-Num.shift_left_by(1L, 4L)
+Num.shift_left_by(1, 4)
 #> 16L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1697)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1689)
 
 ## `Num.shift_right_by`
 
@@ -2591,11 +2583,11 @@ Num.shift_right_by <- function(number, bits)
 Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative.
 
 ```r ry run runtime=ry dput
-Num.shift_right_by(-16L, 2L)
+Num.shift_right_by(-16, 2)
 #> -4L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1705)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1697)
 
 ## `Num.shift_right_zf_by`
 
@@ -2620,11 +2612,11 @@ Num.shift_right_zf_by <- function(number, bits)
 Shifts the bits right by `bits`, filling with zeros.
 
 ```r ry run runtime=ry dput
-Num.shift_right_zf_by(-16L, 28L)
+Num.shift_right_zf_by(-16, 28)
 #> 15L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1713)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1705)
 
 ## `Num.count_one_bits`
 
@@ -2649,11 +2641,11 @@ Num.count_one_bits <- function(number)
 The number of set bits.
 
 ```r ry run runtime=ry dput
-Num.count_one_bits(255L)
+Num.count_one_bits(255)
 #> 8L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1721)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1713)
 
 ## `Num.count_leading_zero_bits`
 
@@ -2678,11 +2670,11 @@ Num.count_leading_zero_bits <- function(number)
 The number of zero bits above the highest set bit, 32 for zero.
 
 ```r ry run runtime=ry dput
-Num.count_leading_zero_bits(1L)
+Num.count_leading_zero_bits(1)
 #> 31L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1729)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1721)
 
 ## `Num.count_trailing_zero_bits`
 
@@ -2707,11 +2699,11 @@ Num.count_trailing_zero_bits <- function(number)
 The number of zero bits below the lowest set bit, 32 for zero.
 
 ```r ry run runtime=ry dput
-Num.count_trailing_zero_bits(8L)
+Num.count_trailing_zero_bits(8)
 #> 3L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1737)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1729)
 
 ## `Num.pi`
 
@@ -2727,7 +2719,7 @@ Num.pi
 #> 3.14159265358979
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1745)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1737)
 
 ## `Num.tau`
 
@@ -2743,7 +2735,7 @@ Num.tau
 #> 6.28318530717959
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1753)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1745)
 
 ## `Num.e`
 
@@ -2759,7 +2751,7 @@ Num.e
 #> 2.71828182845905
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1761)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1753)
 
 ## `Num.max_i64`
 
@@ -2768,14 +2760,14 @@ Num.e
 Num.max_i64
 ```
 
-The largest integer, `2147483647L`. It is a value, not a function.
+The largest `I64`, `9223372036854775807i64`. It is a value, not a function.
 
 ```r ry run runtime=ry dput
 Num.max_i64
-#> 2147483647L
+#> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1769)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1761)
 
 ## `Num.min_i64`
 
@@ -2784,15 +2776,14 @@ Num.max_i64
 Num.min_i64
 ```
 
-The smallest integer, `-2147483647L`. R stores `NA` in the one value below it, so that value is
-not an integer here.
+The smallest `I64`, `-9223372036854775808i64`. It is a value, not a function.
 
 ```r ry run runtime=ry dput
 Num.min_i64
-#> -2147483647L
+#> -9223372036854775808i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1778)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1769)
 
 ## `Num.max_f64`
 
@@ -2808,7 +2799,7 @@ Num.max_f64
 #> 1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1786)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1777)
 
 ## `Num.min_f64`
 
@@ -2824,7 +2815,7 @@ Num.min_f64
 #> -1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1794)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1785)
 
 ## `Num.infinity_f64`
 
@@ -2840,7 +2831,7 @@ c(Num.infinity_f64, -Num.infinity_f64)
 #> c(Inf, -Inf)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1802)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1793)
 
 ## `Num.nan_f64`
 
@@ -2851,4 +2842,4 @@ Num.nan_f64
 
 Not a number, the `F64` that arithmetic such as `0 / 0` produces. It is not R's `NA`.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1805)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1796)

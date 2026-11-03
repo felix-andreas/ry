@@ -1601,7 +1601,7 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     // every library traversal the JIT compiles into a loop, each checked against a model of the
     // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
     // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
-    // is not one, an Array, which fails the loop's type guard as an ALTREP list does) must still
+    // is not one, a list, which fails the loop's type guard as an ALTREP list does) must still
     // end where the model says.
     with_interpreter(|| {
         let (mut runs, mut errors) = (0, 0);
@@ -1972,7 +1972,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
     }
 }
 
-/// The items as an Array literal, now and then, when they share one type and none is `NA`.
+/// The items as a list literal, now and then, when they share one type and none is `NA`.
 fn homogeneous_array(rng: &mut SplitMix64, items: &[Scalar]) -> Option<String> {
     // An Array holds no `NA`, so a list with one stays a list.
     let all_int = items

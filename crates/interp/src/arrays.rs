@@ -12,7 +12,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin},
-        coerce,
+        coerce, numbers,
         unwind::{R, error_in},
         values::{self, alloc, length, missing_arg, nil, symbol_name},
     },
@@ -101,6 +101,36 @@ pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
     }
 }
 
+/// `items` with each plain R number converted to the native number type `ty` of the other items,
+/// as an unsuffixed literal converts where it meets a native number; or why one does not fit.
+unsafe fn literals_as(items: &[Sexp], ty: numbers::NumberType) -> R<Result<Vec<Sexp>, String>> {
+    let mut converted = Vec::with_capacity(items.len());
+    for &item in items {
+        let plain = matches!(item.kind(), SexpType::Integer | SexpType::Real)
+            && !item.is_array()
+            && !item.is_object();
+        if !plain {
+            converted.push(item);
+            continue;
+        }
+        let Ok(source) = numbers::r_source(item) else {
+            converted.push(item);
+            continue;
+        };
+        match numbers::convert(source, ty) {
+            Some(number) => converted.push(numbers::alloc(number)?),
+            None => {
+                return Ok(Err(format!(
+                    "{} does not fit {}, the type of the list's other items",
+                    numbers::source_text(source),
+                    ty.name()
+                )));
+            }
+        }
+    }
+    Ok(Ok(converted))
+}
+
 /// The item kind a single value contributes to an Array literal, or why it cannot be an item.
 unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
     if is_ry_value(value) {
@@ -113,19 +143,19 @@ unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
         SexpType::String => Items::Character,
         _ => {
             return Err(format!(
-                "an Array item must be a single logical, integer, double or character value or a ry value, not {}",
+                "a list item must be a single logical, integer, double or character value or a ry value, not {}",
                 describe(value)
             ));
         }
     };
     if value.is_object() || length(value) != 1 {
         return Err(format!(
-            "an Array item must be a single value, not {}; convert a vector with `List.from_r()`",
+            "a list item must be a single value, not {}; convert a vector with `List.from_r()`",
             describe(value)
         ));
     }
     if first_missing(value).is_some() {
-        return Err("an Array cannot hold NA; mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned());
+        return Err("a list cannot hold NA; mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned());
     }
     Ok(kind)
 }
@@ -133,7 +163,7 @@ unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
 /// `value` for an error message, such as "a double vector of length 3".
 pub unsafe fn describe(value: Sexp) -> String {
     if value.is_array() {
-        return format!("an Array of {} items", length(value));
+        return format!("a list of {} items", length(value));
     }
     if value == nil() {
         return "NULL".to_owned();
@@ -150,10 +180,10 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
     let mut items = Vec::with_capacity(call.args.len());
     for arg in call.args {
         if arg.value == missing_arg() {
-            return Err(call.error("an Array item is empty"));
+            return Err(call.error("a list item is empty"));
         }
         if arg.tag.kind() == SexpType::Symbol && !symbol_name(arg.tag).is_empty() {
-            return Err(call.error("an Array's items have no names; use a record for named fields"));
+            return Err(call.error("a list's items have no names; use a record for named fields"));
         }
         items.push(arg.value);
     }
@@ -163,6 +193,17 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// An Array of `items`, each a single non-NA value or a ry value, all of one kind; or why they
 /// cannot form one. An empty Array is a logical vector of length zero.
 pub unsafe fn from_items(items: &[Sexp]) -> R<Result<Sexp, String>> {
+    let converted;
+    let items = match items.iter().find_map(|&item| numbers::read(item)) {
+        Some(native) => match literals_as(items, native.ty)? {
+            Ok(items) => {
+                converted = items;
+                &converted[..]
+            }
+            Err(message) => return Ok(Err(message)),
+        },
+        None => items,
+    };
     let mut kind = None;
     for (position, &value) in items.iter().enumerate() {
         let item = match item_kind(value) {
@@ -173,7 +214,7 @@ pub unsafe fn from_items(items: &[Sexp]) -> R<Result<Sexp, String>> {
             None => kind = Some(item),
             Some(first) if first != item => {
                 return Ok(Err(format!(
-                    "Array items must all have one type, but item 1 is {} and item {} is {}",
+                    "a list's items must all have one type, but item 1 is {} and item {} is {}",
                     first.name(),
                     position + 1,
                     item.name()
@@ -235,7 +276,7 @@ pub unsafe fn check_operands(
             return Err(error_in(
                 call,
                 format!(
-                    "`{operator}` needs Arrays of the same length, but they have {} and {} items; an Array is never recycled",
+                    "`{operator}` needs lists of the same length, but they have {} and {} items; a list is never recycled",
                     length(left),
                     length(right)
                 ),
@@ -270,7 +311,7 @@ pub unsafe fn check_operands(
         return Err(error_in(
             call,
             format!(
-                "`{operator}` is not defined for an Array of {} items",
+                "`{operator}` is not defined for a list of {} items",
                 kind.name()
             ),
         ));
@@ -292,7 +333,7 @@ pub unsafe fn finish_result(call: Sexp, operator: &str, result: Sexp) -> R<Sexp>
         return Err(error_in(
             call,
             format!(
-                "`{operator}` produced a missing value at item {} (an integer overflow or an undefined result such as 0 / 0), which an Array cannot hold",
+                "`{operator}` produced a missing value at item {} (an integer overflow or an undefined result such as 0 / 0), which a list cannot hold",
                 position + 1
             ),
         ));
@@ -318,7 +359,7 @@ pub unsafe fn subset(array: Sexp, indices: &[Sexp], call: Sexp) -> R<Sexp> {
         _ => {
             return Err(error_in(
                 call,
-                "an Array has one dimension, so `[` takes one index",
+                "a list has one dimension, so `[` takes one index",
             ));
         }
     };
@@ -355,7 +396,7 @@ pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) 
         _ => {
             return Err(error_in(
                 call,
-                "an Array has one dimension, so `[<-` takes one index",
+                "a list has one dimension, so `[<-` takes one index",
             ));
         }
     };
@@ -363,7 +404,7 @@ pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) 
         return Err(error_in(
             call,
             format!(
-                "`[<-` assigns {} positions but the replacement Array has {} items; an Array is never recycled",
+                "`[<-` assigns {} positions but the replacement list has {} items; a list is never recycled",
                 positions.len(),
                 length(value)
             ),
@@ -464,7 +505,7 @@ unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &
     let [index] = indices else {
         return Err(error_in(
             call,
-            format!("`{operator}` on an Array takes one position"),
+            format!("`{operator}` on a list takes one position"),
         ));
     };
     let single = match index.kind() {
@@ -477,7 +518,7 @@ unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &
         _ => Err(error_in(
             call,
             format!(
-                "`{operator}` on an Array takes one whole-number position, not {}",
+                "`{operator}` on a list takes one whole-number position, not {}",
                 describe(*index)
             ),
         )),
@@ -498,7 +539,7 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
                 return Err(error_in(
                     call,
                     format!(
-                        "a logical mask needs one entry per item, but the Array has {count} items and the mask {}",
+                        "a logical mask needs one entry per item, but the list has {count} items and the mask {}",
                         mask.len()
                     ),
                 ));
@@ -539,7 +580,7 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
                 };
                 error_in(
                     call,
-                    format!("position {shown} is out of bounds for an Array of {count} items"),
+                    format!("position {shown} is out of bounds for a list of {count} items"),
                 )
             };
             // R truncates a fractional position toward zero.
@@ -579,7 +620,7 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
         _ => Err(error_in(
             call,
             format!(
-                "an Array is indexed by positions or a logical mask, not {}",
+                "a list is indexed by positions or a logical mask, not {}",
                 describe(index)
             ),
         )),

@@ -36,7 +36,7 @@ Bool.true
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1818)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1809)
 
 ## `Bool.false`
 
@@ -52,7 +52,7 @@ Bool.false
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1826)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1817)
 
 ## `Bool.from_r`
 
@@ -76,7 +76,7 @@ Bool.from_r <- function(value)
 
 Converts an R `logical` into a `Bool`, refusing `NA` and a length other than one.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1829)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1820)
 
 ## `Bool.and`
 
@@ -105,7 +105,7 @@ Bool.and(TRUE, FALSE)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1837)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1828)
 
 ## `Bool.or`
 
@@ -134,7 +134,7 @@ Bool.or(TRUE, FALSE)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1845)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1836)
 
 ## `Bool.not`
 
@@ -159,11 +159,11 @@ Bool.not <- function(value)
 The opposite value.
 
 ```r ry run runtime=ry dput
-List.keep_if(list(1L, 2L, 3L), function(x) Bool.not(Num.is_even(x)))
-#> list(1L, 3L)
+List.keep_if([1, 2, 3], function(x) Bool.not(Num.is_even(x)))
+#> [1, 3]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1853)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1844)
 
 ## `Bool.is_eq`
 
@@ -190,11 +190,11 @@ are never identical, so `Bool.is_eq(1L, 1)` is `FALSE`, and a dictionary or set 
 regard to order.
 
 ```r ry run runtime=ry dput
-Bool.is_eq(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 1L)))
+Bool.is_eq(Set.from_list([1, 2]), Set.from_list([2, 1]))
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1863)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1854)
 
 ## `Bool.is_not_eq`
 
@@ -219,8 +219,8 @@ Bool.is_not_eq <- function(first, second)
 Whether two values differ by `identical()`.
 
 ```r ry run runtime=ry dput
-Bool.is_not_eq(list(1L), list(2L))
+Bool.is_not_eq([1], [2])
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1871)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1862)

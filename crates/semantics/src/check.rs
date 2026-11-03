@@ -6947,7 +6947,25 @@ impl<'db> Checker<'db, '_> {
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
-        let inferred = self.infer(operand);
+        // `-` written before a suffixed literal is part of it, as in Roc, so `-128i8` is checked
+        // as the `I8` it denotes rather than as `128i8` negated.
+        let inferred = match self.module.kind(operand) {
+            ExpressionKind::Literal(literal @ LiteralKind::Suffixed { number, ty }) => {
+                let scalar = suffix_scalar(*ty);
+                if NumberLiteral::parse(&self.module[number], true)
+                    .is_some_and(|value| !scalar.holds(&value))
+                {
+                    let expected = native_scalar(self.db, scalar);
+                    self.errors.push(TypeError {
+                        range: operand_range,
+                        kind: TypeErrorKind::LiteralOutOfRange { expected },
+                    });
+                }
+                let literal_ty = self.literal_ty(literal);
+                self.record(operand, literal_ty)
+            }
+            _ => self.infer(operand),
+        };
         let resolved = self.structural(inferred);
         if let TyKind::Native(native) = resolved.kind(self.db) {
             if !native.is_number() {
@@ -7704,6 +7722,8 @@ impl<'db> Checker<'db, '_> {
             _ => operator_spelling(operator)?,
         };
         let reject = |checker: &mut Self| {
+            let left = checker.settle_literals(left);
+            let right = checker.settle_literals(right);
             checker.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::ArrayOperands {
@@ -7739,7 +7759,18 @@ impl<'db> Checker<'db, '_> {
             self.table.rollback(snapshot);
             return reject(self);
         }
-        let item = self.table.resolve(self.db, left_item);
+        let mut item = self.table.resolve(self.db, left_item);
+        // `/` has an exact quotient only on fractional numbers, so it decides undecided items,
+        // such as the literals of `[1, 2] / 2`, as `F64`, the way Roc gives `/` a `Frac`.
+        if operator == Divide && matches!(item.kind(self.db), TyKind::Var(_)) {
+            let fraction = native_scalar(self.db, NativeScalar::F64);
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, item, fraction).is_ok() {
+                item = fraction;
+            } else {
+                self.table.rollback(snapshot);
+            }
+        }
         let item_kind = match item.kind(self.db) {
             TyKind::Native(native) => Some(*native),
             TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => None,

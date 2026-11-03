@@ -59,7 +59,7 @@ const PRINTS: &[(&str, &str)] = &[
     // List: construction and access.
     ("List.to_r(List.from_r(c(1, 2)))", "[1] 1 2\n"),
     ("List.to_r(list())", "logical(0)\n"),
-    ("List.len(xs)", "[1] 3\n"),
+    ("List.len(xs)", "3i64\n"),
     ("List.is_empty(list())", "[1] TRUE\n"),
     ("List.get(xs, 2L)", ":Ok(1L)\n"),
     ("List.get(xs, 4L)", ":Err(:OutOfBounds)\n"),
@@ -73,11 +73,11 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.to_r(List.append(xs, 4L))", "[1] 3 1 2 4\n"),
     ("List.to_r(List.prepend(xs, 0L))", "[1] 0 3 1 2\n"),
     ("List.to_r(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
-    ("List.single(\"a\")", "[[1]]\n[1] \"a\"\n\n"),
+    ("List.single(\"a\")", "[\"a\"]\n"),
     ("List.to_r(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
     ("List.to_r(List.range(2L, 5L))", "[1] 2 3 4 5\n"),
     ("List.to_r(List.range(-1, 1))", "[1] -1  0  1\n"),
-    ("List.range(3L, 2L)", "list()\n"),
+    ("List.range(3L, 2L)", "[]\n"),
     (
         "List.keep_if_try(xs, function(x) :Ok(x > 1L))",
         ":Ok(list(3L, 2L))\n",
@@ -144,10 +144,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.all(list(), function(x) FALSE)", "[1] TRUE\n"),
     ("List.contains(words, \"fig\")", "[1] TRUE\n"),
     ("List.contains(xs, 1)", "[1] FALSE\n"),
-    ("List.count_if(xs, function(x) x < 3L)", "[1] 2\n"),
+    ("List.count_if(xs, function(x) x < 3L)", "2i64\n"),
     ("List.find_first(xs, function(x) x < 3L)", ":Ok(1L)\n"),
     ("List.find_last(xs, function(x) x < 3L)", ":Ok(2L)\n"),
-    ("List.find_first_index(xs, function(x) x < 3L)", ":Ok(2L)\n"),
+    ("List.find_first_index(xs, function(x) x < 3L)", ":Ok(2i64)\n"),
     (
         "List.find_last_index(xs, function(x) x > 5L)",
         ":Err(:NotFound)\n",
@@ -282,14 +282,14 @@ const PRINTS: &[(&str, &str)] = &[
     ("Dict.empty()", "Dict.empty()\n"),
     (
         "Dict.single(1L, \"one\")",
-        "Dict.from_list(list((1L, \"one\")))\n",
+        "Dict.from_list([(1L, \"one\")])\n",
     ),
-    ("d", "Dict.from_list(list((\"a\", 1), (\"b\", 2)))\n"),
+    ("d", "Dict.from_list([(\"a\", 1), (\"b\", 2)])\n"),
     (
         "Dict.to_list(d)",
-        "[[1]]\n(\"a\", 1)\n\n[[2]]\n(\"b\", 2)\n\n",
+        "[(\"a\", 1), (\"b\", 2)]\n",
     ),
-    ("Dict.len(d)", "[1] 2\n"),
+    ("Dict.len(d)", "2i64\n"),
     ("length(d)", "[1] 2\n"),
     ("typeof(d)", "[1] \"dict\"\n"),
     ("class(d)", "[1] \"ry_dict\"\n"),
@@ -306,58 +306,58 @@ const PRINTS: &[(&str, &str)] = &[
     // compiles to bytecode on its first call, so the register checks are exercised too.
     (
         "{ st <- list(seen = Dict.empty()); for (i in 1:5) st$seen <- Dict.insert(st$seen, i, i); Dict.len(st$seen) }",
-        "[1] 5\n",
+        "5i64\n",
     ),
     (
-        "{ a <- list(seen = Dict.empty()); b <- a; a$seen <- Dict.insert(a$seen, 1L, 1); c(Dict.len(a$seen), Dict.len(b$seen)) }",
+        "{ a <- list(seen = Dict.empty()); b <- a; a$seen <- Dict.insert(a$seen, 1L, 1); [Dict.len(a$seen), Dict.len(b$seen)] }",
         "[1] 1 0\n",
     ),
     (
-        "{ a <- list(list(Set.empty())); b <- a[[1]]; a[[1]][[1]] <- Set.insert(a[[1]][[1]], 1L); c(Set.len(a[[1]][[1]]), Set.len(b[[1]])) }",
+        "{ a <- list(list(Set.empty())); b <- a[[1]]; a[[1]][[1]] <- Set.insert(a[[1]][[1]], 1L); [Set.len(a[[1]][[1]]), Set.len(b[[1]])] }",
         "[1] 1 0\n",
     ),
     (
         "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); Dict.len(m) }",
-        "[1] 5\n",
+        "5i64\n",
     ),
     (
-        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); keep <- m; m <- add(m, 1L); c(Dict.len(m), Dict.len(keep)) }",
+        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); keep <- m; m <- add(m, 1L); [Dict.len(m), Dict.len(keep)] }",
         "[1] 1 0\n",
     ),
     (
-        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); n <- add(m, 1L); c(Dict.len(m), Dict.len(n)) }",
+        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); n <- add(m, 1L); [Dict.len(m), Dict.len(n)] }",
         "[1] 0 1\n",
     ),
     (
-        "{ add <- function(m, k) { for (i in 1) NULL; m <- Dict.insert(m, k, k); m }; run <- function() { for (i in 1) NULL; m <- Dict.empty(); keep <- m; m <- add(m, 1L); m <- add(m, 2L); c(Dict.len(m), Dict.len(keep)) }; run() }",
+        "{ add <- function(m, k) { for (i in 1) NULL; m <- Dict.insert(m, k, k); m }; run <- function() { for (i in 1) NULL; m <- Dict.empty(); keep <- m; m <- add(m, 1L); m <- add(m, 2L); [Dict.len(m), Dict.len(keep)] }; run() }",
         "[1] 2 0\n",
     ),
     (
-        "{ kept <- NULL; add <- function(m) { m <- Dict.insert(m, 1L, 1); kept <<- environment(); m }; m <- Dict.empty(); m <- add(m); m <- Dict.insert(m, 2L, 2); c(Dict.len(m), Dict.len(kept$m)) }",
+        "{ kept <- NULL; add <- function(m) { m <- Dict.insert(m, 1L, 1); kept <<- environment(); m }; m <- Dict.empty(); m <- add(m); m <- Dict.insert(m, 2L, 2); [Dict.len(m), Dict.len(kept$m)] }",
         "[1] 2 1\n",
     ),
     (
-        "{ main <- function() { d <- Dict.single(\"z\", 0); h <- function(x, k, y) { x <- Dict.insert(x, k, 1); Dict.len(y) }; n <- 0L; d <- { n <- h(d, \"a\", d); d }; inner <- function(x) { x <- Dict.insert(x, \"b\", 1); Dict.len(d) }; c(n, inner(d)) }; main() }",
+        "{ main <- function() { d <- Dict.single(\"z\", 0); h <- function(x, k, y) { x <- Dict.insert(x, k, 1); Dict.len(y) }; n <- 0L; d <- { n <- h(d, \"a\", d); d }; inner <- function(x) { x <- Dict.insert(x, \"b\", 1); Dict.len(d) }; [n, inner(d)] }; main() }",
         "[1] 1 1\n",
     ),
     (
         "{ main <- function() { st <- list(seen = Dict.single(\"z\", 0)); st$seen <- Dict.insert(st$seen, \"k\", st); old <- Result.with_default(Dict.get(st$seen, \"k\"), NULL); Dict.len(old$seen) }; main() }",
-        "[1] 1\n",
+        "1i64\n",
     ),
     (
-        "{ kept <- NULL; add <- function(m, k) { m <- Dict.insert(m, k, k); g <- function() m; kept <<- g; m }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:3) m <- add(m, i); m <- Dict.insert(m, 9L, 9L); c(Dict.len(m), Dict.len(kept())) }; f() }",
+        "{ kept <- NULL; add <- function(m, k) { m <- Dict.insert(m, k, k); g <- function() m; kept <<- g; m }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:3) m <- add(m, i); m <- Dict.insert(m, 9L, 9L); [Dict.len(m), Dict.len(kept())] }; f() }",
         "[1] 4 3\n",
     ),
     (
-        "{ add <- function(m, k) Dict.insert(m, k, k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); keep <- m; m <- add(m, 9L); c(Dict.len(m), Dict.len(keep)) }; f() }",
+        "{ add <- function(m, k) Dict.insert(m, k, k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); keep <- m; m <- add(m, 9L); [Dict.len(m), Dict.len(keep)] }; f() }",
         "[1] 6 5\n",
     ),
     (
-        "{ saved <- NULL; grab <- function(k) { saved <<- parent.frame(); k }; add <- function(m, k) Dict.insert(m, grab(k), k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:4) m <- add(m, i); c(Dict.len(m), Dict.len(saved$m)) }; f() }",
+        "{ saved <- NULL; grab <- function(k) { saved <<- parent.frame(); k }; add <- function(m, k) Dict.insert(m, grab(k), k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:4) m <- add(m, i); [Dict.len(m), Dict.len(saved$m)] }; f() }",
         "[1] 4 3\n",
     ),
     (
-        "{ h <- function(p, k) { g <- function() Dict.len(p); Dict.insert(p, k, g) }; f <- function() { for (i in 1) NULL; out <- NULL; for (i in 1:4) { d <- Dict.insert(Dict.empty(), \"a\", 0L); d <- h(d, \"z\"); out <- c(out, Result.with_default(Dict.get(d, \"z\"), NULL)()) }; out }; f() }",
+        "{ h <- function(p, k) { g <- function() Dict.len(p); Dict.insert(p, k, g) }; f <- function() { for (i in 1) NULL; out <- NULL; for (i in 1:4) { d <- Dict.insert(Dict.empty(), \"a\", 0L); d <- h(d, \"z\"); out <- [out, Result.with_default(Dict.get(d, \"z\"), NULL)()] }; out }; f() }",
         "[1] 1 1 1 1\n",
     ),
     (
@@ -381,25 +381,25 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 0 1 2\n",
     ),
     (
-        "{ h <- function(d, k) { inc <- function(x) x + 1L; d <- Dict.insert(d, k, inc(k)); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)) }; f() }",
+        "{ h <- function(d, k) { inc <- function(x) x + 1L; d <- Dict.insert(d, k, inc(k)); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); [Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)] }; f() }",
         "[1]  6  5 10\n",
     ),
     (
         "{ f <- function() { m <- Dict.empty(); h <- function(p, k) { g <- function() Dict.len(m); Dict.insert(p, k, g()) }; for (i in 1:3) m <- h(m, i); Dict.get(m, 3L) }; f() }",
-        ":Ok(2L)\n",
+        ":Ok(2i64)\n",
     ),
     (
-        "{ kept <- NULL; h <- function(d, k) { g <- function() Dict.len(d); d <- Dict.insert(d, k, 1); list(d, g) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:3) { r <- h(d, i); d <- r[[1]]; kept <- r[[2]] }; c(Dict.len(d), kept()) }; f() }",
+        "{ kept <- NULL; h <- function(d, k) { g <- function() Dict.len(d); d <- Dict.insert(d, k, 1); list(d, g) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:3) { r <- h(d, i); d <- r[[1]]; kept <- r[[2]] }; [Dict.len(d), kept()] }; f() }",
         "[1] 3 3\n",
     ),
     (
-        "{ h <- function(d, k) { each <- function(x) Dict.insert(x, k, 1); d <- each(d); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:4) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(d), Dict.len(keep)) }; f() }",
+        "{ h <- function(d, k) { each <- function(x) Dict.insert(x, k, 1); d <- each(d); d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:4) d <- h(d, i); keep <- d; d <- h(d, 8L); [Dict.len(d), Dict.len(keep)] }; f() }",
         "[1] 5 4\n",
     ),
     // The tail form in a helper that creates closures: in place while every closure dies with
     // the frame, copied when one escapes as an argument or inside one.
     (
-        "{ h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)) }; f() }",
+        "{ h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); [Dict.len(d), Dict.len(keep), Result.with_default(Dict.get(d, 9L), 0L)] }; f() }",
         "[1]  6  5 10\n",
     ),
     (
@@ -412,7 +412,7 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     // The tail form in an `if` branch and under `return`.
     (
-        "{ h <- function(d, k) { if (k > 100L) return(d); if (k %% 2L == 0L) Dict.insert(d, k, k) else d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:6) d <- h(d, i); keep <- d; d <- h(d, 8L); c(Dict.len(keep), Dict.len(d), Dict.len(h(d, 200L))) }; f() }",
+        "{ h <- function(d, k) { if (k > 100L) return(d); if (k %% 2L == 0L) Dict.insert(d, k, k) else d }; f <- function() { for (i in 1) NULL; d <- Dict.empty(); for (i in 1:6) d <- h(d, i); keep <- d; d <- h(d, 8L); [Dict.len(keep), Dict.len(d), Dict.len(h(d, 200L))] }; f() }",
         "[1] 3 4 4\n",
     ),
     (
@@ -420,11 +420,11 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 3 4 1 2 1 2\n",
     ),
     (
-        "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
+        "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); [Set.len(s), Set.len(other)] }; f() }",
         "[1] 4 5\n",
     ),
     (
-        "{ add <- function(s, k) { s <- Set.insert(s, k); s }; f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:6) { if (i == 4L) old <- s; s <- add(s, i %% 5L) }; c(Set.len(old), Set.len(s)) }; f() }",
+        "{ add <- function(s, k) { s <- Set.insert(s, k); s }; f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:6) { if (i == 4L) old <- s; s <- add(s, i %% 5L) }; [Set.len(old), Set.len(s)] }; f() }",
         "[1] 3 5\n",
     ),
     (
@@ -440,51 +440,51 @@ const PRINTS: &[(&str, &str)] = &[
         "[1]  1 99\n",
     ),
     (
-        "{ h <- function() eval.parent(quote(s <- Set.insert(s, 9L))); f <- function() { for (i in 1) NULL; s <- Set.empty(); r <- list(s, h()); c(Set.len(r[[1]]), Set.len(s)) }; f() }",
+        "{ h <- function() eval.parent(quote(s <- Set.insert(s, 9L))); f <- function() { for (i in 1) NULL; s <- Set.empty(); r <- list(s, h()); [Set.len(r[[1]]), Set.len(s)] }; f() }",
         "[1] 0 1\n",
     ),
     (
         "Dict.insert(d, \"a\", 10)",
-        "Dict.from_list(list((\"a\", 10), (\"b\", 2)))\n",
+        "Dict.from_list([(\"a\", 10), (\"b\", 2)])\n",
     ),
     (
         "Dict.remove(d, \"a\")",
-        "Dict.from_list(list((\"b\", 2)))\n",
+        "Dict.from_list([(\"b\", 2)])\n",
     ),
     (
         "Dict.remove(d, \"z\")",
-        "Dict.from_list(list((\"a\", 1), (\"b\", 2)))\n",
+        "Dict.from_list([(\"a\", 1), (\"b\", 2)])\n",
     ),
     (
         "Dict.update(d, \"c\", function(r) :Ok(Result.with_default(r, 0) + 1))",
-        "Dict.from_list(list((\"a\", 1), (\"b\", 2), (\"c\", 1)))\n",
+        "Dict.from_list([(\"a\", 1), (\"b\", 2), (\"c\", 1)])\n",
     ),
     (
         "Dict.update(d, \"a\", function(r) :Err(:Missing))",
-        "Dict.from_list(list((\"b\", 2)))\n",
+        "Dict.from_list([(\"b\", 2)])\n",
     ),
     ("List.to_r(Dict.keys(d))", "[1] \"a\" \"b\"\n"),
     ("List.to_r(Dict.values(d))", "[1] 1 2\n"),
     ("Dict.walk(d, 0, function(s, k, v) s + v)", "[1] 3\n"),
     (
         "Dict.map(d, function(k, v) Str.concat(k, Num.to_str(v)))",
-        "Dict.from_list(list((\"a\", \"a1\"), (\"b\", \"b2\")))\n",
+        "Dict.from_list([(\"a\", \"a1\"), (\"b\", \"b2\")])\n",
     ),
     (
         "Dict.keep_if(d, function(k, v) v > 1)",
-        "Dict.from_list(list((\"b\", 2)))\n",
+        "Dict.from_list([(\"b\", 2)])\n",
     ),
     (
         "Dict.drop_if(d, function(k, v) v > 1)",
-        "Dict.from_list(list((\"a\", 1)))\n",
+        "Dict.from_list([(\"a\", 1)])\n",
     ),
     (
         "Dict.insert_all(d, Dict.single(\"a\", 5))",
-        "Dict.from_list(list((\"a\", 5), (\"b\", 2)))\n",
+        "Dict.from_list([(\"a\", 5), (\"b\", 2)])\n",
     ),
     (
         "Dict.keep_shared(d, Dict.single(\"b\", 2))",
-        "Dict.from_list(list((\"b\", 2)))\n",
+        "Dict.from_list([(\"b\", 2)])\n",
     ),
     (
         "Dict.keep_shared(d, Dict.single(\"b\", 0))",
@@ -492,7 +492,7 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     (
         "Dict.remove_all(d, Dict.single(\"b\", 0))",
-        "Dict.from_list(list((\"a\", 1)))\n",
+        "Dict.from_list([(\"a\", 1)])\n",
     ),
     (
         "identical(d, Dict.from_list(list((\"b\", 2), (\"a\", 1))))",
@@ -501,52 +501,52 @@ const PRINTS: &[(&str, &str)] = &[
     ("identical(d, Dict.insert(d, \"a\", 1L))", "[1] FALSE\n"),
     (
         "Dict.from_list(list((1L, \"a\"), (2, \"b\")))",
-        "Dict.from_list(list((1, \"a\"), (2, \"b\")))\n",
+        "Dict.from_list([(1, \"a\"), (2, \"b\")])\n",
     ),
     ("Dict.get(Dict.single(1L, \"a\"), 1)", ":Ok(\"a\")\n"),
     ("Dict.get(Dict.single(-0, \"zero\"), 0)", ":Ok(\"zero\")\n"),
     (
         "Dict.from_list(list((\"a\", 1), (\"a\", 2)))",
-        "Dict.from_list(list((\"a\", 2)))\n",
+        "Dict.from_list([(\"a\", 2)])\n",
     ),
     ("list(d = Dict.empty())", "$d\nDict.empty()\n\n"),
     // Set.
     ("Set.empty()", "Set.empty()\n"),
-    ("Set.single(\"a\")", "Set.from_list(list(\"a\"))\n"),
+    ("Set.single(\"a\")", "Set.from_list([\"a\"])\n"),
     (
         "Set.from_list(list(2L, 1L, 2L))",
-        "Set.from_list(list(2L, 1L))\n",
+        "Set.from_list([2L, 1L])\n",
     ),
     ("List.to_r(Set.to_list(s))", "[1] 1 2 3\n"),
-    ("Set.len(s)", "[1] 3\n"),
+    ("Set.len(s)", "3i64\n"),
     ("Set.is_empty(Set.empty())", "[1] TRUE\n"),
     ("Set.contains(s, 2L)", "[1] TRUE\n"),
-    ("Set.insert(s, 4L)", "Set.from_list(list(1L, 2L, 3L, 4L))\n"),
-    ("Set.remove(s, 1L)", "Set.from_list(list(2L, 3L))\n"),
+    ("Set.insert(s, 4L)", "Set.from_list([1L, 2L, 3L, 4L])\n"),
+    ("Set.remove(s, 1L)", "Set.from_list([2L, 3L])\n"),
     (
         "Set.union(s, Set.from_list(list(5L, 1L)))",
-        "Set.from_list(list(1L, 2L, 3L, 5L))\n",
+        "Set.from_list([1L, 2L, 3L, 5L])\n",
     ),
     (
         "Set.intersection(s, Set.from_list(list(3L, 2L, 9L)))",
-        "Set.from_list(list(2L, 3L))\n",
+        "Set.from_list([2L, 3L])\n",
     ),
     (
         "Set.difference(s, Set.from_list(list(3L)))",
-        "Set.from_list(list(1L, 2L))\n",
+        "Set.from_list([1L, 2L])\n",
     ),
     ("Set.walk(s, 0L, function(acc, x) acc + x)", "[1] 6\n"),
     (
         "Set.map(s, function(x) x %% 2L)",
-        "Set.from_list(list(1L, 0L))\n",
+        "Set.from_list([1L, 0L])\n",
     ),
     (
         "Set.keep_if(s, function(x) x > 1L)",
-        "Set.from_list(list(2L, 3L))\n",
+        "Set.from_list([2L, 3L])\n",
     ),
     (
         "Set.drop_if(s, function(x) x > 1L)",
-        "Set.from_list(list(1L))\n",
+        "Set.from_list([1L])\n",
     ),
     (
         "identical(s, Set.from_list(list(3L, 2L, 1L)))",
@@ -561,11 +561,11 @@ const PRINTS: &[(&str, &str)] = &[
     // An emptied collection is `Dict.empty()` again, key type included.
     (
         "Dict.insert(Dict.remove(Dict.single(1L, \"a\"), 1L), \"x\", 2)",
-        "Dict.from_list(list((\"x\", 2)))\n",
+        "Dict.from_list([(\"x\", 2)])\n",
     ),
     (
         "Set.insert(Set.remove(Set.single(1L), 1L), \"x\")",
-        "Set.from_list(list(\"x\"))\n",
+        "Set.from_list([\"x\"])\n",
     ),
     (
         "identical(Set.from_list(list(1L)), Set.from_list(list(1)))",
@@ -581,15 +581,15 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     // An update reuses its first argument only when nothing else can observe it.
     (
-        "{ a <- Dict.from_list(list((\"x\", 1))); b <- a; a <- Dict.insert(a, \"y\", 2); c(Dict.len(a), Dict.len(b)) }",
+        "{ a <- Dict.from_list(list((\"x\", 1))); b <- a; a <- Dict.insert(a, \"y\", 2); [Dict.len(a), Dict.len(b)] }",
         "[1] 2 1\n",
     ),
     (
-        "{ p <- list(1L); q <- p; for (i in 1:3) p <- List.append(p, i); c(List.len(p), List.len(q)) }",
+        "{ p <- list(1L); q <- p; for (i in 1:3) p <- List.append(p, i); [List.len(p), List.len(q)] }",
         "[1] 4 1\n",
     ),
     (
-        "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); c(List.len(p), List.len(holder[[1]])) }",
+        "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); [List.len(p), List.len(holder[[1]])] }",
         "[1] 2 1\n",
     ),
     (
@@ -601,19 +601,19 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 1 1 1 2 2 3 3\n",
     ),
     (
-        "{ grow <- function(n) { s <- Set.empty(); keep <- NULL; for (i in 1:n) { s <- Set.insert(s, i); if (i == 3L) keep <- s }; c(Set.len(s), Set.len(keep)) }; grow(10L); grow(10L) }",
+        "{ grow <- function(n) { s <- Set.empty(); keep <- NULL; for (i in 1:n) { s <- Set.insert(s, i); if (i == 3L) keep <- s }; [Set.len(s), Set.len(keep)] }; grow(10L); grow(10L) }",
         "[1] 10  3\n",
     ),
     (
-        "{ g <- function(p) { p <- List.append(p, 0L); List.len(p) }; z <- list(1L); c(g(z), g(z), List.len(z)) }",
+        "{ g <- function(p) { p <- List.append(p, 0L); List.len(p) }; z <- list(1L); [g(z), g(z), List.len(z)] }",
         "[1] 2 2 1\n",
     ),
     (
-        "{ u <- Set.single(1L); v <- u; u <- Set.union(u, Set.single(2L)); c(Set.len(u), Set.len(v)) }",
+        "{ u <- Set.single(1L); v <- u; u <- Set.union(u, Set.single(2L)); [Set.len(u), Set.len(v)] }",
         "[1] 2 1\n",
     ),
     (
-        "{ a <- Dict.single(\"k\", 1); a <- Dict.insert(a, \"self\", a); c(Dict.len(a), Dict.len(Result.with_default(Dict.get(a, \"self\"), NULL))) }",
+        "{ a <- Dict.single(\"k\", 1); a <- Dict.insert(a, \"self\", a); [Dict.len(a), Dict.len(Result.with_default(Dict.get(a, \"self\"), NULL))] }",
         "[1] 2 1\n",
     ),
     (
@@ -726,7 +726,7 @@ const PRINTS: &[(&str, &str)] = &[
         "List.to_r(List.concat_utf8(list(104L), \"i!\"))",
         "[1] 104 105  33\n",
     ),
-    ("List.len(List.with_capacity(10L))", "[1] 0\n"),
+    ("List.len(List.with_capacity(10L))", "0i64\n"),
     (
         "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_r(p) }",
         "[1] 1 2 3 4 5 6\n",
@@ -857,16 +857,16 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 1 2\n",
     ),
     (
-        "(function() { d <- Dict.reserve(Dict.single(\"a\", 1L), 20L); c(Dict.capacity(d) >= 21L, Dict.capacity(Dict.release_excess_capacity(d)), Dict.len(d), Dict.capacity(Dict.empty())) })()",
+        "(function() { d <- Dict.reserve(Dict.single(\"a\", 1L), 20L); [Dict.capacity(d) >= 21L, Dict.capacity(Dict.release_excess_capacity(d)), Dict.len(d), Dict.capacity(Dict.empty())] })()",
         "[1] 1 1 1 4\n",
     ),
     // An empty collection keeps its room in its index until the first key fixes the key type.
     (
-        "(function() { d <- Dict.with_capacity(100L); e <- Dict.insert(d, \"a\", 1L); s <- Set.insert(Set.reserve(Set.empty(), 30L), 2L); c(Dict.capacity(d), Dict.capacity(e), Dict.len(e), Set.capacity(s), Set.capacity(Set.release_excess_capacity(s)), Dict.capacity(Dict.reserve(d, 10L)), Dict.capacity(Dict.release_excess_capacity(d))) })()",
+        "(function() { d <- Dict.with_capacity(100L); e <- Dict.insert(d, \"a\", 1L); s <- Set.insert(Set.reserve(Set.empty(), 30L), 2L); [Dict.capacity(d), Dict.capacity(e), Dict.len(e), Set.capacity(s), Set.capacity(Set.release_excess_capacity(s)), Dict.capacity(Dict.reserve(d, 10L)), Dict.capacity(Dict.release_excess_capacity(d))] })()",
         "[1] 128 128   1  32   1 128   4\n",
     ),
     (
-        "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",
+        "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); [Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)] })()",
         "[1] 7 2 1\n",
     ),
     ("Num.to_i64(7L)", "7i64\n"),
@@ -920,14 +920,14 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     (
         "Dict.join_map(d, function(k, v) Dict.single(v, k))",
-        "Dict.from_list(list((1, \"a\"), (2, \"b\")))\n",
+        "Dict.from_list([(1, \"a\"), (2, \"b\")])\n",
     ),
-    ("Dict.len(Dict.reserve(d, 100L))", "[1] 2\n"),
+    ("Dict.len(Dict.reserve(d, 100L))", "2i64\n"),
     (
-        "{ r <- Dict.reserve(d, 100L); r <- Dict.insert(r, \"c\", 3); c(Dict.len(r), Dict.len(d)) }",
+        "{ r <- Dict.reserve(d, 100L); r <- Dict.insert(r, \"c\", 3); [Dict.len(r), Dict.len(d)] }",
         "[1] 3 2\n",
     ),
-    ("Dict.len(Dict.reserve(Dict.empty(), 10L))", "[1] 0\n"),
+    ("Dict.len(Dict.reserve(Dict.empty(), 10L))", "0i64\n"),
     ("Dict.clear(d)", "Dict.empty()\n"),
     (
         "Set.walk_until(s, 0L, function(t, e) if (e == 3L) :Break(t) else :Continue(t + e))",
@@ -935,10 +935,10 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     (
         "Set.join_map(s, function(e) Set.from_list(list(e, e * 10L)))",
-        "Set.from_list(list(1L, 10L, 2L, 20L, 3L, 30L))\n",
+        "Set.from_list([1L, 10L, 2L, 20L, 3L, 30L])\n",
     ),
     (
-        "{ r <- Set.reserve(s, 50L); for (i in 4:60) r <- Set.insert(r, i); c(Set.len(r), Set.len(s)) }",
+        "{ r <- Set.reserve(s, 50L); for (i in 4:60) r <- Set.insert(r, i); [Set.len(r), Set.len(s)] }",
         "[1] 60  3\n",
     ),
 ];

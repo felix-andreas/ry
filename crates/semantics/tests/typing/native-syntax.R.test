@@ -18,8 +18,8 @@ b <- 1.5i64
 #++++
 a: Unknown
 b: Unknown
-5..10 error[type-mismatch] this literal is not a `U8`: a `U8` cannot hold its value
-16..22 error[type-mismatch] this literal is not a `I64`: a `I64` cannot hold its value
+5..10 error[type-mismatch] this literal does not fit `U8`, which cannot hold its value exactly
+16..22 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
 
 #---- suffixed_numbers_do_not_mix
 x <- 1i32 + 1i64

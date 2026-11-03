@@ -969,78 +969,74 @@ exceptions are the functions the runtime lets them through: those that understan
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
-## Arrays
+## Lists
 
-An Array is ry's strict typed vector. The user guide is [Arrays](/type-checking/arrays/); this
-section is its typing contract. The `[...]` literal is inline syntax, so with
+A `List` is ry's typed sequence. The user guide is [Typed lists](/type-checking/lists/); this section
+is its typing contract. The `[...]` literal is inline syntax, so with
 `[check] inline-annotations = false` each literal is a `ry-syntax` warning, and it is still typed.
-The type `Array<T>` may be written in `#:` comments either way.
+The type `List<T>` may be written in `#:` comments either way.
 
-### Array literals
+### List literals
 
-`[a, b, c]` types as `Array<T>`, where `T` is the type of the first item. Every other item must have
-exactly that type: items are never converted into each other, so `[1L, 2.5]` is a `type-mismatch` at
-`2.5`. The one exception is tags, whose types join into a tag union, so `[:Ok(1), :Err("no")]` is an
-`Array<:Ok(double) | :Err(character)>`.
+`[a, b, c]` types as `List<T>`, where `T` is the type of the first item. Every other item must have
+exactly that type: items are never converted into each other, so `[1, "a"]` is a `type-mismatch` at
+`"a"`. An unsuffixed number literal is decided by the list it is in, as described under
+[number literals](#number-literals): `[1, 2]` is a `List<I64>`, `[1.5, 2]` is a `List<F64>`, and
+`[1i32, 2]` is a `List<I32>`. A literal the item type cannot hold exactly, such as `2.5` in
+`[1, 2.5]`, is a `type-mismatch`. Tags are the one exception to exact item types: their types join
+into a tag union, so `[:Ok(1), :Err("no")]` is a list of `:Ok(double) | :Err(character)`.
 
-An item is a scalar-like `logical`, `integer`, `double` or `character`, or a ry value: a record,
-tuple, tag, dictionary, set or another Array. Any other item type is a `type-mismatch`, and so is the
-literal `NA`. A type does not say whether a value is missing, so an item computed by R code may still
-be `NA`, and the constructor stops with an error on it when the code runs. It also checks that atomic
-items share one type; that ry values share one type is checked only by the checker. In an annotation, `Array<T>` with any other `T`,
-such as `Array<double[]>` or `Array<double | NULL>`, is an `annotation` error.
+An item is a number, a `Bool`, a `Str`, or another ry value: a record, tuple, tag, `Dict`, `Set` or
+list. Any other item type is a `type-mismatch`, and so is the literal `NA`. A type does not say
+whether a value is missing, so an item computed by R code may still be `NA`, and the constructor
+stops with an error on it when the code runs. In an annotation, `List<T>` with any other `T`, such
+as `List<double[]>`, is an `annotation` error.
 
-The empty literal `[]` takes its item type from an annotation, as in `#: Array<character>`, or else
-is `Array<Unknown>` until a use such as `List.append(xs, 1L)` gives it one.
+The empty literal `[]` takes its item type from an annotation, as in `#: List<Str>`, or from a use
+such as `List.append(xs, 1)`.
 
-### Arrays and R vectors
+### Lists and R vectors
 
-- `Array<T>` fits `T[]` when `T` is atomic, and `list[T]` when `T` is a ry value, so an Array passes
-  to any R function that takes a vector or a list.
-- A plain R vector never fits `Array<T>`. `as.Array(x)` converts one: a `T[]` gives `Array<T>`, and a
-  `list[T]` gives `Array<T>` when `T` is a ry value (the `item` constraint).
-- At run time `as.Array()` stops with an error on an `NA` or a classed object, and drops names.
-  Setting any attribute on an Array turns it into a plain R vector.
+- `List<F64>`, `List<Bool>` and `List<Str>` are stored as R `double`, `logical` and `character`
+  vectors, and they fit `double[]`, `logical[]` and `character[]`. A list of ry values fits
+  `list[T]`. Other lists, such as `List<I64>`, cross to R only through `List.to_r()`.
+- A plain R vector never fits `List<T>`. `List.from_r(x)` converts one: a `double[]` gives
+  `List<F64>`, a `character[]` gives `List<Str>`, and a `list[T]` gives `List<T>` when `T` is a ry
+  value (the `item` constraint).
+- At run time `List.from_r()` stops with an error on an `NA` or an attribute such as a class, and it
+  drops names. Setting an attribute on a list, or assigning `NA` into it from R code, turns it into a
+  plain R vector.
 
-### Array operators
+### List operators
 
-An elementwise operator takes two Arrays with the same item type, or an Array and a scalar-like value
-of the item type. `integer` and `double` never mix, and an R vector operand is a `type-mismatch`
-whose message suggests `as.Array()`.
+An elementwise operator takes two lists with the same item type, or a list and a single value of the
+item type. Number types never mix, and an R vector operand is a `type-mismatch` whose message
+suggests `List.from_r()`.
 
 | Operator | Items | Result |
 | --- | --- | --- |
-| `+ - * %% %/%`, unary `-` | `integer` or `double` | `Array<T>` |
-| `/ ^` | `integer` or `double` | `Array<double>` |
-| `== != < > <= >=` | atomic | `Array<logical>` |
-| `& \| !` | `logical` | `Array<logical>` |
+| `+ - * %% %/% ^`, unary `-` | numbers | `List<T>` |
+| `/` | fractional numbers (`F32`, `F64`, `Dec`) | `List<T>` |
+| `== != < > <= >=` | numbers and `Str` for ordering, any item for equality | `List<Bool>` |
+| `& \| !` | `Bool` | `List<Bool>` |
 
-When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
-that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
-values is an error, and so are two Arrays of different item types. An operand that is not an Array
-and not a single item of the item type, such as an R vector, `NA` or an `integer` beside an
-`Array<double>`, is a `type-mismatch` in checked code; when R code does it, as base `str()` does
-with `ob - signif(ob, digits)`, R's operator runs and the result is a plain R vector, as for a
-replacement below.
+`/` on integer items is a `type-mismatch`, as it is on a single integer, and it decides undecided
+literal items as `F64`, so `[1, 2] / 2` is a `List<F64>`. When the code runs, two lists of different
+lengths are an error rather than recycled.
 
-### Array indexing
+### List indexing
 
-- `xs[[i]]` takes one `integer` or `double` position and types as `T`.
-- `xs[i]` takes positions, a `logical` mask, or no index, and types as `Array<T>`.
-- A `character` index, or more than one index, is a `type-mismatch`, because an Array has one
+- `xs[[i]]` takes one position and types as `T`.
+- `xs[i]` takes positions, a `Bool` mask, or no index, and types as `List<T>`.
+- A `character` index, or more than one index, is a `type-mismatch`, because a list has one
   dimension and no names.
-- When the code runs, positions follow R where R gives no `NA`: a negative position leaves an item
-  out and a zero selects nothing. A position past the end, an `NA` position, or a mask of a different
-  length is an error, never `NA`.
-- A replacement through `[<-` or `[[<-` must be an item of the item type, or for `[<-` an Array of
-  them with one item per position, which is never recycled. When the code runs, a position past the
-  end or an Array of the wrong length is an error. A replacement that is not an item of the item
-  type, such as `NA` or an R vector, is a `type-mismatch` in checked code; when R code does it, as
-  base `ifelse()` does with its `test` argument, the result is the plain R vector R would build.
+- When the code runs, a negative position leaves an item out and a zero selects nothing, as in R. A
+  position past the end, an `NA` position, or a mask of a different length is an error, never `NA`.
+- A replacement through `[<-` or `[[<-` must be an item of the item type, or for `[<-` a list of
+  them with one item per position, which is never recycled.
 
-`for (x in xs)` binds `x` as `T`. Every `List` function of the
-[standard library](/reference/standard-library/) that takes a collection has an Array overload, so
-`List.map` on an `Array<T>` returns an Array and `List.len` returns its length.
+`for (x in xs)` binds `x` as `T`. The `List` module of the [standard library](/reference/std/list/)
+holds the functions that work on lists.
 
 ## Function types
 

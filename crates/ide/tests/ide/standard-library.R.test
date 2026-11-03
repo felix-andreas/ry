@@ -7,8 +7,8 @@ hover-definition: package std (1 declaration(s), declared in stub source std at 
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
@@ -125,8 +125,8 @@ hover-definition: package std (1 declaration(s), declared in stub source std at 
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
@@ -173,8 +173,8 @@ hover-definition: package std (1 declaration(s), declared in stub source std at 
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none

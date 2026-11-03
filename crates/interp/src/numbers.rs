@@ -757,19 +757,7 @@ pub(crate) unsafe fn num_to_f64(call: &Call<'_>) -> R<Sexp> {
 
 /// The two numbers of a two-argument library function, of one native type.
 unsafe fn two_numbers(call: &Call<'_>) -> R<(Number, Number)> {
-    let [first, second] = arguments(call, ["first", "second"])?;
-    match (read(first), read(second)) {
-        (Some(left), Some(right)) if left.ty == right.ty => Ok((left, right)),
-        (Some(left), Some(right)) => Err(call.error(format!(
-            "`{}()` needs two numbers of one type, not {} and {}",
-            call.name(),
-            left.ty.name(),
-            right.ty.name()
-        ))),
-        (Some(left), None) => Ok((left, library_operand(call, "second", left.ty, second)?)),
-        (None, Some(right)) => Ok((library_operand(call, "first", right.ty, first)?, right)),
-        (None, None) => Err(wrong(call, "first", "a number", first)),
-    }
+    named_numbers(call, ["first", "second"])
 }
 
 unsafe fn library_operand(
@@ -900,6 +888,12 @@ pub(crate) unsafe fn num_sub_wrap(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn num_mul_wrap(call: &Call<'_>) -> R<Sexp> {
     overflowing(call, Op::Multiply, Overflow::Wrap)
+}
+
+/// `Num.compare` on native numbers, `None` when one is a `NaN`.
+pub unsafe fn compare(call: &Call<'_>) -> R<Option<Ordering>> {
+    let (left, right) = two_numbers(call)?;
+    Ok(order(left, right))
 }
 
 /// `Num.min` and `Num.max` on native numbers.
@@ -1072,7 +1066,7 @@ pub unsafe fn range(call: &Call<'_>, limit: usize) -> R<Sexp> {
         },
         ()
     );
-    values::list_vector(&items)
+    Ok(arrays::finish(values::list_vector(&items)?))
 }
 
 // The R boundary.
@@ -1609,3 +1603,256 @@ macro_rules! unsigned_int {
 
 signed_int!(i8, i16, i32, i64, i128);
 unsigned_int!(u8, u16, u32, u64, u128);
+
+/// The `Num` functions on native numbers that have no dedicated native path, picked by the
+/// function's name. A library function calls this when one of its arguments is a native number.
+pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
+    let name = call.name();
+    let fail = |message: String| call.error(message);
+    match name {
+        "Num.add" | "Num.sub" | "Num.mul" | "Num.div" | "Num.pow" | "Num.pow_int" => {
+            let op = match name {
+                "Num.add" => Op::Add,
+                "Num.sub" => Op::Subtract,
+                "Num.mul" => Op::Multiply,
+                "Num.div" => Op::Divide,
+                _ => Op::Power,
+            };
+            let parameters = if op == Op::Power {
+                ["base", "exponent"]
+            } else {
+                ["first", "second"]
+            };
+            let (left, right) = named_numbers(call, parameters)?;
+            if op == Op::Divide && is_zero(right) {
+                return Err(fail(
+                    "`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead"
+                        .to_owned(),
+                ));
+            }
+            alloc(binary(name, op, left, right).map_err(fail)?)
+        }
+        "Num.div_trunc" | "Num.div_ceil" | "Num.rem" => {
+            let (left, right) = two_numbers(call)?;
+            match division(name, left, right).map_err(fail)? {
+                Some(result) => alloc(result),
+                None => Err(fail(format!(
+                    "`second` is zero; `{name}_checked()` returns `:Err(:DivByZero)` instead"
+                ))),
+            }
+        }
+        "Num.div_checked"
+        | "Num.div_trunc_checked"
+        | "Num.div_ceil_checked"
+        | "Num.rem_checked" => {
+            let (left, right) = two_numbers(call)?;
+            let unchecked = name.trim_end_matches("_checked");
+            let result = if unchecked == "Num.div" {
+                if is_zero(right) {
+                    None
+                } else {
+                    Some(binary(unchecked, Op::Divide, left, right).map_err(fail)?)
+                }
+            } else {
+                division(unchecked, left, right).map_err(fail)?
+            };
+            match result {
+                Some(result) if result.ty == NumberType::F32 && result.as_f32().is_nan() => {
+                    err("Undefined")
+                }
+                Some(result) => ok(alloc(result)?),
+                None => err("DivByZero"),
+            }
+        }
+        "Num.is_lt" | "Num.is_gt" | "Num.is_lte" | "Num.is_gte" => {
+            let (left, right) = two_numbers(call)?;
+            let order = order(left, right);
+            scalar_bool(match name {
+                "Num.is_lt" => order == Some(Ordering::Less),
+                "Num.is_gt" => order == Some(Ordering::Greater),
+                "Num.is_lte" => matches!(order, Some(Ordering::Less | Ordering::Equal)),
+                _ => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
+            })
+        }
+        "Num.is_multiple_of" => {
+            let (left, right) = two_numbers(call)?;
+            if is_zero(right) {
+                return scalar_bool(is_zero(left));
+            }
+            let remainder = binary(name, Op::Modulo, left, right).map_err(fail)?;
+            scalar_bool(is_zero(remainder))
+        }
+        "Num.abs_diff" => {
+            let (left, right) = two_numbers(call)?;
+            let (low, high) = if order(left, right) == Some(Ordering::Greater) {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            alloc(binary(name, Op::Subtract, high, low).map_err(fail)?)
+        }
+        "Num.neg" => alloc(negate(one_number(call)?).map_err(fail)?),
+        "Num.is_zero" | "Num.is_positive" | "Num.is_negative" => {
+            let number = one_number(call)?;
+            let sign = order(number, zero(number.ty));
+            scalar_bool(match name {
+                "Num.is_zero" => sign == Some(Ordering::Equal),
+                "Num.is_positive" => sign == Some(Ordering::Greater),
+                _ => sign == Some(Ordering::Less),
+            })
+        }
+        "Num.is_even" | "Num.is_odd" => {
+            let number = one_number(call)?;
+            if !number.ty.is_integer() {
+                return Err(fail(format!(
+                    "`{name}()` takes an integer, not {} {}",
+                    article(number.ty),
+                    number.ty.name()
+                )));
+            }
+            scalar_bool((number.bits & 1 == 0) == (name == "Num.is_even"))
+        }
+        _ => fractional(call, name, one_number(call)?),
+    }
+}
+
+/// The fractional `Num` functions (`Num.sqrt`, `Num.sin` and the rest) on an `F32` or a `Dec`,
+/// computed in double precision and rounded back to the argument's type.
+unsafe fn fractional(call: &Call<'_>, name: &str, number: Number) -> R<Sexp> {
+    if number.ty.is_integer() {
+        return Err(call.error(format!(
+            "`{name}()` takes a fractional number (F32, F64 or Dec), not {} {}",
+            article(number.ty),
+            number.ty.name()
+        )));
+    }
+    let value = to_double(source(number));
+    let back = |result: f64| -> R<Sexp> {
+        let source = Source::F64(result);
+        let converted = match number.ty {
+            NumberType::F32 => Some(Number::f32(result as f32)),
+            ty => convert(source, ty).or_else(|| dec_rounded(result)),
+        };
+        alloc(converted.ok_or_else(|| {
+            call.error(format!(
+                "`{name}()` gives {result}, which does not fit {}",
+                number.ty.name()
+            ))
+        })?)
+    };
+    match name {
+        "Num.sqrt" => back(value.sqrt()),
+        "Num.log" => back(value.ln()),
+        "Num.sin" => back(value.sin()),
+        "Num.cos" => back(value.cos()),
+        "Num.tan" => back(value.tan()),
+        "Num.asin" => back(value.asin()),
+        "Num.acos" => back(value.acos()),
+        "Num.atan" => back(value.atan()),
+        "Num.sqrt_checked" if value < 0.0 => err("SqrtOfNegative"),
+        "Num.sqrt_checked" => ok(back(value.sqrt())?),
+        "Num.log_checked" if value <= 0.0 => err("LogNeedsPositive"),
+        "Num.log_checked" => ok(back(value.ln())?),
+        "Num.is_nan" => scalar_bool(value.is_nan()),
+        "Num.is_finite" => scalar_bool(value.is_finite()),
+        "Num.is_infinite" => scalar_bool(value.is_infinite()),
+        _ => Err(call.error(format!("`{name}()` does not take native numbers"))),
+    }
+}
+
+/// A double rounded to the nearest `Dec`, for a fractional function whose exact result a `Dec`
+/// cannot hold.
+fn dec_rounded(value: f64) -> Option<Number> {
+    let scaled = (value * DEC_SCALE as f64).round();
+    (scaled.is_finite() && scaled.abs() < i128::MAX as f64).then(|| Number::dec(scaled as i128))
+}
+
+fn zero(ty: NumberType) -> Number {
+    Number { ty, bits: 0 }
+}
+
+fn is_zero(number: Number) -> bool {
+    order(number, zero(number.ty)) == Some(Ordering::Equal)
+}
+
+/// `Num.div_trunc`, `Num.div_ceil` or `Num.rem` on two numbers of one type: Roc's truncating
+/// quotient and remainder, or the quotient rounded up. `None` for a zero divisor.
+fn division(name: &str, left: Number, right: Number) -> Result<Option<Number>, String> {
+    if is_zero(right) {
+        return Ok(None);
+    }
+    let ty = left.ty;
+    let result = match ty {
+        NumberType::F32 => {
+            let (a, b) = (left.as_f32(), right.as_f32());
+            Number::f32(match name {
+                "Num.div_trunc" => (a / b).trunc(),
+                "Num.div_ceil" => (a / b).ceil(),
+                _ => a % b,
+            })
+        }
+        NumberType::Dec => {
+            let (a, b) = (left.as_dec(), right.as_dec());
+            let overflowed = || format!("`{name}` overflows Dec: the result does not fit");
+            match name {
+                "Num.rem" => Number::dec(a % b),
+                _ => {
+                    let quotient = a / b;
+                    let rounds_up = name == "Num.div_ceil" && a % b != 0 && (a < 0) == (b < 0);
+                    let quotient = quotient + i128::from(rounds_up);
+                    Number::dec(quotient.checked_mul(DEC_SCALE).ok_or_else(overflowed)?)
+                }
+            }
+        }
+        _ => with_int!(
+            ty,
+            T => {
+                let (a, b) = (T::from_bits(left.bits), T::from_bits(right.bits));
+                let overflowed = || overflow(name, ty);
+                let value = match name {
+                    // Only the most negative value by -1 overflows, and its remainder is 0.
+                    "Num.rem" => a.checked_rem(b).unwrap_or(T::ZERO),
+                    _ => {
+                        let quotient = a.checked_div(b).ok_or_else(overflowed)?;
+                        let remainder = a.checked_rem(b).unwrap_or(T::ZERO);
+                        let rounds_up = name == "Num.div_ceil"
+                            && remainder != T::ZERO
+                            && a.is_negative() == b.is_negative();
+                        if rounds_up {
+                            quotient.checked_add(T::ONE).ok_or_else(overflowed)?
+                        } else {
+                            quotient
+                        }
+                    }
+                };
+                Number::int(ty, value)
+            },
+            return Err(String::new())
+        ),
+    };
+    Ok(Some(result))
+}
+
+unsafe fn one_number(call: &Call<'_>) -> R<Number> {
+    let [value] = arguments(call, ["number"])?;
+    read(value).ok_or_else(|| wrong(call, "number", "a number", value))
+}
+
+unsafe fn named_numbers(call: &Call<'_>, parameters: [&str; 2]) -> R<(Number, Number)> {
+    let [first, second] = arguments(call, parameters)?;
+    match (read(first), read(second)) {
+        (Some(left), Some(right)) if left.ty == right.ty => Ok((left, right)),
+        (Some(left), Some(right)) => Err(call.error(format!(
+            "`{}()` needs two numbers of one type, not {} and {}",
+            call.name(),
+            left.ty.name(),
+            right.ty.name()
+        ))),
+        (Some(left), None) => Ok((left, library_operand(call, parameters[1], left.ty, second)?)),
+        (None, Some(right)) => Ok((
+            library_operand(call, parameters[0], right.ty, first)?,
+            right,
+        )),
+        (None, None) => Err(wrong(call, parameters[0], "a number", first)),
+    }
+}
