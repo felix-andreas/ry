@@ -143,9 +143,9 @@ No. Let Claude rewrite your code in Rust.
 ### Why is it called ry?
 
 It started as "the roughly good enough language server": all it offered was go-to-definition
-based on regular expressions, but it was fast. It grew into a proper language
-server built on tree-sitter, and people called it just Roughly. With its first type checker it was
-rewritten from scratch with its own recursive-descent parser, and renamed ry.
+based on regular expressions, but it was fast. It grew into a proper language server built on
+tree-sitter, and people called it just Roughly. With its first type checker it was rewritten from
+scratch with its own recursive-descent parser, and renamed ry.
 
 ## License
 
