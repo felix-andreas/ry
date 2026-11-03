@@ -45,7 +45,10 @@ use {
         ops::Range,
         ptr::NonNull,
         rc::Rc,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
     thin_vec::ThinVec,
@@ -345,24 +348,9 @@ pub enum OperandExpectation {
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
-    pub expression_types: ExpressionTypes<'db>,
-    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
-    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
-    /// a pattern that cannot match records nothing.
-    pub pattern_types: PatternTypes<'db>,
-    /// The declared type each native record, tuple or tag literal was checked against, at an
-    /// annotated binding, a call argument or a nominal constructor, so completion can offer
-    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
-    /// the enclosing one's field or payload.
-    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
-    /// The element type each `for` loop binds its variable to, keyed by the loop. The
-    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
-    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
     pub errors: ThinVec<TypeError<'db>>,
     pub strict_origins: ThinVec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
-    /// Index into the declared overload set; absent when no candidate matched.
-    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
     pub masked_reads: SortedSet<ExprId>,
@@ -376,9 +364,40 @@ pub struct ItemCheck<'db> {
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
     pub match_findings: ThinVec<MatchFinding>,
+    /// What only editor features read, absent when the host asked for no editor facts, so a
+    /// one-shot check keeps no per-item slots for them.
+    pub editor: Option<Box<EditorFacts<'db>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct EditorFacts<'db> {
+    pub expression_types: ExpressionTypes<'db>,
+    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
+    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
+    /// a pattern that cannot match records nothing.
+    pub pattern_types: PatternTypes<'db>,
+    /// The declared type each native record, tuple or tag literal was checked against, at an
+    /// annotated binding, a call argument or a nominal constructor, so completion can offer
+    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
+    /// the enclosing one's field or payload.
+    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
+    /// The element type each `for` loop binds its variable to, keyed by the loop. The
+    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
+    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
+    /// Index into the declared overload set; absent when no candidate matched.
+    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Call heads whose lookup skipped the binding naming resolved, because that binding
     /// cannot hold a function. Editor features navigate to the binding the call reaches.
     pub callee_targets: SortedMap<ExprId, CalleeTarget>,
+}
+
+static NO_EDITOR_FACTS: LazyLock<EditorFacts<'static>> = LazyLock::new(EditorFacts::default);
+
+impl<'db> ItemCheck<'db> {
+    /// The editor facts, empty when the host asked for none.
+    pub fn editor(&self) -> &EditorFacts<'db> {
+        self.editor.as_deref().unwrap_or(&NO_EDITOR_FACTS)
+    }
 }
 
 /// A DataFrame function whose result the checker computes from its arguments.
@@ -861,12 +880,9 @@ fn check_item_in<'db>(
         Some(context.table.resolve(db, ty))
     });
     let editor_facts = db.editor_facts();
-    let mut expression_types = ExpressionTypes::default();
-    let mut pattern_types = PatternTypes::default();
-    let mut literal_expectations = SortedMap::default();
-    let mut loop_variables = SortedMap::default();
+    let mut editor = None;
     if editor_facts {
-        expression_types = recorded
+        let expression_types = recorded
             .into_iter()
             .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
             .collect();
@@ -876,17 +892,33 @@ fn check_item_in<'db>(
                 *slot = Some(context.table.resolve(context.db, ty));
             }
         }
-        pattern_types = PatternTypes(ThinVec::from(patterns));
-        literal_expectations = context
+        let pattern_types = PatternTypes(ThinVec::from(patterns));
+        let literal_expectations = context
             .recorded_expectations
             .iter()
             .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
-        loop_variables = context
+        let loop_variables = context
             .recorded_loop_variables
             .iter()
             .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
+        editor = Some(Box::new(EditorFacts {
+            expression_types,
+            pattern_types,
+            literal_expectations,
+            loop_variables,
+            selected_overloads: context
+                .selected_overloads
+                .iter()
+                .map(|(&callee, &index)| (callee, index))
+                .collect(),
+            callee_targets: context
+                .callee_targets
+                .iter()
+                .map(|(&callee, &target)| (callee, target))
+                .collect(),
+        }));
     }
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
@@ -923,23 +955,10 @@ fn check_item_in<'db>(
     }
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
-        expression_types,
-        pattern_types,
-        literal_expectations,
-        loop_variables,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: if editor_facts {
-            context.selected_overloads.into_iter().collect()
-        } else {
-            SortedMap::default()
-        },
-        callee_targets: if editor_facts {
-            context.callee_targets.into_iter().collect()
-        } else {
-            SortedMap::default()
-        },
+        editor,
         masked_reads: context.masked_reads.into_iter().collect(),
         column_misses: context.column_misses.into_iter().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),

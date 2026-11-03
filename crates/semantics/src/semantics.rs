@@ -3404,18 +3404,13 @@ mod tests {
         let db = RootDatabase::default();
         let integer = types::scalar(&db, types::Atomic::Integer);
         let check = check::ItemCheck {
-            expression_types: Default::default(),
-            pattern_types: Default::default(),
-            literal_expectations: Default::default(),
-            loop_variables: Default::default(),
+            editor: None,
             errors: ThinVec::new(),
             strict_origins: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
-            selected_overloads: Default::default(),
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
-            callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
