@@ -401,8 +401,11 @@ Vectors of a megabyte or more get an anonymous mapping each (`crates/heap/src/la
 goes back to the kernel when the vector dies, as glibc's `mmap` threshold returns GNU R's large
 vectors. libR's global allocator does the same for its own blocks of that size, so the buffers a
 builtin fills before copying them into a vector go back too. A small cache of freed mappings,
-resized with `mremap`, saves the next vector's page faults; it empties whenever a vector must add
-pages, so it never raises the peak.
+resized with `mremap`, saves the next vector's page faults. It holds at most a quarter of the
+collection limit, and when no kept mapping is long enough for a new vector it grows the longest
+and unmaps the rest, so it never holds memory idle while a vector adds pages. Between those
+moments the idle mappings do count toward resident memory, and a major collection trims the
+cache to its limit.
 
 The JIT recovers what a moving nursery would buy in other VMs by not allocating in the first place:
 unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (section 5). If

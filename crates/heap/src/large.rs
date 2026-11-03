@@ -212,7 +212,7 @@ unsafe fn unmap_block(address: NonNull<u8>, length: usize) {
     }
 }
 
-/// The cache's limit for a heap whose collection limit is `heap_limit`: a sixteenth of it, and
+/// The cache's limit for a heap whose collection limit is `heap_limit`: a quarter of it, and
 /// at least [`MIN_CACHE_BYTES`].
 pub(crate) fn cache_limit(heap_limit: usize) -> usize {
     (heap_limit / 4).max(MIN_CACHE_BYTES)
@@ -280,8 +280,8 @@ unsafe fn unmap(address: NonNull<u8>, length: usize) {
     }
 }
 
-// Elsewhere the global allocator serves large vectors too, and the cache keeps nothing, because
-// there is no `mremap` to resize a kept block in place. `Mapped` passes every block through.
+// Elsewhere the global allocator serves large vectors too. With no `mremap` to resize a kept
+// block in place, the cache reuses a block only for a vector of exactly its length. `Mapped` passes every block through.
 
 #[cfg(not(target_os = "linux"))]
 fn page_size() -> usize {

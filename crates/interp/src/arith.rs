@@ -3865,18 +3865,24 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
                 RepPlan::Cycle {
                     total: base_count
                         .checked_mul(repeat as usize)
+                        .filter(|&total| total <= LONGEST_REPETITION)
                         .ok_or_else(too_long)?,
                 }
             } else if times_count == base_count {
                 let mut counts = Vec::with_capacity(base_count);
+                let mut total = 0usize;
                 for position in 0..base_count {
                     let repeat = crate::subset::numeric_element(times, position);
                     if repeat.is_nan() || repeat < 0.0 {
                         return Err(call.error("invalid 'times' argument"));
                     }
+                    total = total
+                        .checked_add(repeat as usize)
+                        .filter(|&total| total <= LONGEST_REPETITION)
+                        .ok_or_else(too_long)?;
                     counts.push(repeat as usize);
                 }
-                RepPlan::Counts(counts)
+                RepPlan::Counts { counts, total }
             } else {
                 return Err(call.error("invalid 'times' argument"));
             }
@@ -3914,8 +3920,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
 /// its own number of times.
 enum RepPlan {
     Cycle { total: usize },
-    Counts(Vec<usize>),
+    Counts { counts: Vec<usize>, total: usize },
 }
+
+/// GNU R's `R_XLEN_T_MAX`: `rep` reports a longer result as an invalid `times`, before any
+/// allocation is attempted.
+const LONGEST_REPETITION: usize = 1 << 52;
 
 /// `object` repeated by `plan`, where `base_count` is its length times `each`. The positions are
 /// generated as they are gathered, because a position list costs eight bytes per result element,
@@ -3932,13 +3942,12 @@ unsafe fn select_repeated(object: Sexp, plan: &RepPlan, base_count: usize, each:
             });
             crate::subset::select_positions(object, positions, *total)
         }
-        RepPlan::Counts(counts) => {
-            let total = counts.iter().sum();
+        RepPlan::Counts { counts, total } => {
             let positions = counts
                 .iter()
                 .enumerate()
                 .flat_map(|(position, &repeat)| std::iter::repeat_n(position / each, repeat));
-            crate::subset::select_positions(object, positions, total)
+            crate::subset::select_positions(object, positions, *total)
         }
     }
 }
@@ -3963,16 +3972,27 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
         }
         let total = count
             .checked_mul(repeat as usize)
+            .filter(|&total| total <= LONGEST_REPETITION)
             .ok_or_else(|| call.error("invalid 'times' value"))?;
         if let Some(result) = repeat_plain(object, total)? {
             return keep_factor(object, result);
         }
         RepPlan::Cycle { total }
     } else if length(times) == count {
-        let counts = (0..count)
-            .map(|index| crate::subset::numeric_element(times, index) as usize)
-            .collect();
-        RepPlan::Counts(counts)
+        let mut counts = Vec::with_capacity(count);
+        let mut total = 0usize;
+        for index in 0..count {
+            let repeat = crate::subset::numeric_element(times, index);
+            if repeat.is_nan() || repeat < 0.0 {
+                return Err(call.error("invalid 'times' value"));
+            }
+            total = total
+                .checked_add(repeat as usize)
+                .filter(|&total| total <= LONGEST_REPETITION)
+                .ok_or_else(|| call.error("invalid 'times' value"))?;
+            counts.push(repeat as usize);
+        }
+        RepPlan::Counts { counts, total }
     } else {
         return Err(call.error("invalid 'times' value"));
     };
