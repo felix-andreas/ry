@@ -1529,9 +1529,18 @@ unsafe fn is_plain_name(value: Sexp) -> bool {
         && !value.element(0).bytes().is_empty()
 }
 
-/// The value bound to `name` in the methods namespace.
+/// The value bound to `name` in the methods namespace. Its bindings are lazy-load promises, and
+/// forcing one only reads the saved value, as the R code reading the variable would.
 unsafe fn methods_value(name: &str) -> R<Option<Sexp>> {
-    quiet_value(install(name)?, interp().globals.methods_namespace)
+    let Some(cell) =
+        crate::heap().frame_cell(interp().globals.methods_namespace, install(name)?)
+    else {
+        return Ok(None);
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        return Ok(None);
+    }
+    eval::value_of(eval::cell_value(cell)?).map(Some)
 }
 
 /// `inBasicFuns(name)`: whether the methods package keeps an implicit generic for the base
