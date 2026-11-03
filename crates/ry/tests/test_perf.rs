@@ -10,7 +10,7 @@
 use std::{
     fs,
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::Instant,
 };
 
@@ -48,7 +48,7 @@ fn cold_check_memory_budget() {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn ry check");
-        let (exit, peak) = wait_with_peak(child.id());
+        let (exit, peak) = wait_with_peak(child);
         let elapsed = started.elapsed();
         assert!(
             matches!(exit, 0 | 1),
@@ -71,10 +71,11 @@ fn cold_check_memory_budget() {
     );
 }
 
-/// Reaps the child and reads its own peak resident set in KiB. `RUSAGE_CHILDREN` would report
-/// the largest child the test process ever waited for, not this one.
-fn wait_with_peak(pid: u32) -> (i32, i64) {
-    let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+/// Reaps the child with `wait4` and reads its own peak resident set in KiB. `Child::wait` cannot
+/// return resource usage, and `RUSAGE_CHILDREN` would report the largest child the test process
+/// ever waited for, not this one.
+fn wait_with_peak(child: Child) -> (i32, i64) {
+    let pid = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
     let mut status = 0;
     // SAFETY: an all-zero `rusage` is a valid value, and `wait4` writes only through the two
     // pointers, which live for the call.

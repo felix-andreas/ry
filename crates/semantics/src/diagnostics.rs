@@ -755,12 +755,14 @@ struct ReadContext<'db> {
     test_files: Option<ProjectFiles>,
     library: Option<&'db StubLibrary<'db>>,
     super_globals: &'db BTreeSet<Symbol>,
-    /// The package's top-level and conditional definitions, which nearly every unresolved
-    /// candidate probes.
-    package: Option<(
-        &'db FxHashMap<Symbol, Item<'db>>,
-        &'db FxHashMap<Symbol, Vec<Item<'db>>>,
-    )>,
+    /// Nearly every unresolved candidate probes these.
+    package: Option<PackageDefinitions<'db>>,
+}
+
+/// The package's top-level definitions and its definitions made inside a condition.
+struct PackageDefinitions<'db> {
+    top_level: &'db FxHashMap<Symbol, Item<'db>>,
+    conditional: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
 }
 
 fn read_context(db: &dyn Db, file: SourceFile) -> ReadContext<'_> {
@@ -777,11 +779,9 @@ fn read_context(db: &dyn Db, file: SourceFile) -> ReadContext<'_> {
         }),
         library: stubs(db),
         super_globals: super_globals(db, file),
-        package: files.map(|files| {
-            (
-                crate::package_definitions(db, files),
-                crate::conditional_slot_items(db, files),
-            )
+        package: files.map(|files| PackageDefinitions {
+            top_level: crate::package_definitions(db, files),
+            conditional: crate::conditional_slot_items(db, files),
         }),
     }
 }
@@ -824,8 +824,8 @@ fn classify_non_local_read(
     let files = context.files;
     let test_files = context.test_files;
     let package_binds = |_: &str| {
-        context.package.is_some_and(|(definitions, conditional)| {
-            definitions.contains_key(&symbol) || conditional.contains_key(&symbol)
+        context.package.as_ref().is_some_and(|package| {
+            package.top_level.contains_key(&symbol) || package.conditional.contains_key(&symbol)
         })
     };
     if crate::package_scheme_exists_in(db, context.library, name, package_binds)
