@@ -3,7 +3,7 @@
 	"displayName": "ry",
 	"description": "R language support",
 	"author": "Felix Andreas",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"publisher": "felix-andreas",
 	"license": "MIT",
 	"homepage": "https://ry-lang.org",

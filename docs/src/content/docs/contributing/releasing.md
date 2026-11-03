@@ -32,11 +32,11 @@ without one it publishes with `--oidc`, which works only inside GitHub Actions.
 requests. The orchestrating agent starts it on main at its hourly check when main has new commits.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
-in `.github/pending/workflows/`, which mirrors the final layout. A maintainer then moves it into place
-from the repository root, commits and pushes:
+under the same name in `.github/pending/`. A maintainer then moves it into place, commits and
+pushes with one command:
 
 ```bash
-git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
+git pull && just accept
 ```
 
 ## Deploying the docs site

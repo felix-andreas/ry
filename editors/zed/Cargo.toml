@@ -2,7 +2,7 @@
 name = "zed_ry"
 # Equals extension.toml's version (the one Zed publishes); `just bump-version` sets both to the
 # release version without its `-beta` suffix.
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT"
 

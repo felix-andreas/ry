@@ -3,6 +3,43 @@ title: News
 description: Release announcements and project news
 ---
 
+## ry 0.4.1-beta, on every platform
+
+*Released in November 2026 as a pre-release.*
+
+Version 0.4.1-beta ships ry with its runtime for Linux x86_64, macOS on Apple silicon and Windows
+x86_64, loads large S4 packages much faster, and fixes the R incompatibilities that real package
+test suites reported. The VS Code extension on the Marketplace is unchanged at 0.3.2, so set
+`ry.path` to the new binary to use the runtime from VS Code ([Installation](/installation)).
+
+### Highlights
+
+- **macOS and Windows archives.** `ry run`, `ry load` and `ry install` work on all three platforms,
+  and the release workflow smoke-tests each archive against GNU R and a CRAN package before it
+  publishes.
+- **Large S4 packages load in well under a second once cached.** On a generated package with
+  2,877 S4 definitions, `ry load` followed by the first `new()` takes about 0.75 s on a second run,
+  against about 6.6 s before. Class unions and `setAs` no longer stop ry from holding S4
+  definitions back until first use, and the cached definitions are restored lazily without
+  `methods::cacheMetaData`.
+- **`sys.call()` and `sys.calls()` no longer copy the arguments.** Under `do.call()` with a large
+  argument they took about 0.1 s each, which made data.table's `[` hundreds of times slower.
+
+### All changes
+
+- Regular expressions accept TRE's `{+}` quantifier.
+- `names<-` dispatches `as.character`, so Date and POSIXct names match GNU R.
+- `format(x, "%OS0")` prints whole seconds.
+- An interrupt raised under `suspendInterrupts()` stays pending until the next check.
+- `ry load` attaches testthat and sources the test helpers as pkgload does.
+- `ry test` runs `test_*.R` files and filters on testthat's context name.
+- `c()` drops `NULL` arguments before S4 dispatch, as GNU R does.
+- `nrows()` and `ncols()` accept `NULL` and pairlists.
+- `round()` and `signif()` port GNU R's algorithm, including the R 4.5.1 change, so they pick the
+  same nearest double.
+- On Windows, paths split at both separators, `system()` runs without a shell and honors its
+  redirections, and `R CMD` puts Rtools first on `PATH`, so `R CMD build` and package installs work.
+
 ## ry 0.4.0-beta, the first release that runs R
 
 *Released in November 2026 as a pre-release.*
