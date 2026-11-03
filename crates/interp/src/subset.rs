@@ -3335,11 +3335,24 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable(object)?;
+    // GNU R's `names<-` turns any value but a plain character vector into text with a
+    // dispatched `as.character(value)`, so a Date names by its formatted dates. The value goes
+    // into the call as it is, which evaluates a symbol or a call there, as in GNU R.
+    let names = if names != nil() && !(names.kind() == SexpType::String && names.attrib() == nil())
+    {
+        crate::heap().root(object);
+        let function = values::install("as.character")?;
+        eval::eval(values::call(function, &[names])?, call.env)?
+    } else {
+        names
+    };
     set_names(object, names)?;
     Ok(object)
 }
 
-/// `names<-`: names are converted to character and padded with `NA` to the object's length.
+/// GNU R's `namesgets`, behind `attr<-`, `attributes<-` and the C API: names are converted to
+/// character without dispatch, keeping the value's own attributes as `coerceVector` does, and
+/// padded with `NA` to the object's length.
 pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     if names == nil() {
         if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
@@ -3412,12 +3425,10 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
             );
         }
         padded
-    } else if names.attrib() != nil() || names == object {
+    } else if names == object {
         // `names(x) <- x` must not make the names attribute the vector itself, which would be a
         // cycle that `serialize` recurses into forever (GNU R's `R_FixupRHS`).
-        let copy = values::shallow_duplicate(names)?;
-        values::clear_attributes(copy);
-        copy
+        values::shallow_duplicate(names)?
     } else {
         names
     };
