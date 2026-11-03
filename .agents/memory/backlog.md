@@ -22,6 +22,12 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: `ry install` fails on Windows inside `R CMD build`
+
+- The release smoke test (windows-latest, gnullvm) now reaches `R CMD build` through ry's `R.exe` front end, which checks the DESCRIPTION, then fails with `Error: cannot rename directory to 'twice'`, followed by `ry: cannot remove the temporary directory '...\Rtmp...': The process cannot access the file because it is being used by another process. (os error 32)`.
+- Likely an open handle in ry's runtime (a file or directory handle, or the session's cwd) inside the build's temporary copy, which Windows refuses to rename or delete while it is open; Unix allows both. Look at what `tools:::.build_packages` opens (it `setwd`s into the copy) and whether ry's `file.rename`/`setwd`/connections close handles.
+- Every other Windows smoke check passes, including `ry R` on GNU R and loading a package GNU R installed.
+
 ## Open: `test_linalg` library cases fail on some OpenBLAS kernels
 
 - On CI (ubuntu runner, OpenBLAS, probably an AMD Zen CPU) `linear_algebra_matches_gnu_r` fails on `dtrco` by one ulp against a live GNU R on the same libraries. It reproduces locally with `OPENBLAS_CORETYPE=Zen`, `Sandybridge` or `Nehalem` (and `Prescott` fails on `dqrcf`); the default, Haswell and SkylakeX kernels pass.
