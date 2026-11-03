@@ -762,7 +762,7 @@ unsafe fn collect_evaluated_args(
                     counted_push(args);
                     cell = cell.cdr();
                 }
-            } else if value != missing && value != unbound() && value != nil() {
+            } else if value != missing && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else if expression == missing {
@@ -841,7 +841,7 @@ unsafe fn closure_args_into(
                     });
                     cell = cell.cdr();
                 }
-            } else if value != missing_arg() && value != unbound() && value != nil() {
+            } else if value != missing_arg() && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {

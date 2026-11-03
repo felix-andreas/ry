@@ -1,0 +1,11 @@
+# Expanding `...` where no `...` is bound is an error, for builtins and closures alike.
+f <- function(x, y) sum(x, y, ...)
+print(try(f(1, 2), silent = TRUE))
+g <- function() list(...)
+print(try(g(), silent = TRUE))
+h <- function() identity(...)
+print(try(h(), silent = TRUE))
+e <- new.env()
+print(try(eval(quote(sum(1, ...)), e), silent = TRUE))
+k <- function(...) list(...)
+print(k())
