@@ -86,6 +86,13 @@ pub enum S4Definition {
     Validity { class: String },
     /// `setClassUnion("Name", c("A", "B"))`, with its members as written.
     Union { class: String, members: Vec<String> },
+    /// `setAs("From", "To", def)`: a method for the methods package's `coerce` generic, and
+    /// for `coerce<-` too when `replace` is given.
+    Coerce {
+        from: String,
+        to: String,
+        replace: bool,
+    },
 }
 
 /// A class or method an item registers as a side effect, which a reload must undo when the
@@ -873,6 +880,23 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
             };
             Registration::S4Method { generic, signature }
         }),
+        "setAs" => {
+            let (Some(from), Some(to)) = (string_argument(0, "from"), string_argument(1, "to"))
+            else {
+                return Vec::new();
+            };
+            let mut registrations = vec![Registration::S4Method {
+                generic: "coerce".to_owned(),
+                signature: vec![from.clone(), to.clone()],
+            }];
+            if argument(3, "replace").is_some() {
+                registrations.push(Registration::S4Method {
+                    generic: "coerce<-".to_owned(),
+                    signature: vec![from, to],
+                });
+            }
+            return registrations;
+        }
         "R6Class" => string_argument(0, "classname")
             .or(bound_name)
             .map(|class| Registration::R6Class { class }),
@@ -968,6 +992,14 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
             Some(S4Definition::Union {
                 class: string_argument(0, "name")?,
                 members,
+            })
+        }
+        "setAs" => {
+            argument(2, "def")?;
+            Some(S4Definition::Coerce {
+                from: string_argument(0, "from")?,
+                to: string_argument(1, "to")?,
+                replace: argument(3, "replace").is_some(),
             })
         }
         _ => None,

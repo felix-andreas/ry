@@ -232,13 +232,24 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   state$helpers_stamp <- helpers$stamp
 }
 
-# With `options(ry.load.verbose = TRUE)`, reports how long each phase of a load took.
+# With `options(ry.load.verbose = TRUE)`, or `RY_LOAD_VERBOSE=true` in the environment for a
+# load that starts before any code could set the option, reports how long each phase of a load
+# took. The first load of a process also reports the time the process took to reach it.
 .ry_phase <- function(label) {
   now <- proc.time()[["elapsed"]]
-  if (!is.null(label) && isTRUE(getOption("ry.load.verbose"))) {
-    message(sprintf("  %-14s %7.1f ms", label, (now - .ry_timing$last) * 1000))
+  if (.ry_verbose()) {
+    if (!is.null(label)) {
+      message(sprintf("  %-14s %7.1f ms", label, (now - .ry_timing$last) * 1000))
+    } else if (is.null(.ry_timing$reported_start)) {
+      message(sprintf("  %-14s %7.1f ms", "process start", now * 1000))
+    }
   }
+  .ry_timing$reported_start <- TRUE
   .ry_timing$last <- now
+}
+
+.ry_verbose <- function() {
+  isTRUE(getOption("ry.load.verbose", as.logical(Sys.getenv("RY_LOAD_VERBOSE", "false"))))
 }
 
 # Reloads the packages whose sources changed, including one whose load failed, which has no

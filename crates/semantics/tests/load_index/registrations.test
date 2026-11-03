@@ -27,6 +27,16 @@ package demo 0.1.0
 1:0 eager reads [setMethod] registers S4Method { generic: "area", signature: ["Point"] }
 2:0 eager registers S4Class { class: "Named" }
 
+#---- a_coercion_registers_coerce_methods
+setAs("Point", "character", function(from) "point")
+setAs(from = "numeric", to = "Point", def = function(from) new("Point"),
+  replace = function(from, value) from)
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager reads [setAs] registers S4Method { generic: "coerce", signature: ["Point", "character"] }
+2:0 eager reads [setAs] registers S4Method { generic: "coerce", signature: ["numeric", "Point"] } registers S4Method { generic: "coerce<-", signature: ["numeric", "Point"] }
+
 #==== r6
 #---- an_r6_class_registers_its_class_name
 Counter <- R6::R6Class("Counter", public = list(count = 0))

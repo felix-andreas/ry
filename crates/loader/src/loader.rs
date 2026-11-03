@@ -280,18 +280,21 @@ pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
 /// Only a fresh load defers, and only when every S4 definition qualifies:
 ///
 /// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`,
-///   `setValidity` and `setClassUnion`, each with literal names, as [`S4Definition`]
+///   `setValidity`, `setClassUnion` and `setAs`, each with literal names, as [`S4Definition`]
 ///   describes. Any other S4 registration, such as `setRefClass`, keeps them all eager.
-/// - Each class union unites classes held back with it, or only other packages' classes, as
-///   `setClassUnion("NumOrNull", c("numeric", "NULL"))` does. A union of the second kind is not
-///   held back but runs in place, because it changes what its members extend; a union of both
-///   kinds keeps them all eager.
+/// - A class union or a coercion that names none of the held-back classes, as
+///   `setClassUnion("NumOrNull", c("numeric", "NULL"))` does, is not held back but runs in
+///   place, because a union changes what its members extend in the process-wide class cache.
+///   A union that names both kinds, as `c("Quantity", "NULL")` does, is held back: code that
+///   asks whether `NULL` belongs to it names the union, whose lookup runs the definitions.
 /// - Each method belongs to a generic the package defines, so nothing reaches it except
 ///   through that generic, or its signature names a class the package defines, so it applies
 ///   only to objects of that class. A method of the second kind on another package's generic,
-///   such as `show`, `length` or `as.list`, is listed in [`DeferredS4::foreign_methods`]:
-///   the backend must run the definitions before that method can be found, and keeps them
-///   eager when it cannot tell when that happens.
+///   such as `show`, `length`, `as.list` or the `coerce` method `setAs` defines, is listed in
+///   [`DeferredS4::foreign_methods`]: the backend must run the definitions before that method
+///   can be found, and keeps them eager when it cannot tell when that happens. Such a method
+///   for a union that names another package's class keeps them all eager, because dispatch on
+///   an object of that class would not look for it.
 /// - Each validity method is for a class the package defines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredS4 {
@@ -331,6 +334,7 @@ const PURE_S4_READS: &[&str] = &[
     "setReplaceMethod",
     "setValidity",
     "setClassUnion",
+    "setAs",
     "representation",
     "signature",
     "prototype",
@@ -1916,9 +1920,11 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     if definitions.is_empty() {
         return None;
     }
-    // A union changes what its members extend in the process-wide class cache, which every
-    // lookup of a member reads, so only a union of classes held back with it can wait. One of
-    // other packages' classes alone reads nothing held back and runs in place.
+    // A union, or a coercion, that names none of the classes held back reads nothing held back
+    // and runs in place: a union of other packages' classes changes what its members extend in
+    // the process-wide class cache, which no placeholder in this namespace could stand in for.
+    // A union that also names other packages' classes, as `c("Quantity", "NULL")` does, is held
+    // back with the rest; see `mixed` below for what that leaves to watch.
     let mut held: FxHashSet<&str> = definitions
         .iter()
         .filter_map(|(_, _, _, definition)| match definition {
@@ -1926,20 +1932,34 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
             _ => None,
         })
         .collect();
+    let mut mixed: FxHashSet<&str> = FxHashSet::default();
     let mut kept = Vec::with_capacity(definitions.len());
     for definition in definitions {
-        if let S4Definition::Union { class, members } = definition.3 {
-            let held_members = members
-                .iter()
-                .filter(|member| held.contains(member.as_str()))
-                .count();
-            if held_members == 0 {
-                continue;
+        match definition.3 {
+            S4Definition::Union { class, members } => {
+                let held_members = members
+                    .iter()
+                    .filter(|member| held.contains(member.as_str()))
+                    .count();
+                if held_members == 0 {
+                    continue;
+                }
+                if held_members < members.len() {
+                    mixed.insert(class);
+                }
+                held.insert(class);
             }
-            if held_members < members.len() {
-                return None;
+            S4Definition::Coerce { from, to, .. } => {
+                if !held.contains(from.as_str()) && !held.contains(to.as_str()) {
+                    continue;
+                }
+                // `setAs` from another package's class to a union that may contain it
+                // records the coercion in that class's own definition, as `setIs` does.
+                if !held.contains(from.as_str()) && mixed.contains(to.as_str()) {
+                    return None;
+                }
             }
-            held.insert(class);
+            _ => {}
         }
         kept.push(definition);
     }
@@ -1955,23 +1975,41 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
                 classes.push(class.clone())
             }
             S4Definition::Generic { generic } => generics.push(generic.clone()),
-            S4Definition::Method { .. } | S4Definition::Validity { .. } => {}
+            S4Definition::Method { .. }
+            | S4Definition::Validity { .. }
+            | S4Definition::Coerce { .. } => {}
         }
     }
     let mut foreign_methods = Vec::new();
     let mut names = Vec::new();
+    // A method for another package's generic is found only through its label, or a primitive's
+    // dispatch on one of the held-back classes, so neither sees an object of another package's
+    // class that a held-back union contains: dispatch would pick another method for it.
+    let mut foreign = |generic: &str, signature: Vec<(Option<String>, String)>| {
+        let reaches_own = signature.iter().any(|(_, class)| classes.contains(class));
+        let names_mixed = signature
+            .iter()
+            .any(|(_, class)| mixed.contains(class.as_str()));
+        foreign_methods.push(ForeignMethod {
+            generic: generic.to_owned(),
+            signature,
+        });
+        reaches_own && !names_mixed
+    };
     for (_, position, item, definition) in &definitions {
         let reaches_own = match definition {
             S4Definition::Class { .. }
             | S4Definition::Union { .. }
             | S4Definition::Generic { .. } => true,
             S4Definition::Method { generic, .. } if generics.contains(generic) => true,
-            S4Definition::Method { generic, signature } => {
-                foreign_methods.push(ForeignMethod {
-                    generic: generic.clone(),
-                    signature: signature.clone(),
-                });
-                signature.iter().any(|(_, class)| classes.contains(class))
+            S4Definition::Method { generic, signature } => foreign(generic, signature.clone()),
+            S4Definition::Coerce { from, to, replace } => {
+                let signature = vec![
+                    (Some("from".to_owned()), from.clone()),
+                    (Some("to".to_owned()), to.clone()),
+                ];
+                let coerce = foreign("coerce", signature.clone());
+                coerce && (!replace || foreign("coerce<-", signature))
             }
             S4Definition::Validity { class } => classes.contains(class),
         };

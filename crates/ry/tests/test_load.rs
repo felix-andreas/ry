@@ -635,6 +635,92 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
 }
 
+/// A union that also names a basic class, and coercions with `setAs()`, are held back with the
+/// classes they name, and each first use, in a process of its own, sees what an eager load
+/// shows: union membership of the basic class, coercions in both directions and their
+/// replacement form, method lookups, validity, and dispatch on an object read back from disk.
+/// The second round restores the definitions from the S4 metadata cache.
+#[test]
+fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_eagerly() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: coins\nVersion: 1.0\n"),
+        (
+            "NAMESPACE",
+            "exportPattern(\".\")\nexportClasses(Coin, Purse, CoinOrNull)\n",
+        ),
+        (
+            "R/a.R",
+            "Coin <- setClass(\"Coin\", representation(value = \"numeric\"))\n\
+             setClass(\"Purse\", representation(coins = \"list\"))\n\
+             setClassUnion(\"CoinOrNull\", c(\"Coin\", \"NULL\"))\n\
+             setGeneric(\"worth\", function(x) standardGeneric(\"worth\"))\n\
+             setMethod(\"worth\", \"CoinOrNull\", function(x) if (is.null(x)) 0 else x@value)\n\
+             setAs(\"Coin\", \"character\", function(from) paste(from@value, \"coins\"))\n\
+             setAs(\"numeric\", \"Coin\", function(from) new(\"Coin\", value = from))\n\
+             setAs(\"Coin\", \"Purse\", function(from) new(\"Purse\", coins = list(from)),\n\
+               replace = function(from, value) { from@value <- length(value@coins); from })\n\
+             setValidity(\"Coin\", function(object) if (length(object@value) == 1) TRUE else \"one value\")\n",
+        ),
+    ]);
+    let saved = root.path().join("coin.rds");
+    let load = |lazy: &str, probe: &str| {
+        let reload = format!(
+            "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+            root.path().display().to_string()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .args(["-e", &reload, "-e", probe])
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .output()
+            .expect("run ry load");
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    load("FALSE", &format!("saveRDS(Coin(value = 3), {saved:?})"));
+    let line = |text: &str| {
+        text.lines()
+            .find(|line| line.starts_with("probe:"))
+            .unwrap_or_else(|| panic!("no probe line in {text}"))
+            .to_owned()
+    };
+    let probes = [
+        "cat('probe:', is(NULL, 'CoinOrNull'), extends('NULL', 'CoinOrNull'), isVirtualClass('CoinOrNull'), '\\n')".to_owned(),
+        "cat('probe:', worth(NULL), worth(Coin(value = 2)), is(Coin(value = 1), 'CoinOrNull'), '\\n')".to_owned(),
+        "cat('probe:', as(3, 'Coin')@value, '\\n')".to_owned(),
+        "cat('probe:', as(Coin(value = 2), 'character'), '\\n')".to_owned(),
+        "cat('probe:', existsMethod('coerce', c('numeric', 'Coin')), existsMethod('coerce<-', c('Coin', 'Purse')), '\\n')".to_owned(),
+        "x <- Coin(value = 1); as(x, 'Purse') <- new('Purse', coins = list(1, 2)); cat('probe:', x@value, '\\n')".to_owned(),
+        "cat('probe:', tryCatch(new('Coin', value = 1:2), error = conditionMessage), '\\n')".to_owned(),
+        "cat('probe:', capture.output(showMethods('worth')), '\\n')".to_owned(),
+        format!("x <- readRDS({saved:?}); cat('probe:', as(x, 'character'), worth(x), '\\n')"),
+    ];
+    // The second round finds the S4 metadata cache the first round's forces saved.
+    for round in ["miss", "hit"] {
+        let cached = std::fs::read_dir(root.path().join("cache/ry/s4"))
+            .is_ok_and(|mut entries| entries.next().is_some());
+        assert_eq!(cached, round == "hit", "{round}");
+        for probe in &probes {
+            let lazy = load("TRUE", probe);
+            let eager = load("FALSE", probe);
+            assert!(
+                lazy.contains("9 S4 definitions held back until first use"),
+                "{round}: {lazy}"
+            );
+            assert_eq!(
+                line(&lazy),
+                line(&eager),
+                "{round}: lazy:\n{lazy}\neager:\n{eager}"
+            );
+        }
+    }
+}
+
 #[test]
 fn package_functions_used_or_made_generic_around_held_back_methods_load_as_eagerly() {
     if !r_available() {

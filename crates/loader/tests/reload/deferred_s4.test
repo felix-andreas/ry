@@ -174,15 +174,64 @@ placeholders .__C__Sq
 sync exports
 run .onLoad
 
-#---- a_class_union_of_package_and_other_classes_keeps_the_definitions_in_place
+#---- a_class_union_of_package_and_other_classes_is_held_back_with_them
 #~~~~ R/a.R
 setClass("Sq", representation(side = "numeric"))
-setClassUnion("SqOrNumber", c("Sq", "numeric"))
+setClassUnion("SqOrNull", c("Sq", "NULL"))
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", "SqOrNull", function(shape) 1)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setClassUnion("SqOrNull", c("Sq", "NULL"))
+hold back R/a.R:3 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:4 setMethod("area", "SqOrNull", function(shape) 1)
+placeholders .__C__Sq .__C__SqOrNull .__T__area:demo area
+sync exports
+run .onLoad
+
+#---- a_method_on_an_external_generic_for_a_union_with_other_classes_keeps_everything_eager
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setClassUnion("SqOrNull", c("Sq", "NULL"))
+setMethod("show", "SqOrNull", function(object) cat("square or nothing\n"))
 #++++
 rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"))
-run R/a.R:2 setClassUnion("SqOrNumber", c("Sq", "numeric"))
+run R/a.R:2 setClassUnion("SqOrNull", c("Sq", "NULL"))
+run R/a.R:3 setMethod("show", "SqOrNull", function(object) cat("square or nothing\n"))
+sync exports
+run .onLoad
+
+#---- coercions_to_and_from_a_package_class_are_held_back
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setAs("Sq", "character", function(from) "square")
+setAs("numeric", "Sq", function(from) new("Sq", side = from),
+  replace = function(from, value) value@side)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setAs("Sq", "character", function(from) "square")
+hold back R/a.R:3 setAs("numeric", "Sq", function(from) new("Sq", side = from),
+placeholders .__C__Sq
+forced by other packages' generics coerce coerce<-
+sync exports
+run .onLoad
+
+#---- a_coercion_between_other_packages_classes_runs_in_place
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setAs("numeric", "character", function(from) "number")
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+run R/a.R:2 setAs("numeric", "character", function(from) "number")
+placeholders .__C__Sq
 sync exports
 run .onLoad
 
