@@ -7221,7 +7221,11 @@ unsafe fn do_gray(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `col2rgb(col, alpha)`: an integer matrix with a column per colour.
 unsafe fn do_col2rgb(call: &NativeCall<'_>) -> R<Sexp> {
-    let colours = call.arg(0);
+    // As in GNU R, anything but numbers and strings (a list, a logical) is read as strings.
+    let colours = match call.arg(0).kind() {
+        SexpType::String | SexpType::Integer | SexpType::Real => call.arg(0),
+        _ => coerce_vector(call.arg(0), SexpType::String)?,
+    };
     let with_alpha = values::as_logical_scalar(call.arg(1)) == 1;
     let rows = if with_alpha { 4 } else { 3 };
     let count = length(colours);
