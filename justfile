@@ -344,8 +344,9 @@ release-assets version:
     done
     rm -rf editors/code/bin
 
-# Publish release/VERSION: create the GitHub release with every archive and `.vsix` (or refresh the
-# assets of one a failed run left behind), then publish each `.vsix` to the VS Code Marketplace.
+# Publish release/VERSION: create the GitHub release with every archive and `.vsix` it holds (or
+# refresh the assets of one a failed run left behind), then publish each `.vsix` to the VS Code
+# Marketplace.
 # Needs `gh` signed in (GH_TOKEN in CI) and, outside CI, a VSCE_PAT.
 release-publish version:
     #!/usr/bin/env bash
@@ -353,6 +354,8 @@ release-publish version:
     version={{ quote(version) }}
     dir="release/$version"
     kind=$(just release-kind "$version")
+    # A release limited to some platforms, or without the extension, lacks some of these files.
+    shopt -s nullglob
     assets=("$dir"/ry-*.tar.gz "$dir"/ry-*.zip "$dir"/*.vsix)
     if gh release view "$version" >/dev/null 2>&1; then
     	gh release upload "$version" --clobber "${assets[@]}"
@@ -370,7 +373,7 @@ release-publish version:
     options=(--skip-duplicate)
     if [ "$kind" = pre-release ]; then options+=(--pre-release); fi
     if [ -z "${VSCE_PAT:-}" ]; then options+=(--oidc); fi
-    for vsix in "$dir"/ry-*.vsix "$dir"/ry.vsix; do
+    for vsix in "$dir"/ry-*.vsix "$dir"/ry.vsi[x]; do
     	npx --yes @vscode/vsce@4.1.0 publish "${options[@]}" --packagePath "$vsix"
     done
 

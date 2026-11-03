@@ -8,6 +8,10 @@ workflow by hand with that version, builds each platform's archive on its own ru
 it, and then publishes the GitHub release and the VS Code extension. The workflow is
 `.github/workflows/release.yml`, and there is no other release path.
 
+A run started by hand has two more inputs. `platforms` set to `linux` builds and releases only the
+Linux archive, and unticking `vscode` leaves the VS Code extension out of the release and the
+Marketplace. A tag push always releases every platform and the extension.
+
 Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
 one runs locally as well:
 
@@ -16,7 +20,7 @@ one runs locally as well:
 | `just release-check VERSION` | Fails unless `VERSION` is a valid release version and `Cargo.toml` and both extensions carry it. |
 | `just package VERSION TARGET` | Builds one platform's archive into `release/VERSION`. |
 | `just release-assets VERSION` | Unpacks the archives in `release/VERSION` and packages the VS Code extension from them. A platform without an archive is skipped with a note. |
-| `just release-publish VERSION` | Creates the GitHub release with every archive and `.vsix` (or refreshes the assets of one a failed run left behind), then publishes each `.vsix` to the Marketplace. |
+| `just release-publish VERSION` | Creates the GitHub release with every archive and `.vsix` in `release/VERSION` (or refreshes the assets of one a failed run left behind), then publishes each `.vsix` to the Marketplace. |
 
 `release-publish` needs `gh` signed in, and outside the workflow it needs a `VSCE_PAT`, because
 without one it publishes with `--oidc`, which works only inside GitHub Actions.
