@@ -4,7 +4,7 @@
 //! for reuse instead: libR's mimalloc returns it only on `gc()`, so in a loop whose temporaries
 //! differ in size, the freed blocks it could not reuse stayed resident on top of the live data.
 //!
-//! Freed mappings, at most [`MappedCache::limit`] bytes, are kept and resized with `mremap`
+//! Freed mappings, at most [`MappedPool::limit`] bytes, are kept and resized with `mremap`
 //! for the next large vector, because a fresh mapping costs a page fault per page touched. A loop
 //! that allocates temporaries of the same size then reuses resident pages instead of faulting in
 //! new ones.
@@ -18,12 +18,13 @@ use std::{
 /// vectors come from the global allocator, which reuses their memory within its pages.
 pub(crate) const MAPPED_BYTES: usize = 1 << 20;
 
-/// Freed mappings kept for reuse.
-pub(crate) struct MappedCache {
+/// Freed mappings kept for reuse: a pool of address space, not a cache of derived data, so it can
+/// never go stale. Reusing a mapping skips the page faults and kernel zeroing a fresh one costs.
+pub(crate) struct MappedPool {
     mappings: Vec<Mapping>,
     bytes: usize,
     /// The most bytes kept, which [`crate::Heap`] sets from its limit after each major
-    /// collection, so the memory a cache holds stays a small share of the heap.
+    /// collection, so the memory the pool holds stays a small share of the heap.
     pub limit: usize,
 }
 
@@ -32,12 +33,12 @@ struct Mapping {
     length: usize,
 }
 
-impl MappedCache {
-    pub fn new() -> MappedCache {
-        MappedCache {
+impl MappedPool {
+    pub fn new() -> MappedPool {
+        MappedPool {
             mappings: Vec::new(),
             bytes: 0,
-            limit: MIN_CACHE_BYTES,
+            limit: MIN_POOL_BYTES,
         }
     }
 
@@ -45,7 +46,7 @@ impl MappedCache {
     ///
     /// # Safety
     /// `size` must be at least [`MAPPED_BYTES`], and the memory must be released with
-    /// [`MappedCache::release`] and the same `size`.
+    /// [`MappedPool::release`] and the same `size`.
     pub unsafe fn allocate(&mut self, size: usize, zeroed: usize) -> Option<NonNull<u8>> {
         let length = page_rounded(size)?;
         if let Some(address) = self.reuse(length) {
@@ -56,11 +57,11 @@ impl MappedCache {
         map(length)
     }
 
-    /// Gives back the memory of an object of `size` bytes, keeping it for reuse while the cache
+    /// Gives back the memory of an object of `size` bytes, keeping it for reuse while the pool
     /// has room.
     ///
     /// # Safety
-    /// `address` must come from [`MappedCache::allocate`] with the same `size`, and nothing may
+    /// `address` must come from [`MappedPool::allocate`] with the same `size`, and nothing may
     /// use it afterwards.
     pub unsafe fn release(&mut self, address: NonNull<u8>, size: usize) {
         let Some(length) = page_rounded(size) else {
@@ -77,29 +78,29 @@ impl MappedCache {
     /// Returns every kept mapping to the kernel, as an explicit `gc()` returns free memory.
     pub fn flush(&mut self) {
         for mapping in self.mappings.drain(..) {
-            // SAFETY: a kept mapping is owned by the cache alone.
+            // SAFETY: a kept mapping is owned by the pool alone.
             unsafe { unmap(mapping.address, mapping.length) };
         }
         self.bytes = 0;
     }
 
-    /// Drops kept mappings until the cache fits its limit.
+    /// Drops kept mappings until the pool fits its limit.
     pub fn trim(&mut self) {
         while self.bytes > self.limit {
             let Some(mapping) = self.mappings.pop() else {
                 break;
             };
             self.bytes -= mapping.length;
-            // SAFETY: a kept mapping is owned by the cache alone.
+            // SAFETY: a kept mapping is owned by the pool alone.
             unsafe { unmap(mapping.address, mapping.length) };
         }
     }
 
     /// A kept mapping resized to `length`: the smallest one at least that long, which only
     /// returns pages to the kernel. When none is long enough, the longest one grows and the rest
-    /// go back to the kernel, because the vector adds pages either way and memory the cache keeps
+    /// go back to the kernel, because the vector adds pages either way and memory the pool keeps
     /// idle while pages are added would raise the peak above what returning every dead vector
-    /// gives. So the cache saves page faults without ever raising the peak.
+    /// gives. Between those moments the pool's idle mappings, at most its limit, stay resident.
     unsafe fn reuse(&mut self, length: usize) -> Option<NonNull<u8>> {
         let lengths = || self.mappings.iter().map(|mapping| mapping.length).enumerate();
         if let Some((chosen, _)) = lengths()
@@ -128,7 +129,7 @@ unsafe fn resize(mapping: Mapping, length: usize) -> Option<NonNull<u8>> {
     resized
 }
 
-impl Drop for MappedCache {
+impl Drop for MappedPool {
     fn drop(&mut self) {
         self.flush();
     }
@@ -212,13 +213,13 @@ unsafe fn unmap_block(address: NonNull<u8>, length: usize) {
     }
 }
 
-/// The cache's limit for a heap whose collection limit is `heap_limit`: a quarter of it, and
-/// at least [`MIN_CACHE_BYTES`].
-pub(crate) fn cache_limit(heap_limit: usize) -> usize {
-    (heap_limit / 4).max(MIN_CACHE_BYTES)
+/// The pool's limit for a heap whose collection limit is `heap_limit`: a quarter of it, and
+/// at least [`MIN_POOL_BYTES`].
+pub(crate) fn pool_limit(heap_limit: usize) -> usize {
+    (heap_limit / 4).max(MIN_POOL_BYTES)
 }
 
-const MIN_CACHE_BYTES: usize = 16 << 20;
+const MIN_POOL_BYTES: usize = 16 << 20;
 
 fn page_rounded(size: usize) -> Option<usize> {
     size.checked_next_multiple_of(page_size())
@@ -281,7 +282,8 @@ unsafe fn unmap(address: NonNull<u8>, length: usize) {
 }
 
 // Elsewhere the global allocator serves large vectors too. With no `mremap` to resize a kept
-// block in place, the cache reuses a block only for a vector of exactly its length. `Mapped` passes every block through.
+// block in place, the pool reuses a block only for a vector of exactly its length. `Mapped`
+// passes every block through.
 
 #[cfg(not(target_os = "linux"))]
 fn page_size() -> usize {
