@@ -913,6 +913,36 @@ pub unsafe fn try_builtin_dispatch(
     };
     match definition.generic {
         Generic::None => Ok(None),
+        Generic::Internal if definition.name == "c" => {
+            // GNU R's `do_c` drops every `NULL` argument after the first, named or not, before
+            // it dispatches, so neither an S3 nor an S4 method sees them, and `nargs()` in the
+            // method does not count them. It then dispatches through `DispatchAnyOrEval`,
+            // which tries the S4 methods when any argument is an S4 object, not only the first.
+            let kept: Vec<Arg> = args
+                .iter()
+                .enumerate()
+                .filter(|(position, arg)| *position == 0 || arg.value != nil())
+                .map(|(_, arg)| *arg)
+                .collect();
+            if kept.iter().any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
+                // The promises pair each value with its expression in the call, which still
+                // holds the dropped arguments, so they are made before the `NULL`s go.
+                let promised: Vec<Arg> = promised_args(call, args)?
+                    .into_iter()
+                    .zip(args)
+                    .enumerate()
+                    .filter(|(position, (_, arg))| *position == 0 || arg.value != nil())
+                    .map(|(_, (promise, _))| promise)
+                    .collect();
+                if let Some(value) = s4_dispatch(op, call, &promised, env)? {
+                    return Ok(Some(value));
+                }
+            }
+            if !first.value.is_object() {
+                return Ok(None);
+            }
+            internal_dispatch("c", call, &kept, env)
+        }
         Generic::Internal => {
             if !first.value.is_object() {
                 return Ok(None);
@@ -928,16 +958,6 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 definition.name
             };
-            if generic == "c" {
-                // A `c` method never sees the `NULL` arguments after the first, as in GNU R.
-                let kept: Vec<Arg> = args
-                    .iter()
-                    .enumerate()
-                    .filter(|(position, arg)| *position == 0 || arg.value != nil())
-                    .map(|(_, arg)| *arg)
-                    .collect();
-                return internal_dispatch(generic, call, &kept, env);
-            }
             internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {

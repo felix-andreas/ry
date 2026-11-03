@@ -1,0 +1,21 @@
+[stdout]
+| [1] 1
+| [1] 2
+| [1] "Box"       "numeric"   "list"      "character"
+| [1] "Box"
+| [1] "Box"
+| [1] 1
+| [1] 1
+| [1] 2
+| c(new("Box", value = "a"), NULL, b = NULL)
+| [1] "the S4 method for an S3 class"
+| [1] 2
+| [1] 2
+| [1] 1
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1
