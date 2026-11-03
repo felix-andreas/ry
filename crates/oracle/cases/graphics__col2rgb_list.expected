@@ -1,0 +1,29 @@
+[stdout]
+|       [,1] [,2]
+| red     31  255
+| green  119  127
+| blue   180   14
+| alpha  255  255
+|         a   b
+| red   255  97
+| green   0 208
+| blue    0  79
+|       [,1] [,2]
+| red      0    0
+| green    0    0
+| blue     0  255
+|       [,1]
+| red    255
+| green  255
+| blue   255
+|       [,1]
+| red    255
+| green    0
+| blue     0
+| [1] "invalid color name 'TRUE'"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid color name 'TRUE'"
