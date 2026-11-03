@@ -446,6 +446,13 @@ bench-s4-load dir="target/s4heavy" seed="20261102":
     cd {{ dir }} && echo 'q()' | {{ justfile_directory() }}/target/release/ry run
     cd {{ justfile_directory() }}/target && PKG={{ absolute_path(dir) }} ./release/ry run {{ justfile_directory() }}/tools/loader-bench/s4_profile.R
 
+# Times each phase of `ry load` on the S4-heavy package and its first S4 use, once with an empty cache and twice warm, e.g. `just bench-s4-first-use target/s4heavy lubridate,data.table,xts`.
+bench-s4-first-use dir="target/s4heavy" imports="" seed="20261102":
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/loader-bench/s4_package.py {{ dir }} --seed {{ seed }} {{ if imports == "" { "" } else { "--imports " + imports } }}
+    rm -rf target/s4-first-use-cache
+    for run in cold warm warm; do echo "== $run"; XDG_CACHE_HOME={{ absolute_path("target/s4-first-use-cache") }} RY_LOAD_VERBOSE=true ./target/release/ry load {{ dir }} -e 'started <- proc.time()[[3]]; x <- new("Cls100"); message(sprintf("  first new()    %7.1f ms", (proc.time()[[3]] - started) * 1000))' -e 'message(sprintf("  at exit        %7.1f ms", proc.time()[[3]] * 1000))'; done
+
 # Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
 bench-gen *args:
     python3 -I tools/bench/generate.py {{ args }}

@@ -2346,11 +2346,12 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
     })
 }
 
-/// Where one kind of per-package cache lives for the package at `root`, one `.rds` file per
-/// package that each save replaces: `s4` for the S4 metadata a backend holds back
-/// ([`DeferredS4::cache_key`]), `roxygen` for the blocks `ry document` parsed.
+/// Where one kind of per-package cache lives for the package at `root`, one entry per package
+/// that each save replaces: `s4` is a directory holding a lazy-load database of the S4
+/// metadata a backend holds back ([`DeferredS4::cache_key`]), and `roxygen` names the `.rds`
+/// file of the blocks `ry document` parsed once the caller adds the extension.
 pub fn package_cache_path(root: &Path, kind: &str) -> Option<PathBuf> {
-    let name = format!("{:016x}.rds", xxh3_64(root.as_os_str().as_encoded_bytes()));
+    let name = format!("{:016x}", xxh3_64(root.as_os_str().as_encoded_bytes()));
     Some(cache_directory()?.join("ry").join(kind).join(name))
 }
 

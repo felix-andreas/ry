@@ -667,6 +667,15 @@ View <- function(x, title) {
   ns <- state$ns
   held <- .Internal(ryLoaderDeferred(state$root))
   loading <- !is.null(state$s4_cursor)
+  last <- proc.time()[["elapsed"]]
+  step <- function(label) {
+    if (!loading && .ry_verbose()) {
+      now <- proc.time()[["elapsed"]]
+      # Not a message, which would count as one the run signalled.
+      cat(sprintf("  %-14s %7.1f ms\n", label, (now - last) * 1000), file = stderr())
+      last <<- now
+    }
+  }
   previous <- options(topLevelEnvironment = ns)
   on.exit({
     options(previous)
@@ -678,18 +687,23 @@ View <- function(x, title) {
     .ry_s4_cache(ns, deferred$cache_key, held$cache)
   }
   # Restoring overwrites the placeholders, and one left in the attached package environment
-  # now finds the restored value, so only a run, or a name the restored file lacks, needs them
-  # gone. Removing a binding from a large frame is slow, which is why a restore skips it.
+  # now finds the restored value, so only a run, or a name the restored database lacks, needs
+  # them gone. Removing a binding from a large frame is slow, which is why a restore skips it.
   restored <- .ry_restore_s4(ns, cache)
-  .ry_remove_s4_placeholders(state, if (isTRUE(restored)) {
-    setdiff(deferred$names, attr(restored, "names_bound"))
-  } else {
+  .ry_remove_s4_placeholders(state, if (is.null(restored)) {
     deferred$names
+  } else {
+    setdiff(deferred$names, restored$names)
   })
-  if (!isTRUE(restored)) {
+  if (!is.null(restored)) {
+    step("S4 restore")
+    .ry_cache_restored_s4(ns, restored$metadata)
+    step("S4 caches")
+  } else {
+    step("S4 lookup")
     before <- names(ns)
     signalled <- FALSE
-    withCallingHandlers(
+    withCallingHandlers({
       for (k in seq_along(held$position)) {
         if (loading && held$position[[k]] >= state$s4_cursor) {
           break
@@ -700,22 +714,30 @@ View <- function(x, title) {
             message(sprintf("Error while loading %s:%d", held$path[[k]], held$line[[k]]))
           }
         )
-      },
+      }
+      step("S4 run")
+      if (!loading) {
+        methods::cacheMetaData(ns, TRUE, ns)
+        step("S4 caches")
+      }
+    },
       message = function(condition) signalled <<- TRUE,
       warning = function(condition) signalled <<- TRUE
     )
     # A message or warning must show again in the next process, so a run that signalled one
-    # is not saved.
+    # is not saved. Saving after `cacheMetaData()` stores the package's generics with their
+    # methods tables merged, which a restore then need not merge again.
     if (!is.null(cache) && !signalled) {
       .ry_save_s4(ns, cache, setdiff(names(ns), before))
+      step("S4 save")
     }
   }
   if (!loading) {
-    methods::cacheMetaData(ns, TRUE, ns)
     .ry_sync_exports(ns, state$namespace_spec, state$export_all)
     if (!is.null(state$package_env)) {
       .ry_sync_package_env(state)
     }
+    step("S4 exports")
   }
   invisible()
 }
@@ -736,18 +758,128 @@ View <- function(x, title) {
 }
 
 # Binds what an earlier process saved for exactly these definitions, which then need not run,
-# and reports whether it did. A saved file that is missing, stale or unreadable means running
-# them, as it does on the first load.
+# and returns the names it bound with the plan `.ry_s4_metadata()` saved, or NULL when the
+# saved database is missing, stale or unreadable, which means running them as the first load
+# does. Each binding is a promise that reads its value from the database, so a session
+# unserializes only the definitions it uses. Reading the first value reads the whole file into
+# memory, which is why a later replacement of the file cannot affect these promises.
 .ry_restore_s4 <- function(ns, cache) {
-  if (is.null(cache) || !file.exists(cache$path)) {
-    return(FALSE)
+  if (is.null(cache) || !file.exists(file.path(cache$path, "s4.rdx"))) {
+    return(NULL)
   }
-  saved <- tryCatch(readRDS(cache$path), error = function(error) NULL)
-  if (!identical(saved[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
-    return(FALSE)
+  tryCatch(lazyLoadDBexec(file.path(cache$path, "s4"), function(db) {
+    meta <- lazyLoadDBfetch(db$vals[[".ry_s4_meta"]], db$datafile, db$compressed, db$envhook)
+    if (!identical(meta[c("key", "r", "imports")], cache[c("key", "r", "imports")])) {
+      return(NULL)
+    }
+    keep <- db$vars != ".ry_s4_meta"
+    expr <- quote(lazyLoadDBfetch(key, datafile, compressed, envhook))
+    .Internal(makeLazy(db$vars[keep], db$vals[keep], expr, db, ns))
+    list(names = db$vars[keep], metadata = meta$metadata)
+  }), error = function(error) NULL)
+}
+
+# What `methods::cacheMetaData()` does for the package's classes and generics, so that a
+# restore can do the same without reading every definition. When every class is plain
+# (`.ry_s4_metadata()`) and the class table has none of their names yet, each goes into the
+# table as a binding that shares the namespace's promise, and only a union's members from other
+# packages have their cached definitions updated, in the order `cacheMetaData()` updates them.
+# Otherwise the order of the updates decides what the table ends up holding, so every class runs
+# what `cacheMetaData()` runs for it. A plain generic goes into the generic table as a shared
+# binding too, and every other generic, such as one from another package with methods for the
+# package's classes, runs the steps `cacheMetaData()` runs for it.
+.ry_cache_restored_s4 <- function(ns, metadata) {
+  classes <- methods:::.classTable
+  taken <- vapply(metadata$classes, exists, NA, envir = classes, inherits = FALSE)
+  # A union of other packages' classes runs in place during the load, so its name is taken by
+  # the very definition the namespace holds, and caching it again only recaches its members.
+  in_place <- vapply(metadata$classes[taken], function(class) {
+    definition <- get(paste0(".__C__", class), envir = ns)
+    identical(get(class, envir = classes), definition) &&
+      (!methods::is(definition, "ClassUnionRepresentation") || !any(vapply(
+        paste0(".__C__", names(definition@subclasses)), exists, NA, envir = ns, inherits = FALSE
+      )))
+  }, NA)
+  if (all(metadata$plain_classes) && all(in_place)) {
+    fresh <- metadata$classes[!taken]
+    .ry_internal("importIntoEnv", classes, fresh, ns, paste0(".__C__", fresh))
+    for (k in which(taken | lengths(metadata$recache) > 0L)) {
+      definition <- get(paste0(".__C__", metadata$classes[[k]]), envir = ns)
+      if (taken[[k]] && methods::is(definition, "ClassUnionRepresentation")) {
+        .ry_recache_members(definition, names(definition@subclasses), ns)
+      } else if (!taken[[k]]) {
+        .ry_recache_members(definition, metadata$recache[[k]], ns)
+      }
+    }
+  } else {
+    for (class in metadata$classes) {
+      definition <- get(paste0(".__C__", class), envir = ns)
+      if (methods::is(definition, "classRepresentation")) {
+        methods:::.cacheClass(class, definition,
+          methods::is(definition, "ClassUnionRepresentation"), ns)
+      }
+    }
   }
-  list2env(saved$values, envir = ns)
-  structure(TRUE, names_bound = names(saved$values))
+  generics <- methods:::.genericTable
+  package <- methods::getPackageName(ns)
+  for (k in seq_along(metadata$generics)) {
+    name <- metadata$generics[[k]]
+    if (metadata$plain_generics[[k]] && !exists(name, envir = generics, inherits = FALSE)) {
+      .ry_internal("importIntoEnv", generics, name, ns, name)
+    } else {
+      .ry_cache_generic(ns, package, name, metadata$packages[[k]])
+    }
+  }
+}
+
+# The body of `methods::cacheMetaData()`'s loop over generics, for attaching `ns`.
+.ry_cache_generic <- function(ns, package, name, generic_package) {
+  if (!identical(generic_package, package)) {
+    if (exists(name, envir = ns, inherits = FALSE)) {
+      definition <- get(name, envir = ns)
+      generic <- methods:::.genericOrImplicit(name, generic_package, ns)
+      if (is.function(definition)) {
+        if (identical(environment(definition), environment(generic))) {
+          return(invisible())
+        } else if (methods::is(generic, "genericFunction")) {
+          methods:::.assignOverBinding(name, generic, ns, FALSE)
+        }
+      }
+    } else {
+      generic <- methods::getGeneric(name, FALSE, ns, generic_package)
+    }
+  } else {
+    generic <- methods::getGeneric(name, FALSE, ns, generic_package)
+  }
+  if (!methods::is(generic, "genericFunction")) {
+    return(invisible())
+  }
+  methods:::.cacheGeneric(name, generic)
+  tables <- methods:::.updateMethodsInTable(generic, ns, TRUE)
+  methods::cacheGenericsMetaData(name, generic, TRUE, ns, generic@package, tables)
+  invisible()
+}
+
+# `methods:::.recacheSubclasses()` for the members `names` of the union `definition` only: each
+# member's cached definition gets the union added to what it contains.
+.ry_recache_members <- function(definition, names, ns) {
+  subclasses <- definition@subclasses
+  for (name in names) {
+    extension <- subclasses[[name]]
+    member <- methods::getClassDef(name, package = methods::packageSlot(extension))
+    if (is.null(member)) {
+      member <- methods::getClassDef(name, ns)
+    }
+    if (is.null(member)) {
+      warning(gettextf("undefined subclass %s of class %s; definition not updated",
+        methods:::.dQ(name), methods:::.dQ(definition@className)))
+    } else if (is.na(match(name, names(member@contains)))) {
+      contains <- member@contains
+      contains[[definition@className]] <- extension
+      member@contains <- contains[sort.list(vapply(contains, function(x) x@distance, 1))]
+      methods:::.cacheClass(name, member, FALSE, ns)
+    }
+  }
 }
 
 # The attached package environment shares the placeholder bindings, and the methods package
@@ -760,23 +892,100 @@ View <- function(x, title) {
   }
 }
 
-# Saves the bindings the held-back definitions made, replacing the file atomically so that a
-# concurrent load reads either the old file or the new one. Failing to save only costs the
-# next process the run, so a failure is reported as a warning and the load goes on.
+# Saves the bindings the held-back definitions made, after `methods::cacheMetaData()` ran on
+# them, as a lazy-load database, which keeps an environment that several definitions share
+# shared. The database goes into a fresh directory that then replaces the old one, so a
+# concurrent load reads either the old database or the new one. Load actions and
+# `.requireCachedGenerics` make `cacheMetaData()` do work a restore does not repeat, so a
+# package with either is not saved. Failing to save only costs the next process the run, so a
+# failure is reported as a warning and the load goes on.
 .ry_save_s4 <- function(ns, cache, names) {
-  saved <- c(cache[c("key", "r", "imports")], list(values = mget(names, envir = ns)))
-  directory <- dirname(cache$path)
+  if (exists(".requireCachedGenerics", envir = ns, inherits = FALSE) ||
+    length(methods::getLoadActions(ns))) {
+    return(invisible())
+  }
+  values <- new.env(hash = TRUE, parent = emptyenv())
+  list2env(mget(names, envir = ns), envir = values)
+  meta <- c(cache[c("key", "r", "imports")], list(metadata = .ry_s4_metadata(ns)))
+  assign(".ry_s4_meta", meta, envir = values)
   temporary <- paste0(cache$path, ".", Sys.getpid())
   tryCatch({
-    dir.create(directory, recursive = TRUE, showWarnings = FALSE)
-    saveRDS(saved, temporary)
-    file.rename(temporary, cache$path)
+    unlink(temporary, recursive = TRUE)
+    dir.create(temporary, recursive = TRUE, showWarnings = FALSE)
+    tools:::makeLazyLoadDB(values, file.path(temporary, "s4"),
+      variables = c(".ry_s4_meta", names))
+    unlink(cache$path, recursive = TRUE)
+    if (!file.rename(temporary, cache$path)) {
+      stop("cannot move the database into place")
+    }
   }, error = function(error) {
-    unlink(temporary)
+    unlink(temporary, recursive = TRUE)
     warning(sprintf("could not save the S4 metadata cache: %s", conditionMessage(error)),
       call. = FALSE)
   })
   invisible()
+}
+
+# Which of the package's classes and generics `.ry_cache_restored_s4()` may put in the methods
+# package's tables without reading them. Caching a union also caches each member's definition
+# with the union added to what it contains (`methods:::.recacheSubclasses()`). For a member of
+# the package's own, whose saved definition contains the union already, that changes nothing,
+# so a union is plain when each such member's definition comes out identical, and `recache`
+# lists its other members, from other packages, whose cached definitions a restore updates.
+# Every other class definition is plain.
+# A plain generic is one of the package's own, bound in the namespace, that `cacheMetaData()`
+# treats only by merging its methods tables, which happened before the save: not a group
+# generic, a member of a group, or a primitive. The generics are the ones `cacheMetaData()`
+# visits, in its order.
+.ry_s4_metadata <- function(ns) {
+  package <- methods::getPackageName(ns)
+  classes <- methods::getClasses(ns)
+  recache <- lapply(classes, function(class) {
+    definition <- get(paste0(".__C__", class), envir = ns)
+    if (!methods::is(definition, "classRepresentation")) {
+      return(NA)
+    }
+    if (!methods::is(definition, "ClassUnionRepresentation")) {
+      return(character())
+    }
+    subclasses <- definition@subclasses
+    foreign <- character()
+    for (name in names(subclasses)) {
+      member <- get0(paste0(".__C__", name), envir = ns, inherits = FALSE)
+      if (is.null(member) || !identical(member@package, package)) {
+        foreign <- c(foreign, name)
+        next
+      }
+      contains <- member@contains
+      contains[[definition@className]] <- subclasses[[name]]
+      contains <- contains[sort.list(vapply(contains, function(x) x@distance, 1))]
+      if (!identical(contains, member@contains)) {
+        return(NA)
+      }
+    }
+    foreign
+  })
+  plain_classes <- !vapply(recache, anyNA, NA)
+  generics <- methods:::.getGenerics(ns)
+  packages <- rep(attr(generics, "package"), length.out = length(generics))
+  keep <- !(duplicated(generics) & duplicated(packages))
+  generics <- as.character(generics)[keep]
+  packages <- packages[keep]
+  plain_generics <- vapply(seq_along(generics), function(k) {
+    name <- generics[[k]]
+    if (!identical(packages[[k]], package) || !exists(name, envir = ns, inherits = FALSE)) {
+      return(FALSE)
+    }
+    generic <- get(name, envir = ns, inherits = FALSE)
+    methods::is(generic, "genericFunction") &&
+      identical(generic, methods::getGeneric(name, FALSE, ns, package)) &&
+      !length(generic@group) && !methods::is(generic, "groupGenericFunction") &&
+      !methods:::dispatchIsInternal(generic)
+  }, NA)
+  list(
+    classes = classes, plain_classes = plain_classes, recache = recache,
+    generics = generics, packages = packages, plain_generics = plain_generics
+  )
 }
 
 # A reload that reruns or undoes an S4 registration, or rebinds a name the held-back

@@ -565,7 +565,7 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
     };
     let cache = package_cache_path(&root, "roxygen").map_or_else(
         || "NULL".to_owned(),
-        |path| load::r_string(&path.to_string_lossy()),
+        |path| load::r_string(&path.with_extension("rds").to_string_lossy()),
     );
     let run = format!(
         "({driver})({root}, {roclets}, {cache})",

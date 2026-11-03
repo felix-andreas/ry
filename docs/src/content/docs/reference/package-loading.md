@@ -144,9 +144,14 @@ first.
 
 When the held-back definitions run after the load, ry saves what they bound (the classes, generics
 and method tables) to `$XDG_CACHE_HOME/ry/s4` (`~/.cache/ry/s4` by default), and a later process
-restores them instead of running them, much as GNU R restores an installed package's S4 metadata. On
-the 326,000-line bench package, this cuts the first S4 use from about 330 ms to about 100 ms. A saved
-entry is used only when all of these match the process that saved it:
+restores them instead of running them, much as GNU R restores an installed package's S4 metadata.
+The saved definitions form a lazy-load database, like an installed package's R code, so a process
+reads only the classes and generics it uses. The `methods` package's class and generic tables get
+the package's own classes and generics as lazy entries too, and only what involves other packages
+(a union with `NULL` as a member, a `show` or `initialize` method) is cached when the definitions
+are restored. On a generated package with 2,877 S4 definitions, the first `new()` takes about 6 s
+when the definitions run and under 60 ms when they are restored. A saved entry is used only when all
+of these match the process that saved it:
 
 - the text of every held-back definition, the package's name and version, and the build of ry;
 - the R version, and the version of every package the namespace imports.
@@ -155,7 +160,8 @@ The definitions are saved only when they read nothing but the names they bind th
 `methods` and base functions that build S4 objects, such as `setClass()`, `representation()`, `c()`
 and `function`, so no other code in the package can change what they produce. A definition that
 reads a package constant, as in `prototype(side = ZERO)`, still runs in every process. Nothing is
-saved when running them signalled a message or a warning, so a later process shows it again. The
+saved when running them signalled a message or a warning, so a later process shows it again, nor
+when the package registers load actions (`setLoadAction()`) or sets `.requireCachedGenerics`. The
 directory is safe to delete.
 
 ### Source references
