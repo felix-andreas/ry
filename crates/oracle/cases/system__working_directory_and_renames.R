@@ -1,0 +1,21 @@
+# R CMD build sets the working directory into its copy of a package, takes basename(getwd()) as
+# the directory's name, and renames the copy when that differs from the package name. setwd()
+# returns the previous directory, file.rename() renames a directory, gives FALSE for NA, and warns
+# with the reason when a rename fails.
+owd <- getwd()
+d <- file.path(tempdir(), "pkgsrc")
+dir.create(d)
+writeLines("Package: twice", file.path(d, "DESCRIPTION"))
+previous <- setwd(d)
+cat(identical(previous, owd), basename(getwd()), basename(dirname(getwd())) == basename(tempdir()), "\n")
+setwd(tempdir())
+cat(file.rename("pkgsrc", "twice"), dir.exists("twice"), dir.exists("pkgsrc"), "\n")
+dir.create("other")
+writeLines("x", file.path("other", "f"))
+cat(file.rename("twice", "other"), "\n")
+cat(file.rename("missing", "x"), "\n")
+cat(file.rename(NA_character_, "x"), "\n")
+cat(tryCatch(file.rename(c("a", "b"), "x"), error = conditionMessage), "\n")
+cat(tryCatch(file.rename(1, "x"), error = conditionMessage), "\n")
+setwd(owd)
+cat(identical(getwd(), owd), "\n")

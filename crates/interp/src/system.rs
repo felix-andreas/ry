@@ -169,31 +169,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_strings(call, crate::connections::expand_path)
     }),
     internal("basename", 1, |call| unsafe {
-        map_strings(call, |path| {
-            let trimmed = path.trim_end_matches('/');
-            trimmed.rsplit('/').next().unwrap_or("").to_owned()
-        })
+        map_strings(call, |path| base_name(path, cfg!(windows)))
     }),
     internal("dirname", 1, |call| unsafe {
-        // GNU R's `R_dirname`: expand `~`, drop one trailing separator unless it is the whole
-        // path (its loop never shortens the string, so only one goes), then cut at the last
-        // separator along with the separators just before it.
         map_strings(call, |path| {
-            if path.is_empty() {
-                return String::new();
-            }
-            let expanded = crate::connections::expand_path(path);
-            let trimmed = match expanded.strip_suffix('/') {
-                Some(rest) if !rest.is_empty() => rest,
-                _ => expanded.as_str(),
-            };
-            match trimmed.rfind('/') {
-                None => ".".to_owned(),
-                Some(position) => {
-                    let head = trimmed[..position].trim_end_matches('/');
-                    if head.is_empty() { "/" } else { head }.to_owned()
-                }
-            }
+            dir_name(&crate::connections::expand_path(path), cfg!(windows))
         })
     }),
     internal("file.path", 2, do_file_path),
@@ -212,11 +192,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("dir.create", 4, do_dir_create).invisible(),
     internal("file.access", 2, do_file_access),
     internal("getwd", 0, |_| unsafe {
-        scalar_string(
-            &std::env::current_dir()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-        )
+        scalar_string(&working_directory())
     }),
     internal("setwd", 1, do_setwd).invisible(),
     internal("Sys.glob", 2, do_sys_glob),
@@ -450,6 +426,17 @@ pub fn remove_session_temp_dir() {
     if temp.owner != std::process::id() {
         return;
     }
+    // Windows cannot remove a directory that is some process's working directory, and a session
+    // can end inside its temporary directory (`R CMD build` exits from there when it fails).
+    if let Ok(current) = std::env::current_dir()
+        && let Some(outside) = directory_outside(&current, Path::new(&temp.path))
+        && let Err(failure) = std::env::set_current_dir(&outside)
+    {
+        eprintln!(
+            "ry: cannot leave the temporary directory for '{}': {failure}",
+            outside.display()
+        );
+    }
     match std::fs::remove_dir_all(&temp.path) {
         Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => {
             eprintln!(
@@ -459,6 +446,19 @@ pub fn remove_session_temp_dir() {
         }
         Ok(()) | Err(_) => {}
     }
+}
+
+/// Where to move a working directory `current` that lies inside `directory`, so that
+/// `directory` can be removed: its parent. Both are canonicalized first, because the same
+/// Windows directory has several spellings (`RUNNER~1` and `runneradmin`, with or without the
+/// `\\?\` prefix).
+fn directory_outside(current: &Path, directory: &Path) -> Option<std::path::PathBuf> {
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let directory = canonical(directory);
+    if !canonical(current).starts_with(&directory) {
+        return None;
+    }
+    directory.parent().map(Path::to_path_buf)
 }
 
 struct SessionTemp {
@@ -2653,21 +2653,58 @@ unsafe fn do_unlink(call: &Call<'_>) -> R<Sexp> {
     scalar_integer(failed)
 }
 
+/// `file.rename(from, to)`: FALSE for an `NA` path, and a warning that names the reason for each
+/// rename that fails, as GNU R gives.
 unsafe fn do_file_rename(call: &Call<'_>) -> R<Sexp> {
     let from = call.arg(0);
     let to = call.arg(1);
+    if from.kind() != SexpType::String {
+        return Err(call.error("invalid 'from' argument"));
+    }
+    if to.kind() != SexpType::String {
+        return Err(call.error("invalid 'to' argument"));
+    }
     let count = length(from);
+    if length(to) != count {
+        return Err(call.error("'from' and 'to' are of different lengths"));
+    }
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
-        let source = values::string_at(from, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let target = values::string_at(to, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        values::ints_mut(result)[index] = std::fs::rename(source, target).is_ok() as i32;
+        values::ints_mut(result)[index] = 0;
+        let (Some(source), Some(target)) =
+            (values::string_at(from, index), values::string_at(to, index))
+        else {
+            continue;
+        };
+        let source = crate::connections::expand_path(&source);
+        let target = crate::connections::expand_path(&target);
+        match rename_path(Path::new(&source), Path::new(&target)) {
+            Ok(()) => values::ints_mut(result)[index] = 1,
+            Err(failure) => crate::conditions::warning(format!(
+                "cannot rename file '{source}' to '{target}', reason '{}'",
+                crate::connections::os_message(&failure)
+            ))?,
+        }
     }
     Ok(result)
+}
+
+/// Renames a file or directory. GNU R on Windows renames with `MoveFileEx` and
+/// `MOVEFILE_COPY_ALLOWED`, which moves a file to another volume by copying it; a directory
+/// cannot move between volumes there either.
+fn rename_path(source: &Path, target: &Path) -> std::io::Result<()> {
+    const ERROR_NOT_SAME_DEVICE: i32 = 17;
+    match std::fs::rename(source, target) {
+        Err(failure)
+            if cfg!(windows)
+                && failure.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE)
+                && source.is_file() =>
+        {
+            std::fs::copy(source, target)?;
+            std::fs::remove_file(source)
+        }
+        outcome => outcome,
+    }
 }
 
 unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
@@ -2715,12 +2752,71 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "dir")?;
-    let previous = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let previous = working_directory();
     std::env::set_current_dir(crate::connections::expand_path(&path))
         .map_err(|_| call.error("cannot change working directory"))?;
     scalar_string(&previous)
+}
+
+/// The working directory as `getwd()` reports it. GNU R on Windows answers with `/`, and R code
+/// relies on that: `tools:::.build_packages` takes `basename(getwd())` as the package's
+/// directory name.
+fn working_directory() -> String {
+    let Ok(directory) = std::env::current_dir() else {
+        return String::new();
+    };
+    let text = crate::platform::path_text(&directory);
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
+}
+
+/// GNU R's `basename`: drop trailing separators, then keep what follows the last one. Windows
+/// also takes `\` as a separator.
+fn base_name(path: &str, windows: bool) -> String {
+    let path = if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let trimmed = path.trim_end_matches('/');
+    trimmed.rsplit('/').next().unwrap_or("").to_owned()
+}
+
+/// GNU R's `R_dirname` on a path whose `~` is already expanded: drop one trailing separator
+/// unless it is the whole path (its loop never shortens the string, so only one goes), then cut
+/// at the last separator along with the separators just before it. Windows also takes `\` as a
+/// separator, answers with `/`, and keeps the separator after a drive (`dirname("C:\\a")` is
+/// `"C:/"`).
+fn dir_name(path: &str, windows: bool) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let path = if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let is_drive = |text: &str| windows && text.len() == 2 && text.ends_with(':');
+    let trimmed = match path.strip_suffix('/') {
+        Some(rest) if !rest.is_empty() && !is_drive(rest) => rest,
+        _ => path.as_str(),
+    };
+    match trimmed.rfind('/') {
+        None => ".".to_owned(),
+        Some(position) => {
+            let head = trimmed[..position].trim_end_matches('/');
+            if head.is_empty() {
+                "/".to_owned()
+            } else if is_drive(head) {
+                format!("{head}/")
+            } else {
+                head.to_owned()
+            }
+        }
+    }
 }
 
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
@@ -4127,4 +4223,41 @@ unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
         values::ints_mut(result)[index] = valid as i32;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::{base_name, dir_name, directory_outside},
+        std::path::Path,
+    };
+
+    #[test]
+    fn windows_paths_split_at_either_separator() {
+        let package = r"C:\rtools45\tmp\ry-smoke.XVYEQP\twice";
+        assert_eq!(base_name(package, true), "twice");
+        assert_eq!(base_name(package, false), package);
+        assert_eq!(base_name("C:/a/b\\", true), "b");
+        assert_eq!(dir_name(package, true), "C:/rtools45/tmp/ry-smoke.XVYEQP");
+        assert_eq!(dir_name(package, false), ".");
+        assert_eq!(dir_name(r"C:\a", true), "C:/");
+        assert_eq!(dir_name("C:/", true), "C:/");
+        assert_eq!(dir_name("C:/", false), ".");
+        assert_eq!(dir_name("/a//b/", true), "/a");
+        assert_eq!(dir_name("/a", false), "/");
+    }
+
+    #[test]
+    fn leaves_a_working_directory_inside_the_removed_one() {
+        let root = std::env::temp_dir().join(format!("ry-outside-{}", std::process::id()));
+        let temp = root.join("Rtmp");
+        let inside = temp.join("Rbuild").join("twice");
+        std::fs::create_dir_all(&inside).expect("create the test directories");
+        let parent = std::fs::canonicalize(&root).expect("canonical root");
+        assert_eq!(directory_outside(&inside, &temp), Some(parent.clone()));
+        assert_eq!(directory_outside(&temp, &temp), Some(parent));
+        assert_eq!(directory_outside(&root, &temp), None);
+        assert_eq!(directory_outside(Path::new("/"), &temp), None);
+        std::fs::remove_dir_all(&root).expect("remove the test directories");
+    }
 }

@@ -22,11 +22,10 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: `ry install` fails on Windows inside `R CMD build`
+## Open: confirm `ry install` on Windows in the release smoke test
 
-- The release smoke test (windows-latest, gnullvm) now reaches `R CMD build` through ry's `R.exe` front end, which checks the DESCRIPTION, then fails with `Error: cannot rename directory to 'twice'`, followed by `ry: cannot remove the temporary directory '...\Rtmp...': The process cannot access the file because it is being used by another process. (os error 32)`.
-- Likely an open handle in ry's runtime (a file or directory handle, or the session's cwd) inside the build's temporary copy, which Windows refuses to rename or delete while it is open; Unix allows both. Look at what `tools:::.build_packages` opens (it `setwd`s into the copy) and whether ry's `file.rename`/`setwd`/connections close handles.
-- Every other Windows smoke check passes, including `ry R` on GNU R and loading a package GNU R installed.
+- The smoke test failed inside `R CMD build` with `Error: cannot rename directory to 'twice'`, then `ry: cannot remove the temporary directory '...\Rtmp...' ... (os error 32)`. Cause: `getwd()` answered with `\` on Windows and `basename`/`dirname` split only at `/`, so `tools:::.build_packages` took the whole path as the package directory's name, tried to rename it onto the copy it had just made, and exited with its working directory inside the session's temporary directory, which Windows cannot delete.
+- Fixed in `crates/interp/src/system.rs` (`working_directory`, `base_name`, `dir_name`, `directory_outside`): `getwd()` answers with `/` on Windows as GNU R does, `basename`/`dirname` take both separators there, and the session leaves its temporary directory before removing it. Verified on Linux by unit tests and an `strace` of `R CMD build` (no handle stays open in the build copy); the Windows path is verified only by reasoning, so the next Windows release smoke run is the check. Delete this entry once it passes.
 
 ## Open: `test_linalg` library cases fail on some OpenBLAS kernels
 

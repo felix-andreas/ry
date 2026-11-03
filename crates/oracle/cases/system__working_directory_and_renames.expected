@@ -1,0 +1,17 @@
+[stdout]
+| TRUE pkgsrc TRUE 
+| TRUE TRUE FALSE 
+| FALSE 
+| FALSE 
+| FALSE 
+| 'from' and 'to' are of different lengths 
+| invalid 'from' argument 
+| TRUE 
+[messages]
+[warnings]
+- cannot rename file 'twice' to 'other', reason 'Directory not empty' (in file.rename("twice", "other"))
+- cannot rename file 'missing' to 'x', reason 'No such file or directory' (in file.rename("missing", "x"))
+[errors]
+[value]
+NULL
+| NULL
