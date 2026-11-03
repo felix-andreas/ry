@@ -1,0 +1,124 @@
+#==== native_types
+#---- suffixed_literals_keep_the_number_without_its_suffix
+c(5i64, 1.5f32, 0xFFu8, 2dec, 170141183460469231731687303715884105727i128)
+#++++
+# <statement>
+  Call
+    NameRef c
+    Literal Suffixed("5", I64)
+    Literal Suffixed("1.5", F32)
+    Literal Suffixed("0xFF", U8)
+    Literal Suffixed("2", Dec)
+    Literal Suffixed("170141183460469231731687303715884105727", I128)
+
+#---- fstring_pieces_in_source_order
+f"Hello {name}, {{n}} is {n + 1}"
+#++++
+# <statement>
+  FormatString
+    Literal String("Hello ")
+    NameRef name
+    Literal String(", {{n}} is ")
+    Binary Add
+      NameRef n
+      Literal Double("1")
+
+#---- try_wraps_its_operand
+try parse(x)$value
+#++++
+# <statement>
+  Try
+    Field $value
+      Call
+        NameRef parse
+        NameRef x
+
+#---- record_update_carries_base_and_fields
+q <- (..point, x = 3, y = 4)
+#++++
+# q
+  Assign Local
+    NameRef q
+    RecordUpdate(x, y)
+      NameRef point
+      Literal Double("3")
+      Literal Double("4")
+
+#---- list_patterns
+match (xs) {
+  [] => 0
+  [a, b] => a
+  [first, ..] => first
+  [first, ..rest] => rest
+  [.., last] => last
+  [first, .., last] => last
+}
+#++++
+# <statement>
+  Match
+    Paren
+      NameRef xs
+    arm
+      pattern list
+      Literal Double("0")
+    arm
+      pattern list
+        pattern bind a
+        pattern bind b
+      NameRef a
+    arm
+      pattern list
+        pattern bind first
+        ..
+      NameRef first
+    arm
+      pattern list
+        pattern bind first
+        ..rest
+      NameRef rest
+    arm
+      pattern list
+        ..
+        pattern bind last
+      NameRef last
+    arm
+      pattern list
+        pattern bind first
+        ..
+        pattern bind last
+      NameRef last
+
+#---- as_pattern_and_record_rest
+match (s) {
+  :Circle(radius = r) as circle => circle
+  (x = a, ..rest) => rest
+  (x =, y =) => x
+  5i32 => 0
+}
+#++++
+# <statement>
+  Match
+    Paren
+      NameRef s
+    arm
+      pattern as circle
+        pattern tag :Circle
+          pattern Record
+            field radius =
+              pattern bind r
+      NameRef circle
+    arm
+      pattern Record ..rest
+        field x =
+          pattern bind a
+      NameRef rest
+    arm
+      pattern Record
+        field x =
+          pattern bind x
+        field y =
+          pattern bind y
+      NameRef x
+    arm
+      pattern literal Suffixed("5", I32)
+      Literal Double("0")

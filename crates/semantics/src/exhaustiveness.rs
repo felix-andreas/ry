@@ -487,6 +487,14 @@ fn lower<'db>(
     let ty = structural(db, definitions, ty);
     match &module.pattern(pattern).kind {
         PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => Pat::Wild,
+        PatternKind::As { pattern, .. } => lower(db, definitions, module, *pattern, ty),
+        PatternKind::List { items, rest } if items.is_empty() && rest.is_some() => Pat::Wild,
+        // Each other list pattern covers a value of its own, so a match over lists needs a
+        // catch-all arm.
+        PatternKind::List { .. } => Pat::Constructed(
+            Constructor::Literal(format!("{:?}", module.pattern(pattern).range)),
+            Vec::new(),
+        ),
         PatternKind::Or(alternatives) => Pat::Or(
             module[alternatives]
                 .iter()
@@ -501,7 +509,8 @@ fn lower<'db>(
                 LiteralKind::Null => Constructor::Null,
                 LiteralKind::Integer(text)
                 | LiteralKind::Double(text)
-                | LiteralKind::Complex(text) => {
+                | LiteralKind::Complex(text)
+                | LiteralKind::Suffixed { number: text, .. } => {
                     let value = module[text].trim_end_matches('L');
                     Constructor::Literal(if *negative {
                         format!("-{value}")
@@ -566,7 +575,7 @@ fn lower<'db>(
             };
             let shape = members.iter().find_map(|member| match member.kind(db) {
                 TyKind::NativeRecord(native)
-                    if (*rest || native.len() == fields.len())
+                    if (rest.is_some() || native.len() == fields.len())
                         && module[fields].iter().all(|field| {
                             native
                                 .iter()

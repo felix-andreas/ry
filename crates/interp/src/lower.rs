@@ -19,7 +19,10 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected},
+    syntax::{
+        SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected,
+        split_number_suffix,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -432,6 +435,7 @@ fn unexpected_token(root: &SyntaxNode, text: &str, unexpected: &std::ops::Range<
 fn token_description(token: &SyntaxToken, text: &str) -> String {
     let name = match token.kind() {
         SyntaxKind::INTEGER
+        | SyntaxKind::SUFFIXED_NUMBER
         | SyntaxKind::DOUBLE
         | SyntaxKind::COMPLEX
         | SyntaxKind::TRUE_KW
@@ -1171,7 +1175,20 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             }
             values::pairlist(&items, SexpType::Language)
         }
+        SyntaxKind::FSTRING => format_string(node, source),
+        SyntaxKind::TRY_EXPR => match expression_children(node).first() {
+            Some(operand) => lower(operand, source),
+            None => Err(error("expected an expression after `try`")),
+        },
         SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
+            if let Some(spread) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
+                .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::RECORD_SPREAD))
+            {
+                return Err(error(format!(
+                    "the record update `({}, ...)` does not run in the interpreter",
+                    spread.text()
+                )));
+            }
             let head = if node.kind() == SyntaxKind::RECORD_EXPR {
                 ".ry_record"
             } else {
@@ -1397,6 +1414,45 @@ unsafe fn literal_items(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<
         .collect()
 }
 
+/// `f"a{x}b"` runs as `paste0("a", as.character(x), "b")`. A text run has its escapes decoded
+/// and its doubled braces halved.
+unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+    let as_character = install("as.character")?;
+    let mut items = vec![(nil(), install("paste0")?)];
+    for child in node.children_with_tokens() {
+        match child {
+            SyntaxElement::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
+                let text = token.text().replace("{{", "{").replace("}}", "}");
+                let (bytes, high_byte) =
+                    unescape_bytes(&text).map_err(|failure| error(failure.message))?;
+                let encoding = if high_byte {
+                    Encoding::Native
+                } else {
+                    Encoding::Utf8
+                };
+                let piece = alloc(SexpType::String, 1)?;
+                values::set_elt(piece, 0, values::mkchar_bytes(&bytes, encoding)?);
+                items.push((nil(), piece));
+            }
+            SyntaxElement::Node(interpolation)
+                if interpolation.kind() == SyntaxKind::FSTRING_INTERPOLATION =>
+            {
+                let inner = expression_children(&interpolation);
+                let inner = inner
+                    .first()
+                    .ok_or_else(|| error("this interpolation is empty"))?;
+                let value = lower(inner, source)?;
+                items.push((nil(), values::call(as_character, &[value])?));
+            }
+            _ => {}
+        }
+    }
+    if items.len() == 1 {
+        items.push((nil(), values::scalar_string("")?));
+    }
+    values::pairlist(&items, SexpType::Language)
+}
+
 /// A tag's name as the string `.ry_tag` takes first.
 unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
     let token = significant_tokens(name)
@@ -1464,7 +1520,7 @@ unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<S
 unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::PATTERN_WILDCARD => install("_"),
-        SyntaxKind::PATTERN_REST => install(".."),
+        SyntaxKind::PATTERN_REST if node.text() == ".." => install(".."),
         SyntaxKind::PATTERN_BIND => {
             let name = child_of_kind(node, SyntaxKind::NAME)
                 .ok_or_else(|| error("empty binding pattern"))?;
@@ -1738,6 +1794,7 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
     let known = crate::heap().known();
     match token.kind() {
         SyntaxKind::DOUBLE => values::scalar_real(parse_number(text)),
+        SyntaxKind::SUFFIXED_NUMBER => suffixed_number_value(text),
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
@@ -1805,6 +1862,19 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
 }
 
 /// A numeric literal: decimal, hexadecimal, or hexadecimal with a binary exponent.
+/// The R value a suffixed number such as `5i64` runs as: an integer when the type is an integer
+/// type and the value fits R's integer range, and otherwise a double.
+unsafe fn suffixed_number_value(text: &str) -> R<Sexp> {
+    let (number, ty) =
+        split_number_suffix(text).ok_or_else(|| error(format!("malformed number `{text}`")))?;
+    let value = parse_number(number);
+    if ty.is_integer() && value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
+        values::scalar_integer(value as i32)
+    } else {
+        values::scalar_real(value)
+    }
+}
+
 pub fn parse_number(text: &str) -> f64 {
     let lower = text.to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {

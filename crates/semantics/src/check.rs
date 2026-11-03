@@ -10,8 +10,9 @@ use {
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
-            MatchArm, Module, NaAtom, NameSite, Parameter as Formal, PatId, PatternKind, Symbol,
-            UnaryOperator, destructure_leaves, integer_literal_position, is_whole_number_double,
+            MatchArm, Module, NaAtom, NameSite, Parameter as Formal, PatId, PatternKind, Rest,
+            Symbol, UnaryOperator, destructure_leaves, integer_literal_position,
+            is_whole_number_double,
         },
         infer::{
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
@@ -3297,6 +3298,16 @@ impl<'db> Checker<'db, '_> {
                 let (scrutinee, arms) = (*scrutinee, *arms);
                 self.infer_match(range, scrutinee, &module[arms])
             }
+            ExpressionKind::RecordUpdate { .. }
+            | ExpressionKind::FormatString(_)
+            | ExpressionKind::Try(_) => {
+                let mut children = Vec::new();
+                module.for_each_child(id, |child| children.push(child));
+                for child in children {
+                    self.infer(child);
+                }
+                unknown(self.db)
+            }
         };
         // Assignments applied their annotation before the slot write above.
         let ty = if matches!(module.kind(expression), ExpressionKind::Assign { .. }) {
@@ -3567,6 +3578,8 @@ impl<'db> Checker<'db, '_> {
             LiteralKind::Integer(_) => scalar(self.db, Atomic::Integer),
             LiteralKind::Double(_) => scalar(self.db, Atomic::Double),
             LiteralKind::Complex(_) => scalar(self.db, Atomic::Complex),
+            LiteralKind::Suffixed { ty, .. } if ty.is_integer() => scalar(self.db, Atomic::Integer),
+            LiteralKind::Suffixed { .. } => scalar(self.db, Atomic::Double),
             LiteralKind::String(_) => scalar(self.db, Atomic::Character),
             LiteralKind::Logical(_) => scalar(self.db, Atomic::Logical),
             LiteralKind::Null => null(self.db),
@@ -4860,10 +4873,7 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 Some(Ty::new(self.db, TyKind::NativeTuple(items)))
             }
-            PatternKind::Record {
-                fields,
-                rest: false,
-            } => {
+            PatternKind::Record { fields, rest: None } => {
                 let fields = self.module[fields]
                     .iter()
                     .map(|field| NativeField {
@@ -5069,6 +5079,14 @@ impl<'db> Checker<'db, '_> {
                     self.check_pattern(item, item_ty, bindings);
                 }
             }
+            PatternKind::Record {
+                rest: Some(Rest {
+                    binding: Some(_), ..
+                }),
+                ..
+            }
+            | PatternKind::List { .. }
+            | PatternKind::As { .. } => self.bind_unknown(pattern, bindings),
             PatternKind::Record { fields, .. } => {
                 for field in module[fields].iter() {
                     let name = field.name;
@@ -5157,7 +5175,7 @@ impl<'db> Checker<'db, '_> {
             }
             PatternKind::Record { fields, rest } => match subject.kind(self.db) {
                 TyKind::NativeRecord(native) => {
-                    (*rest || native.len() == fields.len())
+                    (rest.is_some() || native.len() == fields.len())
                         && module[fields].iter().all(|field| {
                             native
                                 .iter()
@@ -5166,6 +5184,7 @@ impl<'db> Checker<'db, '_> {
                 }
                 _ => false,
             },
+            PatternKind::List { .. } | PatternKind::As { .. } => true,
         }
     }
 
