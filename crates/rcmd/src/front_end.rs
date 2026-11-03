@@ -53,10 +53,11 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     };
     // Windows runs no `bin/R` script to export the home, so the front end exports it for the
-    // tools R CMD INSTALL starts (make, configure, and R itself).
+    // tools R CMD INSTALL starts (make, configure, and R itself). Like GNU R's, it uses forward
+    // slashes, which `Rcmd_environ` needs: an unquoted `${R_HOME}` there loses its backslashes.
     if front_end.is_some() {
         // SAFETY: no other thread exists yet.
-        unsafe { std::env::set_var("R_HOME", &home) };
+        unsafe { std::env::set_var("R_HOME", home.display().to_string().replace('\\', "/")) };
     }
     let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
         Some("R") => match arguments.first().map(String::as_str) {
@@ -68,6 +69,22 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         Some("Rcmd") => [vec!["CMD".to_owned()], arguments].concat(),
         _ => arguments,
     };
+    // GNU R's `Rcmd.exe` reads `etc/Rcmd_environ` before any `R CMD` command, which is what puts
+    // Rtools ahead of other toolchains on `PATH`. A Unix home's `bin/Rcmd` script reads
+    // `etc/Renviron` itself.
+    if front_end.is_some() && arguments.first().is_some_and(|first| first == "CMD") {
+        let assignments = match crate::command_environment(&home, |name| std::env::var(name).ok()) {
+            Ok(assignments) => assignments,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for (name, value) in assignments {
+            // SAFETY: no other thread exists yet.
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
     let tools = match arguments.split_first() {
         Some((front, rest)) if front == "CMD" => tools_command(rest),
         _ => None,

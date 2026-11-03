@@ -1221,7 +1221,12 @@ JIT fits around them.
     `libs/x64/`; and `R_ARCH=/x64` for the build and for `install.libs.R`. Its `Makeconf` follows
     the Rtools ABI of GNU R's `etc/x64/Makeconf`: `gcc`/`g++`/`gfortran`, `-shared
     -static-libgcc`, no PIC flags, and `-L"$(R_HOME)/bin/x64" -lR` against the `libR.dll.a` that
-    the home keeps beside `R.dll` in `bin/x64/`. Windows runs no shell scripts, so the home's
+    the home keeps beside `R.dll` in `bin/x64/`. A DLL exports what the package's
+    `<name>-win.def` lists, or else every global symbol, as GNU R's `winshlib.mk` links it. Before
+    an `R CMD` command the front end reads the home's `etc/Rcmd_environ`, linked from GNU R, as
+    GNU R's `Rcmd.exe` does, which puts that R version's Rtools first on `PATH`, so Rtools' GCC
+    finds Rtools' assembler even when another toolchain (MSYS2's clang64, say) comes earlier on
+    `PATH`. Windows runs no shell scripts, so the home's
     `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (which callr starts)
     are copies of `ry-rcmd.exe`, which reads which front end it is from its file name and the home
     from its location, ignoring an inherited `R_HOME`. The paths it exports to `configure` and

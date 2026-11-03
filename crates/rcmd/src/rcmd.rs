@@ -699,6 +699,140 @@ fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Pat
     Ok(())
 }
 
+/// The variables GNU R's `Rcmd.exe` sets from the home's `etc/Rcmd_environ` before it runs an
+/// `R CMD` command, in the order it sets them; `lookup` reads the environment they start from.
+/// The R home links GNU R's own file, which the Windows installer edits to put the Rtools of
+/// that R version first on `PATH`, so `make`, the compilers and the assembler they run come
+/// from Rtools whatever other toolchain `PATH` holds. A home without the file sets nothing,
+/// as GNU R's front end does.
+pub fn command_environment(
+    home: &Path,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>> {
+    let path = home.join("etc").join("Rcmd_environ");
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(renviron_assignments(&text, lookup)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(Error::Io(path, error)),
+    }
+}
+
+/// The assignments of an `Renviron` file, read as GNU R's `process_Renviron` reads one
+/// (`src/main/Renviron.c`): every `NAME=value` line sets its variable, even one already set,
+/// after `${NAME}`, `${NAME-default}` and `${NAME:-default}` expand against the variables set so
+/// far. A line whose name or expanded value is empty sets nothing.
+fn renviron_assignments(
+    text: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut assignments: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_ascii();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let get = |variable: &str| {
+            assignments
+                .iter()
+                .rev()
+                .find(|(name, _)| name == variable)
+                .map(|(_, value)| value.clone())
+                .or_else(|| lookup(variable))
+        };
+        let (name, value) = (name.trim_ascii(), expand_renviron(value.trim_ascii(), &get));
+        if !name.is_empty() && !value.is_empty() {
+            assignments.push((name.to_owned(), unquote_renviron(&value)));
+        }
+    }
+    assignments
+}
+
+/// Replaces each `${...}` term of `value` with its expansion, as `findterm` does. Like GNU R, it
+/// stops at the first `$` that does not start a complete term.
+fn expand_renviron(value: &str, get: &impl Fn(&str) -> Option<String>) -> String {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('$')
+        && rest[start + 1..].starts_with('{')
+        && let Some(end) = closing_brace(&rest[start + 2..]).map(|end| start + 2 + end)
+    {
+        expanded.push_str(&rest[..start]);
+        expanded.push_str(&expand_term(&rest[start..=end], get));
+        rest = &rest[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+/// The position of the brace that closes a term whose opening brace precedes `text`.
+fn closing_brace(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (position, byte) in text.bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return Some(position),
+            b'}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One `${NAME}`, `${NAME-default}` or `${NAME:-default}` term, as `subterm` expands it: the
+/// default applies when the variable is unset, or with `:-` also when it is empty, and is itself
+/// expanded only when it is a whole term.
+fn expand_term(term: &str, get: &impl Fn(&str) -> Option<String>) -> String {
+    let Some(inner) = term
+        .strip_prefix("${")
+        .and_then(|inner| inner.strip_suffix('}'))
+    else {
+        return term.to_owned();
+    };
+    let inner = inner.trim_ascii();
+    let (name, default, colon) = match inner.split_once('-') {
+        Some((name, default)) if name.len() > 1 && name.ends_with(':') => {
+            (&name[..name.len() - 1], Some(default), true)
+        }
+        Some((name, default)) => (name, Some(default), false),
+        None => (inner, None, false),
+    };
+    match get(name) {
+        Some(value) if !colon || !value.is_empty() => value,
+        _ => default.map_or_else(String::new, |default| expand_term(default, get)),
+    }
+}
+
+/// Removes the quotes around sections of an expanded value, as GNU R's `Putenv` does: a
+/// backslash inside quotes is kept unless it escapes the quote, and outside quotes it is dropped
+/// unless doubled. This is why a Windows path in an unquoted value must use forward slashes.
+fn unquote_renviron(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut unquoted = Vec::with_capacity(bytes.len());
+    let mut quote = None;
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let previous = index.checked_sub(1).and_then(|before| bytes.get(before));
+        let next = bytes.get(index + 1);
+        let escaped = previous == Some(&b'\\');
+        match quote {
+            None if (byte == b'"' || byte == b'\'') && !escaped => quote = Some(byte),
+            Some(open) if byte == open && !escaped => quote = None,
+            None if byte == b'\\' => {
+                if next == Some(&b'\\') {
+                    unquoted.push(b'\\');
+                }
+            }
+            Some(open) if byte == b'\\' && next == Some(&open) => {}
+            _ => unquoted.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&unquoted).into_owned()
+}
+
 /// A directory GNU R's `bin/R` wrapper exports as a plain `NAME=value` line. Debian keeps
 /// `share/` and `doc/` under `/usr/share/R` rather than in the R home.
 fn wrapper_directory(gnu_home: &Path, name: &str) -> Option<PathBuf> {
@@ -1068,6 +1202,23 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
     };
     let shlib_ext = platform.shlib_ext();
     let r_arch = platform.arch();
+    // GNU R's Windows `Makeconf` names its tools through `BINPREF`, which packages use too
+    // (`$(BINPREF)gcc`, `$(PKG_CONFIG)`), and its `winshlib.mk` links a DLL exporting what the
+    // package's `<name>-win.def` lists, or else every global symbol. Exporting every symbol
+    // keeps `R_init_<name>` visible even when an object marks other symbols `dllexport`, which
+    // turns the linker's automatic export off.
+    let platform_variables = match platform {
+        Platform::Windows => {
+            "BINPREF ?=\nIMPDIR = bin/x64\nPKG_CONFIG = $(BINPREF)pkg-config\n\
+             DLLTOOL = $(BINPREF)dlltool\nNM = $(BINPREF)nm\nOBJDUMP = $(BINPREF)objdump\n\
+             RESCOMP = $(BINPREF)windres\nSTRIP_SHARED_LIB = $(BINPREF)strip --strip-unneeded\n\
+             STRIP_STATIC_LIB = $(BINPREF)strip --strip-debug\n\
+             SHLIB_DEF = $(wildcard $(basename $(SHLIB))-win.def)\n\
+             EXPORT_ALL_SYMBOLS = -Wl,--export-all-symbols\n\
+             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n"
+        }
+        Platform::Linux | Platform::MacOs => "SHLIB_EXPORTS =\n",
+    };
     format!(
         r#"# ry's build configuration for packages, read by R CMD INSTALL and R CMD SHLIB.
 
@@ -1144,7 +1295,7 @@ TCLTK_CPPFLAGS =
 TCLTK_LIBS =
 JAVA_HOME =
 R_XTRA_CPPFLAGS = -I"$(R_INCLUDE_DIR)" -DNDEBUG
-
+{platform_variables}
 ALL_CPPFLAGS = $(R_XTRA_CPPFLAGS) $(PKG_CPPFLAGS) $(CLINK_CPPFLAGS) $(CPPFLAGS)
 ALL_CFLAGS = $(PKG_CFLAGS) $(CPICFLAGS) $(SHLIB_CFLAGS) $(CFLAGS)
 ALL_CXXFLAGS = $(PKG_CXXFLAGS) $(CXXPICFLAGS) $(SHLIB_CXXFLAGS) $(CXXFLAGS)
@@ -1186,8 +1337,8 @@ all: $(SHLIB)
 
 $(SHLIB): $(OBJECTS)
 \t@if test \"z$(OBJECTS)\" != \"z\"; then \\
-\t  echo $(SHLIB_LINK) -o $@ $(OBJECTS) $(ALL_LIBS); \\
-\t  $(SHLIB_LINK) -o $@ $(OBJECTS) $(ALL_LIBS); \\
+\t  echo $(SHLIB_LINK) -o $@ $(SHLIB_EXPORTS) $(OBJECTS) $(ALL_LIBS); \\
+\t  $(SHLIB_LINK) -o $@ $(SHLIB_EXPORTS) $(OBJECTS) $(ALL_LIBS); \\
 \tfi
 
 shlib-clean:
@@ -2626,5 +2777,181 @@ SHLIB_OPENMP_CFLAGS =
             Some(package.join("configure"))
         );
         fs::remove_dir_all(&package).expect("remove package");
+    }
+
+    /// GNU R 4.5's `etc/Rcmd_environ` as its Windows installer leaves it, with the x86_64
+    /// `INSTALLER-BUILD` lines uncommented.
+    const RCMD_ENVIRON: &str = r#"## from R.sh
+R_SHARE_DIR=${R_HOME}/share
+R_INCLUDE_DIR=${R_HOME}/include
+R_DOC_DIR=${R_HOME}/doc
+R_ARCH=
+
+## from Rcmd
+R_OSTYPE=windows
+TEXINPUTS=.;${TEXINPUTS};${R_SHARE_DIR}/texmf/tex/latex;
+R_PAPERSIZE_USER=${R_PAPERSIZE}
+R_PAPERSIZE=${R_PAPERSIZE-'a4'}
+SED=${SED-sed}
+
+## keep in step with Rprofile.windows
+R_RTOOLS45_PATH="${RTOOLS45_HOME:-c:/rtools45}/x86_64-w64-mingw32.static.posix/bin;${RTOOLS45_HOME:-c:/rtools45}/usr/bin"
+# INSTALLER-BUILD-aarch64:R_RTOOLS45_PATH="${RTOOLS45_AARCH64_HOME:-c:/rtools45-aarch64}/aarch64-w64-mingw32.static.posix/bin;${RTOOLS45_AARCH64_HOME:-c:/rtools45-aarch64}/usr/bin"
+#   trailing slash to protect against trailing backslash in PATH
+PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
+"#;
+
+    fn rcmd_environ(home: &Path, variables: &[(&str, &str)]) -> BTreeMap<String, String> {
+        command_environment(home, |name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| (*value).to_owned())
+        })
+        .expect("read Rcmd_environ")
+        .into_iter()
+        .collect()
+    }
+
+    /// The smoke test's runner puts MSYS2's clang64 ahead of Rtools on `PATH`, and its `as` is
+    /// LLVM's, which rejects the `--gdwarf-5` Rtools' GCC passes. GNU R's front end puts
+    /// Rtools first, and so does ry's.
+    #[test]
+    fn rcmd_environ_puts_rtools_ahead_of_other_toolchains() {
+        let home = std::env::temp_dir().join(format!("ry-rcmd-environ-{}", std::process::id()));
+        fs::create_dir_all(home.join("etc")).expect("create etc");
+        assert!(
+            rcmd_environ(&home, &[]).is_empty(),
+            "a home without the file"
+        );
+        write(&home.join("etc/Rcmd_environ"), RCMD_ENVIRON).expect("write Rcmd_environ");
+        let inherited = r"C:\msys64\clang64\bin;C:\rtools45\usr\bin;C:\Windows\";
+        let environment = rcmd_environ(
+            &home,
+            &[("R_HOME", "C:/Users/me/ry/home"), ("PATH", inherited)],
+        );
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some(
+                r"c:/rtools45/x86_64-w64-mingw32.static.posix/bin;c:/rtools45/usr/bin;C:\msys64\clang64\bin;C:\rtools45\usr\bin;C:\Windows\/"
+            )
+        );
+        assert_eq!(
+            environment.get("R_SHARE_DIR").map(String::as_str),
+            Some("C:/Users/me/ry/home/share")
+        );
+        assert_eq!(
+            environment.get("TEXINPUTS").map(String::as_str),
+            Some(".;;C:/Users/me/ry/home/share/texmf/tex/latex;")
+        );
+        assert_eq!(
+            environment.get("R_PAPERSIZE").map(String::as_str),
+            Some("a4")
+        );
+        assert_eq!(environment.get("SED").map(String::as_str), Some("sed"));
+        assert!(!environment.contains_key("R_ARCH"));
+        assert!(!environment.contains_key("R_PAPERSIZE_USER"));
+
+        let elsewhere = rcmd_environ(
+            &home,
+            &[
+                ("R_HOME", "C:/R"),
+                ("RTOOLS45_HOME", "D:/rtools45"),
+                ("PATH", "C:/bin"),
+                ("SED", "/usr/bin/sed"),
+                ("R_PAPERSIZE", "letter"),
+            ],
+        );
+        assert_eq!(
+            elsewhere.get("R_RTOOLS45_PATH").map(String::as_str),
+            Some("D:/rtools45/x86_64-w64-mingw32.static.posix/bin;D:/rtools45/usr/bin")
+        );
+        assert_eq!(
+            elsewhere.get("SED").map(String::as_str),
+            Some("/usr/bin/sed")
+        );
+        assert_eq!(
+            elsewhere.get("R_PAPERSIZE_USER").map(String::as_str),
+            Some("letter")
+        );
+
+        let custom = rcmd_environ(
+            &home,
+            &[("R_CUSTOM_TOOLS_PATH", "E:/tools/bin"), ("PATH", "C:/bin")],
+        );
+        assert_eq!(
+            custom.get("PATH").map(String::as_str),
+            Some("E:/tools/bin;C:/bin/")
+        );
+        fs::remove_dir_all(&home).expect("remove home");
+    }
+
+    #[test]
+    fn renviron_values_expand_and_unquote_as_gnu_r_reads_them() {
+        let read = |text: &str, variables: &[(&str, &str)]| {
+            renviron_assignments(text, |name| {
+                variables
+                    .iter()
+                    .find(|(variable, _)| *variable == name)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+        };
+        let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        // An assignment overrides a variable already set, unlike a shell's `${A:=b}`.
+        assert_eq!(read("A=new", &[("A", "old")]), pairs(&[("A", "new")]));
+        // `-` takes the default only when unset, `:-` also when empty.
+        assert_eq!(
+            read("A=${E-x}\nB=${E:-y}", &[("E", "")]),
+            pairs(&[("B", "y")])
+        );
+        // Unquoted backslashes are dropped unless doubled; quoted ones are kept.
+        assert_eq!(
+            read(r#"A=C:\R\\x"C:\R"'it''s'"#, &[]),
+            pairs(&[("A", r"C:R\xC:\Rits")])
+        );
+        // A default is expanded only when it is a whole term, and later lines see earlier ones.
+        assert_eq!(
+            read("A=1\nB=${U-${A}}\nC=${U-x${A}}", &[]),
+            pairs(&[("A", "1"), ("B", "1"), ("C", "x${A}")])
+        );
+        // A `$` that starts no term stops expansion for the rest of the value.
+        assert_eq!(read("A=$x ${H}", &[("H", "h")]), pairs(&[("A", "$x ${H}")]));
+        assert_eq!(read("# A=1\nnot an assignment\n =1", &[]), pairs(&[]));
+    }
+
+    /// A Windows package DLL exports what its `<name>-win.def` lists, and otherwise every global
+    /// symbol, as GNU R's `winshlib.mk` links it.
+    #[test]
+    fn windows_shlib_exports_follow_the_package_def_file() {
+        let directory =
+            std::env::temp_dir().join(format!("ry-rcmd-exports-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("create directory");
+        let windows = format!(
+            "SHLIB = twice.dll\n{}",
+            makeconf(Path::new("C:\\R"), &Toolchain::rtools(), Platform::Windows)
+        );
+        let exports = |directory: &Path| {
+            gnu_make_info(
+                &windows,
+                directory,
+                "C:/R",
+                ["SHLIB_EXPORTS", "LIBR", "CC"].into_iter(),
+            )
+            .expect("make reads the Windows Makeconf")
+        };
+        assert_eq!(
+            exports(&directory),
+            "SHLIB_EXPORTS=[-Wl,--export-all-symbols]\nLIBR=[-L\"C:/R/bin/x64\" -lR]\nCC=[gcc]\n"
+        );
+        write(&directory.join("twice-win.def"), "EXPORTS\nR_init_twice\n").expect("write def");
+        assert!(exports(&directory).starts_with("SHLIB_EXPORTS=[twice-win.def]\n"));
+        let unix = makeconf(Path::new("/r"), &Toolchain::default(), Platform::Linux);
+        assert!(unix.contains("SHLIB_EXPORTS =\n") && SHLIB_MK.contains("$(SHLIB_EXPORTS)"));
+        fs::remove_dir_all(&directory).expect("remove directory");
     }
 }
