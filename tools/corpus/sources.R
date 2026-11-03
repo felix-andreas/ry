@@ -5,7 +5,9 @@
 # runs each package's tests from these sources. See
 # docs/src/content/docs/contributing/corpus-and-oracle.md.
 #
-# Environment: RY_CORPUS_DIR and RY_CORPUS_SNAPSHOT, as for install.R.
+# Environment: RY_CORPUS_DIR, RY_CORPUS_SNAPSHOT and RY_CORPUS_ROOTS, as for install.R. With
+# RY_CORPUS_ROOTS set, closure.txt (the packages whose tests run) holds only that list, and
+# install.txt holds the list plus everything it needs to load, which is what ry must build.
 
 args <- commandArgs(trailingOnly = FALSE)
 script <- sub("^--file=", "", grep("^--file=", args, value = TRUE))
@@ -17,7 +19,13 @@ sources_dir <- file.path(corpus_dir, "sources")
 dir.create(sources_dir, recursive = TRUE, showWarnings = FALSE)
 options(timeout = 600)
 
-roots <- c(readLines(file.path(repo_root, "tools", "corpus", "roots.txt")), "esgtoolkit", "loadfast")
+roots_file <- Sys.getenv("RY_CORPUS_ROOTS", "")
+roots <- if (nzchar(roots_file)) {
+  lines <- trimws(sub("#.*", "", readLines(roots_file)))
+  lines[nzchar(lines)]
+} else {
+  c(readLines(file.path(repo_root, "tools", "corpus", "roots.txt")), "esgtoolkit", "loadfast")
+}
 installed <- installed.packages(lib.loc = c(library_dir, .Library), noCache = TRUE)
 base <- rownames(installed.packages(priority = "base"))
 
@@ -27,7 +35,8 @@ closure <- tools::package_dependencies(
   which = c("Depends", "Imports", "LinkingTo"), recursive = TRUE
 )
 closure <- sort(setdiff(unique(c(intersect(roots, rownames(installed)), unlist(closure))), base))
-writeLines(closure, file.path(corpus_dir, "closure.txt"))
+writeLines(closure, file.path(corpus_dir, "install.txt"))
+writeLines(if (nzchar(roots_file)) sort(intersect(roots, rownames(installed))) else closure, file.path(corpus_dir, "closure.txt"))
 
 repositories <- c(
   sprintf("https://packagemanager.posit.co/cran/%s", snapshot),

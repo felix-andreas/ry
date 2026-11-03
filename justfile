@@ -435,6 +435,18 @@ ry-home:
 corpus-ry-install *args: ry-home
     cargo run -q --release -p oracle -- install {{ args }}
 
+# Install the top CRAN packages outside the closure (tools/corpus/top-packages.txt) and their Suggests into .corpus-top/library with GNU R, and download their sources.
+top-packages-setup:
+    RY_CORPUS_DIR=.corpus-top RY_CORPUS_ROOTS=tools/corpus/top-packages.txt Rscript tools/corpus/install.R
+    RY_CORPUS_DIR=.corpus-top RY_CORPUS_ROOTS=tools/corpus/top-packages.txt Rscript tools/corpus/sources.R
+
+# Build the top packages from source on ry and run their tests under both runtimes: `just top-packages [--jobs N] [PKG...]`.
+top-packages *args:
+    cargo build -q --release -p ry-lang -p libr -p rcmd -p oracle
+    ./target/release/ry-rcmd assemble .corpus-top/ry-home --include crates/libr/include --libr target/release/libR.so
+    ./target/release/oracle install --corpus .corpus-top --timeout 3600 $(cat .corpus-top/install.txt)
+    ORACLE_RY=$PWD/target/release/ry ./target/release/oracle packages --corpus .corpus-top --installed {{ args }}
+
 # The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
 oracle *args:
     cargo run -q -p oracle -- {{ args }}

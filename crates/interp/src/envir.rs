@@ -626,37 +626,45 @@ unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(error("invalid first argument"));
+    }
     let env = environment_arg(call.arg(1), "envir")?;
     let modes = call.arg(2);
-    let if_not_found = call.arg(3);
-    let inherits = values::as_logical_scalar(call.arg(4)) == 1;
     let count = length(names);
+    if modes.kind() != SexpType::String || (length(modes) != 1 && length(modes) != count) {
+        return Err(error("wrong length for 'mode' argument"));
+    }
+    // GNU R takes any vector here and treats its elements as a list's, so `ifnotfound = NA`
+    // gives `NA` for every missing name.
+    let if_not_found = call.arg(3);
+    if !if_not_found.kind().is_vector() {
+        return Err(error("invalid 'ifnotfound' argument"));
+    }
+    let fallbacks = length(if_not_found);
+    if fallbacks != 1 && fallbacks != count {
+        return Err(error("wrong length for 'ifnotfound' argument"));
+    }
+    let if_not_found = crate::coerce::coerce_vector(if_not_found, SexpType::List)?;
+    let inherits = values::as_logical_scalar(call.arg(4)) == 1;
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
         let name = string_at(names, index)
             .map(|text| text.into_owned())
             .unwrap_or_default();
         let symbol = values::install(&name)?;
-        let mode = if length(modes) > 0 {
-            string_at(modes, index % length(modes))
-                .map(|text| text.into_owned())
-                .unwrap_or_else(|| "any".into())
-        } else {
-            "any".into()
-        };
+        let mode = string_at(modes, index % length(modes))
+            .map(|text| text.into_owned())
+            .unwrap_or_else(|| "any".into());
         let value = match lookup(symbol, env, &mode, inherits)? {
             Some(value) => value_of(value)?,
             None => {
-                if if_not_found.kind() == SexpType::List && length(if_not_found) > 0 {
-                    let fallback = if_not_found.element(index % length(if_not_found));
-                    if values::is_function(fallback) {
-                        let argument = scalar_string(&name)?;
-                        eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env)?
-                    } else {
-                        fallback
-                    }
+                let fallback = if_not_found.element(index % fallbacks);
+                if values::is_function(fallback) {
+                    let argument = scalar_string(&name)?;
+                    eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env)?
                 } else {
-                    return Err(error(format!("value for '{name}' not found")));
+                    fallback
                 }
             }
         };
