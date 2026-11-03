@@ -6506,3 +6506,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   specialization needs, while cold bodies pay one comparison per activation.
 - **Impact.** The ggplot2 render's JIT overhead fell from +55M to +26M instructions, and the
   gallery is no slower with the JIT on than off (6.99 s against 7.10 s, three interleaved runs).
+
+## A typed closure compiles at its first call only when that call can run long
+
+- **Previous shape.** Every fully typed closure compiled at its first call, because its
+  annotations give the types a profile would otherwise collect. On a finbench slice that was
+  183 compiles of about a millisecond each, of bodies such as `alpha + beta` whose call costs a
+  microsecond and which most tests call a handful of times.
+- **Target shape.** A first-call compile is refused as `BRIEF` (`crates/jit/src/analysis.rs`)
+  unless the plan has a loop or calls a closure or native function directly
+  (`Plan::may_run_long`), the cases where the first activation itself can run long, recursion
+  included. The refusal is not counted, so the body tiers up at the entry threshold like any
+  other. `compile_in` takes a `Trigger` (first call, hot entry, hot loop) in place of the
+  `in_loop` flag, so each profitability gate states which triggers it applies to.
+- **Impact.** The why-ry typed programs are unchanged (their bodies loop or recurse); typed
+  test-suite code no longer pays for compiles that never run again.
