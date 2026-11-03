@@ -66,8 +66,7 @@ nix profile install github:felix-andreas/ry
 `ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`,
 `ry load`, `ry test` and `ry document` need a GNU R installation built as a shared library (see the
 [CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
-R's R sources and the default packages from your GNU R installation instead of shipping them, so
-ry stays independent of R's license.
+R's R sources and the default packages from your GNU R installation instead of shipping them.
 
 ry's runtime supports GNU R 4.3 and every later release, and has been checked against R 4.3.3
 and 4.6.1. It emulates the version it finds: `R.version`, `getRversion()` and the check that a
@@ -121,7 +120,7 @@ it on a Mac.
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:
 
 1. Install [rustup](https://rustup.rs), which Zed uses to compile dev extensions. The first build
-   downloads the nightly toolchain that the repository pins.
+   downloads the stable toolchain that `editors/zed/rust-toolchain.toml` pins.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
@@ -136,7 +135,7 @@ Global Options → Code → Formatting**, set **Code formatter** to **External**
 to `path/to/ry fmt`. For format-on-save, tick **Reformat documents on save** under **Code → Saving**.
 Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI. RStudio's
 console can still reload your package with ry's `load_all()`, as
-[Loading packages](/guides/loading-packages#from-rstudio-or-plain-r) shows.
+[Loading packages](/guides/running#from-rstudio-or-plain-r) shows.
 
 ## Other editors
 

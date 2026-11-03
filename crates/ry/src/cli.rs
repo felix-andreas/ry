@@ -300,7 +300,11 @@ pub fn migrate_data_table(
             .filter(|file| file.requested && fixes_apply(file))
         {
             let rewrites = data_table_rewrites(&analysis.db, file.file);
-            if rewrites.is_empty() {
+            let applied = rewrites
+                .iter()
+                .filter(|rewrite| rewrite.replacement.is_some())
+                .count();
+            if applied == 0 {
                 continue;
             }
             let original = fs::read_to_string(&file.path).map_err(|err| {
@@ -313,7 +317,7 @@ pub fn migrate_data_table(
                 continue;
             }
             let migrated = apply_data_table_rewrites(&original, &rewrites);
-            n_rewrites += rewrites.len();
+            n_rewrites += applied;
             n_files += 1;
             if write {
                 fs::write(&file.path, migrated).map_err(|err| {
@@ -1251,10 +1255,13 @@ fn install_environment(
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::HIGH)
         .new(db);
-    let _: AnalysisSettings =
-        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
-            .durability(Durability::HIGH)
-            .new(db);
+    let _: AnalysisSettings = AnalysisSettings::builder(
+        config.check.inline_annotations,
+        config.check.strict,
+        config.check.prelude,
+    )
+    .durability(Durability::HIGH)
+    .new(db);
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();

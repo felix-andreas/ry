@@ -6,6 +6,8 @@
 //! The header list is read from `include/`, so a header added later is covered without
 //! touching this file.
 
+#![cfg(unix)]
+
 mod harness;
 
 use std::{

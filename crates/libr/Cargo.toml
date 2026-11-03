@@ -3,7 +3,7 @@ name = "libr"
 description = "ry's implementation of R's C API, built as an ABI-compatible libR shared library"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "GPL-2.0-or-later AND LGPL-2.1-or-later"
 publish = false
 build = "build.rs"
 # `tests/harness.rs` is a module the test binaries share, not a test of its own.

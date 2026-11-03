@@ -617,6 +617,7 @@ impl Worker {
         let _: AnalysisSettings = AnalysisSettings::builder(
             worker.config.check.inline_annotations,
             worker.config.check.strict,
+            worker.config.check.prelude,
         )
         .durability(Durability::MEDIUM)
         .new(&worker.db);
@@ -1824,6 +1825,7 @@ impl Worker {
                         config_changed |= config != self.config;
                         let inline_annotations = config.check.inline_annotations;
                         let strict = config.check.strict;
+                        let prelude = config.check.prelude;
                         self.config = config;
                         let settings = AnalysisSettings::get(&self.db);
                         if *settings.inline_annotations(&self.db) != inline_annotations {
@@ -1833,6 +1835,9 @@ impl Worker {
                         }
                         if *settings.strict(&self.db) != strict {
                             settings.set_strict(&mut self.db).to(strict);
+                        }
+                        if *settings.prelude(&self.db) != prelude {
+                            settings.set_prelude(&mut self.db).to(prelude);
                         }
                         self.report_config_warnings();
                         self.publish_config_diagnostics(None);
@@ -3087,12 +3092,6 @@ impl LanguageServer for ServerState {
             let cursor_line_start = text[..usize::from(caret)]
                 .rfind('\n')
                 .map_or(0, |at| at + 1);
-            let line = match params.ch.as_str() {
-                "\n" if cursor_line_start == 0 => return Ok(None),
-                "\n" => cursor_line_start - 1,
-                _ => usize::from(caret),
-            };
-            let line = TextSize::try_from(line).unwrap_or_default();
             if params.ch != "\n" {
                 // A `}` finishes the construct it closes, so the selection
                 // runs from where that statement starts.
@@ -3111,7 +3110,7 @@ impl LanguageServer for ServerState {
                             })
                         })
                     })
-                    .map_or(line, |statement| statement.text_range().start());
+                    .map_or(caret, |statement| statement.text_range().start());
                 let edits = format::format_range(
                     &text,
                     worker.config.format,
@@ -3119,25 +3118,45 @@ impl LanguageServer for ServerState {
                 );
                 return Ok(worker.format_edits(&text, edits));
             }
-            // The editor has already indented the new line for the user to
-            // type on, and a blank line before a `}` is one the formatter
-            // deletes. Either edit would fight the user under the cursor, so
-            // a blank cursor line is laid out as if it were not there yet,
-            // and no edit may reach it. Offsets before it are the same in
+            // Formatting deletes blank lines at the end of the file and before
+            // a `}`, and collapses runs of them, so it would undo the Enter the
+            // user just pressed to open up space. A blank finished line
+            // therefore has nothing to lay out, and a finished line with code
+            // is laid out in a probe without the blank lines from the cursor
+            // on (the indented cursor line among them), with no edit allowed
+            // to reach the cursor's line. Offsets before it are the same in
             // both texts.
-            let cursor_line_end = text[cursor_line_start..]
-                .find('\n')
-                .map_or(text.len(), |at| cursor_line_start + at + 1);
-            let probe = match text[cursor_line_start..cursor_line_end].trim().is_empty() {
-                true => [&text[..cursor_line_start], &text[cursor_line_end..]].concat(),
-                false => text.clone(),
-            };
+            let is_blank = |line: &str| line.trim().is_empty();
+            let finished_line_start = text[..cursor_line_start.saturating_sub(1)]
+                .rfind('\n')
+                .map_or(0, |at| at + 1);
+            if cursor_line_start == 0 || is_blank(&text[finished_line_start..cursor_line_start]) {
+                return Ok(None);
+            }
+            let mut blank_run_end = cursor_line_start;
+            while blank_run_end < text.len() {
+                let line_end = text[blank_run_end..]
+                    .find('\n')
+                    .map_or(text.len(), |at| blank_run_end + at + 1);
+                if !is_blank(&text[blank_run_end..line_end]) {
+                    break;
+                }
+                blank_run_end = line_end;
+            }
+            let probe = [&text[..cursor_line_start], &text[blank_run_end..]].concat();
+            let finished_line_break = TextSize::try_from(cursor_line_start - 1).unwrap_or_default();
             let cursor_line_start = TextSize::try_from(cursor_line_start).unwrap_or_default();
-            let edits = format::format_range(&probe, worker.config.format, TextRange::empty(line))
-                .map(|mut edits| {
-                    edits.retain(|edit| edit.range.end() <= cursor_line_start);
-                    edits
+            let edits = format::format_range(
+                &probe,
+                worker.config.format,
+                TextRange::empty(finished_line_break),
+            )
+            .map(|mut edits| {
+                edits.retain(|edit| {
+                    edit.range.start() < cursor_line_start && edit.range.end() <= cursor_line_start
                 });
+                edits
+            });
             Ok(worker.format_edits(&text, edits))
         })
     }

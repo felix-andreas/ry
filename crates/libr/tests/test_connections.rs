@@ -2,6 +2,8 @@
 //! creates with `R_new_custom_connection`, the C readers and writers packages use, and the
 //! struct layout. Behavior is compared against GNU R through `connection_scenarios`.
 
+#![cfg(unix)]
+
 mod connection_scenarios;
 mod harness;
 

@@ -356,7 +356,7 @@ algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` check
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
 `crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
-declarations in `types/ry.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
+declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
 without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random

@@ -190,6 +190,43 @@ mod imp {
         std::os::unix::fs::symlink(from, to)
     }
 
+    /// Creates a fresh directory, private to this user, from `template`: a path ending in
+    /// `XXXXXX`, which `mkdtemp(3)` replaces to make the name unique.
+    pub fn make_temp_dir(template: &str) -> io::Result<String> {
+        let template = CString::new(template)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in the template"))?;
+        let mut bytes = template.into_bytes_with_nul();
+        // SAFETY: `bytes` is a NUL-terminated template that mkdtemp rewrites in place.
+        if unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) }.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        bytes.pop();
+        String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+    }
+
+    /// Whether this process may create files in the directory `path`.
+    pub fn writable_directory(path: &Path) -> bool {
+        if !path.is_dir() {
+            return false;
+        }
+        let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return false;
+        };
+        // SAFETY: `path` is NUL-terminated.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    }
+
+    /// Whether `path` is a directory this user owns, creating it private to this user when
+    /// nothing is there.
+    pub fn ensure_private_dir(path: &Path) -> bool {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        match std::fs::symlink_metadata(path) {
+            // SAFETY: geteuid has no preconditions.
+            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
+        }
+    }
+
     pub fn system_name() -> SystemName {
         // SAFETY: `uname` fills the zeroed struct it is given.
         let name = unsafe {
@@ -476,14 +513,31 @@ mod imp {
     }
 
     /// An `iconv(3)` conversion descriptor, closed on drop.
-    pub struct Iconv(libc::iconv_t);
+    pub struct Iconv(IconvDescriptor);
+
+    type IconvDescriptor = *mut c_void;
+
+    // Declared here rather than taken from `libc`, whose Apple bindings are deprecated: on
+    // macOS these functions live in the system `libiconv`, not in libSystem.
+    #[cfg_attr(target_os = "macos", link(name = "iconv"))]
+    unsafe extern "C" {
+        fn iconv_open(to: *const c_char, from: *const c_char) -> IconvDescriptor;
+        fn iconv(
+            descriptor: IconvDescriptor,
+            input: *mut *mut c_char,
+            input_left: *mut usize,
+            output: *mut *mut c_char,
+            output_left: *mut usize,
+        ) -> usize;
+        fn iconv_close(descriptor: IconvDescriptor) -> libc::c_int;
+    }
 
     impl Iconv {
         pub fn open(from: &str, to: &str) -> Option<Iconv> {
             let from = CString::new(from).ok()?;
             let to = CString::new(to).ok()?;
             // SAFETY: both names are valid NUL-terminated strings.
-            let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
+            let descriptor = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
             if descriptor as isize == -1 {
                 None
             } else {
@@ -506,7 +560,7 @@ mod imp {
             // SAFETY: the pointers and lengths describe `input` and `output`, which outlive
             // the call; iconv only reads the input.
             let status = unsafe {
-                libc::iconv(
+                iconv(
                     self.0,
                     &mut input_pointer,
                     &mut input_left,
@@ -536,7 +590,7 @@ mod imp {
             // SAFETY: a null input asks for the final shift sequence; the output pointer and
             // length describe `output`.
             let status = unsafe {
-                libc::iconv(
+                iconv(
                     self.0,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
@@ -556,7 +610,7 @@ mod imp {
         pub fn reset(&mut self) {
             // SAFETY: a null input and output reset the descriptor's shift state.
             unsafe {
-                libc::iconv(
+                iconv(
                     self.0,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
@@ -571,7 +625,7 @@ mod imp {
         fn drop(&mut self) {
             // SAFETY: the descriptor came from a successful iconv_open and is closed once.
             unsafe {
-                libc::iconv_close(self.0);
+                iconv_close(self.0);
             }
         }
     }
@@ -716,6 +770,50 @@ mod imp {
             std::os::windows::fs::symlink_dir(from, to)
         } else {
             std::os::windows::fs::symlink_file(from, to)
+        }
+    }
+
+    /// Creates a fresh directory from `template`, a path ending in `XXXXXX`, by replacing those
+    /// characters until the name is unused, as `mkdtemp(3)` does where it exists.
+    pub fn make_temp_dir(template: &str) -> io::Result<String> {
+        use std::hash::{BuildHasher, RandomState};
+        const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let stem = template
+            .strip_suffix("XXXXXX")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no XXXXXX suffix"))?;
+        let random = RandomState::new();
+        for attempt in 0u32..100 {
+            let mut bits = random.hash_one(attempt);
+            let suffix: String = (0..6)
+                .map(|_| {
+                    let letter = LETTERS[(bits % LETTERS.len() as u64) as usize];
+                    bits /= LETTERS.len() as u64;
+                    char::from(letter)
+                })
+                .collect();
+            let path = format!("{stem}{suffix}");
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(failure) if failure.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(failure) => return Err(failure),
+            }
+        }
+        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+    }
+
+    /// Whether this process may create files in the directory `path`. Windows keeps only a
+    /// read-only flag, as in [`file_mode`].
+    pub fn writable_directory(path: &Path) -> bool {
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+    }
+
+    /// Whether `path` is a directory, creating it when nothing is there. Windows has no POSIX
+    /// owner or mode to check.
+    pub fn ensure_private_dir(path: &Path) -> bool {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.is_dir(),
+            Err(_) => std::fs::create_dir(path).is_ok(),
         }
     }
 

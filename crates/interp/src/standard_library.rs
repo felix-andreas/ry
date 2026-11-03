@@ -1,10 +1,12 @@
 //! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules,
-//! modeled on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
-//! live in the docs (`contributing/design/standard-library.md`, `reference/standard-library.mdx`).
+//! modeled on Roc's builtins. `types/std.Rtypes` declares their types and documents them, and the
+//! design and user contract live in the docs (`contributing/design/standard-library.md`,
+//! `reference/standard-library.mdx`, and the generated `reference/std/` pages).
 //!
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any
 //! definition a program or package makes of the same name comes first. Session startup moves them
-//! into the `ry` namespace beside the frame functions (`frame::attach_package`).
+//! into the `std` namespace and attaches it as `package:std` unless the prelude is off
+//! (`frame::attach_package`).
 //! Every function is written for ry's own values, so each accepts a record, tuple or tag.
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as
@@ -4771,7 +4773,7 @@ unsafe fn set_reserve(call: &Call<'_>) -> R<Sexp> {
     reserve_collection(call, object, spare)
 }
 
-/// The names the library binds, for the test that keeps them equal to `types/ry.Rtypes`.
+/// The names the library binds, for the test that keeps them equal to `types/std.Rtypes`.
 pub fn names() -> impl Iterator<Item = &'static str> {
     BUILTINS
         .iter()

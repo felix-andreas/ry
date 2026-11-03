@@ -2,6 +2,8 @@
 //! built-in classes, GNU R conformance, method errors, collection stress, and a property test
 //! comparing ALTREP views with ordinary vectors.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

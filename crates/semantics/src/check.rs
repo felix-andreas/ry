@@ -23,7 +23,7 @@ use {
             is_column_update, query_index_arguments,
         },
         sorted::{SortedMap, SortedSet},
-        stubs::{STANDARD_LIBRARY, StubLibrary, is_ry_type, lower_type_text, stubs},
+        stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
@@ -569,6 +569,12 @@ pub enum StrictOriginKind {
     /// A recursive definition that checked clean yet exports `Unknown`: the reference
     /// cycle is the only possible source.
     RecursiveUnknown(String),
+    /// A query naming `column` of a frame whose columns are unknown, so nothing checks it.
+    /// `frame` is the queried variable's name, when the frame is a plain variable.
+    UnknownColumns {
+        frame: Option<String>,
+        column: String,
+    },
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
     /// `expression` is the function and `range` the parameter's name.
     UntypedParameter(Symbol),
@@ -621,10 +627,6 @@ pub trait GlobalEnv<'db> {
     /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
     /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
     fn defines_dollar_method(&self) -> bool;
-
-    /// The shipped declaration alone, which a call reaches when R's function lookup skips a
-    /// project binding whose value is not a function.
-    fn stub_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
 }
 
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
@@ -2783,7 +2785,7 @@ impl<'db> Checker<'db, '_> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        globals.library_candidates(&name)?.last().cloned()
+                        self.library?.schemes.get(name.as_str())?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -3079,8 +3081,8 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         first_call_error: usize,
     ) {
-        // A library function accepts ry values, but only a bare name or `ry::` reaches it:
-        // `pkg::List.len` is the package's own function, whatever its name.
+        // A library function accepts ry values, but only a bare name, `std::` or `ry::` reaches
+        // it: `pkg::List.len` is the package's own function, whatever its name.
         let (function, may_be_library) = match self.module.kind(callee) {
             ExpressionKind::NameRef(name) => {
                 let deferred = self.naming.deferred_non_locals.contains(&callee);
@@ -3099,15 +3101,17 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => (
                 name.as_str(),
-                package.is_some_and(|package| package.as_str() == STANDARD_LIBRARY),
+                package.is_some_and(|package| NATIVE_NAMESPACES.contains(&package.as_str())),
             ),
             _ => return,
         };
         if accepts_native(function)
             || (may_be_library
-                && self
-                    .library
-                    .is_some_and(|library| library.exports(STANDARD_LIBRARY, function)))
+                && self.library.is_some_and(|library| {
+                    NATIVE_NAMESPACES
+                        .iter()
+                        .any(|namespace| library.exports(namespace, function))
+                }))
         {
             return;
         }
@@ -9557,22 +9561,19 @@ impl<'db> Checker<'db, '_> {
         let module = self.module;
         let subject = arguments.first()?.value?;
         if let DataFrameVerb::ReadCsv(kind) = verb {
-            let ty = self.fread_type(arguments);
-            return match ty.kind(db) {
-                TyKind::Frame(_, Some(columns)) => {
-                    Some(Ty::new(db, TyKind::Frame(kind, Some(columns.clone()))))
-                }
-                _ => None,
-            };
+            return self.read_csv_type(kind, arguments);
         }
         let subject_ty = *self.recorded.get(&subject)?;
-        let TyKind::Frame(subject_kind, Some(columns)) =
-            self.structural(subject_ty).kind(db).clone()
-        else {
-            return None;
+        let rest = &arguments[1..];
+        let (subject_kind, columns) = match self.structural(subject_ty).kind(db).clone() {
+            TyKind::Frame(kind, Some(columns)) => (kind, columns),
+            TyKind::Frame(_, None) => {
+                self.note_unchecked_columns(subject, rest);
+                return None;
+            }
+            _ => return None,
         };
         let frame = variable_name(module, subject);
-        let rest = &arguments[1..];
         let expressions = |checker: &mut Self, keep: &dyn Fn(&str) -> bool| {
             let mut computed = Vec::with_capacity(rest.len());
             let mut known = true;
@@ -9690,6 +9691,48 @@ impl<'db> Checker<'db, '_> {
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
         }
+    }
+
+    /// Strict mode reports a query that names columns of a frame whose columns are unknown,
+    /// because nothing checks those names and types. A chain is reported once, at its first
+    /// step that names a column.
+    fn note_unchecked_columns(&mut self, subject: ExprId, rest: &[Argument]) {
+        let module = self.module;
+        let Some(column) = first_named_column(module, rest) else {
+            return;
+        };
+        // Steps that name no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`,
+        // reported nothing, so the walk looks through them for an earlier step that did.
+        let mut inner = subject;
+        loop {
+            while let ExpressionKind::Paren(expression) = module.kind(inner) {
+                inner = *expression;
+            }
+            let ExpressionKind::Call { callee, arguments } = module.kind(inner) else {
+                break;
+            };
+            if self.dataframe_verb(*callee).is_none() {
+                break;
+            }
+            let Some((first, inner_rest)) = module[arguments].split_first() else {
+                break;
+            };
+            let Some(inner_subject) = first.value else {
+                break;
+            };
+            let Some(&ty) = self.recorded.get(&inner_subject) else {
+                break;
+            };
+            if !matches!(self.structural(ty).kind(self.db), TyKind::Frame(_, None)) {
+                break;
+            }
+            if first_named_column(module, inner_rest).is_some() {
+                return;
+            }
+            inner = inner_subject;
+        }
+        let frame = variable_name(module, subject).map(|name| name.to_string());
+        self.record_strict_origin(subject, StrictOriginKind::UnknownColumns { frame, column });
     }
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
@@ -10464,24 +10507,7 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let db = self.db;
-        let mut columns: Vec<(String, Ty<'db>)> = layout
-            .columns
-            .iter()
-            .map(|column| {
-                let atomic = match column.kind {
-                    sniff::ColumnType::Logical => Atomic::Logical,
-                    sniff::ColumnType::Integer => Atomic::Integer,
-                    sniff::ColumnType::Double => Atomic::Double,
-                    sniff::ColumnType::Character => Atomic::Character,
-                };
-                let ty = if factors && atomic == Atomic::Character {
-                    factor_type(db)
-                } else {
-                    Ty::new(db, TyKind::Vector(scalar(db, atomic)))
-                };
-                (column.name.clone(), ty)
-            })
-            .collect();
+        let mut columns = sniffed_columns(db, &layout, factors);
         if let Some(selected) = selected {
             let mut picked = Vec::with_capacity(selected.len());
             for name in selected {
@@ -10501,6 +10527,40 @@ impl<'db> Checker<'db, '_> {
             }
         }
         frame_of(db, FrameKind::DataTable, columns)
+    }
+
+    /// `DataFrame.read_csv("data/sales.csv")` and `LazyFrame.scan_csv(...)` type with the columns
+    /// the project's file has, sniffed as for `fread`; `DataFrame.read_csv`'s
+    /// `strings_as_factors = TRUE` reads its text columns as factors. A computed path, a file the project lacks, or a flag that is not a
+    /// literal keeps the declared result, a frame with unknown columns.
+    fn read_csv_type(&mut self, kind: FrameKind, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let module = self.module;
+        // `LazyFrame.scan_csv` takes only a path.
+        let formals: &[&str] = match kind {
+            FrameKind::LazyFrame => &["path"],
+            _ => &["path", "strings_as_factors"],
+        };
+        let matched = match_formals(module, arguments, formals);
+        let path = match module.kind(matched[0]?) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => decode_escapes(&module[text])?,
+            _ => return None,
+        };
+        let factors = match matched
+            .get(1)
+            .copied()
+            .flatten()
+            .map(|value| module.kind(value))
+        {
+            None => false,
+            Some(ExpressionKind::Literal(LiteralKind::Logical(flag))) => *flag,
+            Some(_) => return None,
+        };
+        let layout = self.data_file(&path)?;
+        Some(frame_of(
+            self.db,
+            kind,
+            sniffed_columns(self.db, &layout, factors),
+        ))
     }
 
     fn data_file(&self, path: &str) -> Option<sniff::Layout> {
@@ -11410,7 +11470,7 @@ impl<'db> Checker<'db, '_> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.globals?.library_candidates(&name)?;
+                    let schemes = self.library?.schemes.get(name.as_str())?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -12297,7 +12357,7 @@ impl<'db> Checker<'db, '_> {
                 package: Some(package),
                 name: Some(name),
                 ..
-            } if package.as_str() == STANDARD_LIBRARY => name.as_str(),
+            } if NATIVE_NAMESPACES.contains(&package.as_str()) => name.as_str(),
             _ => return,
         };
         if !MATCH_FUN_CALLERS.contains(&name) {
@@ -16524,7 +16584,7 @@ fn column_read(module: &Module, mut id: ExprId) -> Option<String> {
     let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
         return None;
     };
-    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if &**name == "col") {
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col") {
         return None;
     }
     let first = module[arguments].first()?.value?;
@@ -16711,6 +16771,75 @@ fn decode_escapes(text: &str) -> Option<String> {
         });
     }
     Some(decoded)
+}
+
+/// The first column a verb's arguments after the subject name, as a string or a column read.
+fn first_named_column(module: &Module, rest: &[Argument]) -> Option<String> {
+    for argument in rest {
+        let Some(value) = argument.value else {
+            continue;
+        };
+        if module
+            .argument_name(argument)
+            .as_deref()
+            .is_some_and(|name| matches!(name, "how" | "suffix" | "strategy" | "descending" | "n"))
+        {
+            continue;
+        }
+        let column = match module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::String(text)) => Some(module[text].to_string()),
+            _ => first_column_read(module, value),
+        };
+        if column.is_some() {
+            return column;
+        }
+    }
+    None
+}
+
+/// The first column an expression reads with `col("name")`, in source order.
+fn first_column_read(module: &Module, value: ExprId) -> Option<String> {
+    if let ExpressionKind::Call { callee, arguments } = module.kind(value)
+        && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col")
+        && let Some(first) = module[arguments].first().and_then(|first| first.value)
+        && let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(first)
+    {
+        return Some(module[text].to_string());
+    }
+    let mut found = None;
+    module.for_each_child(value, |child| {
+        if found.is_none() {
+            found = first_column_read(module, child);
+        }
+    });
+    found
+}
+
+/// A sniffed file's columns, each the vector type of its sniffed kind, and text as a factor when
+/// `factors` asks for it, as the readers do.
+fn sniffed_columns<'db>(
+    db: &'db dyn Db,
+    layout: &sniff::Layout,
+    factors: bool,
+) -> Vec<(String, Ty<'db>)> {
+    layout
+        .columns
+        .iter()
+        .map(|column| {
+            let atomic = match column.kind {
+                sniff::ColumnType::Logical => Atomic::Logical,
+                sniff::ColumnType::Integer => Atomic::Integer,
+                sniff::ColumnType::Double => Atomic::Double,
+                sniff::ColumnType::Character => Atomic::Character,
+            };
+            let ty = if factors && atomic == Atomic::Character {
+                factor_type(db)
+            } else {
+                Ty::new(db, TyKind::Vector(scalar(db, atomic)))
+            };
+            (column.name.clone(), ty)
+        })
+        .collect()
 }
 
 /// A frame from named columns, or a frame with unknown columns when two share a name.

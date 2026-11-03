@@ -1,5 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
+import { benchmarkRows } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -159,18 +160,12 @@ Str.join_with(loud, " ")`,
     },
 ];
 
-// Copied from the Speed table in why-ry.mdx, which `just bench-why` regenerates; keep the two in
-// sync. Sorted by speedup so the strongest real results lead, and the slowdown stays visible.
-const benchmarks = [
-    { program: "drawdown", gnuR: 0.314, ry: 0.024 },
-    { program: "loop_sum", gnuR: 0.265, ry: 0.042 },
-    { program: "closures", gnuR: 0.818, ry: 0.395 },
-    { program: "log_rank", gnuR: 0.101, ry: 0.073 },
-    { program: "vector_arith", gnuR: 0.176, ry: 0.14 },
-    { program: "vasicek", gnuR: 0.042, ry: 0.041 },
-    { program: "fib", gnuR: 0.08, ry: 0.094 },
-].map((row) => ({ ...row, speedup: row.gnuR / row.ry }));
-const benchmarkScale = Math.ceil(Math.max(...benchmarks.map((row) => row.speedup)));
+// Read from tools/bench/why/results.json, which `just bench-why --write` regenerates, sorted by
+// speedup so the strongest results lead. The speedups span two orders of magnitude, so a bar's
+// width is logarithmic, and the 1x tick sits at log(2) of the scale.
+const benchmarks = benchmarkRows().sort((a, b) => b.speedup - a.speedup);
+const benchmarkScale = Math.log(1 + Math.max(...benchmarks.map((row) => row.speedup)));
+const benchmarkWidth = (speedup: number) => Math.log(1 + speedup) / benchmarkScale;
 
 const migrationTabs: Sample[] = [
     {
@@ -389,7 +384,7 @@ ${checkerCode.replace('message("fee: " + fee)', 'message("fee: ", fee)')}`,
 
 1 problem in 1 file`,
         caption: "With that bug fixed, one `#:` comment finds the next. R reads it as a comment, so the file still runs on GNU R.",
-        link: { href: "/type-checking/annotations", label: "Annotations" },
+        link: { href: "/type-checking/overview#annotations", label: "Annotations" },
     },
 ];
 
@@ -658,7 +653,7 @@ const year = new Date().getFullYear();
                                     <div class="code" set:html={markChanged(highlightR(formatterSample.after), formatterSample.afterChanged)} />
                                 </div>
                             </div>
-                            <p class="stage-foot"><span></span><a href="/guides/formatting">Formatting guide</a></p>
+                            <p class="stage-foot"><span></span><a href="/guides/checking#formatting">Formatting guide</a></p>
                         </div>
                         <div class="lsp-panel" role="tabpanel" id="panel-lsp" aria-labelledby="tab-lsp" tabindex="0" hidden>
                         <div
@@ -803,7 +798,7 @@ const year = new Date().getFullYear();
                         <div class="stage-head">
                             <span class="ftabs"><span class="ftab is-active">benchmarks</span></span>
                         </div>
-                        <table class="bench-table" style={`--one: ${1 / benchmarkScale}`}>
+                        <table class="bench-table" style={`--one: ${benchmarkWidth(1)}`}>
                             <caption class="visually-hidden">Run time of each program on GNU R and on ry, untyped, and how many times faster ry is.</caption>
                             <thead>
                                 <tr>
@@ -820,7 +815,7 @@ const year = new Date().getFullYear();
                             <tbody>
                                 {
                                     benchmarks.map((row, index) => (
-                                        <tr class={row.speedup < 1 ? "is-slower" : undefined} style={`--x: ${row.speedup / benchmarkScale}; --k: ${index}`}>
+                                        <tr class={row.speedup < 1 ? "is-slower" : undefined} style={`--x: ${benchmarkWidth(row.speedup)}; --k: ${index}`}>
                                             <th scope="row">{row.program}</th>
                                             <td class="bench-axis" aria-hidden="true">
                                                 <span class="bench-bar" />
@@ -834,8 +829,8 @@ const year = new Date().getFullYear();
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Untyped code on ry and on GNU R 4.3.3 with its bytecode compiler, best of three runs.{" "}
-                            <a href="/why-ry#speed">Full table and method</a>
+                            Untyped code on ry and on GNU R 4.3.3 with its bytecode compiler, best of six runs, bars on a logarithmic scale.{" "}
+                            <a href="/benchmarks">Full table, programs and method</a>
                         </p>
                     </div>
                     </div>

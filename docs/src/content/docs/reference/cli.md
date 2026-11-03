@@ -166,8 +166,8 @@ and stops it at its ends instead. knitr and rmarkdown documents with plot chunks
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
-guide](/guides/console) describes what its completion knows. Started inside an R package, either
-console [loads it](/guides/loading-packages) and reloads what changed before each command, and
+guide](/guides/running) describes what its completion knows. Started inside an R package, either
+console [loads it](/guides/running) and reloads what changed before each command, and
 `--no-load` turns that off. `--keybindings` and `--no-load` apply
 only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
 checked under its own name before the console opens, and a strict-mode refusal exits 1.
@@ -181,7 +181,7 @@ and it keeps its `-f FILE`, which is `ry R -i FILE`.
 
 ## load and server
 
-`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
+`ry load` [loads the package](/guides/running) at `PATH` (default: the one containing the
 current directory) on ry's runtime, then runs each `-e EXPR` and the `-f FILE` script, and exits
 like `ry run`. `ry load --r-entry` prints the R code that gives a plain R session the same
 `load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in the scripts

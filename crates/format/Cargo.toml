@@ -2,7 +2,7 @@
 name = "format"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 repository.workspace = true
 publish = false
 

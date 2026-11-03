@@ -14,7 +14,7 @@ Usage: tools/bench/table/report.py <data-dir> [--rows 1e7] [--groupby-only | --j
 A limited run writes between its own markers, `bench-table:<rows>-groupby` or
 `bench-table:<rows>-joins`.
 """
-import argparse, json, math, os, pathlib, re, subprocess, sys, tempfile
+import argparse, json, math, os, pathlib, re, signal, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -69,28 +69,45 @@ def main():
         print(f"== {name}", file=sys.stderr, flush=True)
         stdout, errors, status, peak = run(command, env)
         sys.stderr.write(stdout)
-        if status != 0:
+        # An engine the kernel kills for running out of memory is a result at this size, so its
+        # column says so and the other engines still run; any other failure is a bug.
+        if status == -signal.SIGKILL:
+            results[name] = None
+        elif status != 0:
             sys.exit(f"{name} failed with status {status}:\n{errors}")
-        results[name] = parse(stdout)
+        else:
+            results[name] = parse(stdout)
         peaks[name] = peak
 
-    questions = list(results["data.table"])
+    finished = [answers for answers in results.values() if answers is not None]
+    if not finished:
+        sys.exit("every engine ran out of memory")
+    questions = list(finished[0])
     lines = ["| Question | " + " | ".join(results) + " |", "|---|" + "---|" * len(results)]
     totals = {name: 0.0 for name in results}
     mismatches = []
     for question in questions:
         cells = []
-        reference = results["data.table"][question][1]
+        reference_name, reference = next(
+            (name, answers[question][1]) for name, answers in results.items() if answers is not None
+        )
         for name, answers in results.items():
+            if answers is None:
+                cells.append("out of memory")
+                continue
             seconds, checksum = answers[question]
             totals[name] += seconds
             cells.append(f"{seconds:.3f}")
             agree = math.isclose(checksum, reference, rel_tol=1e-6, abs_tol=1e-6)
             if not (agree or math.isnan(checksum) and math.isnan(reference)):
-                mismatches.append(f"{question}: {name} gives {checksum:.6e}, data.table {reference:.6e}")
+                mismatches.append(f"{question}: {name} gives {checksum:.6e}, {reference_name} {reference:.6e}")
         lines.append(f"| {LABELS.get(question, question)} | " + " | ".join(cells) + " |")
-    lines.append("| total | " + " | ".join(f"{total:.2f}" for total in totals.values()) + " |")
-    lines.append("| peak memory (GB) | " + " | ".join(f"{peaks[name]:.1f}" for name in results) + " |")
+    lines.append("| total | " + " | ".join(
+        "out of memory" if results[name] is None else f"{total:.2f}" for name, total in totals.items()
+    ) + " |")
+    lines.append("| peak memory (GB) | " + " | ".join(
+        f"over {peaks[name]:.1f}" if results[name] is None else f"{peaks[name]:.1f}" for name in results
+    ) + " |")
     table = "\n".join(lines)
     print(table)
     if mismatches:

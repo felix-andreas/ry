@@ -118,7 +118,7 @@ miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unkn
 same way, with the closest column as the suggestion. In `NAMESPACE`, an
 `importFrom` of a name the package does not export and an `export` of a name you never define are
 errors, because R refuses to load such a package. Attaching a package ry knows nothing about turns
-off this check for bare names, as [stubs](/type-checking/stubs) explains, and that includes a near
+off this check for bare names, as [stubs](/type-checking/unknown#package-stubs) explains, and that includes a near
 miss of one of your own names, because the package may export it.
 
 **`unused`** (warning): an assignment nothing reads. In a package, top-level definitions are exempt,

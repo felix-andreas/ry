@@ -118,7 +118,9 @@ struct LoadedPackage {
 /// first time someone asks what changed, because a one-off load never asks.
 enum Watch {
     Unstarted,
-    Watching(SourceWatcher),
+    /// Boxed because a watcher is large (macOS's FSEvents watcher especially) and most loaded
+    /// packages are never watched.
+    Watching(Box<SourceWatcher>),
     /// The operating system refused (a watch limit, a file system without notifications), so
     /// changes are found by comparing fingerprints.
     Unavailable,
@@ -741,7 +743,9 @@ impl Loader {
                 Watch::Unstarted => {
                     // Edits made before the watch started are caught by the fingerprint below.
                     package.watch = SourceWatcher::new(&package.root)
-                        .map_or(Watch::Unavailable, Watch::Watching);
+                        .map_or(Watch::Unavailable, |watcher| {
+                            Watch::Watching(Box::new(watcher))
+                        });
                 }
                 Watch::Watching(watcher) => match watcher.take() {
                     Ok(edits) => {
@@ -781,7 +785,7 @@ impl Loader {
             .ok_or_else(|| WatchError::NotLoaded(root.to_path_buf()))?;
         if let Watch::Unstarted = package.watch {
             match SourceWatcher::new(root) {
-                Ok(watcher) => package.watch = Watch::Watching(watcher),
+                Ok(watcher) => package.watch = Watch::Watching(Box::new(watcher)),
                 Err(error) => {
                     package.watch = Watch::Unavailable;
                     return Err(WatchError::Notify(root.to_path_buf(), error.to_string()));

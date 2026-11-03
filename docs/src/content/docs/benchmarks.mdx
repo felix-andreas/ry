@@ -1,0 +1,48 @@
+---
+title: Benchmarks
+description: The same programs run untyped on GNU R, untyped on ry, and typed in strict mode on ry, with the code of each
+---
+
+import BenchmarkMachine from '../../components/BenchmarkMachine.astro';
+import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
+import BenchmarkTable from '../../components/BenchmarkTable.astro';
+
+Each program runs three ways: as plain R on GNU R, as the same plain R on ry's runtime, and with
+inline annotations checked in [strict mode](/type-checking/strict-mode) on ry's runtime. All three
+compute the same result:
+
+<BenchmarkTable />
+
+Code that spends its time in R itself gains the most. Recursion (`fib`) runs over 100 times faster,
+and loops over the elements of a vector, or carrying scalar state through one, run 4 to 7 times
+faster. Code that spends its time in vectorized builtins gains little, because GNU R already runs
+those in C: `vector_arith`, `vasicek` and `log_rank` are within a third of GNU R, and `log_rank`
+is slightly slower. The typed column stays within a few percent of the untyped one, so today types
+make code safer, not faster.
+
+Memory goes both ways. ry's process peaks higher than GNU R's in most programs, up to 1.8 times as
+high in `drawdown`, and the typed programs peak another 2 to 24 MiB higher, while
+`fib`, `log_rank` and `vasicek` peak lower on ry.
+
+## The programs
+
+Each program exists twice in `tools/bench/why/`: as plain R, and typed. Open one to compare the two
+versions; the tab you choose applies to every program.
+
+<BenchmarkPrograms />
+
+## How it was measured
+
+Each script times its own work with the harness above, so a time leaves out startup and, for the
+typed column, the static check. The harness runs the program once to warm up (GNU R compiles it to
+bytecode, and ry compiles hot code to machine code), then three more times, and keeps the fastest.
+`just bench-why --write` runs every program twice per engine, alternating the engines so they never
+share the CPU, and stores the fastest of those six runs in `tools/bench/why/results.json`, which
+every table on this site reads. The fastest run is reported rather than the median because other
+load on a machine only ever slows a run down.
+
+Peak memory is the peak resident set size (RSS) of the whole process, R's startup included, as the
+operating system reports it when the process exits. Each cell keeps the largest peak of that
+engine's runs, so no engine gets credit for a lucky run.
+
+<BenchmarkMachine />

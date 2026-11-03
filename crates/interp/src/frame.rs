@@ -71,59 +71,82 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("tail.DataFrame", -1, do_tail),
 ];
 
-/// A registered namespace in the shape `loadNamespace` builds, so `ry::setkey` and
-/// `asNamespace("ry")` work like they do for an installed package.
-const NAMESPACE: &str = r#"
-local({
+/// A registered namespace in the shape `loadNamespace` builds, so `ry::setkey`, `std::List.map`
+/// and `asNamespace("std")` work like they do for an installed package.
+fn namespace_source(name: &str, title: &str) -> String {
+    format!(
+        r#"
+local({{
   ns <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
   info <- new.env(hash = TRUE, parent = baseenv())
   assign(".__NAMESPACE__.", info, envir = ns)
-  info$spec <- c(name = "ry", version = "0.0.0")
+  info$spec <- c(name = "{name}", version = "0.0.0")
   # `packageDescription()`, which `sessionInfo()` calls for every loaded namespace, reads a
   # DESCRIPTION from the namespace's path. ry has no installed package directory, so the path
   # is a directory written on first use in the session's temporary directory.
-  makeActiveBinding("path", local({
+  makeActiveBinding("path", local({{
     path <- NULL
-    function() {
-      if (is.null(path)) {
-        path <<- file.path(tempdir(), "ry")
+    function() {{
+      if (is.null(path)) {{
+        path <<- file.path(tempdir(), "{name}")
         dir.create(path, showWarnings = FALSE)
-        writeLines(c("Package: ry", "Version: 0.0.0", "Title: The ry runtime", "License: UPL-1.0"),
+        writeLines(c("Package: {name}", "Version: 0.0.0", "Title: {title}", "License: GPL (>= 2)"),
                    file.path(path, "DESCRIPTION"))
-      }
+      }}
       path
-    }
-  }), info)
+    }}
+  }}), info)
   info$imports <- list(base = TRUE)
   info$dynlibs <- character()
   info$S3methods <- matrix(NA_character_, 0L, 4L)
   info$lazydata <- new.env(hash = TRUE, parent = baseenv())
-  .Internal(registerNamespace("ry", ns))
+  .Internal(registerNamespace("{name}", ns))
   ns
-})
-"#;
+}})
+"#
+    )
+}
 
-/// Exports every function of the namespace, the standard library's included, and attaches them
-/// as `package:ry` at position 2. The builtins bind the standard library in a `package:ry` just
-/// above base, which plain code without base R uses; once the default packages are attached, that
-/// environment is replaced by the full package in front of them, so `col` masks `base::col` and
-/// `ry::List.map` resolves through the namespace.
-const ATTACH: &str = r#"
-local({
+/// Moves the bootstrap builtins into their namespaces, the standard library's (`library_names`)
+/// into `std` and the rest into `ry`, exports every function of both, and attaches them at
+/// position 2: `package:ry` always, and `package:std` in front of it when `prelude` is on. The
+/// builtins bind everything in a `package:ry` just above base, which plain code without base R
+/// uses; once the default packages are attached, that environment is replaced by the packages in
+/// front of them, so `col` masks `base::col` and `std::List.map` resolves through the namespace.
+fn attach_source(library_names: &str, prelude: bool) -> String {
+    let prelude = if prelude { "TRUE" } else { "FALSE" };
+    format!(
+        r#"
+local({{
   ns <- asNamespace("ry")
+  std <- asNamespace("std")
   library <- as.environment("package:ry")
+  library_names <- {library_names}
   builtins <- ls(library, all.names = TRUE)
-  for (name in builtins) assign(name, get(name, envir = library), envir = ns)
+  for (name in builtins) {{
+    assign(name, get(name, envir = library), envir = if (name %in% library_names) std else ns)
+  }}
   detach("package:ry", character.only = TRUE)
-  functions <- union(ls(ns), builtins)
-  exports <- new.env(hash = TRUE, parent = baseenv())
-  for (name in functions) assign(name, name, envir = exports)
-  assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
-  env <- attach(NULL, pos = 2L, name = "package:ry")
-  for (name in functions) assign(name, get(name, envir = ns), envir = env)
+  attach_namespace <- function(ns, functions, name) {{
+    exports <- new.env(hash = TRUE, parent = baseenv())
+    for (f in functions) assign(f, f, envir = exports)
+    assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
+    env <- attach(NULL, pos = 2L, name = name)
+    for (f in functions) assign(f, get(f, envir = ns), envir = env)
+  }}
+  attach_namespace(ns, setdiff(union(ls(ns), builtins), library_names), "package:ry")
+  if ({prelude}) {{
+    attach_namespace(std, library_names, "package:std")
+  }} else {{
+    exports <- new.env(hash = TRUE, parent = baseenv())
+    for (f in library_names) assign(f, f, envir = exports)
+    assign("exports", exports, envir = std[[".__NAMESPACE__."]])
+  }}
   invisible(NULL)
-})
-"#;
+}})
+"#
+    )
+}
 
 /// The user-facing functions, attached as `package:ry` right after the default packages.
 const PACKAGE: &str = r#"
@@ -196,13 +219,27 @@ pub fn package_functions() -> impl Iterator<Item = &'static str> {
         .filter(|name| !name.starts_with(' '))
 }
 
-/// Attaches `package:ry` at position 2 of the search path.
+/// Registers the `ry` and `std` namespaces and attaches them at position 2 of the search path.
 pub unsafe fn attach_package() -> R<()> {
-    let namespace = crate::session::eval_text(NAMESPACE, values::global_env())?;
+    let namespace = crate::session::eval_text(
+        &namespace_source("ry", "The ry runtime"),
+        values::global_env(),
+    )?;
+    crate::session::eval_text(
+        &namespace_source("std", "The ry standard library"),
+        values::global_env(),
+    )?;
     crate::session::eval_text(PACKAGE, namespace)?;
     crate::session::eval_text(crate::dataframe::PACKAGE, namespace)?;
     crate::data_table::attach(namespace)?;
-    crate::session::eval_text(ATTACH, values::global_env())?;
+    let library_names = crate::standard_library::names()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    crate::session::eval_text(
+        &attach_source(&format!("c({library_names})"), crate::interp().prelude),
+        values::global_env(),
+    )?;
     crate::session::eval_text(METHODS, values::global_env())?;
     crate::session::eval_text(crate::dataframe::METHODS, values::global_env())?;
     Ok(())

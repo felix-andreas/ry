@@ -41,6 +41,9 @@ pub struct Run {
     pub wall: Duration,
     /// The suite's own time as the driver measured it, or `None` when the run never finished.
     pub suite_seconds: Option<f64>,
+    /// The elapsed time `gc.time()` counted during the suite, or `None` when the run never
+    /// finished.
+    pub gc_seconds: Option<f64>,
     pub exit: String,
     pub stderr_tail: String,
 }
@@ -82,6 +85,8 @@ pub struct Summary {
     pub ry_wall_seconds: f64,
     pub gnu_r_suite_seconds: Option<f64>,
     pub ry_suite_seconds: Option<f64>,
+    pub gnu_r_gc_seconds: Option<f64>,
+    pub ry_gc_seconds: Option<f64>,
     pub ry_exit: String,
     /// False for a GNU R-only run, whose report lists GNU R's own failures instead.
     pub ry_ran: bool,
@@ -237,6 +242,8 @@ pub fn compare_runs(package: &str, gnu_r: &Run, gnu_r_again: &Run, ry: Option<&R
         ry_wall_seconds: ry.map_or(0.0, |ry| ry.wall.as_secs_f64()),
         gnu_r_suite_seconds: gnu_r.suite_seconds,
         ry_suite_seconds: ry.and_then(|ry| ry.suite_seconds),
+        gnu_r_gc_seconds: gnu_r.gc_seconds,
+        ry_gc_seconds: ry.and_then(|ry| ry.gc_seconds),
         ry_exit: ry.map_or_else(String::new, |ry| match ry.suite_seconds {
             Some(_) => ry.exit.clone(),
             None => format!("{} before the suite finished: {}", ry.exit, ry.stderr_tail),
@@ -455,10 +462,9 @@ fn run_suite(
             Err(error) => eprintln!("{runtime}: unreadable report line ({error}): {line}"),
         }
     }
-    let suite_seconds = results
-        .iter()
-        .find(|result| result.test == "<total>")
-        .map(|result| result.seconds);
+    let total = results.iter().find(|result| result.test == "<total>");
+    let suite_seconds = total.map(|result| result.seconds);
+    let gc_seconds = total.and_then(|result| result.value.parse().ok());
     let stderr_text = read_output(&stderr_path, runtime);
     let stderr_tail = stderr_text
         .lines()
@@ -473,6 +479,7 @@ fn run_suite(
         results,
         wall,
         suite_seconds,
+        gc_seconds,
         exit,
         stderr_tail,
     })

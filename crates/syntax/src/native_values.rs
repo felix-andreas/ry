@@ -4,7 +4,7 @@
 use std::{collections::HashSet, sync::LazyLock};
 
 /// The R functions that accept a record, tuple, tag, dictionary or set as a top-level argument.
-/// The standard library's own functions are not listed: `types/ry.Rtypes` declares them for the
+/// The standard library's own functions are not listed: `types/std.Rtypes` declares them for the
 /// checker, and the runtime marks them with `BuiltinDef::accepting_native`. Every other builtin
 /// and internal refuses one with the runtime's boundary error before it runs, which is what keeps code
 /// written for R lists from silently misreading these values. The list holds the builtins that

@@ -5,6 +5,8 @@
 //! protection and `R_alloc` block was released. The other drives random API sequences under
 //! collection pressure and checks every stored object against a model. `FUZZ_ITERS` scales both.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

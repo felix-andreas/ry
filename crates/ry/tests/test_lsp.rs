@@ -1165,6 +1165,70 @@ async fn on_type_formatting_lays_out_the_line_just_finished() {
     context.shutdown().await;
 }
 
+/// Whatever Enter just opened up stays: on-type formatting may lay out the
+/// finished line, but whole-file formatting's blank-line rules (no trailing blank
+/// lines, at most one blank line in a row, none before a `}`) never apply to the
+/// line breaks around the cursor.
+#[tokio::test]
+async fn on_type_formatting_keeps_the_line_breaks_just_typed() {
+    let mut context = setup_test(&[]).await;
+    let cases = [
+        // Enter at the end of the last line, and again on the new last line.
+        ("x <- 1\n\n", Position::new(1, 0), "x <- 1\n\n"),
+        ("x <- 1\n\n", Position::new(2, 0), "x <- 1\n\n"),
+        ("x <- 1\n\n\n", Position::new(3, 0), "x <- 1\n\n\n"),
+        // The finished line is still laid out when blank lines follow it.
+        ("x<-1\n\n\n", Position::new(1, 0), "x <- 1\n\n\n"),
+        // Enter twice between two statements, for a blank line between them.
+        (
+            "x <- 1\n\ny <- 2\n",
+            Position::new(1, 0),
+            "x <- 1\n\ny <- 2\n",
+        ),
+        (
+            "x <- 1\n\n\ny <- 2\n",
+            Position::new(2, 0),
+            "x <- 1\n\n\ny <- 2\n",
+        ),
+        (
+            "x <- 1\n\n\n\ny <- 2\n",
+            Position::new(3, 0),
+            "x <- 1\n\n\n\ny <- 2\n",
+        ),
+        // Enter at the start of a statement that follows a blank line.
+        (
+            "x <- 1\n\n\ny <- 2\n",
+            Position::new(3, 0),
+            "x <- 1\n\n\ny <- 2\n",
+        ),
+        // Enter on a blank line before a `}`, with the editor's indentation.
+        (
+            "f <- function() {\n  x <- 1\n  \n  \n}\n",
+            Position::new(3, 2),
+            "f <- function() {\n  x <- 1\n  \n  \n}\n",
+        ),
+        (
+            "f <- function() {\n  x<-1\n  \n  \n}\n",
+            Position::new(2, 2),
+            "f <- function() {\n  x <- 1\n  \n  \n}\n",
+        ),
+    ];
+    for (index, (text, position, expected)) in cases.into_iter().enumerate() {
+        let uri = context.open(&format!("R/enter_{index}.R"), text);
+        context.recv_diagnostics(&uri).await;
+        let edits = context
+            .on_type_formatting(&uri, position, "\n")
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            apply_edits(text, &edits),
+            expected,
+            "Enter at {position:?} in {text:?}: {edits:?}"
+        );
+    }
+    context.shutdown().await;
+}
+
 #[tokio::test]
 async fn pull_diagnostics_report_known_diagnostics_and_unchanged_repeats() {
     let mut context = setup_with(&[], pull_capabilities(false)).await;
@@ -1298,7 +1362,7 @@ fn any_save_republishes_documents_that_an_edit_elsewhere_changed() {
                 Outgoing::PublishDiagnostics(params) if params.uri == analysis => Some(params),
                 _ => None,
             })
-            .last()
+            .next_back()
             .map(|params| {
                 messages(params)
                     .iter()

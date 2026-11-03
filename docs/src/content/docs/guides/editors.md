@@ -58,8 +58,8 @@ You get:
   columns a `DataFrame` query such as `sales[amount > 0, .(total = sum(amount))]` reads), which an
   R grammar cannot tell apart, with functions from packages and base R marked as library functions
 - formatting with the same rules as `ry fmt`, for the whole document, a selection, or as you type
-  (a line break lays out the line you finished, and `}` the block it closes, when your editor
-  formats on type)
+  (a line break lays out the line you finished but keeps the blank lines you type, and `}` lays
+  out the block it closes, when your editor formats on type)
 - code lenses: "Run file" above a script, "Run test" and "Debug test" above each testthat
   `test_that()` block, and a reference count above each function
 
@@ -111,7 +111,7 @@ Inlining adds parentheses only where R's precedence needs them: `fee * n` inline
 `total * (fee + n)`.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
-[DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
+[DataFrame](/guides/dataframes#types) columns, gets the same features as plain R.
 
 ## R Markdown and Quarto
 

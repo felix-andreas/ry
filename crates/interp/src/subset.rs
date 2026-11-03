@@ -4372,7 +4372,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 // even when the extent is zero.
                 let uneven = source_length > 0
                     && (if source_length > extent {
-                        has_matrix || source_length % extent != 0
+                        has_matrix || !source_length.is_multiple_of(extent)
                     } else {
                         extent % source_length != 0
                     });
@@ -4381,7 +4381,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     let direction = if by_row { "columns" } else { "rows" };
                     crate::conditions::warning_call(
                         closure_call,
-                        &format!(
+                        format!(
                             "number of {direction} of result is not a multiple of vector length (arg {position})"
                         ),
                     )?;

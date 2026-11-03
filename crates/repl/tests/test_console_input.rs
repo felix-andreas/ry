@@ -17,7 +17,8 @@ enum Key {
     /// A raw-mode Enter sends `\r`; a paste can carry `\r\n`.
     CarriageReturnLineFeed,
     Arrow(u8),
-    FunctionKey,
+    /// A function key such as F5, sent as an escape sequence.
+    Function,
     /// Alt plus a printable key: ESC and the key, both dropped.
     Alt(u8),
     /// An ESC on its own and then Enter (or Alt+Enter), which must still end the line.
@@ -226,7 +227,7 @@ fn random_key(rng: &mut SplitMix64) -> Key {
         5 => Key::Enter,
         6 => Key::CarriageReturnLineFeed,
         7 => Key::Arrow(b"ABCD"[rng.below(4)]),
-        8 => Key::FunctionKey,
+        8 => Key::Function,
         9 => Key::Alt(b"abf."[rng.below(4)]),
         10 => match rng.below(3) {
             0 => Key::EscapeEnter,
@@ -246,7 +247,7 @@ fn encode_keys(keys: &[Key]) -> Vec<u8> {
             Key::Enter => bytes.push(b'\r'),
             Key::CarriageReturnLineFeed => bytes.extend(b"\r\n"),
             Key::Arrow(letter) => bytes.extend([0x1b, b'[', *letter]),
-            Key::FunctionKey => bytes.extend(b"\x1b[15~"),
+            Key::Function => bytes.extend(b"\x1b[15~"),
             Key::Alt(letter) => bytes.extend([0x1b, *letter]),
             Key::EscapeEnter => bytes.extend([0x1b, b'\r']),
             Key::ControlC => bytes.push(0x03),
@@ -274,7 +275,7 @@ fn spell_keys(keys: &[Key]) -> Vec<Decoded> {
                 line.clear();
                 decoded.push(Decoded::Interrupt);
             }
-            Key::Arrow(_) | Key::FunctionKey | Key::Alt(_) | Key::Ignored(_) => {}
+            Key::Arrow(_) | Key::Function | Key::Alt(_) | Key::Ignored(_) => {}
         }
     }
     decoded.push(Decoded::Line(line));

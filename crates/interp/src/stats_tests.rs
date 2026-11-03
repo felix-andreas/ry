@@ -1,3 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/library/stats/src/swilk.c (swilk)
+//     Copyright (C) 2000-2016 The R Core Team
+//     Based on Applied Statistics algorithms AS181, R94
+//     (C) Royal Statistical Society 1982, 1995
+//
+// GNU R: src/library/stats/src/prho.c (prho)
+//     Copyright (C) 2000-2016 The R Core Team
+//     Copyright (C) 2003 The R Foundation
+//     based on AS 89 (C) 1975 Royal Statistical Society
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! The null distributions behind stats' classical tests: Shapiro and Wilk's W, Kolmogorov and
 //! Smirnov's statistics, the Ansari-Bradley, Kendall and Spearman rank statistics, and the
 //! exact conditional distribution of a stratified 2 x 2 table, and the random two-way tables

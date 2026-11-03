@@ -8,6 +8,8 @@
 //! Without a corpus the test reports that and passes. The full report goes to
 //! `target/tmp/corpus-binaries.tsv`.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

@@ -3,7 +3,7 @@ title: Package loading
 description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
 ---
 
-[`ry load`](/guides/loading-packages), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
+[`ry load`](/guides/running), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
 This page is the exact behavior.
 
 ## A load

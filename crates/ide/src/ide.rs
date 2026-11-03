@@ -21,8 +21,8 @@ use {
         naming::{BindingId, BindingKind, CopySource, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{
-            STANDARD_LIBRARY, StubSources, declaring_namespace, exporting_namespaces,
-            stub_declaration, stubs,
+            NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
+            outside_prelude, stub_declaration, stubs,
         },
         types::{
             Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
@@ -217,7 +217,7 @@ fn typed_hover(
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
     let hir = item_hir(db, position.item).as_ref()?;
-    if let Some(member) = member_at(db, hir, check, position.relative) {
+    if let Some(member) = member_at(db, file, hir, check, position.relative) {
         let mut renderer = TypeRenderer::default();
         let line = match &member.label {
             Some(name) => format!("{name}: {}", renderer.render(db, member.ty)),
@@ -345,8 +345,19 @@ fn typed_hover(
             )
         }
         ExpressionKind::Namespace {
-            name: Some(name), ..
-        } => (hover_lines(db, name, &TypeScheme::monomorphic(ty)), None),
+            package,
+            name: Some(name),
+            ..
+        } => {
+            // A name the package's stub declares is documented there, as a bare name is.
+            let declared = package
+                .as_ref()
+                .is_some_and(|package| declaring_namespace(db, name) == Some(package.as_str()));
+            (
+                hover_lines(db, name, &TypeScheme::monomorphic(ty)),
+                declared.then(|| stub_hover_definition(db, name)).flatten(),
+            )
+        }
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
@@ -371,6 +382,7 @@ struct Member<'db> {
 
 fn member_at<'db>(
     db: &'db dyn Db,
+    file: SourceFile,
     hir: &Module,
     check: &ItemCheck<'db>,
     relative: TextSize,
@@ -493,7 +505,7 @@ fn member_at<'db>(
             }
             ExpressionKind::Literal(LiteralKind::String(name)) => {
                 let name = &hir[name];
-                if let Some(columns) = dataframe_columns_for(db, hir, check, range)
+                if let Some(columns) = dataframe_columns_for(db, file, hir, check, range)
                     && let Some(column) = columns.iter().find(|column| column.name.text(db) == name)
                 {
                     return Some(Member {
@@ -654,7 +666,7 @@ fn hover_definition<'db>(
             CopySource::Slot(origin) => origin,
             CopySource::NonLocal(source) => {
                 return global_hover_definition(db, files, &source, None)
-                    .or_else(|| stub_hover_definition(db, &source));
+                    .or_else(|| bare_stub_hover_definition(db, &source));
             }
         };
         let info = naming.bindings.get(&binding)?;
@@ -673,7 +685,20 @@ fn hover_definition<'db>(
     if !naming.non_locals.contains_key(&expression) {
         return None;
     }
-    global_hover_definition(db, files, name, None).or_else(|| stub_hover_definition(db, name))
+    global_hover_definition(db, files, name, None).or_else(|| bare_stub_hover_definition(db, name))
+}
+
+/// A bare name reaches the standard library only through the prelude, so with the prelude off
+/// it has no stub declaration to show, matching the checker's unresolved-name report.
+fn bare_stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
+    if hidden_by_prelude(db, name) {
+        return None;
+    }
+    stub_hover_definition(db, name)
+}
+
+fn hidden_by_prelude(db: &dyn Db, name: &str) -> bool {
+    stubs(db).is_some_and(|library| outside_prelude(db, library, name))
 }
 
 fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
@@ -796,6 +821,9 @@ fn referenced_scheme<'db>(
 ) -> Option<TypeScheme<'db>> {
     if let Some(item) = declaring_item(db, files, name) {
         return Some(global_scheme(db, item));
+    }
+    if hidden_by_prelude(db, name) {
+        return None;
     }
     let candidates = stubs(db)?.schemes.get(name)?;
     let index = check
@@ -1850,7 +1878,10 @@ pub fn signature_help_with(
                 name
             }
         });
-        let schemes = name.and_then(|name| stubs(db)?.schemes.get(&name));
+        let bare = matches!(hir.kind(*callee), ExpressionKind::NameRef(_));
+        let schemes = name
+            .filter(|name| !(bare && hidden_by_prelude(db, name)))
+            .and_then(|name| stubs(db)?.schemes.get(&name));
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));
@@ -2498,7 +2529,10 @@ pub fn completion_with(
                     library
                         .schemes
                         .iter()
-                        .filter(|(name, _)| search_match(name, &query).is_some())
+                        .filter(|(name, _)| {
+                            search_match(name, &query).is_some()
+                                && !outside_prelude(db, library, name)
+                        })
                         .filter_map(|(name, schemes)| {
                             Some(CompletionItem {
                                 documentation: documentation(name),
@@ -2516,6 +2550,7 @@ pub fn completion_with(
                             !library.schemes.contains_key(*name)
                                 && is_syntactic_name(name)
                                 && search_match(name, &query).is_some()
+                                && !outside_prelude(db, library, name)
                         })
                         .map(|name| CompletionItem {
                             documentation: documentation(name),
@@ -2766,7 +2801,16 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         });
     }
     // Listed only where the cursor offers a rewrite, and only when it does more than that one.
-    if rewrites.len() > 1
+    let file_edits: Vec<TextEdit> = rewrites
+        .iter()
+        .filter_map(|rewrite| {
+            Some(TextEdit {
+                range: rewrite.range,
+                replacement: rewrite.replacement.clone()?,
+            })
+        })
+        .collect();
+    if file_edits.len() > 1
         && rewrites
             .iter()
             .any(|rewrite| ranges_overlap(rewrite.range, viewport))
@@ -2774,13 +2818,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         actions.push(CodeAction {
             title: "Rewrite all data.table code in the file as DataFrame code".to_owned(),
             kind: CodeActionKind::MigrateDataTableFile,
-            edits: rewrites
-                .into_iter()
-                .map(|rewrite| TextEdit {
-                    range: rewrite.range,
-                    replacement: rewrite.replacement,
-                })
-                .collect(),
+            edits: file_edits,
         });
     }
 
@@ -2849,7 +2887,7 @@ pub fn import_fixes(
         let packages: Vec<String> = match exporting.and_then(|exporting| exporting.get(name)) {
             Some(packages) => packages
                 .iter()
-                .filter(|package| package.as_str() != STANDARD_LIBRARY)
+                .filter(|package| !NATIVE_NAMESPACES.contains(&package.as_str()))
                 .take(IMPORT_CANDIDATES)
                 .cloned()
                 .collect(),
@@ -4848,7 +4886,7 @@ fn string_subscript_completion(
     {
         Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
         Some(_) => return None,
-        None => dataframe_columns_for(db, hir, check, string_range)?,
+        None => dataframe_columns_for(db, file, hir, check, string_range)?,
     };
 
     let typed = usize::from(offset - string_token.text_range().start());
@@ -4873,12 +4911,13 @@ fn string_subscript_completion(
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
 /// `DataFrame.select(sales, "price")`, or the name in `col("price")` inside one. The verb's first
 /// argument is the frame whose columns are in scope.
-fn dataframe_columns_for<'a, 'db>(
+fn dataframe_columns_for<'db>(
     db: &'db dyn Db,
+    file: SourceFile,
     hir: &Module,
-    check: &'a ItemCheck<'db>,
+    check: &ItemCheck<'db>,
     string_range: TextRange,
-) -> Option<&'a [RecordField<'db>]> {
+) -> Option<&'db [RecordField<'db>]> {
     let is_column_string = hir.expressions().any(|expression| match &expression.kind {
         ExpressionKind::Call { callee, arguments } => {
             let in_arguments = |arguments: &[Argument]| {
@@ -4917,7 +4956,9 @@ fn dataframe_columns_for<'a, 'db>(
             _ => None,
         })
         .min_by_key(|(length, _)| *length)?;
-    match check.expression_types.get(&subject)?.kind(db) {
+    // A frame typed by a named definition, such as a parameter of type `Sales`, has the
+    // columns of the definition's body.
+    match representation(db, file, *check.expression_types.get(&subject)?).kind(db) {
         TyKind::Frame(_, Some(columns)) => Some(columns.as_slice()),
         _ => None,
     }
@@ -6059,7 +6100,10 @@ fn namespace_completions(
                         .get(name)
                         .and_then(|schemes| schemes.first())
                     {
-                        Some(scheme) => scheme_completion(db, label, scheme),
+                        Some(scheme) => CompletionItem {
+                            documentation: library.documentation.get(name).cloned(),
+                            ..scheme_completion(db, label, scheme)
+                        },
                         None => CompletionItem::new(
                             label,
                             CompletionKind::Variable,
@@ -7358,7 +7402,7 @@ fn non_local_target<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Ta
     if global_declaration_exists(db, files, name) {
         return Target::Global(name.to_string());
     }
-    if stub_declaration(db, name).is_some() {
+    if stub_declaration(db, name).is_some() && !hidden_by_prelude(db, name) {
         return Target::StubGlobal(name.to_string());
     }
     Target::Package(PackageTarget {

@@ -41,6 +41,8 @@ pub mod dispatch;
 pub mod distributions;
 pub mod envir;
 pub mod eval;
+#[cfg(unix)]
+pub mod fork;
 pub mod format;
 pub mod frame;
 pub mod gnu_r_home;
@@ -58,8 +60,6 @@ mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
-// The fork routines exist only on Unix, as in GNU R, whose Windows build of parallel has none.
-#[cfg(unix)]
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
@@ -274,12 +274,16 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// Whether the standard library is attached as `package:std`, so its names resolve bare. A
+    /// host turns it off when the project sets `[check] prelude = false`, and then only
+    /// `std::List.map` reaches the library.
+    pub prelude: bool,
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
-    pub forks: parallel::Forks,
+    pub forks: fork::Forks,
 }
 
 struct InterpState {
@@ -388,9 +392,10 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
+        prelude: true,
         parked_unwind: None,
         #[cfg(unix)]
-        forks: parallel::Forks::default(),
+        forks: fork::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

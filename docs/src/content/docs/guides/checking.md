@@ -1,6 +1,6 @@
 ---
-title: Checking code
-description: What ry check reports in an existing R project without any configuration, and how to silence a finding
+title: Checking and formatting
+description: What ry check reports in an existing R project without any configuration, how to silence a finding, and what ry fmt does
 ---
 
 `ry check` finds the mistakes R would only show you when a line runs, without running anything and
@@ -54,7 +54,7 @@ Chunks in other languages are treated as prose.
 
 One gap matters from the start: after `library()` of a package ry knows nothing about, any bare name
 might be one of its exports, so ry stops reporting unresolved names in the whole project.
-[Package stubs](/type-checking/stubs) shows how to turn the check back on.
+[Package stubs](/type-checking/unknown#package-stubs) shows how to turn the check back on.
 
 Inside data-masking functions such as dplyr's `filter()` and `mutate()`, `data.table`'s `[`, and
 base `with()`, `subset()`, and `transform()`, a bare name refers to a column, so this code reports
@@ -178,9 +178,70 @@ linter silences the ry code that reports the same thing, such as `length-sequenc
 `seq_linter`, and a linter ry has no counterpart for silences nothing. A `.lintr` file's `linters` field carries
 over too, as [configuration](/reference/configuration#a-lintr-lintr-file) describes.
 
+## Formatting
+
+`ry fmt` gives every file in the project the same spacing, indentation and braces, so a review shows
+what changed instead of whose style it is. It formats files in place:
+
+```r
+x<-c(1,2,3)
+if(x>1){y<-2}
+for (i in 1:3) print(i)
+```
+
+```text
+$ ry fmt
+1 file reformatted, 0 files left unchanged
+```
+
+```r
+x <- c(1, 2, 3)
+if (x > 1) { y <- 2 }
+for (i in 1:3) {
+  print(i)
+}
+```
+
+Every loop body, and every `if` or function body that spans lines, gets braces, so a line added
+later cannot fall outside the block it belongs to.
+
+`ry fmt` never reflows code to a column limit, because a formatter that does rewrites lines you did
+not touch and buries your change in layout churn. Your line breaks decide the layout instead: a call
+written on one line stays on one line, and a call you broke across lines gets one argument per line:
+
+```r
+report <- summarise(sales, total = sum(amount), n = n())
+report <- summarise(sales,
+  total = sum(amount), n = n())
+```
+
+```r
+report <- summarise(sales, total = sum(amount), n = n())
+report <- summarise(
+  sales,
+  total = sum(amount),
+  n = n()
+)
+```
+
+`ry fmt --range 2-3 R/report.R` formats only those lines (a line `3`, or a span with columns
+`2:1-3:10`, works too). A statement is the smallest unit, so a range that reaches into a multi-line
+call reformats the whole call. Editors use the same operation for "Format Selection" and for
+format-on-type. The only settings are indent width and line endings, in
+[`ry.toml`](/reference/configuration), and [Formatting rules](/reference/formatting-rules) has every
+rule with examples.
+
 ## In CI
 
 `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file is not
-formatted, so a CI job needs only those two commands. Pin the ry version, because a newer release
-can report findings an older one did not. `ry check --output json` gives machine-readable output, as
-the [command reference](/reference/cli#json-output) describes.
+formatted, listing each one:
+
+```text
+$ ry fmt --check
+Would reformat: ./R/report.R
+1 file would be reformatted, 0 files already formatted
+```
+
+So a CI job needs only those two commands. Pin the ry version, because a newer release can report
+findings an older one did not. `ry check --output json` gives machine-readable output, as the
+[command reference](/reference/cli#json-output) describes.

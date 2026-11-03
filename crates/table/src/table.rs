@@ -11,6 +11,7 @@
 //! column (`libr::frame_altrep`), so there is one place that records whether a column is resident in R.
 
 pub mod convert;
+pub mod factor;
 pub mod ffi;
 mod group;
 pub mod io;
@@ -81,7 +82,7 @@ pub enum ColumnType {
     Double,
     /// `character[]`, `String`.
     Character,
-    /// `factor`, an Arrow dictionary (`Enum`) whose categories are the factor's levels in order.
+    /// `factor`, a column of level codes whose dtype carries the level table (see [`factor`]).
     Factor,
     /// `Date`, a Polars `Date`: whole days since 1970-01-01. R stores a date as a double, so a
     /// fractional day is floored when it enters a table.
@@ -95,8 +96,8 @@ impl ColumnType {
             DataType::Int32 => ColumnType::Integer,
             DataType::Float64 => ColumnType::Double,
             DataType::String => ColumnType::Character,
-            DataType::Enum(..) | DataType::Categorical(..) => ColumnType::Factor,
             DataType::Date => ColumnType::Date,
+            dtype if factor::is_factor(dtype) => ColumnType::Factor,
             _ => return None,
         })
     }
@@ -528,19 +529,17 @@ fn convert(column: Column) -> Result<Column> {
                 .collect();
             return Ok(cleaned.with_name(column.name().clone()).into_column());
         }
-        DataType::Boolean
-        | DataType::Float64
-        | DataType::String
-        | DataType::Enum(..)
-        | DataType::Date => {
+        DataType::Boolean | DataType::Float64 | DataType::String | DataType::Date => {
             return Ok(column);
         }
+        dtype if factor::is_factor(dtype) => return Ok(column),
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,
         DataType::Int64 | DataType::UInt32 | DataType::UInt64 | DataType::Float32 => {
             DataType::Float64
         }
-        DataType::Categorical(..) => {
-            return Ok(convert::string_to_factor(column.as_materialized_series())?.into_column());
+        // A Polars categorical, as a Parquet file may hold, becomes a factor over its labels.
+        DataType::Categorical(..) | DataType::Enum(..) => {
+            return Ok(factor::from_strings(column.as_materialized_series())?.into_column());
         }
         DataType::Null => {
             return Ok(

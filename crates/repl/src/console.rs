@@ -30,7 +30,7 @@ use {
         slice,
         sync::{
             Arc, Mutex, MutexGuard, PoisonError,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         },
         time::Duration,
     },
@@ -770,7 +770,7 @@ fn take_interrupt(ry_runtime: bool) -> bool {
 
 /// The SIGINT handler [`note_interrupt`] runs after its own store, as an address.
 #[cfg(unix)]
-static RUNTIME_SIGINT: AtomicUsize = AtomicUsize::new(0);
+static RUNTIME_SIGINT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
 fn chain_sigint() {
