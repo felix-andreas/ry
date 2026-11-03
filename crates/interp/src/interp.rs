@@ -274,6 +274,10 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// Whether the standard library is attached as `package:std`, so its names resolve bare. A
+    /// host turns it off when the project sets `[check] prelude = false`, and then only
+    /// `std::List.map` reaches the library.
+    pub prelude: bool,
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
@@ -388,6 +392,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         method_cache: dispatch::MethodCache::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
+        prelude: true,
         parked_unwind: None,
         #[cfg(unix)]
         forks: fork::Forks::default(),

@@ -115,6 +115,7 @@ export default defineConfig({
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
 						{ slug: 'reference/standard-library' },
+						{ slug: 'reference/std' },
 						{ slug: 'reference/type-system' },
 						{ slug: 'reference/package-loading' },
 						{ slug: 'reference/diagnostic-codes' },

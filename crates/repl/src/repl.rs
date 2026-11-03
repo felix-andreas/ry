@@ -182,8 +182,8 @@ pub fn set_package_check_on_ry_runtime(
 /// run, and any other value is the status the process exits with. It may block.
 pub type PackageVerdict = extern "C" fn() -> std::ffi::c_int;
 
-/// What ry's runtime does with inline type annotations; mirrors the `RUN_FLAG_*` bits of
-/// `libr::eval`.
+/// What ry's runtime does with inline type annotations and the standard library; mirrors the
+/// `RUN_FLAG_*` bits of `libr::eval`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeFlags {
     /// Inline annotations become checks at function boundaries.
@@ -192,6 +192,8 @@ pub struct RuntimeFlags {
     pub object_systems: bool,
     /// The project is in strict mode, so the package loader binds pure constants lazily.
     pub strict: bool,
+    /// The standard library's names resolve bare; off, only as `std::List.map`.
+    pub prelude: bool,
 }
 
 impl RuntimeFlags {
@@ -199,6 +201,7 @@ impl RuntimeFlags {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)
+            | (std::ffi::c_int::from(!self.prelude) << 5)
     }
 }
 

@@ -28,8 +28,9 @@ const R_PACKAGES: &[&str] = &[
     "tcltk",
 ];
 
-/// The standard library loads last, and like R's packages it is always present.
-const STANDARD_LIBRARY: &str = "ry";
+/// ry's runtime package and its standard library load last, in this order, and like R's packages
+/// they are always present.
+const NATIVE_NAMESPACES: &[&str] = &["ry", "std"];
 
 fn main() -> Result<(), Error> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(env_error)?);
@@ -59,7 +60,9 @@ fn main() -> Result<(), Error> {
         .iter()
         .chain(&manifests)
         .map(|(namespace, _)| namespace.as_str())
-        .filter(|namespace| *namespace != STANDARD_LIBRARY && !R_PACKAGES.contains(namespace))
+        .filter(|namespace| {
+            !NATIVE_NAMESPACES.contains(namespace) && !R_PACKAGES.contains(namespace)
+        })
         .collect();
     conditional.sort_unstable();
     conditional.dedup();
@@ -77,10 +80,14 @@ fn main() -> Result<(), Error> {
 }
 
 fn load_rank(namespace: &str) -> (usize, String) {
-    let position = R_PACKAGES.iter().position(|package| *package == namespace);
-    match position {
-        Some(position) => (position, String::new()),
-        None if namespace == STANDARD_LIBRARY => (R_PACKAGES.len() + 1, String::new()),
+    if let Some(position) = R_PACKAGES.iter().position(|package| *package == namespace) {
+        return (position, String::new());
+    }
+    match NATIVE_NAMESPACES
+        .iter()
+        .position(|native| *native == namespace)
+    {
+        Some(position) => (R_PACKAGES.len() + 1 + position, String::new()),
         None => (R_PACKAGES.len(), namespace.to_owned()),
     }
 }

@@ -12,6 +12,7 @@ typing = false           # report type errors
 strict = false           # report unknown types and untyped parameters; implies typing
 inline-annotations = true  # type inline annotations such as `x: integer <- 1L`
 object-systems = true    # allow S4, R6 and Reference Classes; false makes each definition an error
+prelude = true           # put the standard library in scope by bare name; false requires `std::`
 unused = true            # report values that are never read
 maybe-undefined = false  # report reads some path reaches before a write
 exclude = []             # gitignore-style patterns that ry check skips
@@ -153,6 +154,28 @@ function defined there. Code inside a package, installed or loaded with `ry load
 classes, so packages such as `stats4` keep loading. The runtime recognizes the call by name
 (`setClass(...)` or `methods::setClass(...)`), so a renamed alias such as `f <- setClass` is not
 caught. GNU R (`ry R`) does not enforce the setting.
+
+## `prelude`
+
+ry's [standard library](/reference/std/) lives in the namespace `std`. The prelude, on by default,
+also puts every function in scope by its bare name, so `List.map` and `std::List.map` are the same
+function. A project that wants every use of the library spelled out sets `prelude = false`, and a
+bare name is then unbound unless the project defines it itself:
+
+```text
+unresolved
+
+  ! `List.map` is in ry's standard library, which `[check] prelude = false` keeps out of scope. Write `std::List.map`.
+   --[a.R:1:6]
+ 1 | x <- List.map(list(1L, 2L), function(v) v + 1L)
+   |      ^^^^^^^^
+  help: Change to `std::List.map` (`ry check --fix --unsafe-fixes` applies it)
+```
+
+The types `Result`, `Dict`, `Set` and `Array` stay in scope either way. `ry run` and its console
+follow the setting too: with the prelude off, ry's runtime does not attach `package:std`, so a bare
+`List.map` fails there as well, while `std::List.map` works. GNU R (`ry R`) has no standard library
+at all.
 
 ## `exclude`
 

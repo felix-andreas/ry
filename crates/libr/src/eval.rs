@@ -1502,17 +1502,24 @@ pub const RUN_FLAG_SITE_PROFILE: c_int = 1 << 3;
 /// `--no-init-file`.
 pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 4;
 
+/// Set when the project turns the prelude off, so the standard library is reachable only as
+/// `std::List.map`. Unlike the other switches it is set for the non-default, so `R CMD` and
+/// every host that predates the setting keep the library in scope.
+pub const RUN_FLAG_NO_PRELUDE: c_int = 1 << 5;
+
 /// Every flag `ry_run` and `ry_repl` understand.
 pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_OBJECT_SYSTEMS
     | RUN_FLAG_STRICT
     | RUN_FLAG_SITE_PROFILE
-    | RUN_FLAG_USER_PROFILE;
+    | RUN_FLAG_USER_PROFILE
+    | RUN_FLAG_NO_PRELUDE;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
     loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 

@@ -141,6 +141,11 @@ repl-e2e:
 docs:
     cd docs && bun dev
 
+# Regenerate the standard library's API pages (docs/.../reference/std/) from types/std.Rtypes.
+# The same test, run without RY_BLESS, fails when the committed pages are stale.
+docs-std:
+    RY_BLESS=1 cargo test -p semantics --test test_std_docs
+
 # Build the docs site from this checkout and upload it to Cloudflare Pages as BRANCH: `main` is the
 # production deploy (while main is the Pages project's production branch), any other name a preview.
 # Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_PAGES_PROJECT.
