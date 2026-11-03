@@ -724,6 +724,11 @@ fn edge_cases_gnu_r_accepts() {
         r.strings(late),
         vec![Some("c".to_owned()), Some("d".to_owned())]
     );
+    let dim_names = r.call("rytest_named_dim", &[]).expect("a named dim");
+    assert_eq!(
+        r.strings(dim_names),
+        vec![Some("x".to_owned()), Some("y".to_owned())]
+    );
 
     let message = r.string("inner");
     let inner = r.call_expression(
