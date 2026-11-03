@@ -1791,7 +1791,7 @@ Bool.is_eq : <T> fn(first: T, second: T) -> logical
 Bool.is_not_eq : <T> fn(first: T, second: T) -> logical
 
 #' A dictionary maps keys to values, typed `Dict<K, V>`. See [Dictionaries and
-#' sets](#dictionaries-and-sets) for the rules on keys.
+#' sets](/reference/standard-library/#dictionaries-and-sets) for the rules on keys.
 # Dict
 
 #' A dictionary with no entries.
