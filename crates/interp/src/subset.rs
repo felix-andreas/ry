@@ -340,11 +340,17 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     }
 }
 
-/// The elements negative subscripts keep, as one flag per element: `excluded` is each subscript
-/// negated. `None` unless every subscript is negative or zero and at least one is negative, the
-/// only case the mask covers; NA, a positive subscript or all zeros take the general rules.
-fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<bool>> {
-    let mut keep = vec![true; extent];
+/// The elements negative subscripts keep, as a bitset with one bit per element (set when kept):
+/// `excluded` is each subscript negated. `None` unless every subscript is negative or zero and at
+/// least one is negative, the only case the mask covers; NA, a positive subscript or all zeros
+/// take the general rules.
+fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<u64>> {
+    let mut keep = vec![u64::MAX; extent.div_ceil(64)];
+    if let Some(last) = keep.last_mut()
+        && extent % 64 != 0
+    {
+        *last = (1 << (extent % 64)) - 1;
+    }
     let mut any_negative = false;
     for value in excluded {
         // A subscript between -1 and 1 truncates to zero, which selects nothing.
@@ -355,20 +361,29 @@ fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<bo
         if position >= 1.0 {
             any_negative = true;
             if position <= extent as f64 {
-                keep[position as usize - 1] = false;
+                let index = position as usize - 1;
+                if let Some(word) = keep.get_mut(index / 64) {
+                    *word &= !(1 << (index % 64));
+                }
             }
         }
     }
     any_negative.then_some(keep)
 }
 
-/// The elements of `object` whose flag in `keep` is set, streamed without a position list.
-unsafe fn gather_kept(object: Sexp, keep: &[bool]) -> R<Sexp> {
-    let kept = keep.iter().filter(|&&flag| flag).count();
-    let positions = keep
-        .iter()
-        .enumerate()
-        .filter_map(|(position, &flag)| flag.then_some(position));
+/// The elements of `object` whose bit in `keep` is set, streamed without a position list.
+unsafe fn gather_kept(object: Sexp, keep: &[u64]) -> R<Sexp> {
+    let kept = keep.iter().map(|word| word.count_ones() as usize).sum();
+    let positions = keep.iter().enumerate().flat_map(|(index, &word)| {
+        let mut remaining = word;
+        std::iter::from_fn(move || {
+            (remaining != 0).then(|| {
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                index * 64 + bit
+            })
+        })
+    });
     gather_kind(object, positions, kept)
 }
 

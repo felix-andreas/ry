@@ -30,7 +30,7 @@ pub mod strings;
 use {
     crate::{
         env::Frame,
-        large::{MAPPED_BYTES, MappedCache, cache_limit},
+        large::{MAPPED_BYTES, MappedPool, pool_limit},
         object::{
             EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
             TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
@@ -70,7 +70,7 @@ pub struct Heap {
     allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
     /// Freed mappings of large vectors kept for the next one.
-    mapped: MappedCache,
+    mapped: MappedPool,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
@@ -525,7 +525,7 @@ impl Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
-            mapped: MappedCache::new(),
+            mapped: MappedPool::new(),
             young_large: Vec::new(),
             remembered: Vec::new(),
             escaped: Vec::new(),
@@ -2113,7 +2113,7 @@ impl Heap {
                     needed,
                     policy.min_heap_limit,
                 );
-                self.mapped.limit = cache_limit(policy.heap_limit);
+                self.mapped.limit = pool_limit(policy.heap_limit);
                 self.mapped.trim();
             }
         }
