@@ -241,7 +241,7 @@ the same way `base::paste` reaches base R. By default the prelude also puts ever
 by its bare name, which is why the examples on these pages write `List.map`. Setting
 `prelude = false` under `[check]` in `ry.toml` turns that off: a bare `List.map` is then an unbound
 name, and only `std::List.map` works. A project that defines its own `List.map` keeps it either
-way. The types `Result`, `Dict`, `Set` and `Array` stay in scope, because they are part of the type
+way. The types `Result`, `Dict`, `Set` and `List` stay in scope, because they are part of the type
 syntax rather than the namespace.
 
 ```r ry run runtime=ry dput prelude=false

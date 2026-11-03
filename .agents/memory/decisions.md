@@ -7288,3 +7288,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** orders 0.50 s (GNU R) / 0.44 s (untyped ry) / 0.034 s (typed), expr_tree 0.33 / 0.34
   / 0.008 s, checksums equal. `fuzz_typed_record_natives_agree_with_tier_zero` in
   `crates/jit/tests/test_tiers.rs` pins agreement across JIT modes.
+
+## Typed ry has its own numbers, `Bool`, `Str` and `List`
+
+- **Before:** typed ry borrowed R's `integer`, `double`, `logical` and `character`, which carry `NA` and recycle, and `Array<T>` was a strict R vector. Typed programs could not be written without R data types.
+- **Shape:** Roc's thirteen number types (`I8`..`U128`, `F32`, `F64`, `Dec`), `Bool`, `Str` and `List<T>` (which replaces `Array<T>`), all `NA`-free. The design is `contributing/design/native-types.md`; the contract is the reference section "Numbers, `Bool` and `Str`".
+- **Representation:** `F64`, `Bool` and `Str` reuse R's `double`, `logical` and `character` storage, so they cross into R for free. Every other number type is a boxed heap record (`numbers::alloc`, `Fields::Number`), and a list of them is a list of ry values. `I32` is boxed too, because R reserves one 32-bit pattern for `NA` and overflows to `NA`.
+- **Two `NumberType` enums** exist on purpose: the checker's `NativeScalar` (salsa-interned, in `semantics`) and the runtime's `interp::numbers::NumberType` (bit-level arithmetic), because the runtime builds without the analysis crates.
+- **Literals:** a suffix names the type (`5i64`), and a `-` written directly before a literal is part of it. An unsuffixed literal keeps R's type unless an expected type, the other operand, or a later use decides it. At run time it stays the R value, and the operator (`numbers::operands`) or the annotated binding (`lower::with_annotated_literals`, which rewrites `n: I64 <- 5` and `List<N>` literal items) converts it. A literal branch adapts to the sibling branch's ry type (`adapt_literal_branch`), and a match arm or `if` arm in a function's tail adapts to the declared result.
+- **`/` decides `F64`** for undecided items and is a `type-mismatch` on integer types, as Roc gives `/` a `Frac`.
+- **Lengths, counts and positions are `I64`** (`standard_library::whole_number`), as in Roc.
+- **List operators work item by item** on lists of ry values too (`arith::item_by_item`), never recycling.
+- **`try f(x)`** is the `Ok` value or an early return of the `Err`; `try (expr)` keeps R's `try()`.
+- **No row variables.** An open tag union cannot pass its unlisted tags through with their types; this stays until a real program needs it (user direction to drop them from the design).
+- **Impact:** typed programs are written in ry types only (`tools/bench/why/typed/`). The cost is speed: the JIT has no register type for boxed native numbers, so typed `I64` code runs on boxes (`backlog.md`).

@@ -895,13 +895,19 @@ pub enum Op {
 unsafe fn strict(
     call: &Call<'_>,
     class: OperatorClass,
-    compute: impl FnOnce(&Call<'_>) -> R<Sexp>,
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
 ) -> R<Sexp> {
     if !call.args.iter().any(|arg| arg.value.is_array()) {
         return compute(call);
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
+    if operands
+        .iter()
+        .any(|&value| value.is_array() && arrays::items(value) == arrays::Items::RyValues)
+    {
+        return item_by_item(call, &operands, compute);
+    }
     if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
         return arrays::finish_result(call.call, name, result);
@@ -915,6 +921,59 @@ unsafe fn strict(
         return Ok(copy);
     }
     Ok(result)
+}
+
+/// An operator on a list of ry values, such as native numbers, applied to each pair of items
+/// in turn. R's operator knows nothing of ry values, so the scalar operator runs once per item and
+/// the results form a new list. Two lists must have one length, because a list is never recycled,
+/// and an operand that is not a list stands beside every item.
+unsafe fn item_by_item(
+    call: &Call<'_>,
+    operands: &[Sexp],
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    let name = call.name();
+    let lengths: Vec<usize> = operands
+        .iter()
+        .filter(|value| value.is_array())
+        .map(|&value| length(value))
+        .collect();
+    let count = lengths.first().copied().unwrap_or(0);
+    if let [left, right] = lengths[..]
+        && left != right
+    {
+        return Err(call.error(format!(
+            "`{name}` needs lists of the same length, but they have {left} and {right} items; a list is never recycled"
+        )));
+    }
+    let mut results = Vec::with_capacity(count);
+    for position in 0..count {
+        let mut args = Vec::with_capacity(call.args.len());
+        for arg in call.args {
+            let value = if arg.value.is_array() {
+                let item = arrays::item(arg.value, position)?;
+                crate::heap().root(item);
+                item
+            } else {
+                arg.value
+            };
+            args.push(Arg {
+                tag: arg.tag,
+                value,
+            });
+        }
+        let item_call = Call {
+            call: call.call,
+            op: call.op,
+            args: &args,
+            env: call.env,
+            reusable: None,
+        };
+        let result = compute(&item_call)?;
+        crate::heap().root(result);
+        results.push(result);
+    }
+    arrays::from_items(&results)?.map_err(|message| call.error(message))
 }
 
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {

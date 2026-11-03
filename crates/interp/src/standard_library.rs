@@ -2013,6 +2013,42 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
 
 /// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
 /// double, starting at `start`.
+/// The items of a list of native numbers, all of one type, read without converting them; `None`
+/// for any other list, including an empty one, which the R-number path handles.
+unsafe fn native_numbers(call: &Call<'_>) -> R<Option<Vec<numbers::Number>>> {
+    let [list] = arguments(call, ["list"])?;
+    if list.kind() != SexpType::List || length(list) == 0 {
+        return Ok(None);
+    }
+    let items = list_elements(call, "list", list)?;
+    let Some(first) = items.first().and_then(|&item| numbers::read(item)) else {
+        return Ok(None);
+    };
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        match numbers::read(item) {
+            Some(number) if number.ty == first.ty => result.push(number),
+            _ => {
+                return Err(call.error(format!(
+                    "`list` must hold numbers of one type, all {}",
+                    first.ty.name()
+                )));
+            }
+        }
+    }
+    Ok(Some(result))
+}
+
+/// A sum or product of native numbers in their own type, where overflow is an error.
+unsafe fn fold_native(call: &Call<'_>, op: Op, items: &[numbers::Number]) -> R<Sexp> {
+    let name = call.name();
+    let mut total = items[0];
+    for &item in &items[1..] {
+        total = numbers::binary(name, op, total, item).map_err(|message| call.error(message))?;
+    }
+    numbers::alloc(total)
+}
+
 unsafe fn fold_numbers(
     call: &Call<'_>,
     start: i32,
@@ -2052,12 +2088,18 @@ unsafe fn fold_numbers(
 // R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
 // with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
+    if let Some(items) = native_numbers(call)? {
+        return fold_native(call, Op::Add, &items);
+    }
     fold_numbers(call, 0, i32::checked_add, |start, items| {
         long_double::add_all(LongDouble::from(start), items).to_f64()
     })
 }
 
 unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
+    if let Some(items) = native_numbers(call)? {
+        return fold_native(call, Op::Multiply, &items);
+    }
     fold_numbers(call, 1, i32::checked_mul, |start, items| {
         items.iter().fold(start, |total, &item| total * item)
     })
@@ -2079,6 +2121,15 @@ unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
             }
         });
         return ok(scalar_real(best)?);
+    }
+    if let Some(items) = native_numbers(call)? {
+        let mut best = items[0];
+        for &item in &items[1..] {
+            if numbers::order(item, best) == Some(wanted) {
+                best = item;
+            }
+        }
+        return ok(numbers::alloc(best)?);
     }
     let numbers = list_numbers(call)?;
     let Some(mut best) = numbers.first().copied() else {
@@ -2131,6 +2182,19 @@ unsafe fn list_ends_with(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn sort_numbers(call: &Call<'_>, descending: bool) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
+    if let Some(mut items) = native_numbers(call)? {
+        // An `F32` `NaN` is unordered, and a stable sort leaves it where the order puts it.
+        items.sort_by(|left, right| {
+            let order = numbers::order(*left, *right).unwrap_or(Ordering::Equal);
+            if descending { order.reverse() } else { order }
+        });
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            let value = numbers::alloc(item)?;
+            values.push(value);
+        }
+        return sequence(call, list, &values);
+    }
     let mut numbers = list_numbers(call)?;
     // `number` refuses `NaN`, so the comparison is total.
     numbers.sort_by(|left, right| {

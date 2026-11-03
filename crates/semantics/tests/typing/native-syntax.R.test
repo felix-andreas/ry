@@ -146,3 +146,32 @@ area <- function(shape: :Circle(F64) | :Square(F64)) {
 }
 #++++
 area: fn(shape: :Circle(F64) | :Square(F64)) -> :Circle(F64) | :Square(F64)
+
+#==== native_list_operators
+#---- a_list_beside_a_scalar_applies_the_operator_to_each_item
+times <- [3i64, 1i64, 2i64]
+after <- times >= 2i64
+shifted <- times + 1
+#++++
+times: List<I64>
+after: List<Bool>
+shifted: List<I64>
+
+#---- a_list_and_a_scalar_of_another_number_type_do_not_mix
+xs <- [1.5, 2]
+ys <- xs * 2i64
+#++++
+xs: List<F64>
+ys: Unknown
+21..30 error[type-mismatch] `*` is not defined between `List<F64>` and `I64`. Both sides must have one item type, and number types are never converted into each other
+
+#==== declared_result_literals
+#---- match_arm_literals_take_the_declared_result_type
+rate <- function(region: :North | :South) -> F64 {
+  match (region) {
+    :North => 0.2
+    :South => 0.1
+  }
+}
+#++++
+rate: fn(region: :North | :South) -> F64

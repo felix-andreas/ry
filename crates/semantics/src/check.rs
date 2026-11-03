@@ -7377,6 +7377,10 @@ impl<'db> Checker<'db, '_> {
                 (None, Some(class)) => (class, right, lhs, left),
                 (None, None) => return None,
             };
+        // A `List` beside a scalar applies the operator to each item, a list operator's rule.
+        if array_element(self.db, other_ty).is_some() {
+            return None;
+        }
         let spelling = match operator {
             And => "&",
             Or => "|",
@@ -9617,6 +9621,11 @@ impl<'db> Checker<'db, '_> {
                 let (then_branch, else_branch) = (*then_branch, *else_branch);
                 self.collect_tail_expressions(then_branch, into);
                 self.collect_tail_expressions(else_branch, into);
+            }
+            ExpressionKind::Match { arms, .. } if !self.module[arms].is_empty() => {
+                for arm in &self.module[arms] {
+                    self.collect_tail_expressions(arm.body, into);
+                }
             }
             _ => into.push(id),
         }

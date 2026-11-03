@@ -1290,7 +1290,14 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         let symbol = install(operator.text())?;
         return values::call(symbol, &[left_value]);
     };
-    let right_value = lower(right, source)?;
+    let mut right_value = lower(right, source)?;
+    if matches!(
+        operator.kind(),
+        SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ
+    ) && let Some(ascription) = child_of_kind(node, SyntaxKind::TYPE_ASCRIPTION)
+    {
+        right_value = with_annotated_literals(&ascription, right, right_value)?;
+    }
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
@@ -1301,6 +1308,94 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             let symbol = install(operator.text())?;
             values::call(symbol, &[left_value, right_value])
         }
+    }
+}
+
+/// An unsuffixed number literal bound to a name annotated with a ry number type, as in
+/// `n: I64 <- 5`, is that number, because the checker types the binding so and the literal has no
+/// operand to convert it later; so are the items of a list literal bound to a `List` of one, as in
+/// `xs: List<U8> <- [1, 2]`. Any other value runs unchanged, as bindings are not checked.
+unsafe fn with_annotated_literals(
+    ascription: &SyntaxNode,
+    node: &SyntaxNode,
+    value: Sexp,
+) -> R<Sexp> {
+    let Some(annotation) = ascription.children().next() else {
+        return Ok(value);
+    };
+    match annotation.kind() {
+        SyntaxKind::TYPE_REF => match (native_number_named(&annotation), number_literal_text(node))
+        {
+            (Some(ty), Some(text)) => crate::numbers::from_text(ty, &text),
+            _ => Ok(value),
+        },
+        SyntaxKind::TYPE_APPLY if node.kind() == SyntaxKind::ARRAY_EXPR => {
+            let is_list = child_of_kind(&annotation, SyntaxKind::NAME)
+                .is_some_and(|name| name.text() == "List");
+            let item = child_of_kind(&annotation, SyntaxKind::TYPE_ARG_LIST)
+                .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::TYPE_REF))
+                .and_then(|item| native_number_named(&item));
+            let (true, Some(ty)) = (is_list, item) else {
+                return Ok(value);
+            };
+            let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) else {
+                return Ok(value);
+            };
+            // The lowered call holds one cell per argument, after its head.
+            let mut cell = value.cdr();
+            for argument in arguments
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+            {
+                if cell == nil() {
+                    break;
+                }
+                let text = match expression_children(&argument).as_slice() {
+                    [item] => number_literal_text(item),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    crate::heap().set_car(cell, crate::numbers::from_text(ty, &text)?);
+                }
+                cell = cell.cdr();
+            }
+            Ok(value)
+        }
+        _ => Ok(value),
+    }
+}
+
+/// The ry number type a type reference such as `I64` names, other than `F64`, which is R's
+/// `double` at run time.
+fn native_number_named(annotation: &SyntaxNode) -> Option<crate::numbers::NumberType> {
+    let name = annotation.text().to_string();
+    crate::numbers::NumberType::ALL
+        .into_iter()
+        .find(|ty| ty.name() == name.trim())
+}
+
+/// The text of an unsuffixed integer or double literal, with its sign when a `-` is written
+/// directly before it, and without an `L` suffix.
+fn number_literal_text(node: &SyntaxNode) -> Option<String> {
+    match node.kind() {
+        SyntaxKind::LITERAL => {
+            let token = significant_tokens(node).into_iter().next()?;
+            match token.kind() {
+                SyntaxKind::INTEGER => Some(token.text().trim_end_matches('L').to_owned()),
+                SyntaxKind::DOUBLE => Some(token.text().to_owned()),
+                _ => None,
+            }
+        }
+        SyntaxKind::UNARY_EXPR => {
+            let operator = significant_tokens(node).into_iter().next()?;
+            match (operator.kind(), expression_children(node).as_slice()) {
+                (SyntaxKind::MINUS, [operand]) => {
+                    number_literal_text(operand).map(|text| format!("-{text}"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 

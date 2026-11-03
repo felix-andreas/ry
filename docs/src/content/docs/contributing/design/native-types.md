@@ -52,9 +52,8 @@ type-mismatch
   of a uniquely held value. The [runtime contract](#runtime-contract) states what the runtime must
   provide.
 - **Hindley-Milner** (`decisions.md`, "The type system is Hindley-Milner"). Every feature here is
-  unification over the existing constraint mechanism. Row variables for records and tag unions are
-  the one addition to the unifier. They are Hindley-Milner (Rémy), and they reverse the settled
-  "no row variables" rule, as [Records, tuples and tags](#records-tuples-and-tags) explains.
+  unification over the existing constraint mechanism, and the unifier gains nothing: records stay
+  closed and there are no row variables (`decisions.md`, native records).
 - **One boundary.** An R value becomes a ry value only through a conversion function that checks
   it. A ry value whose representation R already has (`F64`, `Bool`, `Str` and Lists of them) fits
   the R type directly, because nothing R code relies on is lost.
@@ -75,9 +74,8 @@ This design changes four things:
 - **The standard library speaks ry types.** `List.len` returns an `I64`, `Str.split_on` returns a
   `List<Str>`, `List.sum` takes a `List` of numbers. R lists and vectors reach it through
   `List.from_r` and its siblings.
-- **Records and tag unions gain row variables**, so a function can take any record that has a
-  `name` field, as in Roc. This reverses the native-records decision that ry has no row variables,
-  and it lands after the scalar and `List` work.
+- **Records gain an update form and patterns gain list and `as` forms.** Records stay closed, with
+  no row variables, because typed ry stays small until a feature earns its place.
 
 ## Gap analysis against Roc
 
@@ -96,15 +94,15 @@ older Rust compiler (`crates/compiler/builtins/roc/` at tag `alpha4-rolling`) wh
 | Mixed number types | no implicit conversion | R's promotion | none, as Roc; `Num.to_*` converts |
 | `Bool` | nominal tag union `[False, True]` | `logical` with `NA` | `Bool`, two values, written `TRUE` and `FALSE` |
 | `Str` | UTF-8, small-string optimized | length-one `character` with `NA` | `Str`, UTF-8, no `NA` |
-| Interpolation | `"${name}"` | none | [question 1](#1-string-interpolation) |
+| Interpolation | `"${name}"` | none | `f"hello {name}"` |
 | `List` | contiguous, unboxed, in place when unique | R list, or `Array<T>` | `List<T>`, contiguous, unboxed, in place when unique |
-| List operators | none; functions only | elementwise on `Array` | [question 2](#2-operators-on-lists) |
+| List operators | none; functions only | elementwise on `Array` | item by item |
 | `Dict`, `Set` | hash map, insertion order | native, insertion order | keys widen to every ry value but functions and floats-with-`NaN` |
-| Records | structural, open (row variable) | structural, closed | open records through row variables |
+| Records | structural, open (row variable) | structural, closed | unchanged: closed, no row variables |
 | Record update | `{ ..r, x: 1 }` | `r$x <- 1` | both: `(..r, x = 1)` builds a copy |
 | Field punning | `{ x, y }` | none | in patterns only: `(x =, y =)` binds `x` and `y` |
 | Tuples | `(a, b)`, `t.0` | `(a, b)`, `t[[1L]]` | unchanged |
-| Tag unions | open and closed, row variable | open with `..`, no row variable | row variable: `[..]` passes unknown tags through typed |
+| Tag unions | open and closed, row variable | open with `..`, no row variable | unchanged |
 | Recursive types | through nominal types | through `type` | unchanged |
 | Pattern matching | exhaustive, guards, list patterns, `as` | exhaustive, guards, no list patterns | adds list patterns `[x, ..rest]` and `p as name` |
 | Number patterns | literals | literals | adds suffixed literals |
@@ -113,12 +111,12 @@ older Rust compiler (`crates/compiler/builtins/roc/` at tag `alpha4-rolling`) wh
 | Abilities | none: static dispatch on nominal types with `where` constraints (legacy: abilities `Eq`, `Hash`, `Inspect`, `Encode`, `Decode`) | none (traits declined) | built-in structural `==`, hashing and printing for every ry type but functions; no methods, no user abilities |
 | Opaque types | `:=` | `type` nominal, `@type` opaque | unchanged |
 | Modules | `import`, `exposing` | R namespaces, `std` | unchanged; R packages are the module system |
-| Results | `Try(ok, err)` (legacy `Result`), postfix `?`, `??` for a default | `Result`, no operator | `Result`; `Result.with_default` for `??`; [question 3](#3-propagating-an-error) |
+| Results | `Try(ok, err)` (legacy `Result`), postfix `?`, `??` for a default | `Result`, no operator | `Result`; `Result.with_default` for `??`; a `try` prefix |
 | `crash`, `dbg`, `expect` | builtins | `stop`, `print`, testthat | R's |
-| Inference | HM with rows | HM with joins | HM with joins and rows |
+| Inference | HM with rows | HM with joins | unchanged: HM with joins |
 | Generics | type variables | `<T>`, constraints | unchanged; constraints gain `number`, `int`, `frac` |
 | Mutable variables, loops | `var $x`, `for`, `while`, ranges `a..<b` | R's `<-`, `for`, `while`, `a:b` | R's; `for` over a `List<T>` binds `T` |
-| Length and index type | `U64` | `integer` | `I64`; [question 4](#4-the-type-of-lengths-and-positions) |
+| Length and index type | `U64` | `integer` | `I64` |
 
 The sections below give each decision's rules.
 
@@ -234,7 +232,7 @@ A `Str` is an immutable UTF-8 string with no `NA`. A string literal becomes a `S
 demanded. `==` and the ordering comparisons compare bytes, independent of the locale. There is no
 indexing and no length, as in Roc, because a string's length counts bytes or code points and
 neither is what a reader means by characters: `Str.count_utf8_bytes`, `Str.to_utf8` and
-`Str.walk_utf8` cover the needs. `Str.concat`, `Str.join_with` and interpolation (question 1) build
+`Str.walk_utf8` cover the needs. `Str.concat`, `Str.join_with` and interpolation (`f"..."`) build
 strings, and `Num.to_str` formats a number.
 
 ## `List<T>`
@@ -259,21 +257,10 @@ A `List<T>` holds ry values only: `List<double>` is an `annotation` error that s
 ## Records, tuples and tags
 
 The literals, `match` and exhaustiveness are unchanged (`records-and-tags.md` and the type system
-reference). Four additions bring them to Roc's level:
+reference). Records stay closed and tag unions keep their anonymous `..`: Roc's row variables (open
+records, pass-through tags) are left out, because typed ry adds a feature only once it earns its
+place, and a closed record with a nominal type covers the programs ry targets. Two additions remain:
 
-Row variables reverse the decision that native records have none (`decisions.md`, native records;
-type system reference, "Records"). They stay inside Hindley-Milner because a row is its own kind of
-type, not a union member: a tag row `..E` binds to a row of tags by plain unification, so the rule
-that a union never constrains a variable keeps holding. `decisions.md` records the reversal when it
-is built.
-
-- **Open records.** `Record{name: Str, ..}` is any record with at least a `name` field, and the
-  `..` is a row variable: `function<R>(r: Record{name: Str, ..R}) -> Record{name: Str, ..R}` returns
-  the same record type it was given. A row variable binds to the remaining fields by unification
-  (Rémy's rows), so inference stays unification.
-- **Pass-through tags.** An open tag union `:Ok(I64) | ..E` names its row, so a function that
-  handles `:Ok` and passes every other tag on keeps their types, as Roc's `[Ok I64]e` does. The
-  bare `..` keeps today's meaning: an anonymous row the function cannot pass on.
 - **Record update.** `(..point, x = 3)` is a copy of `point` with `x` replaced, and every replaced
   field must exist, as in Roc. `point$x <- 3` stays the statement form. `..point` is an ordinary R
   identifier, so `(..point, x = 3)` is today a record holding a variable named `..point`; a name
@@ -304,7 +291,7 @@ ry has no abilities or methods, because traits are declined (`decisions.md`). Ro
 the same three in, for every ry type except functions:
 
 - **Equality.** `a == b` on two values of the same ry type is structural equality, a `Bool`, except
-  on two `List`s, whose `==` depends on [question 2](#2-operators-on-lists). A function is a
+  on two `List`s, whose `==` works item by item and gives a `List<Bool>`. A function is a
   `type-mismatch` there, as Roc's functions have no `is_eq`, and generic code says so with an `eq`
   constraint (`<T: eq>`), which every ry type but a function satisfies. Floats compare as IEEE 754,
   so `NaN != NaN`.
@@ -435,126 +422,19 @@ The typed programs in `tools/bench/why/typed` use only ry types: `List<F64>` ins
 `seq_len`, `sum` and `vapply`. The harness's clock and output are R calls at the boundary
 (`proc.time`, `cat`), converted with `Num.from_r`.
 
-## Questions for the user
+## Answered questions
 
-Each question is a matter of taste: Roc parity and performance do not decide it. Each option shows
-the same short program.
+The draft asked four questions of taste. Each took the recommended answer:
 
-### 1. String interpolation
-
-R gives every string literal a fixed meaning, and real R code writes `"${x}"` for glue templates,
-so Roc's `"Hello ${name}"` cannot work inside an ordinary string. Interpolation needs a marker.
-
-**a. An `f` prefix, as in Python** (recommended: the most widely known spelling)
-
-```r
-greet <- function(name: Str, count: I64) -> Str {
-  f"Hello {name}, you have {count} messages"
-}
-```
-
-**b. A `$` prefix, as in C#**
-
-```r
-greet <- function(name: Str, count: I64) -> Str {
-  $"Hello {name}, you have {count} messages"
-}
-```
-
-**c. No interpolation**
-
-```r
-greet <- function(name: Str, count: I64) -> Str {
-  Str.concat("Hello ", name, ", you have ", Num.to_str(count), " messages")
-}
-```
-
-R reads `f"..."` as a name followed by a string and `$"..."` as a `$` with nothing before it, so
-both are syntax errors in R today. `$"..."` is free only where an expression starts: after a value,
-as in `x $"a"`, it is R's `$` operator, so b cannot follow a value on the same line. In a and b, `{expr}` may hold any expression whose type is a
-`Str` or a number, and `{{` writes a brace.
-
-### 2. Operators on lists
-
-In a, `a == b` on two lists is a `List<Bool>`, as R's `==` on vectors, so whole-list equality is
-`List.is_eq`; in b it is one `Bool`. That is why the second line differs.
-
-**a. Elementwise, as today's `Array` and R's vectors** (recommended: what an R reader expects)
-
-```r
-normalize <- function(xs: List<F64>) -> List<F64> (xs - List.min(xs)) / (List.max(xs) - List.min(xs))
-same <- function(a: List<I64>, b: List<I64>) -> Bool List.is_eq(a, b)
-```
-
-**b. No operators on lists, as in Roc**
-
-```r
-normalize <- function(xs: List<F64>) -> List<F64> {
-  low <- List.min(xs)
-  span <- List.max(xs) - low
-  List.map(xs, \(x) (x - low) / span)
-}
-same <- function(a: List<I64>, b: List<I64>) -> Bool a == b
-```
-
-### 3. Propagating an error
-
-**a. A `try` prefix** (recommended: no R text changes meaning)
-
-```r
-parse_point <- function(text: Str) -> Result<Record{x: I64, y: I64}, :InvalidNumStr> {
-  parts <- Str.split_on(text, ",")
-  :Ok((x = try Str.to_i64(parts[[1]]), y = try Str.to_i64(parts[[2]])))
-}
-```
-
-**b. A postfix `?`, as in Roc and Rust**
-
-```r
-parse_point <- function(text: Str) -> Result<Record{x: I64, y: I64}, :InvalidNumStr> {
-  parts <- Str.split_on(text, ",")
-  :Ok((x = Str.to_i64(parts[[1]])?, y = Str.to_i64(parts[[2]])?))
-}
-```
-
-**c. No operator**
-
-```r
-parse_point <- function(text: Str) -> Result<Record{x: I64, y: I64}, :InvalidNumStr> {
-  parts <- Str.split_on(text, ",")
-  Result.and_then(Str.to_i64(parts[[1]]), \(x)
-    Result.map(Str.to_i64(parts[[2]]), \(y) (x = x, y = y)))
-}
-```
-
-In a and b, an `:Err` returns from the enclosing function at once. `try f(x)` with a name after
-`try` is a syntax error in R, so a takes that form only. `try (f(x))`, `try -x`, `try[x]` and a
-`try` at the end of a line keep their R meanings, so `try` applies to a name or call written
-directly after it. b has a sharper limit: R reads a `?` at the end of a line as its binary help
-operator with the next line as its right side, so a `?` can never end a statement, which is where
-Roc and Rust code puts it most.
-
-### 4. The type of lengths and positions
-
-**a. `I64`** (recommended: R positions may be negative, as in `xs[-1]`)
-
-```r
-drop_last_three <- function(xs: List<Str>) -> List<Str> {
-  List.take_first(xs, Num.max(List.len(xs) - 3, 0))
-}
-```
-
-**b. `U64`, as in Roc**
-
-```r
-drop_last_three <- function(xs: List<Str>) -> List<Str> {
-  n <- List.len(xs)
-  if (n < 3) [] else List.take_first(xs, n - 3)
-}
-```
-
-In b, `List.len(xs) - 3` on a list of two items is an overflow error, so the subtraction needs a
-guard, and a negative position such as `xs[-1]` cannot be written with the length's type.
+- **String interpolation** is an `f"..."` literal: `f"hello {name}"` is a `Str`. R reads `f"..."`
+  as a syntax error, so no R text changes meaning.
+- **Operators on lists** work item by item, as R's vectors and the old `Array` did, on two lists of
+  one length or a list and a single value, never recycled.
+- **Propagating an error** is a `try` prefix: `try f(x)` unwraps an `:Ok` and returns an `:Err` from
+  the enclosing function. `try (f(x))` and `try` before anything but a name or call keep their R
+  meanings.
+- **Lengths and positions** are `I64`, so `List.len(xs) - 3` may go negative and `xs[-1]` stays
+  expressible.
 
 ## Settled choices
 
@@ -564,13 +444,12 @@ guard, and a negative position such as `xs[-1]` cannot be written with the lengt
 - `List<T>` replaces `Array<T>` and holds ry values only.
 - `F64`, `Bool`, `Str` and Lists of them share R's representation and fit R types directly; every
   other crossing is an explicit conversion.
-- Records and tag unions gain row variables; list patterns, `as` patterns, record update and pattern
-  punning join the syntax.
+- Records stay closed, with no row variables; list patterns, `as` patterns, record update and
+  pattern punning join the syntax.
 - Equality, hashing and printing are built in for every ry type but functions.
 
 ## Open questions
 
-- The four questions above.
 - Whether `Dec` arithmetic in the interpreter should be exact 128-bit or start as a checked `i128`
   scaled by 10^18 with an error on overflow of intermediate products.
 - Whether a project can declare that unconstrained literals default to ry types instead of R's.

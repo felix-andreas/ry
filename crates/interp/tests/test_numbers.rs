@@ -57,6 +57,13 @@ const PRINTS: &[(&str, &str)] = &[
     ("length(n)", "[1] 1\n"),
     // Arithmetic keeps the type, and R numbers convert exactly.
     ("n + n", "10i64\n"),
+    // An operator on lists of native numbers works item by item, as on R-typed lists.
+    ("[1i64, 2i64] + [1i64, 3i64]", "[2i64, 5i64]\n"),
+    ("[n, 2i64] * 2", "[10i64, 4i64]\n"),
+    ("-[1i64, 2i64]", "[-1i64, -2i64]\n"),
+    ("[1i64, 2i64] < [1i64, 3i64]", "[FALSE, TRUE]\n"),
+    ("[1i64, 2i64] == 2i64", "[FALSE, TRUE]\n"),
+    ("[1.5f32] > [0.5f32]", "[TRUE]\n"),
     ("n + 1", "6i64\n"),
     ("1L - n", "-4i64\n"),
     ("n * 3", "15i64\n"),
@@ -211,6 +218,8 @@ const ERRORS: &[(&str, &str)] = &[
     ("Bool.from_r(NA)", "`value`"),
     ("List.from_r(c(1, NA))", "`NA` at position 2"),
     ("Num.round(n)", "a fractional number"),
+    ("[1i64] + [1i64, 2i64]", "a list is never recycled"),
+    ("[1i64] + [1i32]", "two numbers of one type"),
     ("List.range(Num.to_f32(1), 2)", "integer type"),
 ];
 

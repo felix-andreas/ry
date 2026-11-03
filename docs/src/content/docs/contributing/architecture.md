@@ -64,7 +64,7 @@ illegal dependency unrepresentable.
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/type-checking/inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
-  nothing about C. The values that are ry's own live here too: records and tags, `Array`,
+  nothing about C. The values that are ry's own live here too: records and tags, `List`,
   `DataFrame` and the standard library.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has

@@ -424,7 +424,7 @@ the ratio ry / GNU R. The cases live in `tools/bench/stdlib`: `ry.R` holds ry's 
 the R alternatives in base R, purrr, stringr and stringi under the same case names, and the
 fastest alternative sets the bar. A callback function is compared with R's callback idioms
 (`vapply`, `Filter`, `Reduce`, a `for` loop, purrr), and a function on one string with R's
-vectorized string functions. Where ry's input is a vector, the case also runs it on an Array,
+vectorized string functions. Where ry's input is a vector, the case also runs it on a `List`,
 ry's unboxed vector, and the faster of the two counts. Each case runs in its own process, so a case slower than
 `--timeout` shows as `timeout` without stopping the rest, and a `check` column compares
 checksums of both results. Packages load from `R_LIBS_USER`, and an alternative whose package is

@@ -47,10 +47,10 @@ Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, a
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
 
-Write columns as [Arrays](/type-checking/arrays/) (`[1.5, 2]`), so the checker holds each one to a
+Write columns as [lists](/type-checking/lists/) (`[1.5, 2]`), so the checker holds each one to a
 single type with no missing values. A plain R vector such as `c(1.5, 2)` works too. A column read
 back with `sales$price` is a plain R vector, because later steps such as a left join can put `NA`
-into a column; `as.Array(sales$price)` turns it back into an Array and fails if it holds an `NA`.
+into a column; `List.from_r(sales$price)` turns it back into a `List` and fails if it holds an `NA`.
 
 ## Existing data.table code
 

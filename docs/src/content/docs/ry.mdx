@@ -114,7 +114,8 @@ When a comment and an inline annotation disagree, ry uses the inline one and war
 | `<T: numeric> fn(x: T) -> T` | A generic function, bounded to `integer` or `double` |
 | `Record{x: double}`, `Tuple{integer, character}` | ry's records and tuples |
 | `:Ok(integer) \| :Err(character) \| ..` | Tags; a trailing `..` leaves the union open |
-| `Array<double>` | ry's strict vector: one item type, no `NA`, no names, no recycling |
+| `I64`, `F64`, `Bool`, `Str` | ry's own numbers and strings, which never hold `NA` |
+| `List<F64>` | ry's typed sequence: one item type, no `NA`, no names, no recycling |
 | `DataFrame{region: character[], units: integer[]}` | ry's typed table |
 | `Result<T, E>`, `Dict<K, V>`, `Set<T>` | Standard library types |
 | `Any` | A deliberate opt-out; compatible with everything, and strict mode accepts it |
@@ -134,7 +135,7 @@ point <- (x = 1, y = 2)          # Record{x: double, y: double}; point$x reads a
 pair <- (1L, "a")                # Tuple{integer, character}
 one <- (x = 1,)                  # a one-field record needs the trailing comma
 shape <- :Rect(width = 2, height = 3)   # a tag with a payload
-xs <- [1.5, 2, 3]                # Array<double>
+xs <- [1.5, 2, 3]                # List<F64>
 
 alias Shape =
   | :Circle(radius: double)
@@ -155,9 +156,11 @@ area(shape)
 
 A `match` that misses a case is a `non-exhaustive-match` error, and an arm the earlier ones already
 cover is an `unreachable-pattern` warning. Patterns are `_`, a name, a literal, a tag with payload
-patterns, `(p, q)`, `(x = p, ..)`, `p | q`, and a guard `p if (cond)`. Records have value
+patterns, `(p, q)`, `(x = p, ..)`, a list pattern `[first, ..rest]`, `p as name`, `p | q`, and a guard
+`p if (cond)`. `(..point, y = 3)` copies a record with a field replaced, and `try f(x)` returns an
+`:Err` from the enclosing function early. Records have value
 semantics, and passing one to an R function is an error until you convert it with `as.list()`.
-[Records and tags](/type-checking/records-and-tags) and [Arrays](/type-checking/arrays) have the
+[Records and tags](/type-checking/records-and-tags) and [lists](/type-checking/lists) have the
 details.
 
 ## Standard library
@@ -228,5 +231,5 @@ of data.table's time. [Benchmarks](/benchmarks) has the programs and the method.
 ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
 diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's own runtime is still
 incomplete: a script that needs something it lacks stops with an error that names it, and `ry R`
-runs plain and typed R on GNU R meanwhile. Records, tags, Arrays, `DataFrame` and the standard
+runs plain and typed R on GNU R meanwhile. Records, tags, lists, `DataFrame` and the standard
 library run only on ry's runtime.

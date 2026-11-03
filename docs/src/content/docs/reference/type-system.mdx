@@ -343,7 +343,9 @@ these rules:
 - **The return value is checked when the function returns**, including through `return()`, and
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
-  run time.
+  run time. The one exception is an unsuffixed number literal bound to a ry number type:
+  `n: I64 <- 5` binds `5i64`, and `xs: List<U8> <- [1, 2]` converts each item, because the
+  literal is R's `double` until something converts it (see [number literals](#number-literals)).
 - **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
@@ -549,8 +551,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   or set element may have. `complex` and `raw` are left out.
 - `scalar numeric` admits a scalar `integer` or `double`, which is both bounds at once. It is what an
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
-- `item` admits what an [Array](#arrays) can hold: a scalar `logical`, `integer`, `double` or
-  `character`, or a ry value. `as.Array : <T: item> fn(x: list[T]) -> Array<T>` uses it.
+- `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
+  `List.from_r` uses it to type a `list[T]` argument.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call. A union satisfies a
@@ -913,6 +915,24 @@ this section needs the value's shape, the nominal value projects to its represen
 - A nominal value whose representation is a record, tuple or tag is still a ry value when it
   [crosses into R](#crossing-into-r).
 
+### Record update
+
+`(..point, y = 3.5)` is a copy of the record `point` with the field `y` replaced. It has `point`'s
+type, so every replaced field must exist and keep its type:
+
+```r
+p <- (x = 1, y = 2)
+q <- (..p, z = 3)
+```
+
+```text ry check typing
+type-mismatch
+
+  x field `z` does not exist in `Record{x: double, y: double}`
+```
+
+Only a record can be updated this way, and `$<-` is the statement form of the same change.
+
 ### `match`
 
 `match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
@@ -957,6 +977,44 @@ A guarded arm never counts toward coverage, because its guard can be false. A `m
 case is a `non-exhaustive-match` error naming up to three missing cases as patterns, and an arm that
 the arms above it already cover is an `unreachable-pattern` warning.
 
+### List and `as` patterns
+
+`match` takes two more pattern forms. A list pattern matches a `List` by its length and items:
+`[]` matches the empty list, `[a, b]` a list of exactly two items, and `[first, ..rest]` a list of at
+least one item, binding the remaining items to `rest` as a list. `[.., last]` matches from the end.
+`p as name` matches what `p` matches and binds the whole value to `name`:
+
+```r ry run runtime=ry strict
+describe <- function(xs: List<I64>) -> Str match (xs) {
+  [] => "empty",
+  [only] => f"just {only}",
+  [first, ..rest] as all => f"{List.len(all)} items, starting with {first}"
+}
+describe([])
+#> [1] "empty"
+describe([1i64, 2i64, 3i64])
+#> [1] "3 items, starting with 1"
+```
+
+### Propagating an error with `try`
+
+`try f(x)`, where `f(x)` returns a result such as `:Ok(value) | :Err(error)`, is the `value` of an
+`:Ok`. On an `:Err` the enclosing function returns that `:Err` at once, and the function's result
+type gains its error:
+
+```r
+parse_both <- function(a: Str, b: Str) {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+```
+
+`parse_both` types as `fn(a: Str, b: Str) -> :Err(:InvalidNumStr) | :Ok(I64)`. `try` applies to a
+name or call written directly after it. `try (expr)` and `try` before anything else keep R's
+meaning, a call of R's `try()`, so no R code changes meaning. A `try` outside a function, or on a
+value that is not a result, is a `type-mismatch`.
+
 ### Crossing into R
 
 R functions and C code do not know these values. `as.list()` converts a record, tuple or tag to a
@@ -968,6 +1026,115 @@ exceptions are the functions the runtime lets them through: those that understan
 (`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
+
+## Numbers, `Bool` and `Str`
+
+ry has its own scalar types, none of which holds `NA`. They are the types typed ry is written in,
+and an R value reaches them only through an explicit conversion (see
+[Crossing between R and ry scalars](#crossing-between-r-and-ry-scalars)).
+
+### Number types
+
+| Type | Values |
+| --- | --- |
+| `I8`, `I16`, `I32`, `I64`, `I128` | signed integers, every bit pattern a value |
+| `U8`, `U16`, `U32`, `U64`, `U128` | unsigned integers |
+| `F32`, `F64` | IEEE 754 floats, including `NaN` and the infinities |
+| `Dec` | a fixed-point decimal with 18 places, in 128 bits |
+
+An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R code as is. No
+integer type shares R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
+with a warning: `-2147483648i32` is an ordinary `I32`, and overflow in any integer type is an error.
+
+The constraints `number`, `int` and `frac` admit every number type, the integer types, and `F32`,
+`F64` and `Dec`.
+
+### Number literals
+
+A suffix names a literal's type exactly: `5i64`, `255u8`, `1.5f32`, `2.5dec`, `1.5f64`. A hex
+literal takes only the `i` and `u` suffixes (`0xFFu8`), because `f`, `d`, `e` and `c` are hex digits.
+A `-` written directly before a literal is part of it, so `-128i8` is an `I8`.
+
+An unsuffixed literal, such as `5`, `5L` or `1.5`, has R's type unless a ry number type asks for it.
+A ry type asks in three places:
+
+- **An expected type.** A typed parameter, an annotated variable, a function's declared result, a
+  list item or a record field whose type is known.
+- **The other operand.** In arithmetic or a comparison with an operand of a ry number type, the
+  literal takes that type, so `n + 1` with `n: I64` is an `I64`.
+- **A later use.** `total <- 0` gives `total` a literal type that its first use decides. In
+  `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`. A variable that
+  nothing decides keeps R's type.
+
+A literal the type cannot hold exactly, such as `300` as a `U8` or `2.5` as an `I64`, is a
+`type-mismatch` at the literal:
+
+```r
+m <- 5i64
+m * 2.5
+```
+
+```text ry check typing
+type-mismatch
+
+  x this literal does not fit `I64`, which cannot hold its value exactly
+```
+
+When the code runs, an unsuffixed literal is the R value it always was, and the operator or
+binding that the checker typed converts it. An annotated binding such as `n: I64 <- 5` binds the
+`I64`, and `xs: List<U8> <- [1, 2]` converts each item. A conversion that cannot be exact is an
+error, never a rounded value.
+
+### Number arithmetic
+
+Both operands of an arithmetic operator or comparison have the same number type, and number types
+are never converted into each other: `1i32 + 1i64` is a `type-mismatch` that suggests
+`Num.to_i32()`.
+
+| Operator | Integer types | `F32`, `F64`, `Dec` |
+| --- | --- | --- |
+| `+ - *`, unary `-` | the same type; overflow is an error | the same type |
+| `/` | a `type-mismatch` that suggests `%/%` or `Num.to_f64()` | the same type |
+| `%/%`, `%%` | floored division and modulo, as in R | as in R |
+| `^` | the same type | the same type |
+| `== != < > <= >=` | `Bool` | `Bool` |
+
+Integer division by zero is an error. `Num.div_trunc` and `Num.rem` give truncating division, and
+`Num.add_checked`, `Num.add_wrap` and `Num.add_saturated` (with their `sub` and `mul` siblings) give
+the other overflow behaviors. `Num.to_i8` through `Num.to_u128`, `Num.to_f32`, `Num.to_f64` and
+`Num.to_dec` convert between number types. Each is an error when the value does not fit, and each
+`_checked` form returns `:Err(:OutOfBounds)` instead.
+
+### `Bool` and `Str`
+
+`Bool` is `TRUE` or `FALSE`, never `NA`. A comparison of ry numbers or strings is a `Bool`, as is
+`!`, `&&`, `||`, `&` or `|` on `Bool` operands. `if` and `while` take a `Bool` or an R `logical`.
+
+`Str` is an immutable UTF-8 string, never `NA`. A string literal becomes a `Str` where one is
+expected, and the `Str` module holds the functions that work on strings. A `Bool` is stored as R's
+`logical` and a `Str` as R's `character`, so both pass to R code as they are.
+
+`f"..."` builds a `Str` from text and interpolated expressions, each written in braces:
+
+```r ry run runtime=ry strict
+name <- "ry"
+n <- 5i64
+f"hello {name}, {n + 1i64}"
+#> [1] "hello ry, 6"
+```
+
+Doubled braces, `{{` and `}}`, stand for literal braces. R reads `f"..."` as a syntax error, so no R
+code changes meaning.
+
+### Crossing between R and ry scalars
+
+`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I32`, and `Str.from_r`
+turns a `character` into a `Str`. Each stops with an error on `NA`, on a length other than one, and
+on attributes. `Num.to_r` goes the other way: an integer type becomes R's `integer` when it fits in
+32 bits and a `double` otherwise.
+
+Passing an integer type or a `Dec` to an R function is a `type-mismatch` that names `Num.to_r()`,
+and when the code runs, an R function that receives one stops with the same advice.
 
 ## Lists
 
@@ -1297,7 +1464,7 @@ parameters are already bound when the literal's body is inferred:
 ```r
 xs <- [1, 2]
 pairs <- List.map(xs, \(x) c(x, x))
-# error: this function must return an Array item (...), but it returns `double[]`
+# error: this function must return a list item (...), but it returns `double[]`
 ```
 
 `List.map` expects `fn(T) -> U` with `T` bound to `double` by `xs`, so `x` is `double` inside the
@@ -2175,7 +2342,7 @@ Arguments are checked for compatibility, not exact equality:
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
 - A type parameter that several parameters share, directly as `T` or as the items of `list[T]` or
-  `Array<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
+  `List<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
   union, so with `light: :Red | :Green`, `Bool.is_eq(:Red, light)` checks just as
   `Bool.is_eq(light, :Red)` does, and `pick(:Red, :Green)` on `<T> fn(a: T, b: T) -> T` is
   `:Red | :Green`. Numbers join in R's promotion order, so `Num.add(1L, 2.5)` and
@@ -3307,13 +3474,14 @@ sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: chara
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
 project's own function named `DataFrame`, which shadows the builtin.
 
-An `Array<T>` argument is a `T[]` column: the frame stores the column as a plain vector. Reading a
-column back, as `sales$amount` or `sales[["amount"]]`, gives that plain vector, typed `T[]`, even
-when no step could have put an `NA` into it. `as.Array(sales$amount)` is the checked way back to an
-`Array<T>`, and it stops with an error on an `NA`. A read never gives an Array, because an Array
-changes how R arithmetic on it behaves: two Arrays are never recycled and never mix `integer` with
-`double`, so `sales$units * sales$price` would stop with an error. Whether a column holds an `NA`
-depends on the data, such as a left join's unmatched rows, so a read that gave an Array only when
+A `List<T>` argument is a column of the R vector type `T` is stored as (`List<F64>` is a `double[]`
+column): the frame stores the column as a plain vector. Reading a column back, as `sales$amount` or
+`sales[["amount"]]`, gives that plain vector, even when no step could have put an `NA` into it.
+`List.from_r(sales$amount)` is the checked way back to a `List`, and it stops with an error on an
+`NA`. A read never gives a `List`, because a `List` changes how arithmetic on it behaves: two lists
+are never recycled and never mix item types, so `sales$units * sales$price` would stop with an
+error. Whether a column holds an `NA`
+depends on the data, such as a left join's unmatched rows, so a read that gave a `List` only when
 the column had none would make the same code fail or pass depending on its input.
 
 #### Verbs
