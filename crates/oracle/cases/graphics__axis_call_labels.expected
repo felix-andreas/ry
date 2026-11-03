@@ -1,0 +1,13 @@
+[stdout]
+| [1] 5
+| [1] "Error in axis(4, at = c(2, 5), labels = quote(sqrt(x)), las = 1) : \n  'at' and 'labels' lengths differ, 2 != 1\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in axis(4, at = c(2, 5), labels = quote(sqrt(x)), las = 1): 'at' and 'labels' lengths differ, 2 != 1>
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("null device" = 1L)

@@ -2499,7 +2499,12 @@ unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
     } else {
         coerce_vector(at, SexpType::Real)?
     };
-    let label_count = length(labels);
+    // GNU R's `C_axis` coerces a call to an expression vector, which holds the call whole.
+    let label_count = if labels.kind() == SexpType::Language {
+        1
+    } else {
+        length(labels)
+    };
     let logical_labels = matches!(labels.kind(), SexpType::Logical | SexpType::Nil);
     if !logical_labels && label_count != length(result) {
         return Err(error(format!(
