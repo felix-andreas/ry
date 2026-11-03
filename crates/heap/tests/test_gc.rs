@@ -891,6 +891,18 @@ fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
 /// pile up past GNU R's bound: a limit that grows by a fifth once the live data fills 70% of it.
 #[test]
 fn dead_large_vectors_stay_within_the_heap_limit() {
+    dead_large_vectors_stay_within_the_limit(false);
+}
+
+/// Collection stress spaces its major collections by live objects, so with many small live
+/// objects a loop of large vectors runs only minor collections unless the byte escalation of
+/// the ordinary schedule applies to stress too.
+#[test]
+fn dead_large_vectors_stay_within_the_heap_limit_under_stress() {
+    dead_large_vectors_stay_within_the_limit(true);
+}
+
+fn dead_large_vectors_stay_within_the_limit(stress: bool) {
     const MEGABYTE: isize = 1 << 20;
     let mut heap = Heap::new();
     unsafe {
@@ -898,6 +910,15 @@ fn dead_large_vectors_stay_within_the_heap_limit() {
             .alloc_vector(SexpType::Real, 48 * MEGABYTE / 8)
             .expect("alloc");
         heap.add_global_root(live);
+        if stress {
+            let small = heap.alloc_vector(SexpType::List, 20_000).expect("alloc");
+            heap.add_global_root(small);
+            for slot in 0..20_000 {
+                let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                heap.set_element(small, slot, element);
+            }
+            heap.update_policy(|policy| policy.stress = GcStress::EveryAllocation);
+        }
         let mut peak = 0;
         for round in 0..40 {
             let mark = heap.handle_mark();
