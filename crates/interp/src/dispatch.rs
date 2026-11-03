@@ -1309,10 +1309,13 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             if let Some(method) = lookup_in_scope(default, &scope)? {
                 (method, default, class_count)
             } else {
+                // A closure generic such as `rep_len` wraps an internal generic, and GNU R's
+                // `NextMethod` falls back to that `.Internal` function.
                 let function = eval::find_fun(generic_symbol, values::base_env())
                     .ok()
                     .filter(|function| function.kind() != SexpType::Closure)
-                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)));
+                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)))
+                    .or_else(|| crate::builtins::internal_function(generic_symbol));
                 match function {
                     Some(function) => (function, generic_symbol, class_count),
                     None => {
@@ -2015,7 +2018,14 @@ unsafe fn group_dispatch(
             entry.1 = method_vector;
         }
     }
-    let promised = promised_args(call, args)?;
+    let mut promised = promised_args(call, args)?;
+    // GNU R drops the operands' names for the operator groups, so `get("*")(x = a, y = 2)`
+    // reaches `Ops.class(e1, e2)` positionally.
+    if binary {
+        for arg in &mut promised {
+            arg.tag = nil();
+        }
+    }
     let new_call = renamed_call(call, found_method.method_name)?;
     apply_method(new_call, found_method.method, &promised, env, &vars, true).map(Some)
 }

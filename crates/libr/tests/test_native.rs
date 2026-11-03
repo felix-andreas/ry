@@ -715,6 +715,8 @@ fn edge_cases_gnu_r_accepts() {
         .call("rytest_setcdr_any", &[])
         .expect("SETCDR with a vector");
     assert_eq!(r.integers(tail), vec![2]);
+    let left = r.call("rytest_remove_dim", &[]).expect("remove dim");
+    assert_eq!(r.integers(left), vec![0], "removing dim drops dimnames");
 
     let message = r.string("inner");
     let inner = r.call_expression(

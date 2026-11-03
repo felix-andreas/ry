@@ -66,7 +66,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             scalar_integer(count).map(Some)
         }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),
-    internal("lengths", 2, do_lengths),
+    internal("lengths", 2, do_lengths).generic(Generic::Internal),
     builtin("dim<-", 2, do_set_dim).generic(Generic::Internal),
     builtin("dimnames", 1, do_dimnames).generic(Generic::Internal),
     builtin("dimnames<-", 2, do_set_dimnames).generic(Generic::Internal),
@@ -3531,7 +3531,23 @@ unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let use_names = values::as_logical_scalar(call.arg(1)) != 0;
-    let count = length(object);
+    let listlike = matches!(object.kind(), SexpType::List | SexpType::Expression)
+        || crate::coerce::is_s4(object);
+    if !listlike
+        && !matches!(
+            object.kind(),
+            SexpType::Nil
+                | SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::String
+                | SexpType::Raw
+        )
+    {
+        return Err(error("'x' must be a list or atomic vector"));
+    }
+    let count = dispatch_length(object, call.env)?;
     let result = alloc(SexpType::Integer, count)?;
     crate::heap().root(result);
     for index in 0..count {

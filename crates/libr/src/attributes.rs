@@ -198,6 +198,10 @@ pub unsafe fn remove_attribute(object: Sexp, name: Sexp) {
         }
         return;
     }
+    // Dimnames without a dim would be an invalid object, so GNU R's `removeAttrib` drops both.
+    if name == R_DimSymbol.get() {
+        remove_attribute(object, R_DimNamesSymbol.get());
+    }
     let mut previous: Option<Sexp> = None;
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
