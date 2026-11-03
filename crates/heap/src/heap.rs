@@ -43,6 +43,7 @@ use {
         alloc::Layout,
         cell::Cell,
         ffi::c_void,
+        num::NonZeroU32,
         fmt,
         io::Write,
         ptr::NonNull,
@@ -104,6 +105,8 @@ pub struct Heap {
     stats: GcStats,
     inhibit: u32,
     stress_counter: u64,
+    /// Allocations left before the next collection under [`GcStress::Every`].
+    stress_wait: u32,
     known: WellKnown,
     /// Bumped whenever the set of bindings outside function frames changes (a binding created or
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
@@ -210,9 +213,14 @@ pub enum Collection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GcStress {
     Off,
-    /// Collect before every allocation. Every eighth collection is a major one while the heap
-    /// is small; past that, one per sixteenth of the live objects.
-    EveryAllocation,
+    /// Collect before every `gap`-th allocation, as GNU R's `gctorture2(gap)` does, so a gap of
+    /// one is `gctorture(TRUE)`. Every eighth collection is a major one while the heap is small;
+    /// past that, one per sixteenth of the live objects.
+    Every(NonZeroU32),
+}
+
+impl GcStress {
+    pub const EVERY_ALLOCATION: GcStress = GcStress::Every(NonZeroU32::MIN);
 }
 
 /// When `RY_GC_STRESS` turns collection stress on for a whole run.
@@ -480,6 +488,7 @@ impl Heap {
             stats: GcStats::default(),
             inhibit: 1,
             stress_counter: 0,
+            stress_wait: 1,
             pause_log: open_pause_log(),
             // Overwritten below, before anything reads it.
             known: WellKnown::placeholder(),
@@ -575,8 +584,20 @@ impl Heap {
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
+        let stress = self.policy.stress;
         change(&mut self.policy);
+        if let GcStress::Every(gap) = self.policy.stress
+            && self.policy.stress != stress
+        {
+            self.stress_wait = gap.get();
+        }
         self.refresh_small_trigger();
+    }
+
+    /// Delays the next stressed collection until `allocations` more allocations, like the
+    /// `wait` of GNU R's `gctorture2`; later ones follow every gap.
+    pub fn delay_stress(&mut self, allocations: NonZeroU32) {
+        self.stress_wait = allocations.get();
     }
 
     /// Recomputes [`Heap::small_trigger`] from the policy and the old generation's size.
@@ -584,7 +605,7 @@ impl Heap {
         // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
         // every large vector a big session allocates, rescanning the young ones each time.
         self.small_trigger = match self.policy.stress {
-            GcStress::EveryAllocation => 0,
+            GcStress::Every(_) => 0,
             GcStress::Off => self.policy.young_limit.max(self.old_bytes / 2),
         };
     }
@@ -1854,7 +1875,12 @@ impl Heap {
             return;
         }
         match self.policy.stress {
-            GcStress::EveryAllocation => {
+            GcStress::Every(gap) => {
+                self.stress_wait = self.stress_wait.saturating_sub(1);
+                if self.stress_wait > 0 {
+                    return;
+                }
+                self.stress_wait = gap.get();
                 // A major collection marks the whole heap, so running one every few allocations
                 // makes stress quadratic in the heap's size: base R's loading never finished in a
                 // debug build. Spacing majors by a sixteenth of the live objects bounds their
@@ -1886,9 +1912,6 @@ impl Heap {
     fn collection_due(&self, request: usize, large: bool) -> bool {
         if self.inhibit > 0 {
             return false;
-        }
-        if self.policy.stress == GcStress::EveryAllocation {
-            return true;
         }
         // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
         // a reader such as `fread` allocates every column before filling any, so charging
@@ -2547,7 +2570,7 @@ impl Default for GcPolicy {
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: match gc_stress_requested() {
-                Some(GcStressStart::Startup) => GcStress::EveryAllocation,
+                Some(GcStressStart::Startup) => GcStress::EVERY_ALLOCATION,
                 _ => GcStress::Off,
             },
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),

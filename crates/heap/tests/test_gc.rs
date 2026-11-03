@@ -159,7 +159,7 @@ fn run(seed: u64, steps: usize, stress: bool) {
         // every minor collection.
         policy.verify = true;
         if stress {
-            policy.stress = GcStress::EveryAllocation;
+            policy.stress = GcStress::EVERY_ALLOCATION;
         }
     });
     let mut model = Model {
@@ -805,7 +805,7 @@ fn a_reserved_batch_survives_the_collections_that_follow_it() {
     let mut heap = Heap::new();
     unsafe {
         heap.update_policy(|policy| {
-            policy.stress = GcStress::EveryAllocation;
+            policy.stress = GcStress::EVERY_ALLOCATION;
             policy.verify = true;
         });
         let count = 200;
