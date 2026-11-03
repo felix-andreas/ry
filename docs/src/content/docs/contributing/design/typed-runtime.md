@@ -31,8 +31,8 @@ evaluate <- function(node: Node) -> F64 {
 
 `evaluate` compiles ahead of time to one machine function that takes a `Node` reference in a
 register and returns a double in a register. The reference is a 32-bit index with the tag in its
-upper bits, so `match` jumps through a table on bits it already holds, and `v` is one load from the
-`:Num` value column at that index, and the recursive calls are direct calls. `node` is borrowed, so
+upper bits, so `match` jumps through a table on bits it already holds. Reading `v` is one load
+from the `:Num` value column at that index, and the recursive calls are direct calls. `node` is borrowed, so
 the function touches no reference count. Nothing checks a type, nothing allocates, and no R frame
 exists. The interpreter sees `evaluate` as an ordinary closure: when untyped R code calls it, an
 entry stub handles the R value it is given (see "Facts and guesses") and calls a machine function.
@@ -75,19 +75,24 @@ per-function summary that the analysis computes, as a salsa query per function, 
 function's bytecode. A generic function's summary is its generic IR, which the runtime instantiates
 when untyped R code calls it with an instantiation the checker never saw.
 
-**Ahead of time.** A typed program never starts in an interpreter. `ry run` and `ry load` check a
-strict file before it runs and compile every typed function in it before the first call, on a
-thread per core, since Cranelift compiles functions independently. `ry install` compiles a
-package's typed functions at install time and writes the machine code into the installed package,
-beside its R code, as part of the package's build output. Each instantiation the checker
+**Ahead of time.** A typed function never runs in an interpreter. `ry run` and `ry load` check a
+strict file before it runs, and a typed function is compiled before its first call: when the
+lazy loader first forces its binding, so a session compiles only what it uses, as the mandate for
+`ry load` requires. While the program runs, worker threads compile the functions that a compiled
+function can call, which value tracking lists, so most calls find their callee compiled.
+`ry install` compiles all of a package's typed functions and writes the machine code into the
+installed package, beside its R code, as part of the package's build output. Each instantiation the checker
 sees is compiled once, as Roc does. Compiling a function at a later call happens only for a generic
 instantiation that untyped code creates and for the second copies in "Facts and guesses".
 
 **No code cache.** Compiled code is a build output, not a cache. An installed package holds one
 code file for its namespace, written by `ry install` and replaced only by reinstalling, and a
-standalone executable holds one for its program. Code that `ry run` and `ry load` compile for a
+standalone executable holds one for its program. A code file is stamped with the ry build that
+wrote it and with the interface hashes of the namespaces it calls into, and a stamp that does not
+match at load sends the namespace through compilation in memory with a warning to reinstall. Code that `ry run` and `ry load` compile for a
 script or a package under development lives in memory for the process. That costs Cranelift's
-compile time, about a millisecond per function spread over every core, at each start, which keeps
+compile time, about a millisecond per function on a worker thread, for each function a session
+uses, which keeps
 the fast path free of a cache to key, invalidate and keep coherent. If start-up time on the
 benchmark code bases says otherwise, the fix is a faster baseline compiler (`prior-art.md`, the
 copy-and-patch tier), not a cache.
@@ -176,14 +181,22 @@ the contract's, and this section fixes the native side.
 | function | a code pointer and a captures reference | a slot in its lambda set's pool | closure |
 
 A **reference** is a 32-bit index into a pool, not a pointer. A pool holds every heap value of one
-record type or one tag variant, as a struct of arrays: one column per field and one column of
-reference counts, each a flat array indexed by the reference. The upper bits of a reference to a
-tag union carry the tag, as many bits as the union has variants to tell apart, so `match` reads the
-tag without a load, and the lower bits index that variant's pool. Pools are per process, and their
-column base addresses are in the table each code file reads at load, so a field read is one load at
-`base + index * width` with the base hoisted out of loops. A pool that outgrows its index space is
-a run-time error that names the type, which at 2^28 values per variant of an eight-variant union is
-gigabytes of live data.
+record type or one variant, as a struct of arrays: one column per field and one column of
+reference counts, each a flat array indexed by the reference. A variant is a tag name with its
+payload types, and tags are structural, so one `:Num(value: F64)` pool serves every union that
+contains that variant. A reference uses its lower 28 bits as the index into its pool, which allows
+2^28 live values per pool, and for a value of a closed union its upper 4 bits hold the variant's
+index in that union's sorted tag list, so `match` reads the tag without a load. Coercing a value
+from one closed union to a wider one re-encodes the upper bits through a table the compiler builds
+for that coercion. A union of more than 16 variants, and an open union (`..`), whose variants are
+not known, use a 64-bit reference instead: a 32-bit variant id, unique in the process, and the
+32-bit index. A pool that outgrows its index space is a run-time error that names the type.
+
+Pools are per process, and each column's base address is in the table each code file reads at
+load. A field read is one load at `base + index * width`, with the base kept in a register across
+code that cannot allocate from that pool. A column grows by reallocation, so the base is read again
+after any call or allocation that may grow it, which costs one load from the table, a cache line
+that stays hot.
 
 **Strings.** A `Str` is UTF-8 bytes with no terminator, as in Roc and Rust. A string of up to 23
 bytes is stored inline in its three-word value, so most keys, labels and identifiers never
@@ -198,23 +211,33 @@ string that has no UTF-8 form.
 struct of arrays: doubles and integers at their natural width, `Bool` as a bitset, strings as
 three-word values, and a record or tag item as one column per field, so a
 `List<Record{x: F64, y: F64}>` is an array of `x` values followed by an array of `y` values, and a
-loop that sums `x` reads contiguous doubles. A list of tags adds a tag column, one byte per item,
-and a payload column per field across its variants. An item of a recursive type such as `Node` is
-a 32-bit reference. `List.append` grows in place when the list is uniquely held and its capacity
-allows, and doubles the capacity otherwise. A list that does not escape its function and whose
-length the IR bounds by a small constant, or that is usually short, gets inline capacity on the
-stack, eight items by default, and moves to a heap buffer only if it grows past that.
+loop that sums `x` reads contiguous doubles. A list of a union type whose values fit in four words
+stores a tag column, one byte per item, and payload columns overlaid across variants: payload
+column `k` holds the `k`th field of whichever variant the item is, at the widest width any variant
+gives that position. An item of a type that is a reference, a recursive union such as `Node`
+included, is a single column of references, which already carry their tags. `List.append` grows in place when the list is uniquely held and its capacity
+allows, and doubles the capacity otherwise. A list that does not escape its function, and is
+passed only to borrowing parameters, gets inline capacity on the stack, eight items, when the IR
+bounds its length by that constant or the list is built by a loop with no proven bound. It moves
+to a heap buffer if it grows past the inline capacity. A stack list is never dropped: its storage
+ends with the frame, and passing it to an owning parameter is an escape, which gives it a heap
+buffer from the start.
 
-**Dicts and sets.** When a key type can be numbered densely (a payload-free tag union, `Bool`, or
-a small integer type), a `Dict` is a flat array indexed by the key and a bitset of the keys
-present, and a `Set` is the bitset alone, so a lookup is a bit test and a load with no hashing.
+**Dicts and sets.** When the key type is `Bool`, `U8`, `I8` or a union of payload-free tags, which
+have at most 256 values, a `Dict` is a flat array of values indexed by the key, a bitset of the
+keys present, and a byte array of the keys in insertion order, and a `Set` drops the value array.
+A lookup is a bit test and a load with no hashing, and iteration walks the order array, so the
+order is insertion order as `Dict.keys` promises.
 Every other `Dict` keeps its entries in insertion order as a key column and a value column, plus
 an open-addressing index array of 32-bit entries, which is the layout of Roc's `Dict` and of
-Python's. The lower bits of an index entry are the position of its entry in the columns, and the
-upper seven bits are a fragment of the key's hash, so a probe rejects almost every wrong slot
-without reading the key column. Iteration walks the dense columns, a lookup probes the index, and
-removal moves the last entry into the freed position. Iteration order is insertion order, so the hash seed
-never reaches output. The seed is drawn once per process, which keeps input from a web request or a
+Python's. The lower 25 bits of an index entry are the position of its entry in the columns, and
+the upper 7 bits are a fragment of the key's hash, so a probe rejects almost every wrong slot
+without reading the key column. An entry of all ones marks an empty slot, and a `Dict` past 2^25
+entries moves to 64-bit index entries. Iteration walks the dense columns and a lookup probes the
+index. Removal marks the entry's position in a bitset of removed entries instead of moving
+another entry into it, so iteration stays in insertion order, and the columns are compacted when
+removed entries reach half of them. Iteration order is insertion order, so the hash seed never
+reaches output. The seed is drawn once per process, which keeps input from a web request or a
 parsed file from forcing collisions on purpose, and the test harnesses fix it from their one seed
 so a failing run replays. A hashed `Set<T>` is a `Dict<T, {}>` with no value column.
 
@@ -289,7 +312,9 @@ return this value or this failure), so the frame redesign can land without touch
 
 **Closures.** A typed closure that captures by value under the contract's rule is a code pointer
 and a reference to a slot in its lambda set's pool, which holds the captured values at their
-natural width, one column per capture. A closure never captures
+natural width, one column per capture. Where the lambda set is not known, as for a function value
+received from outside the namespace, the code pointer points just past a small header that holds
+the closure's drop function, so dropping the value calls through it. A closure never captures
 itself: recursive and mutually recursive local functions are lifted to top-level definitions that
 call each other by name and take their captures as extra parameters, as in Roc, which keeps
 closures acyclic. Where the checker knows the exact closure at a call site, as for
@@ -414,8 +439,11 @@ user-facing wording and the diagnostic codes follow the native-types contract.
   second copy, so every second copy runs, and the three runs must still agree.
 - **Every fact checked.** `RY_CHECK_FACTS` compiles a check before each use of a fact: a count of
   one before each in-place update and each reuse, a live count before each read, and the bound
-  before each list read whose bounds check was removed. A failed check panics with the function and
-  the fact, so a soundness bug in the IR shows up as a precise failure instead of corrupt memory.
+  before each list read whose bounds check was removed. In this mode every pool also keeps a
+  generation column, bumped when a slot is freed, and every reference carries the generation it
+  was made with, so a read through a reference to a freed and reused slot fails the check instead
+  of reading another value. A failed check panics with the function and the fact, so a soundness
+  bug in the IR shows up as a precise failure instead of corrupt memory.
 - **No leaks.** Reference counting is deterministic and R holds no references into the native
   heap, so a program that returns no native value frees every native value it allocated. Each run
   in the matrix ends by asserting that the native pools hold no live slot apart from saturated
@@ -424,11 +452,13 @@ user-facing wording and the diagnostic codes follow the native-types contract.
 ## What is built in one change
 
 The typed core IR and its lowering in the analysis, its serialized form beside the bytecode, the
-native representations with their pools, columns and free stacks, count insertion with borrow inference, field moves,
-drop specialization and reuse, the Cranelift backend over the IR, the entry and exit stubs with the
-second copies, value tracking per namespace, mapped code files with their per-process table,
-compilation at `ry install` into the installed package, `ry build --exe`, the invalidation of direct calls on unlocking,
-`ry check --explain`, the test modes and the Rust twins. The native path in
+native representations (pools with their columns and free stacks, column lists, bitsets, stack
+lists, dense and hashed dicts), count insertion with borrow inference, field moves, drop
+specialization and reuse, the Cranelift backend over the IR, the entry and exit stubs with the
+second copies, value tracking per namespace, lazy compilation with background workers, mapped code
+files with their stamps and per-process table, compilation at `ry install` into the installed
+package, `ry build --exe`, the invalidation of direct calls on unlocking, `ry check --explain`,
+the test modes and the Rust twins. The native path in
 `crates/jit/src/native.rs` keeps serving typed code over R types that is not strict-clean.
 
 The build starts with native `List`, `Str` and `Dict` and ahead-of-time compilation of the typed
@@ -450,6 +480,9 @@ lists, strings and captures.
 - **Packages in the executable.** `ry build --exe` loads packages from the library. Embedding the
   R code of the program's packages, and their shared objects, would make the executable portable
   between machines.
-- **Start-up compile time.** Compiling every typed function at each `ry run` and `ry load` start
-  is about a millisecond per function per core. Whether a 300,000-line code base under development
-  needs the copy-and-patch baseline for its start is to be measured.
+- **First-call compile time.** A function compiled at its first call costs about a millisecond on
+  that call unless a worker compiled it first. Whether a 300,000-line code base under development
+  needs the copy-and-patch baseline for its first calls is to be measured.
+- **The bytecode cache.** `r-runtime.md` caches untyped bytecode on disk under content hashes.
+  Under the performance principles that cache is to be replaced the same way, by bytecode written
+  at install as build output and a first tier fast enough to compile the rest at load.
