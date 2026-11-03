@@ -1,6 +1,8 @@
-//! Native scalar functions: a closure whose body only computes a scalar from scalars, compiled
-//! to machine code that takes its arguments unboxed and returns its value unboxed, with no
-//! frame, no promises and no annotation checks.
+//! Native functions: a closure whose body only computes a scalar from scalars and plain
+//! vectors, compiled to machine code that takes its scalar arguments unboxed and its vectors as
+//! their objects, and returns its value unboxed, with no frame, no promises and no annotation
+//! checks. The body may loop (`for` over a vector, `seq_len`, `seq_along` or `a:b`, `while`,
+//! `repeat`, `break`, `next`) and read vectors (`length`, and `[[` or `[` with a scalar index).
 //!
 //! Compiled code calls one in place of the closure when it knows the arguments' types (see
 //! `Action::NativeCall`), and a native function calls the native functions it reaches,
@@ -10,11 +12,12 @@
 //!
 //! Skipping the frame is invisible because the body can observe nothing about its caller: it
 //! reads only its parameters and its own locals, calls only base arithmetic and other such
-//! functions, and has no effect. Its arguments are evaluated before the call, which lazy
+//! functions, and has no effect. It allocates nothing either, so the vectors it reads, which
+//! its caller roots, cannot move or die while it runs. Its arguments are evaluated before the call, which lazy
 //! evaluation could only notice through an effect or an error, and the body has neither: every
 //! operation that would warn or raise an error in R (an `NA` condition, an integer overflow, a
-//! `NaN` from `sqrt`, a call nested deeper than R allows) makes the function return [`FAILED`]
-//! instead. Nothing anyone can see has happened by then, so the caller runs the call again in
+//! `NaN` from `sqrt`, a call nested deeper than R allows, an index out of range, a pending
+//! interrupt in a loop) makes the function return [`FAILED`] instead. Nothing anyone can see has happened by then, so the caller runs the call again in
 //! the interpreter, which reports the problem as R would.
 //!
 //! The annotation checks of a typed closure are decided when it compiles, from the argument
@@ -101,6 +104,10 @@ const MAX_REFUSALS: usize = 65536;
 
 /// How deep a body's expressions may nest, which bounds the compiler's own recursion.
 const MAX_NESTING: usize = 200;
+/// The most calls and operators a callee's body may hold to be compiled into its caller.
+const MAX_INLINE_SIZE: usize = 24;
+/// How deeply inlined bodies may nest.
+const MAX_INLINE_DEPTH: usize = 3;
 
 /// The native function for calling `function` with unboxed arguments of types `params`,
 /// compiling it on first use. `None` when the closure is not a scalar function of them.
@@ -126,7 +133,7 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
             Some(&*Box::leak(Box::new(native)))
         }
         Err(Refusal(why)) => {
-            if std::env::var_os("RY_JIT_LOG").is_some() {
+            if crate::logging() {
                 eprintln!("jit: no native function for {params:?}: {why}");
             }
             None
@@ -161,10 +168,14 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
             "the call does not supply every formal positionally",
         ));
     }
-    if !params.iter().all(|ty| ty.is_unboxed()) {
-        return Err(Refusal("an argument is not an unboxed scalar"));
+    if !params.iter().all(|ty| ty.is_unboxed() || ty.is_vector()) {
+        return Err(Refusal(
+            "an argument is neither a scalar nor a plain vector",
+        ));
     }
-    let storages: SmallVec<[Option<SexpType>; 4]> = params.iter().map(|ty| ty.storage()).collect();
+    // The checks test the storage type only, which a vector shares with its elements.
+    let storages: SmallVec<[Option<SexpType>; 4]> =
+        params.iter().map(|ty| ty.element().storage()).collect();
     if matches!(
         annotations::entry_for(function, &storages),
         annotations::Entry::Unchecked
@@ -197,7 +208,8 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         ));
     }
     let speculations = second.speculations;
-    let address = codegen::with_module(|module| {
+    let started = std::time::Instant::now();
+    let (address, size) = codegen::with_module(|module| {
         let call_conv = module.isa().default_call_conv();
         let id = module
             .declare_anonymous_function(&signature(params, guess, call_conv))
@@ -220,14 +232,18 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         module
             .define_function(id, &mut context)
             .map_err(|_| Refusal("Cranelift rejected the function"))?;
+        let size = codegen::code_size(&context);
         module.clear_context(&mut context);
         module
             .finalize_definitions()
             .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
-        Ok(module.get_finalized_function(id) as usize)
+        Ok((module.get_finalized_function(id) as usize, size))
     })?;
-    if std::env::var_os("RY_JIT_LOG").is_some() {
-        eprintln!("jit: native function for {params:?} -> {guess:?}");
+    if crate::logging() {
+        eprintln!(
+            "jit: native function for {params:?} -> {guess:?} in {} us, {size} bytes",
+            started.elapsed().as_micros()
+        );
     }
     Ok(Native {
         address,
@@ -238,7 +254,11 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
 }
 
 fn machine_type(ty: Ty) -> Type {
-    if ty == Ty::Dbl { F64 } else { I32 }
+    match ty {
+        Ty::Dbl => F64,
+        _ if ty.is_vector() => I64,
+        _ => I32,
+    }
 }
 
 /// Whether the value of `expression` may be invisible, as an assignment's is, which a native
@@ -329,6 +349,19 @@ enum Operation {
     Log,
     Floor,
     Ceiling,
+    For,
+    While,
+    Repeat,
+    Break,
+    Next,
+    Length,
+    SeqLen,
+    SeqAlong,
+    Colon,
+    /// `x[[i]]`.
+    Element,
+    /// `x[i]`, which for a scalar index in range reads the same element as `x[[i]]`.
+    Subset,
 }
 
 impl Operation {
@@ -361,6 +394,17 @@ impl Operation {
             "log" => Operation::Log,
             "floor" => Operation::Floor,
             "ceiling" => Operation::Ceiling,
+            "for" => Operation::For,
+            "while" => Operation::While,
+            "repeat" => Operation::Repeat,
+            "break" => Operation::Break,
+            "next" => Operation::Next,
+            "length" => Operation::Length,
+            "seq_len" => Operation::SeqLen,
+            "seq_along" => Operation::SeqAlong,
+            ":" => Operation::Colon,
+            "[[" => Operation::Element,
+            "[" => Operation::Subset,
             _ => return None,
         })
     }
@@ -395,14 +439,22 @@ impl Operation {
 /// function; with one it also emits the code, so both make the same decisions.
 struct Walker<'p> {
     function: Sexp,
+    /// Where the body being walked looks up the functions it calls: the function's own
+    /// environment, or an inlined callee's.
+    environment: Sexp,
+    /// The callees whose bodies enclose the expression being walked, innermost last.
+    inlined: SmallVec<[Sexp; 2]>,
     /// The function's own result type, once known.
     own_result: Option<Ty>,
     parameters: &'p [(Sexp, Ty)],
-    /// Parameters and locals: the symbol, its type, and its variable once emitted.
+    /// Parameters and locals: the symbol, its type, and its variable once emitted. A local
+    /// first assigned in an `if` branch, a right operand of `&&` or `||`, or a loop goes out of
+    /// scope where that region ends, because it is not bound on every path past it: a later
+    /// read refuses the function rather than guess what R would find.
     locals: SmallVec<[(Sexp, Ty, Option<Variable>); 8]>,
-    /// How many `if` branches and right operands of `&&` and `||` enclose the expression being
-    /// walked. A local first assigned under one would not be bound on every path.
-    conditional: usize,
+    /// For each loop enclosing the expression being walked, innermost last, whether a `break`
+    /// leaves it.
+    breaks: SmallVec<[bool; 4]>,
     /// How many closure call arguments enclose the expression being walked. R passes them as
     /// promises the callee may force late or never, so evaluating one eagerly is only unobservable
     /// when it neither assigns nor returns.
@@ -428,13 +480,16 @@ impl<'p> Walker<'p> {
     fn new(function: Sexp, parameters: &'p [(Sexp, Ty)], own_result: Option<Ty>) -> Walker<'p> {
         Walker {
             function,
+            // SAFETY: `function` is a closure, whose tag is its environment.
+            environment: unsafe { function.tag() },
+            inlined: SmallVec::new(),
             own_result,
             parameters,
             locals: parameters
                 .iter()
                 .map(|&(symbol, ty)| (symbol, ty, None))
                 .collect(),
-            conditional: 0,
+            breaks: SmallVec::new(),
             lazy: 0,
             statement: false,
             nesting: 0,
@@ -533,7 +588,7 @@ impl<'p> Walker<'p> {
                 if self.locals.iter().any(|(symbol, _, _)| *symbol == head) {
                     return Err(Refusal("a call of a local variable"));
                 }
-                let speculation = resolve_function(head, self.function.tag())
+                let speculation = resolve_function(head, self.environment)
                     .ok_or(Refusal("a function the lookup cannot resolve"))?;
                 let callee = speculation.function;
                 self.speculations.push(speculation);
@@ -614,6 +669,12 @@ impl<'p> Walker<'p> {
             .ok_or(Refusal("a call of a closure that is not a native function"))?;
         self.speculations
             .extend(native.speculations.iter().cloned());
+        if self.inlined.len() < MAX_INLINE_DEPTH && !self.inlined.contains(&callee) {
+            let body = bytecode::closure_body(callee);
+            if inlinable(body) {
+                return self.inline(emitter, callee, native, body, &types, &arguments);
+            }
+        }
         let value = emitter
             .as_mut()
             .map(|emitter| emitter.call(Callee::Other(native), &arguments))
@@ -622,6 +683,58 @@ impl<'p> Walker<'p> {
             kind: Kind::Known(native.result),
             value,
         })
+    }
+
+    /// A call of a small native function compiled into the caller: its body walked in its own
+    /// scope with its parameters bound to the argument values. The call is invisible in either
+    /// form, so this only saves the call and lets the caller's code see the callee's.
+    unsafe fn inline(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        callee: Sexp,
+        native: &Native,
+        body: Sexp,
+        types: &[Ty],
+        arguments: &[Value],
+    ) -> Result<Val, Refusal> {
+        let mut locals: SmallVec<[(Sexp, Ty, Option<Variable>); 8]> = SmallVec::new();
+        for (index, (&(symbol, _), &ty)) in values::pairlist_items(callee.car())
+            .iter()
+            .zip(types)
+            .enumerate()
+        {
+            let variable = match emitter.as_mut() {
+                Some(emitter) => {
+                    let argument = *arguments
+                        .get(index)
+                        .ok_or(Refusal("an inlined call without its argument"))?;
+                    let variable = emitter.builder.declare_var(machine_type(ty));
+                    emitter.builder.def_var(variable, argument);
+                    Some(variable)
+                }
+                None => None,
+            };
+            locals.push((symbol, ty, variable));
+        }
+        let caller_locals = std::mem::replace(&mut self.locals, locals);
+        let caller_breaks = std::mem::take(&mut self.breaks);
+        let caller_environment = std::mem::replace(&mut self.environment, callee.tag());
+        let caller_nesting = std::mem::take(&mut self.nesting);
+        self.inlined.push(callee);
+        let value = self.expression(emitter, body);
+        self.inlined.pop();
+        self.nesting = caller_nesting;
+        self.environment = caller_environment;
+        self.breaks = caller_breaks;
+        self.locals = caller_locals;
+        let value = value?;
+        match value.kind {
+            Kind::Known(ty) if ty == native.result => Ok(value),
+            Kind::Never => Ok(value),
+            _ => Err(Refusal(
+                "an inlined body of a different type than its function",
+            )),
+        }
     }
 
     unsafe fn builtin(
@@ -656,6 +769,99 @@ impl<'p> Walker<'p> {
                 self.branch(emitter, *condition, *yes, None)
             }
             (Operation::If, [_, _]) => Err(Refusal("an `if` without `else` used for its value")),
+            (Operation::For | Operation::While | Operation::Repeat, _) if !statement => {
+                Err(Refusal("a loop used for its value"))
+            }
+            (Operation::For | Operation::While | Operation::Repeat, _) if self.lazy > 0 => {
+                Err(Refusal("a loop inside a promise"))
+            }
+            (Operation::For, [variable, sequence, body]) => {
+                self.for_loop(emitter, *variable, *sequence, *body)
+            }
+            (Operation::While, [condition, body]) => {
+                self.loop_body(emitter, Some(*condition), *body)
+            }
+            (Operation::Repeat, [body]) => self.loop_body(emitter, None, *body),
+            (Operation::Break | Operation::Next, []) => {
+                if self.lazy > 0 {
+                    return Err(Refusal("a `break` or `next` inside a promise"));
+                }
+                let breaks = self
+                    .breaks
+                    .last_mut()
+                    .ok_or(Refusal("a `break` or `next` outside a loop"))?;
+                *breaks |= operation == Operation::Break;
+                if let Some(emitter) = emitter.as_mut() {
+                    let &(next, exit) = emitter
+                        .loops
+                        .last()
+                        .ok_or(Refusal("a `break` or `next` outside a loop"))?;
+                    let target = if operation == Operation::Break {
+                        exit
+                    } else {
+                        next
+                    };
+                    emitter.builder.ins().jump(target, &[]);
+                    let dead = emitter.builder.create_block();
+                    emitter.builder.switch_to_block(dead);
+                }
+                Ok(Val {
+                    kind: Kind::Never,
+                    value: None,
+                })
+            }
+            (Operation::Length, [operand]) => {
+                let operand = self.expression(emitter, *operand)?;
+                let value = match (operand.kind, emitter.as_mut(), operand.value) {
+                    (Kind::Never, ..) => return Ok(operand),
+                    (Kind::Known(ty), Some(emitter), Some(vector)) if ty.is_vector() => {
+                        Some(emitter.length(vector))
+                    }
+                    (Kind::Known(ty), emitter, _) if ty.is_unboxed() => {
+                        emitter.map(|emitter| emitter.builder.ins().iconst(I32, 1))
+                    }
+                    (Kind::Known(ty), None, _) if ty.is_vector() => None,
+                    (Kind::Open, None, _) => None,
+                    _ => return Err(Refusal("`length` of something native code lacks")),
+                };
+                Ok(Val {
+                    kind: Kind::Known(Ty::Int),
+                    value,
+                })
+            }
+            (Operation::Element | Operation::Subset, [vector, index]) => {
+                let vector = self.expression(emitter, *vector)?;
+                if vector.kind == Kind::Never {
+                    return Ok(vector);
+                }
+                let Kind::Known(vector_ty) = vector.kind else {
+                    return Err(Refusal("an index into something other than a vector"));
+                };
+                if !vector_ty.is_vector() {
+                    return Err(Refusal("an index into something other than a vector"));
+                }
+                let index = self.expression(emitter, *index)?;
+                if index.kind == Kind::Never {
+                    return Ok(index);
+                }
+                // `x[TRUE]` recycles the logical over the whole vector, while `x[[TRUE]]` reads the
+                // first element, so only `[[` may treat a logical index as a position.
+                if operation == Operation::Subset && index.kind == Kind::Known(Ty::Lgl) {
+                    return Err(Refusal("`[` with a logical index selects, not indexes"));
+                }
+                let index_ty = index.kind.numeric()?;
+                let value = match (emitter.as_mut(), vector.value, index.value, index_ty) {
+                    (Some(emitter), Some(vector), Some(index), Some(index_ty)) => {
+                        Some(emitter.element(vector_ty.element(), vector, index_ty, index))
+                    }
+                    (Some(_), ..) => return Err(Refusal("an index without a value")),
+                    (None, ..) => None,
+                };
+                Ok(Val {
+                    kind: Kind::Known(vector_ty.element()),
+                    value,
+                })
+            }
             (Operation::And | Operation::Or, [left, right]) => {
                 self.short_circuit(emitter, operation == Operation::And, *left, *right)
             }
@@ -814,9 +1020,6 @@ impl<'p> Walker<'p> {
                 self.locals[index].2
             }
             None => {
-                if self.conditional > 0 {
-                    return Err(Refusal("a variable first assigned on only some paths"));
-                }
                 let variable = emitter
                     .as_mut()
                     .map(|emitter| emitter.builder.declare_var(machine_type(ty)));
@@ -863,8 +1066,9 @@ impl<'p> Walker<'p> {
             (None, _) => None,
         };
         let used = no.is_some();
-        self.conditional += 1;
+        let scope = self.locals.len();
         let yes = self.expression(emitter, yes)?;
+        self.locals.truncate(scope);
         if let (Some(emitter), Some((no_label, join))) = (emitter.as_mut(), labels) {
             emitter.close_branch(join, yes, used)?;
             emitter.builder.switch_to_block(no_label);
@@ -876,7 +1080,7 @@ impl<'p> Walker<'p> {
                 value: None,
             },
         };
-        self.conditional -= 1;
+        self.locals.truncate(scope);
         let kind = if used {
             yes.kind.join(no.kind)?
         } else {
@@ -891,6 +1095,312 @@ impl<'p> Walker<'p> {
             _ => None,
         };
         Ok(Val { kind, value })
+    }
+
+    /// `for (variable in sequence) body`, as a statement.
+    unsafe fn for_loop(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        variable: Sexp,
+        sequence: Sexp,
+        body: Sexp,
+    ) -> Result<Val, Refusal> {
+        if variable.kind() != SexpType::Symbol {
+            return Err(Refusal("a loop variable that is not a symbol"));
+        }
+        let Some(sequence) = self.sequence(emitter, sequence)? else {
+            return Ok(Val {
+                kind: Kind::Never,
+                value: None,
+            });
+        };
+        let scope = self.locals.len();
+        let existing = self
+            .locals
+            .iter()
+            .rposition(|(symbol, _, _)| *symbol == variable);
+        let target = match existing {
+            Some(index) if self.locals[index].1 != sequence.element => {
+                return Err(Refusal(
+                    "a loop variable assigned values of different types",
+                ));
+            }
+            Some(index) => self.locals[index].2,
+            None => {
+                let target = emitter
+                    .as_mut()
+                    .map(|emitter| emitter.builder.declare_var(machine_type(sequence.element)));
+                self.locals.push((variable, sequence.element, target));
+                target
+            }
+        };
+        let blocks = match emitter.as_mut() {
+            Some(emitter) => {
+                let count = sequence
+                    .count
+                    .ok_or(Refusal("a sequence without a length"))?;
+                let target = target.ok_or(Refusal("a loop variable without a variable"))?;
+                let header = emitter.builder.create_block();
+                let body_block = emitter.builder.create_block();
+                let next = emitter.builder.create_block();
+                let exit = emitter.builder.create_block();
+                let index = emitter.builder.declare_var(I64);
+                let zero = emitter.builder.ins().iconst(I64, 0);
+                emitter.builder.def_var(index, zero);
+                emitter.builder.ins().jump(header, &[]);
+                emitter.builder.switch_to_block(header);
+                let current = emitter.builder.use_var(index);
+                let more = emitter
+                    .builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThan, current, count);
+                emitter.builder.ins().brif(more, body_block, &[], exit, &[]);
+                emitter.builder.switch_to_block(body_block);
+                let value = match sequence.source {
+                    Source::Range { start, step } => {
+                        let offset = emitter.builder.ins().ireduce(I32, current);
+                        let offset = emitter.builder.ins().imul(offset, step);
+                        emitter.builder.ins().iadd(start, offset)
+                    }
+                    Source::Vector(vector) => {
+                        let ty = sequence.element;
+                        emitter.load_element(ty, vector, current)
+                    }
+                    Source::Typing => return Err(Refusal("a sequence without a value")),
+                };
+                emitter.builder.def_var(target, value);
+                emitter.loops.push((next, exit));
+                Some((index, header, next, exit))
+            }
+            None => None,
+        };
+        self.breaks.push(false);
+        self.statement = true;
+        let walked = self.expression(emitter, body);
+        self.breaks.pop();
+        self.locals.truncate(scope);
+        walked?;
+        if let (Some(emitter), Some((index, header, next, exit))) = (emitter.as_mut(), blocks) {
+            emitter.loops.pop();
+            emitter.builder.ins().jump(next, &[]);
+            emitter.builder.switch_to_block(next);
+            emitter.check_interrupt();
+            let current = emitter.builder.use_var(index);
+            let following = emitter.builder.ins().iadd_imm_s(current, 1);
+            emitter.builder.def_var(index, following);
+            emitter.builder.ins().jump(header, &[]);
+            emitter.builder.switch_to_block(exit);
+        }
+        Ok(Val {
+            kind: Kind::Known(Ty::Bottom),
+            value: None,
+        })
+    }
+
+    /// `while (condition) body`, or `repeat body` without a condition, as a statement.
+    unsafe fn loop_body(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        condition: Option<Sexp>,
+        body: Sexp,
+    ) -> Result<Val, Refusal> {
+        let scope = self.locals.len();
+        // Every iteration starts at the header, which checks for an interrupt first.
+        let blocks = emitter.as_mut().map(|emitter| {
+            let header = emitter.builder.create_block();
+            let exit = emitter.builder.create_block();
+            emitter.builder.ins().jump(header, &[]);
+            emitter.builder.switch_to_block(header);
+            emitter.check_interrupt();
+            emitter.loops.push((header, exit));
+            (header, exit)
+        });
+        self.breaks.push(false);
+        let walked = self.loop_iteration(emitter, condition, body);
+        let breaks = self.breaks.pop().unwrap_or(true);
+        self.locals.truncate(scope);
+        let terminates = walked? || breaks;
+        if let (Some(emitter), Some((header, exit))) = (emitter.as_mut(), blocks) {
+            emitter.loops.pop();
+            emitter.builder.ins().jump(header, &[]);
+            emitter.builder.switch_to_block(exit);
+        }
+        // A loop that cannot end other than through `return` never completes.
+        let kind = if terminates {
+            Kind::Known(Ty::Bottom)
+        } else {
+            Kind::Never
+        };
+        Ok(Val { kind, value: None })
+    }
+
+    /// One iteration of a `while` or `repeat` loop: whether a condition may end the loop.
+    unsafe fn loop_iteration(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        condition: Option<Sexp>,
+        body: Sexp,
+    ) -> Result<bool, Refusal> {
+        if let Some(condition) = condition {
+            let condition = self.expression(emitter, condition)?;
+            if condition.kind == Kind::Never {
+                return Ok(false);
+            }
+            let ty = condition.kind.numeric()?;
+            if let Some(emitter) = emitter.as_mut() {
+                let ty = ty.ok_or(Refusal("a condition of undetermined type"))?;
+                let value = condition
+                    .value
+                    .ok_or(Refusal("a condition without a value"))?;
+                let truth = emitter.truth(ty, value);
+                let body_block = emitter.builder.create_block();
+                let &(_, exit) = emitter
+                    .loops
+                    .last()
+                    .ok_or(Refusal("a loop without blocks"))?;
+                emitter
+                    .builder
+                    .ins()
+                    .brif(truth, body_block, &[], exit, &[]);
+                emitter.builder.switch_to_block(body_block);
+            }
+        }
+        self.statement = true;
+        self.expression(emitter, body)?;
+        Ok(condition.is_some())
+    }
+
+    /// The values a `for` loop runs over, evaluated once before it starts. `None` when
+    /// evaluating them never completes.
+    unsafe fn sequence(
+        &mut self,
+        emitter: &mut Emitting<'_, '_>,
+        expression: Sexp,
+    ) -> Result<Option<Sequence>, Refusal> {
+        let generator = if expression.kind() == SexpType::Language
+            && expression.car().kind() == SexpType::Symbol
+            && !self
+                .locals
+                .iter()
+                .any(|(symbol, _, _)| *symbol == expression.car())
+        {
+            let speculation = resolve_function(expression.car(), self.environment)
+                .ok_or(Refusal("a function the lookup cannot resolve"))?;
+            let operation = base_builtin(speculation.function, expression.car())
+                .and_then(|name| Operation::of(&name))
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        Operation::SeqLen | Operation::SeqAlong | Operation::Colon
+                    )
+                });
+            if operation.is_some() {
+                self.speculations.push(speculation);
+            }
+            operation
+        } else {
+            None
+        };
+        let Some(generator) = generator else {
+            let vector = self.expression(emitter, expression)?;
+            let ty = match vector.kind {
+                Kind::Never => return Ok(None),
+                Kind::Known(ty) if ty.is_vector() => ty,
+                _ => {
+                    return Err(Refusal(
+                        "a loop over something other than a vector or a sequence",
+                    ));
+                }
+            };
+            let (count, source) = match (emitter.as_mut(), vector.value) {
+                (Some(emitter), Some(vector)) => {
+                    (Some(emitter.vector_length(vector)), Source::Vector(vector))
+                }
+                _ => (None, Source::Typing),
+            };
+            return Ok(Some(Sequence {
+                element: ty.element(),
+                count,
+                source,
+            }));
+        };
+        let args: SmallVec<[Sexp; 2]> = values::pairlist_items(expression.cdr())
+            .iter()
+            .map(|&(tag, value)| {
+                if tag != values::nil() || value == values::missing_arg() {
+                    Err(Refusal("a sequence with named or missing arguments"))
+                } else {
+                    Ok(value)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let mut operands: SmallVec<[(Ty, Option<Value>); 2]> = SmallVec::new();
+        for &arg in &args {
+            let operand = self.expression(emitter, arg)?;
+            match operand.kind {
+                Kind::Never => return Ok(None),
+                Kind::Known(ty) if ty.is_vector() && generator == Operation::SeqAlong => {
+                    operands.push((ty, operand.value));
+                }
+                _ => {
+                    let ty = operand
+                        .kind
+                        .numeric()?
+                        .ok_or(Refusal("a sequence of undetermined type"))?;
+                    operands.push((ty, operand.value));
+                }
+            }
+        }
+        let Some(emitter) = emitter.as_mut() else {
+            if !matches!((generator, operands.len()), (Operation::Colon, 2) | (_, 1)) {
+                return Err(Refusal("a sequence call native code lacks"));
+            }
+            return Ok(Some(Sequence {
+                element: Ty::Int,
+                count: None,
+                source: Source::Typing,
+            }));
+        };
+        let value = |(ty, value): (Ty, Option<Value>)| {
+            value
+                .map(|value| (ty, value))
+                .ok_or(Refusal("a sequence operand without a value"))
+        };
+        let one = emitter.builder.ins().iconst(I32, 1);
+        let (start, step, count) = match (generator, operands.as_slice()) {
+            (Operation::SeqLen, &[length]) => {
+                let (ty, length) = value(length)?;
+                (one, one, emitter.sequence_length(ty, length))
+            }
+            (Operation::SeqAlong, &[along]) => {
+                let (ty, along) = value(along)?;
+                let count = if ty.is_vector() {
+                    let length = emitter.vector_length(along);
+                    // A longer vector's indexes are doubles.
+                    let long = emitter.builder.ins().icmp_imm_s(
+                        IntCC::SignedGreaterThan,
+                        length,
+                        i64::from(i32::MAX),
+                    );
+                    emitter.fail_if(long);
+                    length
+                } else {
+                    emitter.builder.ins().iconst(I64, 1)
+                };
+                (one, one, count)
+            }
+            (Operation::Colon, &[from, to]) => {
+                let (from_ty, from) = value(from)?;
+                let (to_ty, to) = value(to)?;
+                emitter.colon((from_ty, from), (to_ty, to))
+            }
+            _ => return Err(Refusal("a sequence call native code lacks")),
+        };
+        Ok(Some(Sequence {
+            element: Ty::Int,
+            count: Some(count),
+            source: Source::Range { start, step },
+        }))
     }
 
     /// `left && right` or `left || right`. A missing left operand, whose result depends on the
@@ -932,9 +1442,9 @@ impl<'p> Walker<'p> {
             (Some(_), None) => return Err(Refusal("an operand without a value")),
             (None, _) => None,
         };
-        self.conditional += 1;
+        let scope = self.locals.len();
         let right = self.expression(emitter, right)?;
-        self.conditional -= 1;
+        self.locals.truncate(scope);
         if right.kind != Kind::Never {
             right.kind.numeric()?;
         }
@@ -963,6 +1473,42 @@ impl<'p> Walker<'p> {
     }
 }
 
+/// The values a `for` loop runs over: `count` of them, of type `element`.
+struct Sequence {
+    element: Ty,
+    count: Option<Value>,
+    source: Source,
+}
+
+#[derive(Clone, Copy)]
+enum Source {
+    /// The integers `start`, `start + step`, and so on.
+    Range { start: Value, step: Value },
+    /// The elements of a vector.
+    Vector(Value),
+    /// A walk that only types the body.
+    Typing,
+}
+
+/// Whether a native function's body is small enough to compile into its callers, and has no
+/// `return`, which would leave the caller instead.
+unsafe fn inlinable(body: Sexp) -> bool {
+    unsafe fn visit(expression: Sexp, budget: &mut usize) -> bool {
+        if expression.kind() != SexpType::Language {
+            return true;
+        }
+        if *budget == 0 || expression.car() == values::symbols().return_ {
+            return false;
+        }
+        *budget -= 1;
+        values::pairlist_items(expression.cdr())
+            .iter()
+            .all(|&(_, argument)| visit(argument, budget))
+    }
+    let mut budget = MAX_INLINE_SIZE;
+    visit(body, &mut budget)
+}
+
 /// Emits the body of a native function into `builder`.
 unsafe fn emit<'f>(
     builder: FunctionBuilder<'f>,
@@ -987,6 +1533,7 @@ unsafe fn emit<'f>(
         own,
         budget,
         failure,
+        loops: Vec::new(),
     };
     // A call nested deeper than R allows, or a pending interrupt, belongs to the interpreter.
     let exhausted = emitter
@@ -994,13 +1541,7 @@ unsafe fn emit<'f>(
         .ins()
         .icmp_imm_s(IntCC::SignedLessThanOrEqual, budget, 0);
     emitter.fail_if(exhausted);
-    let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
-    let address = emitter.builder.ins().iconst(I64, flag);
-    let requested = emitter
-        .builder
-        .ins()
-        .uload8(I32, MemFlagsData::trusted(), address, 0);
-    emitter.fail_if(requested);
+    emitter.check_interrupt();
     for (local, &argument) in walker.locals.iter_mut().zip(arguments) {
         let variable = emitter.builder.declare_var(machine_type(local.1));
         emitter.builder.def_var(variable, argument);
@@ -1037,9 +1578,162 @@ struct Emitter<'f> {
     budget: Value,
     /// The block that returns [`FAILED`].
     failure: cranelift_codegen::ir::Block,
+    /// The enclosing loops' blocks for `next` and `break`, innermost last.
+    loops: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>,
 }
 
 impl Emitter<'_> {
+    /// Fails when an interrupt is pending, which the interpreter then raises.
+    fn check_interrupt(&mut self) {
+        let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
+        let address = self.builder.ins().iconst(I64, flag);
+        let requested = self
+            .builder
+            .ins()
+            .uload8(I32, MemFlagsData::trusted(), address, 0);
+        self.fail_if(requested);
+    }
+
+    fn vector_length(&mut self, vector: Value) -> Value {
+        self.builder
+            .ins()
+            .load(I64, MemFlagsData::trusted(), vector, codegen::LENGTH)
+    }
+
+    /// `length(vector)`, failing for a vector whose length is a double.
+    fn length(&mut self, vector: Value) -> Value {
+        let length = self.vector_length(vector);
+        let long =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThan, length, i64::from(i32::MAX));
+        self.fail_if(long);
+        self.builder.ins().ireduce(I32, length)
+    }
+
+    /// The element at zero-based `offset` of a vector of `ty`s.
+    fn load_element(&mut self, ty: Ty, vector: Value, offset: Value) -> Value {
+        let width = if ty == Ty::Dbl { 8 } else { 4 };
+        let scaled = self.builder.ins().imul_imm_s(offset, width);
+        let address = self.builder.ins().iadd(vector, scaled);
+        self.builder.ins().load(
+            machine_type(ty),
+            MemFlagsData::trusted(),
+            address,
+            codegen::DATA,
+        )
+    }
+
+    /// `vector[[index]]` of a vector of `ty`s, failing where the index is `NA` or out of range.
+    /// A double index truncates toward zero, as R's does.
+    fn element(&mut self, ty: Ty, vector: Value, index_ty: Ty, index: Value) -> Value {
+        let length = self.vector_length(vector);
+        let index = if index_ty == Ty::Dbl {
+            let one = self.builder.ins().f64const(1.0);
+            let below = self
+                .builder
+                .ins()
+                .fcmp(FloatCC::GreaterThanOrEqual, index, one);
+            let bound = self.builder.ins().fcvt_from_sint(F64, length);
+            let bound = self.builder.ins().fadd(bound, one);
+            let within = self.builder.ins().fcmp(FloatCC::LessThan, index, bound);
+            let in_range = self.builder.ins().band(below, within);
+            let outside = self.builder.ins().bxor_imm_u(in_range, 1);
+            self.fail_if(outside);
+            self.builder.ins().fcvt_to_sint_sat(I64, index)
+        } else {
+            let index = self.builder.ins().sextend(I64, index);
+            let below = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, index, 1);
+            let beyond = self
+                .builder
+                .ins()
+                .icmp(IntCC::SignedGreaterThan, index, length);
+            let outside = self.builder.ins().bor(below, beyond);
+            self.fail_if(outside);
+            index
+        };
+        let offset = self.builder.ins().iadd_imm_s(index, -1);
+        self.load_element(ty, vector, offset)
+    }
+
+    /// The length of `seq_len(length)`, failing where R raises an error or the sequence's
+    /// values would be doubles.
+    fn sequence_length(&mut self, ty: Ty, length: Value) -> Value {
+        if ty == Ty::Dbl {
+            let zero = self.builder.ins().f64const(0.0);
+            let negative = self
+                .builder
+                .ins()
+                .fcmp(FloatCC::UnorderedOrLessThan, length, zero);
+            let limit = self.builder.ins().f64const(2147483648.0);
+            let long = self
+                .builder
+                .ins()
+                .fcmp(FloatCC::GreaterThanOrEqual, length, limit);
+            let bad = self.builder.ins().bor(negative, long);
+            self.fail_if(bad);
+            self.builder.ins().fcvt_to_sint_sat(I64, length)
+        } else {
+            // `NA` is the smallest integer, so it fails as a negative length.
+            let negative = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, length, 0);
+            self.fail_if(negative);
+            self.builder.ins().sextend(I64, length)
+        }
+    }
+
+    /// `from:to` as `(start, step, count)`, failing where R raises an error or the values would
+    /// be doubles, following R's own rule: the sequence is integer when `from` is a whole number
+    /// in integer range and so is the last value.
+    fn colon(
+        &mut self,
+        (from_ty, from): (Ty, Value),
+        (to_ty, to): (Ty, Value),
+    ) -> (Value, Value, Value) {
+        let from = self.as_double(from_ty, from);
+        let to = self.as_double(to_ty, to);
+        let missing = self.builder.ins().fcmp(FloatCC::Unordered, from, to);
+        self.fail_if(missing);
+        let whole = self.builder.ins().trunc(from);
+        let fractional = self.builder.ins().fcmp(FloatCC::NotEqual, whole, from);
+        let distance = self.builder.ins().fsub(to, from);
+        let distance = self.builder.ins().fabs(distance);
+        let one = self.builder.ins().f64const(1.0);
+        let epsilon = self.builder.ins().f64const(f64::from(f32::EPSILON));
+        let count = self.builder.ins().fadd(distance, one);
+        let count = self.builder.ins().fadd(count, epsilon);
+        let count = self.builder.ins().floor(count);
+        let span = self.builder.ins().fsub(count, one);
+        let ascending = self.builder.ins().fcmp(FloatCC::LessThanOrEqual, from, to);
+        let back = self.builder.ins().fneg(span);
+        let span = self.builder.ins().select(ascending, span, back);
+        let last = self.builder.ins().fadd(from, span);
+        let low = self.builder.ins().f64const(f64::from(i32::MIN));
+        let high = self.builder.ins().f64const(f64::from(i32::MAX));
+        let mut bad = fractional;
+        for value in [from, last] {
+            let under = self
+                .builder
+                .ins()
+                .fcmp(FloatCC::LessThanOrEqual, value, low);
+            let over = self.builder.ins().fcmp(FloatCC::GreaterThan, value, high);
+            let outside = self.builder.ins().bor(under, over);
+            bad = self.builder.ins().bor(bad, outside);
+        }
+        self.fail_if(bad);
+        let start = self.builder.ins().fcvt_to_sint_sat(I32, from);
+        let up = self.builder.ins().iconst(I32, 1);
+        let down = self.builder.ins().iconst(I32, -1);
+        let step = self.builder.ins().select(ascending, up, down);
+        let count = self.builder.ins().fcvt_to_sint_sat(I64, count);
+        (start, step, count)
+    }
+
     /// Calls a native function, failing when it fails.
     fn call(&mut self, callee: Callee, arguments: &[Value]) -> Result<Value, Refusal> {
         let budget = self.builder.ins().iadd_imm_s(self.budget, -1);

@@ -6749,6 +6749,132 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Rejected candidates no longer pay for instantiation or inference, and the findings
   stay byte-identical because the verdict is the same one full matching reached.
 
+## Compiled bodies share one deoptimization exit
+
+- **Previous shape.** Every guard's cold block boxed the live unboxed registers and slots itself,
+  with one runtime call per value, then called `jit_deopt`. A body with many guards carried that
+  boxing code once per guard, so the cold blocks were most of the IR Cranelift compiled.
+- **Target shape.** Each guard's cold block only stores the raw values it must hand back into one
+  stack scratch area (8 bytes per cell) and jumps, with its exit number, to a single shared cold
+  block that calls `runtime::jit_deopt_exit`. The layout of each exit (registers and slots with
+  their representations, and the bytecode pc) lives in `Compiled::exits` (`runtime::Exit`), so the
+  runtime boxes the values and flushes dirty slots from that table.
+- **Why a table.** The layout is static per guard, so it costs nothing to keep beside the code,
+  and boxing is cold work: doing it in Rust from a table instead of in emitted code shrinks every
+  compiled body without slowing any path that runs often.
+- **Impact.** On the why-ry programs the IR shrank by about 31% and Cranelift time by about 40%.
+
+## Native functions loop, read vectors, and inline small callees
+
+- **Previous shape.** Native functions (`decisions.md`, "Native scalar functions") took scalars
+  only and refused every loop, so a typed kernel such as a dot product or a running sum went
+  through `jit_call` with a frame and boxed arguments.
+- **Target shape.** `crates/jit/src/native.rs` also takes plain integer, double and logical
+  vectors (as their object pointers; the caller roots them and the body allocates nothing), and
+  compiles `for` over `seq_len`, `seq_along`, `a:b` or a vector, `while`, `repeat`, `break`,
+  `next`, `length`, and `[[`/`[` with a scalar index. A typed tier-1 caller passes vector
+  arguments straight through (`Argument::Unboxed`/`Argument::Slot` in `Action::NativeCall`).
+  Every case R would warn or fail on (an index out of range or `NA`, a length above
+  `.Machine$integer.max`, a fractional `a:b` start, a pending interrupt at a loop's back edge)
+  returns `FAILED`, and tier 0 reruns the call.
+- **Scoping.** A local first assigned inside a loop, an `if` branch or the right operand of
+  `&&`/`||` goes out of scope where that region ends, so a later read refuses the function rather
+  than guess whether R would find it bound.
+- **Inlining.** A native call of a callee whose body has at most 24 calls and operators and no
+  `return` walks the callee's body in place (its own locals, loops and lookup environment), up
+  to three levels deep and never into a callee already being inlined. Both walks (typing and
+  emitting) decide the same way, because the decision reads only the callee's body.
+- **Strict mode does not drop guards.** A strict-clean program is a hint, not a contract: values
+  from stubs or untyped packages can still differ from their declared types at run time. Typed
+  code is faster because its closures compile at their first call and their calls go frameless,
+  not because guards disappear.
+- **Impact.** `sq <- function(x) x * x + 1` summed over 100,000 doubles 50 times runs in 0.035 s
+  on ry against 1.99 s on GNU R; the same loop through `g <- function(x) sq(x) - sq(x - 1)` runs in
+  0.056 s against 5.44 s, with both `sq` calls inlined into `g`'s 144-byte native function.
+
+## Closures made at one site share compiled code
+
+- **Previous shape.** Compiled code hung off a weak reference keyed on the enclosure it was
+  compiled for, and ran only for that enclosure. A `function(v) ...` passed as an argument was a
+  promise of its source, so the AST evaluator made each closure with its own body, which compiled
+  its own bytecode and, under `RY_JIT=force`, its own machine code on every call: `vapply` over
+  an anonymous function cost 306 µs against 8.2 µs on tier 0.
+- **Target shape.** A function literal that is a whole call argument compiles as promise code
+  (`compiles_as_promise` in `crates/interp/src/bytecode.rs`), whose `Op::Closure` gives every
+  closure from that site one bytecode body. Compiled code is *portable* when each speculation
+  starts from the enclosure or a long-lived environment and finds a binding in a long-lived one
+  (global, base, a namespace or its imports, the search path; `long_lived` in
+  `crates/jit/src/jit.rs`). Portable code holds what it embeds strongly and runs for any
+  enclosure. `Compiled::checked` is a weak reference keyed on the enclosure whose lookups the
+  epoch and stamps were last proven for; a new enclosure resets them, so `runtime::valid` walks
+  every speculation from that enclosure (`Compiled::rooted`) before trusting them. Code that
+  speculates on a function local to its enclosure keeps the per-enclosure scheme.
+- **Why a weak reference, not the enclosure's address.** A dead enclosure's address can be reused
+  by a new environment whose lookups nobody checked.
+- **Impact.** The `vapply` case runs at tier 0's speed under `RY_JIT=force` (about 15 µs per
+  call of ten elements), and base R's `pmin`, whose body makes such a closure, is no slower with
+  the JIT on than off.
+
+## Bodies that would mostly hand back to tier 0 compile only for loops
+
+- **Previous shape.** A hot body compiled whenever its plan had at least one native action. In
+  package code (`[.data.frame`, `[.zoo`, S4 `is`, ggplot2 internals) most instructions are calls
+  tier 1 cannot specialise, so the compiled body was a chain of `jit_step` calls back into tier 0.
+  Each such step costs more than tier 0 running the instruction itself, and Cranelift spent about
+  0.6 s compiling these bodies on a 12-file finbench slice, which made the suite about 8% slower
+  with the JIT on than off.
+- **Target shape.** `compile_in` refuses with `MOSTLY_TIER0` (`crates/jit/src/analysis.rs`) when
+  the plan has fewer native actions than tier-0 steps, unless the compile was triggered by a hot
+  back edge or `RY_JIT=force` is on. The refusal sets `runtime::LOOPS_ONLY` in the body's tier
+  state, so later hot entries return at once and only a hot loop can still compile it, because a
+  loop's native header pays for its steps on every iteration. A fully typed closure's first-call
+  compile goes through the same gate.
+- **Impact.** On the finbench slice the gate refuses about four in five compiles and most of the
+  compile time, and the JIT-on wall gap against `RY_JIT=off` drops from about 8% to about 4.5%.
+  The why-ry programs are unaffected: their bodies are loops or mostly native.
+
+## Tier 0 records type feedback only for warm bodies
+
+- **Previous shape.** With the JIT installed, tier 0 tested the type of every value an
+  instruction produced and stored a bit for it, in every body from its first entry. Almost no
+  body of package code ever reaches a compile threshold, so this was pure overhead: about 25M
+  instructions of a 4.2G ggplot2 render, most of what made the gallery slower with the JIT on.
+- **Target shape.** `Decoded::of` (`crates/interp/src/bytecode.rs`) hands out the feedback
+  pointer only when `warm` holds: the body has a loop, has compiled code, or is halfway to the
+  entry threshold and the tier has not given up on it. A body refused as `MOSTLY_TIER0` gets the
+  entry count `runtime::NEVER_HOT`, so tier 0 stops asking the tier about its calls.
+- **Two follow-ons keep the gates from trapping a body.** `runtime::invalidate` resets the entry
+  count to half the threshold rather than zero, so the activation that just deoptimized records
+  the type that broke the speculation and the recompile sees it; from zero, the body could
+  compile the same speculation until it ran out of compiles. And a `LOOPS_ONLY` body that did
+  compile for its loop still runs its calls in tier 0 (`compiled_for` returns early), because
+  entering compiled code from the top would hand most instructions back one by one.
+- **A first-call `MOSTLY_TIER0` verdict is not final.** The first call plans without a profile,
+  so that refusal leaves the tier state alone and the body tiers up normally later.
+- **Why loops always record.** A loop can turn hot inside a body's only activation, and its
+  compile needs the types of the instructions that ran before it. Switching recording on at
+  half the back-edge threshold left those without feedback, so the loop was refused as cold
+  every time and the why-ry array programs ran 5 to 40 times slower.
+- **Why half a threshold.** A compile reads the feedback of the activations before it; half the
+  threshold leaves 1,500 entries of history, which sees every type a
+  specialization needs, while cold bodies pay one comparison per activation.
+- **Impact.** The ggplot2 render's JIT overhead fell from +55M to +26M instructions, and the
+  gallery is no slower with the JIT on than off (6.99 s against 7.10 s, three interleaved runs).
+
+## A typed closure compiles at its first call only when that call can run long
+
+- **Previous shape.** Every fully typed closure compiled at its first call, because its
+  annotations give the types a profile would otherwise collect. On a finbench slice that was
+  183 compiles of about a millisecond each, of bodies such as `alpha + beta` whose call costs a
+  microsecond and which most tests call a handful of times.
+- **Target shape.** A first-call compile is refused as `BRIEF` (`crates/jit/src/analysis.rs`)
+  unless the plan has a loop or calls a closure or native function directly
+  (`Plan::may_run_long`), the cases where the first activation itself can run long, recursion
+  included. The refusal is not counted, so the body tiers up at the entry threshold like any
+  other. `compile_in` takes a `Trigger` (first call, hot entry, hot loop) in place of the
+  `in_loop` flag, so each profitability gate states which triggers it applies to.
+- **Impact.** The why-ry typed programs are unchanged (their bodies loop or recurse); typed
+  test-suite code no longer pays for compiles that never run again.
 # Decision record: string keys sort by rank, and merge pairs come from sorted codes
 
 - **Previous shape.** `order` and `sort` on character vectors compared the strings themselves

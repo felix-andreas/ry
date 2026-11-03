@@ -821,12 +821,13 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
-    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
-    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
+    /// vectors as objects), and puts its unboxed value in `dst`. When the function fails, tier 0
+    /// runs the call instead.
     NativeCall {
         steps: &'a [(Action<'a>, StateId)],
         native: &'static Native,
-        args: &'a [usize],
+        args: &'a [Argument],
         dst: usize,
     },
     /// Runs the instruction in tier 0, then refines its destination register.
@@ -978,6 +979,19 @@ pub struct Plan<'a> {
     pub loop_headers: List<'a, usize>,
 }
 
+/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
+/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
+/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
+/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
+/// hot, because there the compiled loop control and the native instructions repeat.
+pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
+/// The refusal for compiling a fully typed closure at its first call when the call cannot run
+/// long: the body has no loop and calls no closure or native function directly, so the
+/// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
+/// times such a call, so the body waits until it is hot like any other.
+pub const BRIEF: &str = "the first call would end before compiling paid for itself";
+
 impl Plan<'_> {
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
@@ -1083,23 +1097,46 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty()
-            || self.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    Action::Inline { .. }
-                        | Action::Traverse { .. }
-                        | Action::Call { .. }
-                        | Action::NativeCall { .. }
-                        | Action::Arithmetic { .. }
-                        | Action::Comparison { .. }
-                        | Action::Intrinsic { .. }
-                        | Action::SubAssign { .. }
-                        | Action::LogicLeft { .. }
-                        | Action::LogicRight { .. }
-                )
-            })
+        !self.loop_headers.is_empty() || self.native_actions() > 0
     }
+
+    /// Whether one activation of the body can run long: it has a loop, or it calls a closure
+    /// or native function directly, which may be the body itself.
+    pub fn may_run_long(&self) -> bool {
+        !self.loop_headers.is_empty()
+            || self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
+    }
+
+    /// How many actions compiled code does itself, and how many it hands to tier 0.
+    pub fn native_actions(&self) -> usize {
+        self.actions.iter().filter(|action| native(action)).count()
+    }
+
+    pub fn tier0_actions(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|action| matches!(action, Action::Step { .. }))
+            .count()
+    }
+}
+
+fn native(action: &Action<'_>) -> bool {
+    matches!(
+        action,
+        Action::Inline { .. }
+            | Action::Traverse { .. }
+            | Action::Call { .. }
+            | Action::NativeCall { .. }
+            | Action::Arithmetic { .. }
+            | Action::Comparison { .. }
+            | Action::Intrinsic { .. }
+            | Action::SubAssign { .. }
+            | Action::LogicLeft { .. }
+            | Action::LogicRight { .. }
+    )
 }
 
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
@@ -2759,32 +2796,33 @@ impl<'a> Builder<'a> {
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
         }
-        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+        // A native function takes scalars unboxed and plain vectors as their objects.
+        let types: Option<SmallVec<[Ty; 4]>> = args
             .iter()
-            .map(|argument| match *argument {
-                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
-                _ => None,
+            .map(|argument| {
+                let ty = match *argument {
+                    Argument::Unboxed { ty, .. } => ty,
+                    Argument::Slot(slot) => after.slots[slot].ty,
+                };
+                (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
             .collect();
-        if let Some(unboxed) = unboxed {
-            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
-            if let Some(native) = native::native_for(function, &types) {
-                // The native function reads nothing of this frame, so the variables stay as
-                // they are.
-                after.visible = Some(true);
-                after.registers[dst.0] = native.result;
-                *state = after;
-                self.speculations
-                    .extend(native.speculations.iter().cloned());
-                let mut registers = List::new_in(self.arena);
-                registers.extend(unboxed.iter().map(|&(register, _)| register));
-                return Some(Action::NativeCall {
-                    steps: lowering.steps.leak(),
-                    native,
-                    args: registers.leak(),
-                    dst: dst.0,
-                });
-            }
+        if let Some(types) = types
+            && let Some(native) = native::native_for(function, &types)
+        {
+            // The native function reads nothing of this frame, so the variables stay as they
+            // are.
+            after.visible = Some(true);
+            after.registers[dst.0] = native.result;
+            *state = after;
+            self.speculations
+                .extend(native.speculations.iter().cloned());
+            return Some(Action::NativeCall {
+                steps: lowering.steps.leak(),
+                native,
+                args: args.leak(),
+                dst: dst.0,
+            });
         }
         if !self.frame_safe(function) {
             return None;

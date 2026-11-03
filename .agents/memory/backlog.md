@@ -553,9 +553,11 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
   Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
   per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
-  Next: widen natives to vectors, loops and local closures (`Ty::Closure` is only inlined today),
-  then give non-native compiled callees a direct entry with no environment when their frame cannot
-  escape.
+  Natives now loop, read plain vectors and inline small native callees (`decisions.md`, "Native
+  functions loop, read vectors, and inline small callees"). Next: local closures (`Ty::Closure` is
+  only inlined today), vector results and `Array<T>` arguments (`annotations::plain_admits` rejects
+  an Array mask), then a direct entry with no environment for non-native compiled callees whose
+  frame cannot escape.
 - **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
   its closure for the session, so a helper defined inside a function keeps that function's frame
   (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
@@ -600,6 +602,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   equally fast: the profile proves the same facts the annotations do.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
+- **Closures from one site that speculate on an enclosure-local function compile for one
+  enclosure only.** Since such closures share one body, code that is not portable (it calls a
+  helper defined in the parent function's frame) runs for the first enclosure, every other
+  enclosure stays in tier 0, and each recompile after the first enclosure dies spends one of
+  the body's compiles. Per-enclosure code for a shared body, or speculating on the helper's body
+  rather than its binding, would fix it. Alternating enclosures of portable code also re-walk
+  every speculation on each switch.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
@@ -611,9 +620,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **ry's tier 0 trails GNU R on whole test suites.** Typed beats untyped at runtime (finbench
   30-file slice, callgrind, analysis excluded: typed 71.5G against untyped 72.1G with the JIT on,
   71.7G against 73.7G off), but wall clock is level with GNU R or up to 15% behind (finbench about
-  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT; the
-  remaining tier cost is Cranelift compile time and `jit_load`/`jit_step` glue. A cold strict
-  check of the typed package costs about 4G instructions (0.5 s) once per binary.
+  105 s on GNU R). The gap is interpreter cost spread across all test families, not the JIT. With
+  the JIT on, a 3-file finbench slice runs 0.7% more instructions than with it off, 0.4% of it
+  Cranelift, and wall clock is 1 to 3% slower, within run-to-run noise; disabling every compile
+  but the first-call ones closes it, so the residue is hot bodies whose compiled code does not
+  pay for its compile. Raising the entry threshold to 10,000 or 30,000 showed no clear win. A
+  cold strict check of the typed package costs about 4G instructions (0.5 s) once per binary,
+  and a first strict `ry load` of finbench about 1.3 s more than a warm one.
 - **Vasicek's remaining per-step cost** (87k instructions against GNU R's 118k): about 7.6k in
   `complex_assign` beyond the subassign itself, 13k in scalar and vector arithmetic, 3.7k for the
   `stats::` lookup, and 7k for the `rnorm` R closure around the builtin.
@@ -2469,10 +2482,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     flat profile of closure calls, frame setup, argument binding, allocation and builtin dispatch.
     Measured per call against GNU R: a closure call 0.75 µs against 0.35, `pmin` 15.7 against 6.2,
     `vapply` 8.2 against 3.4, `mostattributes<-` 10.6 against 4.0, `diff` 8.1 against 4.8. The JIT
-    makes it worse on these bodies: it compiles functions that are mostly tier-0 steps, so `pmin`
-    runs in about 10 µs with `RY_JIT=off`, and `vapply` over an anonymous function takes 306 µs
-    under `RY_JIT=force`. A gate on the ratio of native to tier-0 steps was tried without a clear
-    win. Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
+    no longer adds to it: closures from one site share compiled code, bodies that would mostly
+    hand back to tier 0 compile only for loops, and tier 0 records type feedback only for warm
+    bodies (`decisions.md`), so the gallery takes 6.99 s with the JIT on against 7.10 s off.
+    Closing the gap is interpreter call-path work (`decisions.md`, the interpreter's call
     path), not a graphics fix.
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, run with a debug
   build: 64 of 66 end with GNU R's exit status, 35 print exactly its output). Two divergences are

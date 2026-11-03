@@ -507,6 +507,106 @@ fn native_functions_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // Small callees compile into their callers: their locals stay their own, a `break`
+        // inside one leaves only its own loop, and a failure inside one fails the caller.
+        (
+            "ia <- function(x) { s <- x * 2; s + 1 }\nib <- function(x) { s <- 10; for (k in 1:3) { if (k > 2) break; s <- s + ia(k + x) }; s }",
+            "s <- 0\nfor (i in 1:n) s <- s + ib(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "ic <- function(x) { t <- 0L; for (k in 1:x) { if (k > 4L) break; t <- t + k }; t }\nid <- function(x) { t <- 0L; for (j in 1:3) t <- t + ic(x + j); t }",
+            "s <- 0L\nfor (i in 1:n) s <- s + id(i %% 9L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "ie <- function(x) x + 1L\nif2 <- function(x) ie(ie(x)) * 2L\nig <- function(x) if2(x) - ie(x)",
+            "s <- 0L\nfor (i in 1:n) s <- s + ig(if (i == 400L) 2147483646L else i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "fr <- function(x) if (x < 2L) x else fr(x - 1L) + fr(x - 2L)\nih <- function(x) fr(x) + fr(x + 1L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + ih(i %% 12L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        // Loops and vector reads: a native function takes a plain vector as its object.
+        (
+            "dot <- function(x, y) { s <- 0; for (i in seq_along(x)) s <- s + x[[i]] * y[i]; s }",
+            "p <- c(1, 2.5, -3)\nq <- c(2, 0.5, 4)\ns <- 0\nfor (i in 1:n) s <- s + dot(p, q) + i\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "el <- function(x, i) x[[i]] + 1L",
+            "p <- c(4L, NA, 6L)\ns <- 0L\nfor (i in 1:n) s <- s + el(p, if (i == 500L) 4L else 1L + i %% 3L)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "ed <- function(x, i) x[i] * 2",
+            "p <- c(0.5, 1.5)\ns <- 0\nfor (i in 1:n) s <- s + ed(p, if (i == 500L) 2.9 else 1.2)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        // `x[TRUE]` recycles the logical over the whole vector; `x[[TRUE]]` is the first element.
+        (
+            "lg <- function(x) length(x[TRUE]) * 10 + x[[TRUE]]",
+            "p <- c(0.5, 1.5, 2)\ns <- 0\nfor (i in 1:n) s <- s + lg(p)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cnt <- function(n) { k <- 0L; i <- 0L; while (TRUE) { i <- i + 1L; if (i > n) break; if (i %% 3L == 0L) next; k <- k + i }; k }",
+            "s <- 0L\nfor (i in 1:n) s <- s + cnt(i %% 40L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "rp <- function(n) { i <- 0; repeat { i <- i + 1; if (i >= n) return(i * 2) } }",
+            "s <- 0\nfor (i in 1:n) s <- s + rp(i %% 30L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cs <- function(a, b) { s <- 0L; for (j in a:b) s <- s + j; s }",
+            "s <- 0L\nfor (i in 1:n) s <- s + cs(i %% 7L, 3) + cs(4L, -i %% 5L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "cd <- function(a) { s <- 0; for (j in a:3) s <- s + j; s }",
+            "s <- 0\nfor (i in 1:n) s <- s + cd(if (i == 300L) 0.5 else 1)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "sm <- function(x) { s <- 0; for (v in x) { if (v > 2) next; s <- s + v }; s }",
+            "p <- c(1, 2.5, 0.25)\ns <- 0\nfor (i in 1:n) s <- s + sm(p) + length(p)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "sl <- function(n) { s <- 0L; for (i in seq_len(n)) s <- s + i; s }",
+            "s <- 0L\nfor (i in 1:n) s <- s + sl(if (i == 450L) -1L else i %% 9L)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "sc <- function(x) { if (x > 0) { t <- x * 2; x <- t }; for (j in 1:3) { u <- j; x <- x + u }; x }\nln <- function(x) length(x) + 0.5",
+            "p <- c(TRUE, NA)\ns <- 0\nfor (i in 1:n) s <- s + sc(i - 300) + ln(p) + ln(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "spin <- function(n) { i <- 0L; while (i < n) i <- i + 1L; i }",
+            "s <- 0L\nfor (i in 1:n) s <- s + spin(if (i == 300L) NA_integer_ else i)\ns",
+            "(n = 600L)",
+            true,
+        ),
     ];
     with_interpreter(|| {
         for (case, (definitions, body, call, fails)) in cases.iter().enumerate() {
@@ -714,6 +814,40 @@ fn run_time_binding_shadows_cached_global_function() {
 }
 
 #[test]
+fn closures_from_one_site_share_code_but_not_lookups() {
+    // Each call of `make` makes a new closure from one `function` expression, so the closures
+    // share one compiled body. Code whose functions all live in long-lived environments runs
+    // for every closure, but each new enclosure's lookups are checked again: one that binds its
+    // own `g` must reach it, and a closure that calls a function local to its enclosure must
+    // call its own.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function(v) v + 1\napply1 <- function(f, x) f(x)");
+        run(
+            "make <- function(shadow) { if (shadow) g <- function(v) \"local\"; apply1(function(v) g(v), 1) }",
+        );
+        run("scaled <- function(k) { h <- function(v) v * k; apply1(function(v) h(v), 1) }");
+        let mut outcomes = Vec::new();
+        for _ in 0..4 {
+            outcomes.push(("make(FALSE)", run("make(FALSE)"), "2"));
+        }
+        outcomes.push(("make(TRUE)", run("make(TRUE)"), "\"local\""));
+        outcomes.push(("make(FALSE)", run("make(FALSE)"), "2"));
+        for k in 1..6 {
+            outcomes.push((
+                "scaled",
+                run(&format!("scaled({k})")),
+                ["1", "2", "3", "4", "5"][k - 1],
+            ));
+        }
+        jit::install_mode(Mode::Off);
+        for (call, outcome, expected) in outcomes {
+            assert_eq!(outcome, expected, "{call}");
+        }
+    });
+}
+
+#[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
     with_interpreter(|| unsafe {
@@ -731,8 +865,10 @@ fn formal_shadows_enclosing_function() {
 
 #[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
-    // The signature stands in for the profile, so the first call runs compiled code, and a
-    // call whose values the declared types do not predict still gets tier 0's answer.
+    // The signature stands in for the profile, so a first call that can run long (here, one
+    // with a loop) runs compiled code, while a straight-line body waits until it is hot because
+    // compiling it would cost more than the one call. A call whose values the declared types do
+    // not predict still gets tier 0's answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
         let cases = [
@@ -740,7 +876,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "ft <- function(x: double, y: double) -> double x * y + 1",
                 "ft(2, 3)",
                 "7",
-                Some(true),
+                Some(false),
             ),
             (
                 "fi <- function(x: double) -> double x * 2",
@@ -752,7 +888,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "fv <- function(v: double[], k: integer) -> double v[2L] * k",
                 "fv(c(1, 2.5), 2L)",
                 "5",
-                Some(true),
+                Some(false),
             ),
             (
                 "fe <- function(x: double) -> double x + 1",
@@ -766,16 +902,26 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "3",
                 Some(false),
             ),
+            (
+                "fl <- function(v: double[]) -> double { s <- 0; for (i in seq_along(v)) s <- s + v[i]; s }",
+                "fl(c(1, 2.5))",
+                "3.5",
+                Some(true),
+            ),
         ];
         let mut outcomes = Vec::new();
         for (index, (definition, call, _, _)) in cases.iter().enumerate() {
             run(definition);
             let outcome = run(call);
-            let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
+            let name = format!("f{}", ["t", "i", "v", "e", "u", "l"][index]);
             let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
+        // A straight-line body the first call left alone still compiles once it is hot.
+        run("for (i in 1:5000) ft(2, 3)");
+        let hot = has_compiled_code("ft");
         jit::install_mode(Mode::Off);
+        assert!(hot, "ft never compiled after 5000 calls");
         for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
         {
             let agrees = if *expected == "error" {
@@ -894,7 +1040,7 @@ const RETURNS: &[(&str, &str)] = &[
     ("", "@"),
 ];
 
-/// Random fully typed closures, which compile at their first call, called with arguments that
+/// Random fully typed closures, half of which loop and so compile at their first call, called with arguments that
 /// pass and fail their checks, too many and too few, and returning values that may fail the
 /// return check, against the same calls with the JIT off. The calls repeat, so compiled code
 /// that deoptimizes after its first call is exercised too.
@@ -918,8 +1064,10 @@ fn fuzz_typed_closures_agree_with_tier_zero() {
                 let operator = ["+", "-", "*", "/"][rng.below(4)];
                 number = format!("{number} {operator} {}", uses(&mut rng));
             }
+            // Only a body that can run long compiles at its first call under `Mode::On`, so
+            // half the bodies loop to keep the harness reaching first-call code.
             let number = match rng.below(4) {
-                0 => format!(
+                0 | 2 => format!(
                     "{{ acc <- 0L; for (i in 1:{}) acc <- acc + {number}; acc }}",
                     rng.below(4) + 1
                 ),
