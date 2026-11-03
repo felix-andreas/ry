@@ -920,8 +920,7 @@ fn analyze_project_with(
         .collect();
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim. The
-    // interface edges follow for the same reason, and because the walk that finds the project's
-    // cyclic groups reads every item's edges on one thread.
+    // interface edges follow for the same reason.
     in_parallel(&db, workers, &checked_order, |db, index| {
         if checked(index) {
             for &item in semantics::item_tree(db, files[index]) {
@@ -943,12 +942,26 @@ fn analyze_project_with(
             }
         });
     }
-    in_parallel(&db, workers, &checked_order, |db, index| {
-        if checked(index) {
-            for &item in semantics::item_tree(db, files[index]) {
-                semantics::item_interface_edges(db, item);
-            }
+    // The walk that finds the project's cyclic groups reads every item's edges on one thread,
+    // so it runs beside the parallel edge pass and waits only on edges another thread is still
+    // computing. The walk records one dependency edge per item, and salsa keeps that capacity
+    // in the handle's reused query-stack frame, so every later query at the same depth would
+    // clear a table sized for the whole project: a throwaway handle takes the walk and drops
+    // the frame.
+    thread::scope(|scope| {
+        if let Some(project) = ProjectFiles::try_get(&db) {
+            let db = db.clone();
+            scope.spawn(move || {
+                semantics::project_interface_groups(&db, project);
+            });
         }
+        in_parallel(&db, workers, &checked_order, |db, index| {
+            if checked(index) {
+                for &item in semantics::item_tree(db, files[index]) {
+                    semantics::item_interface_edges(db, item);
+                }
+            }
+        });
     });
     // Whether the file's findings are known, from the record or from this run.
     let has_findings: Vec<bool> = (0..files.len())
@@ -959,7 +972,7 @@ fn analyze_project_with(
         .map(Option::unwrap_or_default)
         .collect();
     // The namespace verdict reads only naming and the stubs, so it runs on a spare handle
-    // beside the group walk and the checks instead of after them, on cores the checks leave
+    // beside the checks instead of after them, on cores the checks leave
     // idle as they finish.
     let namespace = thread::scope(|scope| {
         let verdict = namespace_source.as_ref().map(|namespace_source| {
@@ -972,13 +985,6 @@ fn analyze_project_with(
                 (namespace_path, namespace_source.clone(), problems)
             })
         });
-        // The group walk records one dependency edge per item, and salsa keeps that capacity
-        // in the handle's reused query-stack frame, so every later query at the same depth
-        // would clear a table sized for the whole project. A throwaway handle takes the walk
-        // and drops the frame.
-        if let Some(project) = ProjectFiles::try_get(&db) {
-            semantics::project_interface_groups(&db.clone(), project);
-        }
         for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
             let rendered = document_diagnostics(db, files[index], &config);
             apply_suppressions(rendered, files[index].text(db))
