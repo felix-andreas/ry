@@ -865,8 +865,10 @@ fn formal_shadows_enclosing_function() {
 
 #[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
-    // The signature stands in for the profile, so the first call runs compiled code, and a
-    // call whose values the declared types do not predict still gets tier 0's answer.
+    // The signature stands in for the profile, so a first call that can run long (here, one
+    // with a loop) runs compiled code, while a straight-line body waits until it is hot because
+    // compiling it would cost more than the one call. A call whose values the declared types do
+    // not predict still gets tier 0's answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
         let cases = [
@@ -874,7 +876,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "ft <- function(x: double, y: double) -> double x * y + 1",
                 "ft(2, 3)",
                 "7",
-                Some(true),
+                Some(false),
             ),
             (
                 "fi <- function(x: double) -> double x * 2",
@@ -886,7 +888,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "fv <- function(v: double[], k: integer) -> double v[2L] * k",
                 "fv(c(1, 2.5), 2L)",
                 "5",
-                Some(true),
+                Some(false),
             ),
             (
                 "fe <- function(x: double) -> double x + 1",
@@ -900,12 +902,18 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "3",
                 Some(false),
             ),
+            (
+                "fl <- function(v: double[]) -> double { s <- 0; for (e in v) s <- s + e; s }",
+                "fl(c(1, 2.5))",
+                "3.5",
+                Some(true),
+            ),
         ];
         let mut outcomes = Vec::new();
         for (index, (definition, call, _, _)) in cases.iter().enumerate() {
             run(definition);
             let outcome = run(call);
-            let name = format!("f{}", ["t", "i", "v", "e", "u"][index]);
+            let name = format!("f{}", ["t", "i", "v", "e", "u", "l"][index]);
             let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
@@ -1052,8 +1060,10 @@ fn fuzz_typed_closures_agree_with_tier_zero() {
                 let operator = ["+", "-", "*", "/"][rng.below(4)];
                 number = format!("{number} {operator} {}", uses(&mut rng));
             }
+            // Only a body that can run long compiles at its first call under `Mode::On`, so
+            // half the bodies loop to keep the harness reaching first-call code.
             let number = match rng.below(4) {
-                0 => format!(
+                0 | 2 => format!(
                     "{{ acc <- 0L; for (i in 1:{}) acc <- acc + {number}; acc }}",
                     rng.below(4) + 1
                 ),
