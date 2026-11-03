@@ -10,9 +10,16 @@
 | [1] NA
 | [1] NA  2
 | [1] "only 0's may be mixed with negative subscripts"
+| [1] "names" "w"    
+| $names
+| character(0)
+| 
+| $w
+| [1] 1
+| 
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "only 0's may be mixed with negative subscripts"
+list
+| list(names = character(0), w = 1)

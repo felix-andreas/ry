@@ -881,7 +881,8 @@ unsafe fn array_subset(
             .enumerate()
             .map(|(dimension, selection)| {
                 let names = dimnames.element(dimension);
-                if names == nil() {
+                // An empty selection has no names: GNU R stores `NULL` for an empty component.
+                if names == nil() || selection.is_empty() {
                     Ok(nil())
                 } else {
                     select_elements(names, selection)
@@ -2003,11 +2004,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             .filter(|position| !remove.contains(position))
             .collect();
         let result = select_elements(object, &kept)?;
-        values::copy_most_attributes(object, result, false)?;
+        // Names first, as GNU R lists them after a deletion.
         if names != nil() {
             let new_names = select_elements(names, &kept)?;
             values::set_attr(result, symbols().names, new_names)?;
         }
+        values::copy_most_attributes(object, result, false)?;
         return Ok(result);
     }
     let value_kind = if value == nil() {

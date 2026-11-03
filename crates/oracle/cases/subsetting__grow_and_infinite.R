@@ -14,3 +14,11 @@ print(y[Inf])
 print(y[-Inf])
 print(y[c(Inf, 2)])
 print(tryCatch(y[c(-Inf, -1)], error = conditionMessage))
+
+# Deleting list elements keeps names first too.
+y <- list(a = 1, b = 2)
+attr(y, "w") <- 1
+y$a <- NULL
+print(names(attributes(y)))
+y["b"] <- NULL
+print(attributes(y))
