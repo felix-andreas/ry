@@ -5,6 +5,7 @@
 use {
     crate::{SyntaxError, kind::SyntaxKind},
     SyntaxKind::*,
+    memchr::memchr2,
     text_size::{TextRange, TextSize},
 };
 
@@ -127,9 +128,7 @@ impl Lexer<'_> {
                     ANNOTATION_MARKER
                 } else {
                     // A line break is ASCII, so a byte scan cannot stop inside a character.
-                    self.pos += self.text.as_bytes()[self.pos..]
-                        .iter()
-                        .position(|&byte| byte == b'\n' || byte == b'\r')
+                    self.pos += memchr2(b'\n', b'\r', &self.text.as_bytes()[self.pos..])
                         .unwrap_or(self.text.len() - self.pos);
                     COMMENT
                 }
@@ -299,9 +298,17 @@ impl Lexer<'_> {
         let bytes = self.text.as_bytes();
         let annotation = self.in_annotation;
         loop {
-            let Some(offset) = bytes[self.pos..].iter().position(|&byte| {
-                byte == quote || byte == b'\\' || (annotation && matches!(byte, b'\n' | b'\r'))
-            }) else {
+            let rest = &bytes[self.pos..];
+            // Outside an annotation a line break belongs to the string, so only the quote and the
+            // backslash stop the scan. In an annotation a line break before them stops it too.
+            let stop = match memchr2(quote, b'\\', rest) {
+                Some(offset) if annotation => {
+                    memchr2(b'\n', b'\r', &rest[..offset]).or(Some(offset))
+                }
+                None if annotation => memchr2(b'\n', b'\r', rest),
+                found => found,
+            };
+            let Some(offset) = stop else {
                 self.pos = self.text.len();
                 break;
             };

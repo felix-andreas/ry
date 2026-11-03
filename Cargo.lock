@@ -4418,6 +4418,7 @@ dependencies = [
 name = "syntax"
 version = "0.4.0-beta"
 dependencies = [
+ "memchr",
  "text-size",
  "tree-sitter",
  "tree-sitter-r",

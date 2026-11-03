@@ -495,22 +495,26 @@ impl TreeBuilder {
             }
         }
         let mut preorder = vec![0u32; count];
-        for element in (0..count - 1).rev() {
-            let parent = parents[element] as usize;
-            preorder[element] = preorder[parent] + 1 + (self.firsts[element] - self.firsts[parent]);
-        }
         let mut kinds = vec![SyntaxKind::ERROR; count];
         let mut starts = vec![TextSize::new(0); count];
         let mut ends = vec![0u32; count];
         let mut preorder_parents = vec![NO_PARENT; count];
-        for element in 0..count {
-            let position = preorder[element] as usize;
-            kinds[position] = self.kinds[element];
-            starts[position] = self.starts[element];
-            ends[position] = preorder[element] + (element as u32 - self.firsts[element]) + 1;
-            if let Some(&parent) = parents.get(element).filter(|&&parent| parent != NO_PARENT) {
-                preorder_parents[position] = preorder[parent as usize];
-            }
+        for element in (0..count).rev() {
+            let first = self.firsts[element];
+            let parent = parents[element];
+            let position = if parent == NO_PARENT {
+                0
+            } else {
+                let parent_position = preorder[parent as usize];
+                let position = parent_position + 1 + (first - self.firsts[parent as usize]);
+                preorder_parents[position as usize] = parent_position;
+                position
+            };
+            preorder[element] = position;
+            let slot = position as usize;
+            kinds[slot] = self.kinds[element];
+            starts[slot] = self.starts[element];
+            ends[slot] = position + (element as u32 - first) + 1;
         }
         Tree::from_columns(Columns {
             text: text.into(),
