@@ -110,7 +110,8 @@ bench *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/run.py {{ args }}
 
-# Regenerates the benchmark table in why-ry.mdx: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
+# Measures the docs benchmark: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
+# `--write` stores the results in tools/bench/why/results.json, which every benchmark table on the site renders.
 bench-why *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/why/run.py {{ args }}

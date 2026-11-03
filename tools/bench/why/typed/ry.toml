@@ -1,0 +1,4 @@
+# The typed programs must pass strict mode, so `ry run` refuses one that does not.
+[check]
+typing = true
+strict = true
