@@ -25,6 +25,23 @@ use {
     heap::object::{Sexp, SexpType, gp},
 };
 
+/// Returns `false` from a definition fast path so the R body runs. Setting
+/// `RY_TRACE_METHODS_BAILS` prints the source line of every bail, which shows why a definition
+/// takes the slow path.
+macro_rules! bail {
+    ($skip:expr) => {{
+        if trace_bails() {
+            eprintln!("methods fast path bails at methods_core.rs:{}", line!());
+        }
+        return Ok($skip);
+    }};
+}
+
+fn trace_bails() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("RY_TRACE_METHODS_BAILS").is_some())
+}
+
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4New", 1, do_new),
     internal("ryS4Initialize", 1, do_initialize),
@@ -203,7 +220,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
     let skip = values::scalar_bool(false)?;
     let object_symbol = install(".Object")?;
     let Some(mut object) = quiet_value(object_symbol, frame)? else {
-        return Ok(skip);
+        bail!(skip);
     };
     let list_dots = lcons(install("list")?, cons(symbols().dots, nil())?)?;
     let args = eval::eval(list_dots, frame)?;
@@ -213,10 +230,10 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
     }
     let class = dispatch::class_of(object)?;
     if length(class) != 1 || basic_classes()?.contains(&class.element(0).bytes()) {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(definition) = cached_class(class)? else {
-        return Ok(skip);
+        bail!(skip);
     };
     let names = values::names(args);
     let name_at = |index: usize| -> &[u8] {
@@ -228,7 +245,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
     };
     let slots = slot(definition, "slots")?;
     if slots.kind() != SexpType::List {
-        return Ok(skip);
+        bail!(skip);
     }
     let slot_names = values::names(slots);
     let package = slot(definition, "package")?;
@@ -247,7 +264,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         if !data_part_super(class, definition, value_class, data_class)? {
-            return Ok(skip);
+            bail!(skip);
         }
         supers.push((value, true));
     }
@@ -259,14 +276,14 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         if (0..index).any(|earlier| name_at(earlier) == name_bytes) {
-            return Ok(skip);
+            bail!(skip);
         }
         let Some(position) = position_of(slot_names, name_bytes) else {
-            return Ok(skip);
+            bail!(skip);
         };
         let slot_class = slots.element(position);
         if slot_class.kind() != SexpType::String || length(slot_class) != 1 {
-            return Ok(skip);
+            bail!(skip);
         }
         let value = args.element(index);
         let value_class = dispatch::class_of(value)?;
@@ -276,21 +293,21 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
         // what later ones return, relying on `slot<-` modifying its argument. A data part is set
         // on a new object, so it is kept only as the first named argument.
         if name_bytes == b".Data" && (!same || !assignments.is_empty()) {
-            return Ok(skip);
+            bail!(skip);
         }
         if !same {
             let Some(slot_definition) = cached_class(slot_class)? else {
-                return Ok(skip);
+                bail!(skip);
             };
             if slot_class.element(0).bytes() == b"ANY" {
                 // `as(value, "ANY")` is the value itself; only the R code's lookup of the
                 // value's class is left, which has no effect once the package is loaded.
                 if cached_class(value_class)?.is_none() && !package_loaded(package)? {
-                    return Ok(skip);
+                    bail!(skip);
                 }
             } else {
                 let Some(value_definition) = cached_class(value_class)? else {
-                    return Ok(skip);
+                    bail!(skip);
                 };
                 let relation = possible_extends(
                     value_class,
@@ -298,10 +315,16 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
                     Some(value_definition),
                     Some(slot_definition),
                 )?;
-                // A value of a class that extends the slot's goes through `as()`, which may
-                // cache a coerce method.
-                if !matches!(relation, Some(Relation::No)) {
-                    return Ok(skip);
+                // A value of a class that extends the slot's goes through `as()`, which caches a
+                // coerce method the first time; once that method is the identity, the value is
+                // assigned as it is.
+                if !matches!(relation, Some(Relation::No))
+                    && !identity_coerce(
+                        value_class.element(0).bytes(),
+                        slot_class.element(0).bytes(),
+                    )?
+                {
+                    bail!(skip);
                 }
             }
         }
@@ -717,6 +740,31 @@ enum Relation {
     Via,
 }
 
+/// Whether `as()` has cached the coerce method from `from` to `to` that returns its argument,
+/// which it does for a simple extension such as a class union's member.
+unsafe fn identity_coerce(from: &[u8], to: &[u8]) -> R<bool> {
+    let Some(coerce) = methods_value("coerce")? else {
+        return Ok(false);
+    };
+    if coerce.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    let Some(table) = quiet_value(install(".AllMTable")?, coerce.tag())? else {
+        return Ok(false);
+    };
+    if table.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    let mut label = from.to_vec();
+    label.push(b'#');
+    label.extend_from_slice(to);
+    let Some(method) = quiet_value(values::install_bytes(&label)?, table)? else {
+        return Ok(false);
+    };
+    Ok(method.kind() == SexpType::Closure
+        && crate::bytecode::closure_body(method) == install("from")?)
+}
+
 /// `possibleExtends(class1, class2, definition1, definition2)`, where `None` stands for a `NULL`
 /// definition. `None` when deciding needs R code.
 unsafe fn possible_extends(
@@ -971,15 +1019,15 @@ unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     let Some(name) = forced_arg(frame, "name")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if !is_plain_name(name) {
-        return Ok(skip);
+        bail!(skip);
     }
     let name_text = name.element(0);
     let methods = interp().globals.methods_namespace;
     if in_basic_funs(name_text.bytes())? {
-        return Ok(skip);
+        bail!(skip);
     }
     for argument in [
         "group",
@@ -991,49 +1039,49 @@ unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
         "simpleInheritanceOnly",
     ] {
         if !eval::is_missing(install(argument)?, frame)? {
-            return Ok(skip);
+            bail!(skip);
         }
     }
     if eval::is_missing(install("def")?, frame)? {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if place.kind() != SexpType::Environment {
-        return Ok(skip);
+        bail!(skip);
     }
     let name_symbol = install_text(name_text)?;
     if visible_function(name_symbol, place)? != Visible::None {
-        return Ok(skip);
+        bail!(skip);
     }
     if crate::envir::is_namespace(place) {
         if standard_packages_define(name_symbol)? != Some(false) {
-            return Ok(skip);
+            bail!(skip);
         }
     } else if visible_function(name_symbol, methods)? != Visible::None {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(def) = forced_arg(frame, "def")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if def.kind() != SexpType::Closure
         || !is_standard_generic_call(crate::bytecode::closure_body(def), name_text.bytes())?
     {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(package) = package_name(place)? else {
-        return Ok(skip);
+        bail!(skip);
     };
     let table_symbol = table_meta_symbol(name_text.bytes(), package.element(0).bytes())?;
     if !assignable(place, name_symbol) || !assignable(place, table_symbol) {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(generics) = methods_value(".genericTable")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if generics.kind() != SexpType::Environment {
-        return Ok(skip);
+        bail!(skip);
     }
     match quiet_value(name_symbol, generics)? {
         None => {}
@@ -1043,21 +1091,21 @@ unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
                 && length(previous_package) == 1
                 && previous_package.element(0) == package.element(0))
             {
-                return Ok(skip);
+                bail!(skip);
             }
         }
         Some(_) => return Ok(skip),
     }
     let formal_names = formal_names(def.car());
     if formal_names.is_empty() {
-        return Ok(skip);
+        bail!(skip);
     }
     let mut signature: Vec<Sexp> = formal_names.clone();
     if signature.len() > 1 {
         signature.retain(|&symbol| symbol != symbols().dots);
     }
     if signature == [symbols().dots] {
-        return Ok(skip);
+        bail!(skip);
     }
 
     let generic = make_generic(name_text, def, package, &formal_names, &signature)?;
@@ -1150,21 +1198,21 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     let Some(name) = forced_arg(frame, "f")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if !is_plain_name(name) || name.element(0).bytes() == b"as.double" {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if place.kind() != SexpType::Environment || place.has_gp(gp::FRAME_LOCKED) {
-        return Ok(skip);
+        bail!(skip);
     }
     let name_symbol = install_text(name.element(0))?;
     let generic = crate::methods::visible_generic(name_symbol, place)?;
     if !is_standard_generic(generic)? {
-        return Ok(skip);
+        bail!(skip);
     }
     // `getGeneric()` caches a generic it finds that is also the global binding.
     if let Some(global) = quiet_value(name_symbol, values::global_env())? {
@@ -1174,7 +1222,7 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
                 .transpose()?
                 .flatten();
             if global != generic || cached != Some(generic) {
-                return Ok(skip);
+                bail!(skip);
             }
         }
     }
@@ -1195,41 +1243,41 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     };
 
     let Some(signature) = forced_arg(frame, "signature")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     let Some(signature) = match_signature(signature, generic)? else {
-        return Ok(skip);
+        bail!(skip);
     };
     crate::heap().root(signature);
     let Some(definition) = forced_arg(frame, "definition")? else {
-        return Ok(skip);
+        bail!(skip);
     };
     if definition.kind() != SexpType::Closure
         || definition.has_gp(gp::S4_OBJECT)
         || values::class_attr(definition) != nil()
     {
-        return Ok(skip);
+        bail!(skip);
     }
     if !same_formals(definition.car(), generic.car()) {
-        return Ok(skip);
+        bail!(skip);
     }
     let env = generic.tag();
     let (Some(methods_table), Some(all_table)) = (
         quiet_value(install(".MTable")?, env)?,
         quiet_value(install(".AllMTable")?, env)?,
     ) else {
-        return Ok(skip);
+        bail!(skip);
     };
     if methods_table.kind() != SexpType::Environment || all_table.kind() != SexpType::Environment {
-        return Ok(skip);
+        bail!(skip);
     }
     let Some(signature_length) = quiet_value(install(".SigLength")?, env)?
         .and_then(|length| usize::try_from(values::as_integer_scalar(length)).ok())
     else {
-        return Ok(skip);
+        bail!(skip);
     };
     let Some(signature) = match_signature_length(signature, signature_length)? else {
-        return Ok(skip);
+        bail!(skip);
     };
     crate::heap().root(signature);
     let label = signature_label(signature)?;
@@ -1238,10 +1286,10 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         && (existing.kind() == SexpType::Environment
             || values::inherits(existing, "SealedMethodDefinition"))
     {
-        return Ok(skip);
+        bail!(skip);
     }
-    if !methods_flag(".noMlistsFlag", true)? || !cache_on_assign(place)? || duplicate_classes()? {
-        return Ok(skip);
+    if !no_methods_lists()? || !cache_on_assign(place)? || duplicate_classes()? {
+        bail!(skip);
     }
     let meta_table = match quiet_value(table_symbol, place)? {
         Some(table) if table.kind() == SexpType::Environment => Some(table),
@@ -1777,15 +1825,10 @@ unsafe fn signature_label(signature: Sexp) -> R<Sexp> {
     values::install_bytes(&text)
 }
 
-/// Whether the methods package's flag `name` is the single logical `expected`.
-unsafe fn methods_flag(name: &str, expected: bool) -> R<bool> {
-    Ok(methods_value(name)?.is_some_and(|value| {
-        if expected {
-            is_true(value)
-        } else {
-            is_false(value)
-        }
-    }))
+/// `.noMlists()`: methods lists are off. R 4.6 removed them, and with them the flag that turned
+/// them off, so a methods package without the flag has none.
+unsafe fn no_methods_lists() -> R<bool> {
+    Ok(methods_value(".noMlistsFlag")?.is_none_or(|value| is_true(value)))
 }
 
 /// `cacheOnAssign(env)`: the environment's `.cacheOnAssign` is unset or `TRUE`.
