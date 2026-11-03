@@ -81,6 +81,8 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("isoreg", isoreg),
     ("tukeyline", tukeyline),
     ("Rsm", tukey_smooth),
+    ("setsmu", setsmu),
+    ("supsmu", supsmu),
     ("cutree", stats_cluster::cutree),
     ("rWishart", r_wishart),
     ("loess_raw", stats_loess::loess_raw),
@@ -2576,6 +2578,300 @@ unsafe fn eureka(call: &NativeCall<'_>) -> R<Sexp> {
     values::reals_mut(arguments[4]).copy_from_slice(&variances);
     values::reals_mut(arguments[5]).copy_from_slice(&a[1..]);
     c_return(call, &arguments)
+}
+
+std::thread_local! {
+    /// Whether `supsmu` reports each running-lines smooth, as `setsmu` last set it.
+    static SUPSMU_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The three spans the cross-validated super smoother chooses between. GNU R's `ppr.f`
+/// initialises them from single-precision constants, so they carry `f32` rounding.
+const SUPSMU_SPANS: [f64; 3] = [0.05_f32 as f64, 0.2_f32 as f64, 0.5_f32 as f64];
+const SUPSMU_BIG: f64 = 1.0e20_f32 as f64;
+const SUPSMU_SMALL: f64 = 1.0e-7_f32 as f64;
+const SUPSMU_EPS: f64 = 1.0e-3_f32 as f64;
+
+/// `.Fortran(C_setsmu, trace)`: whether the next `supsmu` traces its smooths.
+unsafe fn setsmu(call: &NativeCall<'_>) -> R<Sexp> {
+    let arguments = c_arguments(call)?;
+    SUPSMU_TRACE.set(values::as_integer_scalar(arguments[0]) != 0);
+    c_return(call, &arguments)
+}
+
+/// `.Fortran(C_supsmu, n, x, y, w, iper, span, alpha, smo, sc, edf)`: Friedman's super
+/// smoother over `x` sorted increasingly. A positive `span` is one running-lines smooth with
+/// that span; zero picks a span per point by cross-validation among [`SUPSMU_SPANS`], and
+/// `alpha` in (0, 10] biases that choice toward the largest span. `iper` 2 treats `x` in
+/// [0, 1] as periodic.
+unsafe fn supsmu(call: &NativeCall<'_>) -> R<Sexp> {
+    let mut arguments = c_arguments(call)?;
+    let x = real_values(arguments[1])?;
+    let n = (values::as_integer_scalar(arguments[0]).max(0) as usize).min(x.len());
+    let x = &x[..n];
+    let y = real_values(arguments[2])?;
+    let w = real_values(arguments[3])?;
+    if n == 0 || y.len() < n || w.len() < n {
+        return Err(error("invalid arguments to 'supsmu'"));
+    }
+    let (y, w) = (&y[..n], &w[..n]);
+    let iper = values::as_integer_scalar(arguments[4]);
+    let span = values::as_real_scalar(arguments[5]);
+    let alpha = values::as_real_scalar(arguments[6]);
+    let trace = SUPSMU_TRACE.get();
+    let mut smo = vec![0.0; n];
+    let mut log = String::new();
+    let cross_validated = super_smooth(x, y, w, iper, span, alpha, trace, &mut smo, &mut log);
+    if !log.is_empty() {
+        crate::connections::write_output(log.as_bytes());
+    }
+    arguments[7] = values::real_vector(&smo)?;
+    if cross_validated {
+        arguments[9] = values::real_vector(&[0.0])?;
+    }
+    c_return(call, &arguments)
+}
+
+/// The super smoother of [`supsmu`], writing the fit to `smo`; whether the span was chosen by
+/// cross-validation.
+#[allow(clippy::too_many_arguments)]
+fn super_smooth(
+    x: &[f64],
+    y: &[f64],
+    w: &[f64],
+    iper: i32,
+    span: f64,
+    alpha: f64,
+    trace: bool,
+    smo: &mut [f64],
+    log: &mut String,
+) -> bool {
+    let n = x.len();
+    if x[n - 1] <= x[0] {
+        let (sy, sw) = (0..n).fold((0.0, 0.0), |(sy, sw), j| (sy + w[j] * y[j], sw + w[j]));
+        let mean = if sw > 0.0 { sy / sw } else { 0.0 };
+        smo.fill(mean);
+        return false;
+    }
+    // GNU R reads `x(0)` past the start when `n < 4`; the first observation stands in for it.
+    let at = |i: usize| x[i.clamp(1, n) - 1];
+    let mut i = n / 4;
+    let mut j = 3 * i;
+    let mut scale = at(j) - at(i);
+    while scale <= 0.0 {
+        if j < n {
+            j += 1;
+        }
+        if i > 1 {
+            i -= 1;
+        }
+        scale = at(j) - at(i);
+    }
+    let vsmlsq = (SUPSMU_EPS * scale) * (SUPSMU_EPS * scale);
+    let mut jper = iper;
+    if iper == 2 && (x[0] < 0.0 || x[n - 1] > 1.0) {
+        jper = 1;
+    }
+    if !(1..=2).contains(&jper) {
+        jper = 1;
+    }
+    let mut scratch = vec![0.0; n];
+    if span > 0.0 {
+        running_lines(x, y, w, span, jper, vsmlsq, smo, Some(&mut scratch), trace, log);
+        return false;
+    }
+    let mut columns: Vec<Vec<f64>> = vec![vec![0.0; n]; 7];
+    for (index, &candidate) in SUPSMU_SPANS.iter().enumerate() {
+        let mut fit = std::mem::take(&mut columns[2 * index]);
+        let mut residuals = std::mem::take(&mut columns[6]);
+        running_lines(x, y, w, candidate, jper, vsmlsq, &mut fit, Some(&mut residuals), trace, log);
+        let mut smoothed = std::mem::take(&mut columns[2 * index + 1]);
+        running_lines(
+            x,
+            &residuals,
+            w,
+            SUPSMU_SPANS[1],
+            -jper,
+            vsmlsq,
+            &mut smoothed,
+            None,
+            trace,
+            log,
+        );
+        columns[2 * index] = fit;
+        columns[6] = residuals;
+        columns[2 * index + 1] = smoothed;
+    }
+    for j in 0..n {
+        let mut resmin = SUPSMU_BIG;
+        for (index, &candidate) in SUPSMU_SPANS.iter().enumerate() {
+            if columns[2 * index + 1][j] < resmin {
+                resmin = columns[2 * index + 1][j];
+                columns[6][j] = candidate;
+            }
+        }
+        if alpha > 0.0 && alpha <= 10.0 && resmin < columns[5][j] && resmin > 0.0 {
+            columns[6][j] += (SUPSMU_SPANS[2] - columns[6][j])
+                * SUPSMU_SMALL.max(resmin / columns[5][j]).powf(10.0 - alpha);
+        }
+    }
+    let chosen = std::mem::take(&mut columns[6]);
+    let mut spans = std::mem::take(&mut columns[1]);
+    running_lines(x, &chosen, w, SUPSMU_SPANS[1], -jper, vsmlsq, &mut spans, None, trace, log);
+    let mut blended = std::mem::take(&mut columns[3]);
+    for j in 0..n {
+        if spans[j] <= SUPSMU_SPANS[0] {
+            spans[j] = SUPSMU_SPANS[0];
+        }
+        if spans[j] >= SUPSMU_SPANS[2] {
+            spans[j] = SUPSMU_SPANS[2];
+        }
+        let f = spans[j] - SUPSMU_SPANS[1];
+        blended[j] = if f < 0.0 {
+            let f = -f / (SUPSMU_SPANS[1] - SUPSMU_SPANS[0]);
+            (1.0 - f) * columns[2][j] + f * columns[0][j]
+        } else {
+            let f = f / (SUPSMU_SPANS[2] - SUPSMU_SPANS[1]);
+            (1.0 - f) * columns[2][j] + f * columns[4][j]
+        };
+    }
+    running_lines(x, &blended, w, SUPSMU_SPANS[0], -jper, vsmlsq, smo, None, trace, log);
+    true
+}
+
+/// `smooth` in GNU R's `ppr.f`: a running-lines smooth of `y` on `x` whose window holds
+/// `span * n` observations, updated incrementally as it slides. A positive `iper` also writes
+/// each point's absolute cross-validated residual to `residuals`; `|iper|` 2 wraps the window
+/// around the period [0, 1]. Tied `x` values share their weighted mean fit.
+#[allow(clippy::too_many_arguments)]
+fn running_lines(
+    x: &[f64],
+    y: &[f64],
+    w: &[f64],
+    span: f64,
+    iper: i32,
+    vsmlsq: f64,
+    smo: &mut [f64],
+    mut residuals: Option<&mut [f64]>,
+    trace: bool,
+    log: &mut String,
+) {
+    let n = x.len() as isize;
+    // Fortran indices from 1, clamped where GNU R would read outside a short periodic series.
+    let index = |i: isize| (i.clamp(1, n) - 1) as usize;
+    let (mut xm, mut ym, mut var, mut cvar, mut fbw) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let jper = iper.abs();
+    let mut ibw = (0.5 * span * n as f64 + 0.5) as isize;
+    if ibw < 2 {
+        ibw = 2;
+    }
+    let it = (2 * ibw + 1).min(n);
+    for i in 1..=it {
+        let mut j = i;
+        if jper == 2 {
+            j = i - ibw - 1;
+        }
+        let xti = if j >= 1 {
+            x[index(j)]
+        } else {
+            j += n;
+            x[index(j)] - 1.0
+        };
+        let wt = w[index(j)];
+        let fbo = fbw;
+        fbw += wt;
+        if fbw > 0.0 {
+            xm = (fbo * xm + wt * xti) / fbw;
+            ym = (fbo * ym + wt * y[index(j)]) / fbw;
+        }
+        let tmp = if fbo > 0.0 { fbw * wt * (xti - xm) / fbo } else { 0.0 };
+        var += tmp * (xti - xm);
+        cvar += tmp * (y[index(j)] - ym);
+    }
+    for j in 1..=n {
+        let mut out = j - ibw - 1;
+        let mut inn = j + ibw;
+        if jper == 2 || (out >= 1 && inn <= n) {
+            let (xto, xti);
+            if out < 1 {
+                out += n;
+                xto = x[index(out)] - 1.0;
+                xti = x[index(inn)];
+            } else if inn > n {
+                inn -= n;
+                xti = x[index(inn)] + 1.0;
+                xto = x[index(out)];
+            } else {
+                xto = x[index(out)];
+                xti = x[index(inn)];
+            }
+            let wt = w[index(out)];
+            let fbo = fbw;
+            fbw -= wt;
+            let tmp = if fbw > 0.0 { fbo * wt * (xto - xm) / fbw } else { 0.0 };
+            var -= tmp * (xto - xm);
+            cvar -= tmp * (y[index(out)] - ym);
+            if fbw > 0.0 {
+                xm = (fbo * xm - wt * xto) / fbw;
+                ym = (fbo * ym - wt * y[index(out)]) / fbw;
+            }
+            let wt = w[index(inn)];
+            let fbo = fbw;
+            fbw += wt;
+            if fbw > 0.0 {
+                xm = (fbo * xm + wt * xti) / fbw;
+                ym = (fbo * ym + wt * y[index(inn)]) / fbw;
+            }
+            let tmp = if fbo > 0.0 { fbw * wt * (xti - xm) / fbo } else { 0.0 };
+            var += tmp * (xti - xm);
+            cvar += tmp * (y[index(inn)] - ym);
+        }
+        let position = index(j);
+        let slope = if var > vsmlsq { cvar / var } else { 0.0 };
+        smo[position] = slope * (x[position] - xm) + ym;
+        if iper > 0
+            && let Some(residuals) = residuals.as_deref_mut()
+        {
+            let mut h = if fbw > 0.0 { 1.0 / fbw } else { 0.0 };
+            if var > vsmlsq {
+                let distance = x[position] - xm;
+                h += distance * distance / var;
+            }
+            residuals[position] = 0.0;
+            let a = 1.0 - w[position] * h;
+            if a > 0.0 {
+                residuals[position] = (y[position] - smo[position]).abs() / a;
+            } else if position > 0 {
+                residuals[position] = residuals[position - 1];
+            }
+        }
+    }
+    if trace {
+        log.push_str(&format!(
+            "smooth(span={:>4}, iper={:+2}) -> (var, cvar) = ({}, {})\n",
+            crate::format::format_g(span),
+            iper,
+            crate::format::format_g(var),
+            crate::format::format_g(cvar)
+        ));
+    }
+    let n = x.len();
+    let mut j = 0;
+    while j < n {
+        let start = j;
+        let mut sy = smo[j] * w[j];
+        let mut weight = w[j];
+        while j + 1 < n && x[j + 1] <= x[j] {
+            j += 1;
+            sy += w[j] * smo[j];
+            weight += w[j];
+        }
+        if j > start {
+            let mean = if weight > 0.0 { sy / weight } else { 0.0 };
+            smo[start..=j].fill(mean);
+        }
+        j += 1;
+    }
 }
 
 /// `.Call(C_Rsm, x, kind, end_rule)`: Tukey's running median smoothers. `kind` counts from 1
