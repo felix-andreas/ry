@@ -1969,31 +1969,38 @@ impl Heap {
                 // debug build. Spacing majors by a sixteenth of the live objects bounds their
                 // marking at about sixteen objects per allocation while still running them often
                 // enough to free an old object whose last reference was dropped.
+                // The spacing counts objects, so a loop of a few huge vectors would promote
+                // them for thousands of allocations; the byte escalation below bounds that the
+                // same way it bounds the ordinary schedule.
                 self.stress_counter += 1;
                 let spacing = (self.stats.live_objects / 16).max(8);
-                let kind = if self.stress_counter >= spacing {
+                if self.stress_counter >= spacing {
                     self.stress_counter = 0;
-                    Collection::Major
+                    self.collect_keeping(Collection::Major, keep, request);
                 } else {
-                    Collection::Minor
-                };
-                self.collect_keeping(kind, keep, request);
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
+                }
             }
             GcStress::Off => {
                 if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep, request);
-                    // A minor collection keeps every old object, so the temporaries it found
-                    // live and promoted stay until a major one. Escalate, as GNU R does, when
-                    // what is left would not hold the request and a fifth of the smallest
-                    // limit; without that margin, every large vector allocated just below the
-                    // limit would run a minor collection that frees nothing, and only a major
-                    // one moves the limit.
-                    let margin = request + self.policy.min_heap_limit / 5;
-                    if self.old_bytes() + margin > self.policy.heap_limit {
-                        self.collect_keeping(Collection::Major, keep, request);
-                    }
+                    self.escalate_if_full(keep, request);
                 }
             }
+        }
+    }
+
+    /// A minor collection keeps every old object, so the temporaries it found live and promoted
+    /// stay until a major one. Escalate, as GNU R does, when what is left would not hold the
+    /// request and a fifth of the smallest limit; without that margin, every large vector
+    /// allocated just below the limit would run a minor collection that frees nothing, and only
+    /// a major one moves the limit.
+    unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
+        let margin = request + self.policy.min_heap_limit / 5;
+        if self.old_bytes() + margin > self.policy.heap_limit {
+            self.stress_counter = 0;
+            self.collect_keeping(Collection::Major, keep, request);
         }
     }
 
