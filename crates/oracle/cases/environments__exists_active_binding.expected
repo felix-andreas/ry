@@ -1,0 +1,12 @@
+[stdout]
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] "the binding was called"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "the binding was called"
