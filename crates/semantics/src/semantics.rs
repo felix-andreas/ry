@@ -837,20 +837,20 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
-    package_scheme_exists_in(db, ProjectFiles::try_get(db), stubs::stubs(db), name)
+    let files = ProjectFiles::try_get(db);
+    package_scheme_exists_in(stubs::stubs(db), name, |name| {
+        files.is_some_and(|files| package_binds(db, files, name))
+    })
 }
 
-/// [`package_scheme_exists`] for a caller that already holds the project and the stubs.
+/// [`package_scheme_exists`] for a caller that already holds the stubs and answers whether the
+/// package binds a name from maps it fetched once.
 pub fn package_scheme_exists_in(
-    db: &dyn Db,
-    files: Option<ProjectFiles>,
     library: Option<&stubs::StubLibrary<'_>>,
     name: &str,
+    package_binds: impl FnOnce(&str) -> bool,
 ) -> bool {
-    if BUILTIN_GLOBAL_NAMES.contains(&name) {
-        return true;
-    }
-    if files.is_some_and(|files| package_binds(db, files, name)) {
+    if BUILTIN_GLOBAL_NAMES.contains(&name) || package_binds(name) {
         return true;
     }
     library.is_some_and(|library| {
