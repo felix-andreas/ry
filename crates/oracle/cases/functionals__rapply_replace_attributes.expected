@@ -1,0 +1,45 @@
+[stdout]
+| List of 3
+|  $ a: num 1
+|  $ b:List of 1
+|   ..$ c: chr "x"
+|   ..- attr(*, "class")= chr "inner"
+|  $ d: chr "y"
+|  - attr(*, "class")= chr "outer"
+|  - attr(*, "extra")= num 5
+| List of 3
+|  $ a: num 1
+|  $ b:List of 1
+|   ..$ c: chr "X"
+|   ..- attr(*, "class")= chr "inner"
+|  $ d: chr "Y"
+|  - attr(*, "class")= chr "outer"
+|  - attr(*, "extra")= num 5
+| List of 3
+|  $ a: num 1
+|  $ b:List of 1
+|   ..$ c: chr "x"
+|  $ d: chr "y"
+| List of 2
+|  $ :List of 3
+|   ..$ a: num 1
+|   ..$ b:List of 1
+|   .. ..$ c: chr "x"
+|   .. ..- attr(*, "class")= chr "inner"
+|   ..$ d: chr "y"
+|   ..- attr(*, "class")= chr "outer"
+|   ..- attr(*, "extra")= num 5
+|  $ :List of 3
+|   ..$ a: num 1
+|   ..$ b:List of 1
+|   .. ..$ c: chr "x"
+|   .. ..- attr(*, "class")= chr "inner"
+|   ..$ d: chr "y"
+|   ..- attr(*, "class")= chr "outer"
+|   ..- attr(*, "extra")= num 5
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

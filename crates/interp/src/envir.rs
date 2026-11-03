@@ -1757,9 +1757,15 @@ unsafe fn rapply_one(
             let value = rapply_one(object.element(index), function, classes, deflt, how, env)?;
             values::set_elt(result, index, value);
         }
-        let names = values::names(object);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
+        // As in GNU R, `how = "replace"` keeps every list's attributes, class included, and
+        // the other modes keep only the names.
+        if how == "replace" {
+            values::copy_attributes(object, result)?;
+        } else {
+            let names = values::names(object);
+            if names != nil() {
+                values::set_attr(result, symbols().names, names)?;
+            }
         }
         return Ok(result);
     }
