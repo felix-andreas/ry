@@ -110,6 +110,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         last_run: None,
         debugger: None,
         spawned: None,
+        hide_gnu_r: false,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -203,9 +204,9 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                 }
             }
             "ry-runtime" => {
-                if which("Rscript").is_none() {
+                if base_r().is_none() {
                     return Some(
-                        "ry's runtime loads base R from GNU R, which is not installed".to_owned(),
+                        "ry's base R is not built; build it with `just base-r`".to_owned(),
                     );
                 }
                 if let Err(error) = libr_path() {
@@ -234,6 +235,31 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// The base R tree ry's runtime loads in scenarios: the one `R_HOME` names, which emulates that
+/// GNU R, else ry's own build (`just base-r`) where the `ry` under test finds it. Cargo puts
+/// test binaries in a different directory from `ry`, so the lookup starts from `ry`'s.
+fn base_r() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("R_HOME").filter(|home| !home.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(base) = std::env::var_os("RY_BASE_R").filter(|base| !base.is_empty()) {
+        return Some(PathBuf::from(base));
+    }
+    let directory = Path::new(env!("CARGO_BIN_EXE_ry")).parent()?;
+    [directory.join("base-r"), directory.join("../base-r")]
+        .into_iter()
+        .find(|candidate| rcmd::base::is_complete(candidate))
+}
+
+/// `PATH` without the directories that hold GNU R's `R` or `Rscript`, for `hide gnu-r`.
+fn path_without_gnu_r() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = std::env::split_paths(&path)
+        .filter(|directory| !directory.join("R").is_file() && !directory.join("Rscript").is_file())
+        .collect();
+    std::env::join_paths(kept).unwrap_or_default()
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -294,20 +320,16 @@ fn r_home() -> Result<&'static PathBuf, String> {
         if !status.success() {
             return Err("building ry-rcmd failed".to_owned());
         }
-        // The home links GNU R's base packages, from `R RHOME`.
-        let gnu_r_home = Command::new("R")
-            .arg("RHOME")
-            .output()
-            .map_err(|error| format!("running `R RHOME`: {error}"))?;
-        let gnu_r_home = PathBuf::from(String::from_utf8_lossy(&gnu_r_home.stdout).trim());
+        let base = base_r().ok_or("ry's base R is not built; build it with `just base-r`")?;
         rcmd::assemble(
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("../libr/include"),
                 libr: libr_path()?,
                 rcmd: &profile_directory.join("ry-rcmd"),
-                gnu_r_home: &gnu_r_home,
-                toolchain: rcmd::Toolchain::default(),
+                base: &base,
+                toolchain: rcmd::Toolchain::for_base(&base)
+                    .map_err(|error| format!("reading the toolchain of {}: {error}", base.display()))?,
             },
         )
         .map_err(|error| format!("assembling ry's R home: {error}"))?;
@@ -317,8 +339,9 @@ fn r_home() -> Result<&'static PathBuf, String> {
     .map_err(Clone::clone)
 }
 
-/// A `ry` with the runtime embedded, as a release ships it, alone in a directory of its own.
-/// It is built with `RY_EMBED_RUNTIME` (`crates/repl/build.rs`) and copied away, and then `ry`
+/// A `ry` with the runtime and base R embedded, as a release ships it, alone in a directory of
+/// its own. It is built with `RY_EMBED_RUNTIME` and `RY_EMBED_BASE` (`crates/repl/build.rs`) and
+/// copied away, and then `ry`
 /// is built again without it, so the binary the other scenarios run is the usual one and the
 /// next `cargo test` has nothing to rebuild. Scenarios run one after another, so none of them
 /// sees the swap.
@@ -333,15 +356,20 @@ fn single_ry() -> Result<&'static PathBuf, String> {
             let release = profile_directory
                 .file_name()
                 .is_some_and(|name| name == "release");
-            let build = |embed: Option<&Path>| -> Result<(), String> {
+            let base = base_r().ok_or("ry's base R is not built; build it with `just base-r`")?;
+            let build = |embed: Option<(&Path, &Path)>| -> Result<(), String> {
                 let mut command = Command::new(env!("CARGO"));
                 command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
                 if release {
                     command.arg("--release");
                 }
                 match embed {
-                    Some(library) => command.env("RY_EMBED_RUNTIME", library),
-                    None => command.env_remove("RY_EMBED_RUNTIME"),
+                    Some((library, base)) => command
+                        .env("RY_EMBED_RUNTIME", library)
+                        .env("RY_EMBED_BASE", base),
+                    None => command
+                        .env_remove("RY_EMBED_RUNTIME")
+                        .env_remove("RY_EMBED_BASE"),
                 };
                 let status = command
                     .status()
@@ -352,8 +380,10 @@ fn single_ry() -> Result<&'static PathBuf, String> {
                     Err("building ry failed".to_owned())
                 }
             };
-            build(Some(libr))?;
-            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry");
+            build(Some((libr, &base)))?;
+            // Two levels below `single-ry`, so that no `base-r` of the checkout is where `ry`
+            // looks beside itself (`rcmd::base::installed`).
+            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry/bin/release");
             fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
             let single = directory.join("ry");
             let copied = fs::copy(env!("CARGO_BIN_EXE_ry"), &single)
@@ -382,6 +412,8 @@ struct Journey {
     last_run: Option<Run>,
     debugger: Option<DebugSession>,
     spawned: Option<Spawned>,
+    /// Set by `hide gnu-r`: later runs see no GNU R on `PATH` and no `R_HOME`.
+    hide_gnu_r: bool,
 }
 
 /// A `ry` process the journey started with `spawn` and has not stopped yet, such as a watcher.
@@ -411,6 +443,10 @@ impl Journey {
         let words: Vec<&str> = step.words.iter().map(String::as_str).collect();
         match words.as_slice() {
             ["requires", ..] => Ok(()),
+            ["hide", "gnu-r"] => {
+                self.hide_gnu_r = true;
+                Ok(())
+            }
             ["client", options @ ..] => {
                 if self.editor.is_some() {
                     return Err(
@@ -897,11 +933,20 @@ impl Journey {
                     PathBuf::from(env!("CARGO_BIN_EXE_ry"))
                 };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let output = Command::new(executable)
+                let mut command = Command::new(executable);
+                command
                     .args(arguments)
                     .current_dir(&self.root)
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
-                    .env_remove("RY_LIBR")
+                    .env_remove("RY_LIBR");
+                if *program == "single-ry" {
+                    // A release finds nothing beside it, so neither may the copy that stands in.
+                    command.env_remove("RY_BASE_R");
+                }
+                if self.hide_gnu_r {
+                    command.env("PATH", path_without_gnu_r()).env_remove("R_HOME");
+                }
+                let output = command
                     .output()
                     .map_err(|error| format!("running ry: {error}"))?;
                 self.last_run = Some(Run {

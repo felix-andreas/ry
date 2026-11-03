@@ -11,6 +11,7 @@ path = "src/interp.rs"
 
 [dependencies]
 heap = { path = "../heap" }
+rcmd = { path = "../rcmd" }
 smallvec = { version = "1.15", features = ["union"] }
 syntax = { path = "../syntax" }
 table = { path = "../table" }

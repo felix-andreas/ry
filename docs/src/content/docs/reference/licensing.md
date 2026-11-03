@@ -73,7 +73,19 @@ All of them are in `crates/interp/src`.
 
 `stats_lbfgsb.rs` follows the BSD-licensed L-BFGS-B 3.0 reference code and keeps its notice, and
 the font metrics in `graphics.rs` and `graphics_render.rs` come from Adobe's AFM
-files under Adobe's terms; both notices are in `THIRD_PARTY_NOTICES`. Base R's own R code is not
-part of ry: the runtime reads it from the GNU R installation at run time. The one exception is
-`register_s3_methods.R`, a copy of one base R function whose per-method loops run natively, which
-replaces the installed function only when that is exactly the code it was copied from.
+files under Adobe's terms; both notices are in `THIRD_PARTY_NOTICES`. `register_s3_methods.R` is a copy of one base R function whose per-method loops run natively,
+and it replaces the installed function only when that is exactly the code it was copied from.
+
+## Base R
+
+The `ry` binary carries a build of base R: the R code, help pages, data sets and `share/` files of
+the packages GNU R ships with its interpreter (base, compiler, datasets, graphics,
+grDevices, grid, methods, parallel, splines, stats, stats4, tcltk, tools and utils), plus grid's
+and splines' C code compiled against ry's headers. These are GNU R's own files under GNU R's
+licence, GPL-2.0-or-later, and the build includes R's `COPYING`.
+
+They are not vendored in ry's repository. The build (`tools/base-r/build.sh`, behind `just
+base-r`) downloads the R source release that `tools/base-r/VERSION` names from CRAN, checks it
+against the SHA-256 in `tools/base-r/SHA256SUMS`, and applies the patches in
+`tools/base-r/patches/`. The corresponding source of a release is therefore that tarball and the
+patches at its git tag. The build's `ry-base.txt` records the version and the tarball's checksum.

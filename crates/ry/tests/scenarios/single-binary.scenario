@@ -1,17 +1,20 @@
 # A user downloads a release, which is `ry` alone: the first command that needs ry's runtime
-# extracts the copy built into `ry` into the cache, and `ry install` compiles C code through the
-# R front end that `ry` itself answers.
+# extracts the runtime and base R built into `ry` into the cache, and `ry install` compiles C
+# code through the R front end that `ry` itself answers.
 
 requires ry-runtime
 
 file sum.R
 | cat(sum(1:10), "\n")
 | cat(basename(list.files(file.path(Sys.getenv("XDG_CACHE_HOME"), "ry", "runtime"), recursive = TRUE)), "\n")
+| base <- normalizePath(file.path(R.home(), "library", "base"))
+| cat("base", startsWith(base, normalizePath(file.path(Sys.getenv("XDG_CACHE_HOME"), "ry", "base"))), "\n")
 
 run single-ry run --runtime ry sum.R
 expect exit 0
 expect stdout "55"
 expect stdout "libR.so"
+expect stdout "base TRUE"
 
 file pkg/DESCRIPTION
 | Package: tally

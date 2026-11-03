@@ -2,8 +2,6 @@
 //! symbol at runtime, so nothing here needs R at build time.
 
 pub mod console;
-// The GNU R installations ry's runtime searches too; `repl` does not link the interpreter.
-#[path = "../../interp/src/gnu_r_home.rs"]
 mod gnu_r_home;
 pub mod libr;
 
@@ -349,6 +347,7 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
             built_from.as_deref(),
         )));
     }
+    export_r_home();
     Ok(library)
 }
 
@@ -383,12 +382,61 @@ fn runtime_entry<T: Copy>(library: &'static RuntimeLibrary, name: &str) -> Resul
         .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
-/// ry's R home, whose `bin/R` runs ry's runtime with GNU R's base packages
-/// (`rcmd::runtime_home`).
+/// ry's R home, whose `bin/R` runs ry's runtime (`rcmd::runtime_home`), over the base R tree
+/// [`base_r`] picks.
 pub fn ry_r_home() -> Result<PathBuf, ReplError> {
     let (libr, _) = ry_runtime_library()?;
-    let gnu_r_home = libr::discover_r_home()?;
-    rcmd::runtime_home(&libr, &gnu_r_home).map_err(|error| ReplError(error.to_string()))
+    rcmd::runtime_home(&libr, &base_r()?).map_err(|error| ReplError(error.to_string()))
+}
+
+/// The base R tree ry's runtime loads: the one a set `R_HOME` names (a GNU R installation,
+/// which emulates that R, or a home ry assembled, which a process started by its `bin/R`
+/// inherits), else ry's own ([`bundled_base`]).
+pub fn base_r() -> Result<PathBuf, ReplError> {
+    match std::env::var_os("R_HOME").filter(|home| !home.is_empty()) {
+        Some(home) => {
+            let home = PathBuf::from(home);
+            if !home.join("library/base").is_dir() {
+                return Err(ReplError(format!(
+                    "R_HOME is set to {}, which holds no base R; unset it to use ry's own base R",
+                    home.display()
+                )));
+            }
+            Ok(home)
+        }
+        None => bundled_base(),
+    }
+}
+
+/// ry's own base R tree: one installed outside the executable (`rcmd::base::installed`), else
+/// the copy a release embeds, extracted into the user's cache ([`extract_base`]).
+pub fn bundled_base() -> Result<PathBuf, ReplError> {
+    if let Some(base) = rcmd::base::installed() {
+        return Ok(base);
+    }
+    match &EMBEDDED_BASE {
+        Some(base) => extract_base(base),
+        None => Err(ReplError(
+            "this ry has no base R: it was built without RY_EMBED_BASE, and no base-r directory \
+             is beside it or named by RY_BASE_R. Build one with `just base-r`, or set R_HOME to a \
+             GNU R installation"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Points the runtime's session at ry's R home when `R_HOME` names none, so that `R.home()`,
+/// `R.home("bin")/R` (which callr and `R CMD` run) and the base packages all come from it.
+/// Without a home the variable stays unset, and the session reports the missing base R itself.
+fn export_r_home() {
+    if std::env::var_os("R_HOME").is_some_and(|home| !home.is_empty()) {
+        return;
+    }
+    match ry_r_home() {
+        // SAFETY: the host sets the variable before the runtime starts any thread.
+        Ok(home) => unsafe { std::env::set_var("R_HOME", home) },
+        Err(error) => eprintln!("ry: {error}"),
+    }
 }
 
 /// ry's runtime library, and whether it was extracted from this executable. `RY_LIBR` wins,
@@ -442,6 +490,115 @@ struct EmbeddedFile {
 }
 
 include!(concat!(env!("OUT_DIR"), "/embedded_runtime.rs"));
+
+/// ry's base R tree built into the executable (`build.rs`, `RY_EMBED_BASE`), as one compressed
+/// archive whose format `build.rs` describes.
+pub struct EmbeddedBase {
+    /// A hash of the archive, naming the directory it is extracted into.
+    key: &'static str,
+    /// The archive's size once decompressed.
+    size: u64,
+    compressed: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/embedded_base.rs"));
+
+/// Extracts the embedded base R tree into `ry/base/<key>/` of the user's cache, unless an earlier
+/// run did, and returns its path. The tree is written into a staging directory beside its place
+/// and renamed into it, so a process never sees a partial tree and concurrent first runs both
+/// succeed.
+fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
+    let cache = rcmd::cache_directory().ok_or_else(|| {
+        ReplError(
+            "ry extracts its base R into a cache directory, and none of XDG_CACHE_HOME, \
+             LOCALAPPDATA or HOME is set; set one, or RY_BASE_R to ry's base R"
+                .to_owned(),
+        )
+    })?;
+    let parent = cache.join("ry").join("base");
+    let directory = parent.join(base.key);
+    if rcmd::base::is_complete(&directory) {
+        return Ok(directory);
+    }
+    let failed = |path: &Path, error: io::Error| {
+        ReplError(format!(
+            "cannot extract ry's base R to {}: {error}; set XDG_CACHE_HOME to a writable \
+             directory, or RY_BASE_R to ry's base R",
+            path.display()
+        ))
+    };
+    fs::create_dir_all(&parent).map_err(|error| failed(&parent, error))?;
+    let staging = parent.join(format!(".{}-{}", base.key, rcmd::staging_suffix()));
+    let written = unpack_base(base, &staging);
+    if let Err(error) = written {
+        // A partial tree, say from a full disk, would otherwise stay in the cache for good.
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|error| failed(&staging, error))?;
+        }
+        return Err(failed(&staging, error));
+    }
+    if let Err(error) = fs::rename(&staging, &directory) {
+        // Another process renamed its copy into place first.
+        let removed = fs::remove_dir_all(&staging);
+        if !rcmd::base::is_complete(&directory) {
+            return Err(failed(&directory, error));
+        }
+        removed.map_err(|error| failed(&staging, error))?;
+    }
+    Ok(directory)
+}
+
+fn corrupt_archive() -> io::Error {
+    io::Error::other("the embedded base R archive is corrupt")
+}
+
+fn take<'a>(archive: &'a [u8], position: &mut usize, count: usize) -> io::Result<&'a [u8]> {
+    let end = position.checked_add(count).ok_or_else(corrupt_archive)?;
+    let bytes = archive.get(*position..end).ok_or_else(corrupt_archive)?;
+    *position = end;
+    Ok(bytes)
+}
+
+fn take_array<const N: usize>(archive: &[u8], position: &mut usize) -> io::Result<[u8; N]> {
+    take(archive, position, N)?
+        .try_into()
+        .map_err(|_| corrupt_archive())
+}
+
+fn unpack_base(base: &EmbeddedBase, root: &Path) -> io::Result<()> {
+    let archive = zstd::decode_all(base.compressed)?;
+    if archive.len() as u64 != base.size {
+        return Err(io::Error::other("the embedded base R archive is truncated"));
+    }
+    fs::create_dir_all(root)?;
+    let mut position = 0;
+    while position < archive.len() {
+        let kind = archive[position];
+        position += 1;
+        let length = u32::from_le_bytes(take_array(&archive, &mut position)?) as usize;
+        let relative = std::str::from_utf8(take(&archive, &mut position, length)?)
+            .map_err(|_| corrupt_archive())?;
+        if relative.split('/').any(|part| part.is_empty() || part == "..") {
+            return Err(corrupt_archive());
+        }
+        let path = root.join(relative);
+        match kind {
+            0 => fs::create_dir_all(&path)?,
+            1 | 2 => {
+                let size = u64::from_le_bytes(take_array(&archive, &mut position)?);
+                let size = usize::try_from(size).map_err(|_| corrupt_archive())?;
+                fs::write(&path, take(&archive, &mut position, size)?)?;
+                #[cfg(unix)]
+                if kind == 2 {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+                }
+            }
+            _ => return Err(corrupt_archive()),
+        }
+    }
+    Ok(())
+}
 
 /// Extracts the embedded runtime into `ry/runtime/<key>/` of the user's cache, unless an
 /// earlier run did, and returns the library's path. A file is written under a name of its own

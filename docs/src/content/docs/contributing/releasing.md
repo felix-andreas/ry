@@ -111,18 +111,20 @@ release's tag as its source. `THIRD_PARTY_NOTICES` is committed and regenerated 
 `just notices`. Run it after changing `Cargo.lock` or a GNU R provenance header, and run
 `just notices --check` before a release, because `just package` copies the committed file as it is.
 
-`just package` builds the runtime first and then `ry` with `RY_EMBED_RUNTIME` naming it, which
-embeds it zstd-compressed (`crates/repl/build.rs`), along with `libR.dll.a` on Windows. On first
-use `ry` extracts it into `ry/runtime/<hash>/` of the user's cache. `ry` is also the R front end
+`just package` builds the runtime first, then base R with it (`just base-r`, which downloads
+the R source release `tools/base-r/VERSION` names and checks its SHA-256), and then `ry` with
+`RY_EMBED_RUNTIME` and `RY_EMBED_BASE` naming the two. `crates/repl/build.rs` embeds both
+zstd-compressed, along with `libR.dll.a` on Windows. On first use `ry` extracts the runtime into
+`ry/runtime/<hash>/` and base R into `ry/base/<hash>/` of the user's cache. `ry` is also the R front end
 that `ry-rcmd` is in a development build: ry's R home runs it through a link named `ry-rcmd`
 (on Windows, hard links named `R.exe`, `Rscript.exe` and so on), and `ry` acts as the front end
 when started under such a name.
 
 ry looks for its runtime in `RY_LIBR`, then beside the executable, then in `deps/` and
 `../lib/ry/` next to it, and only then falls back to the built-in one, so an installer may still
-place `ry` in `bin/` and the library in `lib/ry/`. At run time, `ry run`, `ry R` and `ry load` also
-need a GNU R installation built as a shared library, because ry's runtime reads base R from it.
-`ry check`, `ry fmt` and `ry server` need nothing else.
+place `ry` in `bin/` and the library in `lib/ry/`. Base R is looked up the same way: `RY_BASE_R`,
+then `base-r/` beside the executable, one directory up, or in `../lib/ry/`, then the built-in
+copy. Only `ry R` needs a GNU R installation.
 
 The Linux archive is built on Ubuntu 22.04, so it needs glibc 2.35 or newer. On macOS, `libR.dylib`
 has the install name `@rpath/libR.dylib` and exports the same names as the Linux library, which is

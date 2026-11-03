@@ -45,7 +45,6 @@ pub mod eval;
 pub mod fork;
 pub mod format;
 pub mod frame;
-pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_engine;
 pub mod graphics_render;

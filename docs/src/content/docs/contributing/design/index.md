@@ -81,3 +81,8 @@ How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time 
 types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
+
+### [Preloaded base image](/contributing/design/base-image/)
+
+How ry's runtime could start from one mapped image of base R with the default packages already
+loaded, and which interpreter state lives outside the heap and how each piece is restored.

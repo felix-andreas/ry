@@ -1475,8 +1475,8 @@ impl interp::debugger::Transport for DebugChannel {
     }
 }
 
-/// Prints why no GNU R installation was found, and says whether one is missing. Base R's own R
-/// code comes from that installation, so a session cannot start without it.
+/// Prints why no base R was found, and says whether one is missing. The session sources base
+/// R's own R code first, so it cannot start without it.
 fn report_missing_r_home() -> bool {
     match interp::system::missing_r_home() {
         Some(message) => {

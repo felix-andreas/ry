@@ -1,8 +1,12 @@
 //! The R front end that `bin/R` and `bin/Rscript` in ry's R home run. `CMD INSTALL|SHLIB|config`
 //! and `RHOME` are answered in Rust; `R ...` and `Rscript ...` run R code on ry's interpreter,
 //! taking GNU R's command lines, and so do the `R CMD` commands that are R functions of the
-//! tools and utils packages, such as `R CMD build`. The R home is the directory `R_HOME` names. `assemble ROOT
-//! --include DIR --libr FILE [--gnu-r-home DIR]` creates such a home.
+//! tools and utils packages, such as `R CMD build`. The R home is the directory `R_HOME` names.
+//!
+//! Two commands prepare homes rather than run one. `assemble ROOT --include DIR --libr FILE
+//! --base DIR` creates an R home over a base R tree, and `build-base SOURCE OUTPUT --include DIR
+//! --libr FILE --sha256 SUM` builds ry's base R tree from GNU R's unpacked source release
+//! ([`crate::base`]).
 //!
 //! The `ry-rcmd` binary is this front end alone, and `ry` is it too when started under one of
 //! the names [`invoked_as_front_end`] recognizes, so a release can ship `ry` as its only file.
@@ -27,14 +31,20 @@ pub fn invoked_as_front_end() -> bool {
 
 /// Runs the front end with `arguments`, the command line after the program name.
 pub fn main(arguments: Vec<String>) -> ExitCode {
-    if arguments.first().is_some_and(|first| first == "assemble") {
-        return match assemble(&arguments[1..]) {
+    let command = arguments.first().map(String::as_str);
+    if let Some(command @ ("assemble" | "build-base")) = command {
+        let result = if command == "assemble" {
+            assemble(&arguments[1..])
+        } else {
+            build_base(&arguments[1..])
+        };
+        return match result {
             Ok(root) => {
                 println!("{}", root.display());
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("ry-rcmd assemble: {error}");
+                eprintln!("ry-rcmd {command}: {error}");
                 ExitCode::from(2)
             }
         };
@@ -168,60 +178,87 @@ fn windows_front_end() -> Option<(String, PathBuf)> {
     Some((name.to_owned(), bin.parent()?.to_path_buf()))
 }
 
-fn assemble(arguments: &[String]) -> crate::Result<PathBuf> {
-    let mut root = None;
-    let mut include = None;
-    let mut libr = None;
-    let mut gnu_r_home = None;
+/// Reads `--name value` options and positional arguments.
+fn parse_options<'a>(
+    arguments: &'a [String],
+    names: &[&str],
+) -> (Vec<&'a str>, std::collections::BTreeMap<String, &'a str>) {
+    let mut positional = Vec::new();
+    let mut options = std::collections::BTreeMap::new();
     let mut rest = arguments.iter();
     while let Some(argument) = rest.next() {
-        let slot = match argument.as_str() {
-            "--include" => &mut include,
-            "--libr" => &mut libr,
-            "--gnu-r-home" => &mut gnu_r_home,
-            _ => {
-                root = Some(PathBuf::from(argument));
-                continue;
+        match names.iter().find(|name| argument == *name) {
+            Some(name) => {
+                if let Some(value) = rest.next() {
+                    options.insert((*name).to_owned(), value.as_str());
+                }
             }
-        };
-        *slot = rest.next().map(PathBuf::from);
-    }
-    let usage = || {
-        crate::Error::Usage(
-            "usage: ry-rcmd assemble ROOT --include DIR --libr FILE [--gnu-r-home DIR]".into(),
-        )
-    };
-    let (Some(root), Some(include), Some(libr)) = (root, include, libr) else {
-        return Err(usage());
-    };
-    let gnu_r_home = match gnu_r_home {
-        Some(home) => home,
-        None => {
-            let output = std::process::Command::new("R")
-                .arg("RHOME")
-                .output()
-                .map_err(|error| {
-                    crate::Error::Usage(format!("cannot run `R RHOME` to find GNU R: {error}"))
-                })?;
-            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+            None => positional.push(argument.as_str()),
         }
+    }
+    (positional, options)
+}
+
+fn absolute(path: &str) -> crate::Result<PathBuf> {
+    std::path::absolute(path).map_err(|error| crate::Error::Io(PathBuf::from(path), error))
+}
+
+fn assemble(arguments: &[String]) -> crate::Result<PathBuf> {
+    let (positional, options) = parse_options(arguments, &["--include", "--libr", "--base"]);
+    let (&[root], Some(include), Some(libr), Some(base)) = (
+        positional.as_slice(),
+        options.get("--include"),
+        options.get("--libr"),
+        options.get("--base"),
+    ) else {
+        return Err(crate::Error::Usage(
+            "usage: ry-rcmd assemble ROOT --include DIR --libr FILE --base DIR".into(),
+        ));
     };
     let rcmd = std::env::current_exe()
         .map_err(|error| crate::Error::Io(PathBuf::from("ry-rcmd"), error))?;
-    let absolute =
-        |path: PathBuf| std::path::absolute(&path).map_err(|error| crate::Error::Io(path, error));
     let root = absolute(root)?;
+    let base = absolute(base)?;
     crate::assemble(
         &root,
         &crate::HomeSources {
             include: &absolute(include)?,
             libr: &absolute(libr)?,
             rcmd: &rcmd,
-            gnu_r_home: &gnu_r_home,
-            toolchain: crate::Toolchain::for_gnu_r_home(&gnu_r_home)?,
+            base: &base,
+            toolchain: crate::Toolchain::for_base(&base)?,
         },
     )?;
     Ok(root)
+}
+
+fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
+    let (positional, options) = parse_options(arguments, &["--include", "--libr", "--sha256"]);
+    let (&[source, output], Some(include), Some(libr), Some(checksum)) = (
+        positional.as_slice(),
+        options.get("--include"),
+        options.get("--libr"),
+        options.get("--sha256"),
+    ) else {
+        return Err(crate::Error::Usage(
+            "usage: ry-rcmd build-base SOURCE OUTPUT --include DIR --libr FILE --sha256 SUM"
+                .into(),
+        ));
+    };
+    let rcmd = std::env::current_exe()
+        .map_err(|error| crate::Error::Io(PathBuf::from("ry-rcmd"), error))?;
+    let output = absolute(output)?;
+    crate::base::build(
+        &crate::base::BuildSources {
+            source: &absolute(source)?,
+            libr: &absolute(libr)?,
+            rcmd: &rcmd,
+            include: &absolute(include)?,
+            checksum,
+        },
+        &output,
+    )?;
+    Ok(output)
 }
 
 /// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
