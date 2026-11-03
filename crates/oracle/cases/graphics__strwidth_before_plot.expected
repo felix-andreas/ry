@@ -1,0 +1,12 @@
+[stdout]
+| [1] 0.03838095
+| [1] 0.01709524
+| [1] "plot.new has not been called yet"
+| [1] 0.1853333 0.5373333
+| [1] 0.1609194
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("null device" = 1L)

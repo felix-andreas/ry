@@ -3150,7 +3150,12 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
     } else {
         values::as_integer_scalar(font_value)
     };
-    let sizes = with_started_plot(|device| {
+    // As in GNU R, only user coordinates need a plot; figure units and inches measure against
+    // the device's current layout.
+    let sizes = with_device(|device| {
+        if units == 1 && !device.started {
+            return Err(error("plot.new has not been called yet"));
+        }
         let pars = &device.pars;
         let font = if font >= 1 { font } else { pars.font };
         // The `cex` argument scales `par("cex")` rather than replacing it.
