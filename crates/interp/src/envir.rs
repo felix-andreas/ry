@@ -1549,7 +1549,18 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     let element = values::call(symbols.bracket2, &[x_symbol, i_symbol])?;
     let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
     let result = alloc(kind, count * template_length)?;
-    let mut row_names = nil();
+    // An array template makes the result an array one rank higher, and the row names (the
+    // template's names or dimnames, else those of the first result) come along, as in GNU R.
+    let template_dims = values::dims(template).filter(|dims| !dims.is_empty());
+    let row_names_of = |value: Sexp| {
+        if template_dims.is_some() {
+            get_attr(value, symbols.dimnames)
+        } else {
+            values::names(value)
+        }
+    };
+    let mut row_names = row_names_of(template);
+    crate::heap().root(row_names);
     let mut known = atomic_elements(list);
     for index in 0..count {
         let value = crate::scope(|| {
@@ -1588,16 +1599,21 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
         } else {
             value
         };
-        if index == 0 && template_length > 1 {
-            row_names = values::names(value);
+        if index == 0 && use_names && row_names == nil() {
+            row_names = row_names_of(value);
+            crate::heap().root(row_names);
         }
         for offset in 0..template_length {
             crate::subset::copy_element(value, offset, result, index * template_length + offset)?;
         }
     }
     if template_length != 1 {
-        let dim = values::integer_vector(&[template_length as i32, count as i32])?;
-        values::set_attr(result, symbols.dim, dim)?;
+        let mut dim: Vec<i32> = match &template_dims {
+            Some(dims) => dims.iter().map(|&extent| extent as i32).collect(),
+            None => vec![template_length as i32],
+        };
+        dim.push(count as i32);
+        values::set_attr(result, symbols.dim, values::integer_vector(&dim)?)?;
     }
     if use_names {
         let mut names = values::names(list);
@@ -1609,8 +1625,23 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
                 values::set_attr(result, symbols.names, names)?;
             }
         } else if names != nil() || row_names != nil() {
-            let dimnames = values::list_vector(&[row_names, names])?;
-            values::set_attr(result, symbols.dimnames, dimnames)?;
+            let mut components = match &template_dims {
+                Some(dims) if row_names != nil() => {
+                    if row_names.kind() != SexpType::List || length(row_names) != dims.len() {
+                        return Err(call.error(format!(
+                            "dimnames(<value>) is neither NULL nor list of length {}",
+                            dims.len()
+                        )));
+                    }
+                    (0..dims.len())
+                        .map(|axis| row_names.element(axis))
+                        .collect()
+                }
+                Some(dims) => vec![nil(); dims.len()],
+                None => vec![row_names],
+            };
+            components.push(names);
+            crate::subset::set_dimnames(result, values::list_vector(&components)?, nil())?;
         }
     }
     Ok(result)
