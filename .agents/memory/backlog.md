@@ -22,6 +22,13 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: bundle base R into the `ry` binary
+
+- Today `ry run` reads the R code of the base packages (base, stats, utils, methods, graphics, grDevices, datasets, tools, grid, splines, stats4, parallel, compiler) from an installed GNU R (`rcmd::runtime_home`), which is the only reason a user needs GNU R for it. Both are GPL-2.0-or-later, so bundling is licence-clean.
+- Plan: a build step, not vendored sources. Download one pinned R source tarball (SHA-256 in the repo; patches as files in git), parse `src/library/*/R` per platform (base selects unix/windows code at build time), and write one preloaded base image in ry's own format, which can also start faster than R's lazy-load DBs (relevant to S4 first load). Embed it zstd-compressed and extract it to the cache like libR. Nix fetches the tarball as a fixed-output derivation.
+- About 25 MB on disk for those packages on Linux, roughly 8-10 MB compressed (estimate). Check whether ry loads any of their compiled `.so` files.
+- Unchanged: compiled packages still need a C/Fortran toolchain, and `ry R` still needs GNU R.
+
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
