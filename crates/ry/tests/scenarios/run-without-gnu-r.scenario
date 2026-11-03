@@ -1,0 +1,24 @@
+# A user without GNU R installs ry and runs a script: the session loads ry's own base R, reports
+# the R version ry pins, and has the default packages, datasets and S4 attached.
+
+requires ry-runtime
+hide gnu-r
+
+file analysis.R
+| stopifnot(Sys.which("R") == "", Sys.which("Rscript") == "")
+| cat("R", as.character(getRversion()), "\n")
+| cat(setdiff(search(), c(".GlobalEnv", "tools:ry", "package:std", "package:ry")), "\n")
+| fit <- lm(mpg ~ wt, data = mtcars)
+| cat(round(coef(fit), 2), "\n")
+| setClass("Point", representation(x = "numeric", y = "numeric"))
+| p <- new("Point", x = 1, y = 2)
+| cat(isVirtualClass("Point"), p@y, "\n")
+| cat(file.exists(file.path(R.home("bin"), "R")), "\n")
+
+run ry run --runtime ry analysis.R
+expect exit 0
+expect stdout "R 4.6.2"
+expect stdout "package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads"
+expect stdout "37.29 -5.34"
+expect stdout "FALSE 2"
+expect stdout "TRUE"

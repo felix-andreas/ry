@@ -11,8 +11,8 @@
 //! runs a GNU R process.
 //!
 //! The R home is assembled by [`assemble`]. Base R's packages, `share/` and `etc/` files are
-//! linked from a GNU R installation, because ry reuses base R's R code rather than vendoring it
-//! (`decisions.md`, "licensing"), while `include/`, `lib/libR.so`, `etc/Makeconf` and
+//! linked from a base R tree: the one ry builds from GNU R's pinned source release ([`base`]),
+//! or a GNU R installation that `R_HOME` names. `include/`, `lib/libR.so`, `etc/Makeconf` and
 //! the `bin/` front ends are ry's own.
 
 use std::{
@@ -35,6 +35,7 @@ mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
 
+pub mod base;
 pub mod front_end;
 mod makeconf;
 
@@ -190,11 +191,25 @@ pub struct Toolchain {
 
 impl Default for Toolchain {
     /// The GNU toolchain with the system's reference BLAS and LAPACK, which is what GNU R's
-    /// Linux builds and the package binaries of the corpus link against. On Windows it is
-    /// [`Toolchain::rtools`].
+    /// Linux builds and the package binaries of the corpus link against. On macOS it is Apple's
+    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and on
+    /// Windows it is [`Toolchain::rtools`].
     fn default() -> Toolchain {
         if cfg!(windows) {
             return Toolchain::rtools();
+        }
+        if cfg!(target_os = "macos") {
+            return Toolchain {
+                cc: "clang".into(),
+                cxx: "clang++".into(),
+                fc: "gfortran".into(),
+                blas_libs: "-framework Accelerate".into(),
+                lapack_libs: "-framework Accelerate".into(),
+                flibs: "-lgfortran -lm".into(),
+                cppflags: String::new(),
+                ldflags: String::new(),
+                openmp: String::new(),
+            };
         }
         Toolchain {
             cc: "gcc".into(),
@@ -227,22 +242,26 @@ impl Toolchain {
         }
     }
 
-    /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
-    /// On macOS it is the one GNU R's own `etc/Makeconf` names, because the compilers and
+    /// The toolchain for building packages on this platform against the base R at `base`. ry's
+    /// own base tree has no `etc/Makeconf` and gets [`Toolchain::default`]. Beside a GNU R
+    /// installation, on macOS it is the one GNU R's own `etc/Makeconf` names, because the compilers and
     /// libraries vary by installer: CRAN's R uses Apple's clang, the gfortran in `/opt/gfortran`
     /// and its own `libRblas`, Homebrew's uses Homebrew's gcc and OpenBLAS, and neither has a
     /// usable default. On Linux it is [`Toolchain::default`] linking the BLAS and LAPACK that
     /// `Makeconf` names (see [`Toolchain::with_makeconf_libraries`]). On Windows it is Rtools.
-    pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
+    pub fn for_base(base: &Path) -> Result<Toolchain> {
         if cfg!(windows) {
             return Ok(Toolchain::default());
         }
-        let path = gnu_r_home.join("etc").join("Makeconf");
+        let path = base.join("etc").join("Makeconf");
+        if !path.exists() {
+            return Ok(Toolchain::default());
+        }
         let text = fs::read_to_string(&path).map_err(io_error(&path))?;
         Ok(if cfg!(target_os = "macos") {
-            Toolchain::from_makeconf(&text, gnu_r_home)
+            Toolchain::from_makeconf(&text, base)
         } else {
-            Toolchain::default().with_makeconf_libraries(&text, gnu_r_home)
+            Toolchain::default().with_makeconf_libraries(&text, base)
         })
     }
 
@@ -252,8 +271,8 @@ impl Toolchain {
     /// `-L/nix/store/...-blas-3/lib -lblas`), and the linker finds them nowhere else. An empty
     /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
     /// which packages link after `$(LAPACK_LIBS)` anyway.
-    pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+    pub fn with_makeconf_libraries(self, text: &str, base: &Path) -> Toolchain {
+        let variables = make_assignments(text, &base.display().to_string(), &mut |path| {
             fs::read_to_string(path).ok()
         });
         let get = |name: &str| {
@@ -273,10 +292,10 @@ impl Toolchain {
     }
 
     /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
-    /// against the file's own assignments and `R_HOME` against `gnu_r_home`, since ry's home
+    /// against the file's own assignments and `R_HOME` against `base`, since ry's home
     /// does not hold GNU R's BLAS or LAPACK.
-    pub fn from_makeconf(text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+    pub fn from_makeconf(text: &str, base: &Path) -> Toolchain {
+        let variables = make_assignments(text, &base.display().to_string(), &mut |path| {
             fs::read_to_string(path).ok()
         });
         let get = |name: &str| {
@@ -316,9 +335,9 @@ pub struct HomeSources<'a> {
     pub libr: &'a Path,
     /// The front end that `bin/R` and `bin/Rscript` run: `ry-rcmd`, or `ry` itself.
     pub rcmd: &'a Path,
-    /// The GNU R installation (`R RHOME`) whose base packages, `share/` and `etc/` files the
-    /// home links to.
-    pub gnu_r_home: &'a Path,
+    /// The base R tree whose base packages, `share/` and `etc/` files the home links to: ry's
+    /// own ([`base::build`]) or a GNU R installation.
+    pub base: &'a Path,
     pub toolchain: Toolchain,
 }
 
@@ -341,7 +360,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         fs::create_dir_all(&path).map_err(io_error(&path))?;
     }
     copy_tree(sources.include, &root.join("include"))?;
-    let base_description = sources.gnu_r_home.join("library/base/DESCRIPTION");
+    let base_description = sources.base.join("library/base/DESCRIPTION");
     let version = BaseVersion::read(&base_description)?;
     // The headers present the version of the base R the interpreter runs, as `R.version` does,
     // so a package's C code and its R code take the same version branches.
@@ -378,7 +397,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
          Description: Built into ry's interpreter.\nLicense: GPL (>= 2)\n",
     )?;
 
-    let gnu = sources.gnu_r_home;
+    let gnu = sources.base;
     let gnu_share = wrapper_directory(gnu, "R_SHARE_DIR").unwrap_or_else(|| gnu.join("share"));
     let gnu_doc = wrapper_directory(gnu, "R_DOC_DIR").unwrap_or_else(|| gnu.join("doc"));
     let base_library = gnu.join("library");
@@ -526,11 +545,16 @@ exec "$cmd" $extra "$@"
 }
 
 /// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
-/// ([`cached_home`]) from `libr`, a front end, and the base R of `gnu_r_home`. The front end is
+/// ([`cached_home`]) from `libr`, a front end, and the base R tree `base`. A `base` that is
+/// already one of ry's homes (a process started by a home's `bin/R` inherits its `R_HOME`) is
+/// returned as it is. The front end is
 /// the `ry-rcmd` beside `libr` when there is one (a development build), and otherwise the
 /// running executable, which is `ry` (a release, whose runtime is extracted from `ry` itself) or
 /// a front end already.
-pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+pub fn runtime_home(libr: &Path, base: &Path) -> Result<PathBuf> {
+    if is_ry_home(base) {
+        return Ok(base.to_path_buf());
+    }
     let beside = libr.with_file_name(if cfg!(windows) {
         "ry-rcmd.exe"
     } else {
@@ -551,7 +575,13 @@ pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
         })?
         .join("ry")
         .join("home");
-    cached_home(&cache, libr, &rcmd, gnu_r_home)
+    cached_home(&cache, libr, &rcmd, base)
+}
+
+/// Whether `home` is an R home ry assembled, which carries the `.libr` record of the runtime it
+/// was assembled for.
+pub fn is_ry_home(home: &Path) -> bool {
+    home.join(".libr").is_file()
 }
 
 /// The user's cache directory: `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, then
@@ -570,10 +600,10 @@ pub fn cache_directory() -> Option<PathBuf> {
 }
 
 /// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
-/// first time it is asked for, with ry's embedded headers and the base R of `gnu_r_home`.
-/// The home is named by everything it is built from, so a rebuilt `libR` or another GNU R gets
+/// first time it is asked for, with ry's embedded headers and the base R tree `base`.
+/// The home is named by everything it is built from, so a rebuilt `libR` or another base R gets
 /// a home of its own, and a home in use is never rewritten.
-pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Result<PathBuf> {
     let stamp = |path: &Path| -> Result<String> {
         let metadata = fs::metadata(path).map_err(io_error(path))?;
         let modified = metadata
@@ -587,11 +617,20 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
             metadata.len()
         ))
     };
+    // A base rebuilt in place keeps its path, so its manifest tells the builds apart. A GNU R
+    // installation has none.
+    let manifest_path = base.join(base::MANIFEST);
+    let manifest = match fs::read_to_string(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(io_error(&manifest_path)(error)),
+    };
     let key = [
         env!("CARGO_PKG_VERSION").to_owned(),
         stamp(libr)?,
         stamp(rcmd)?,
-        gnu_r_home.display().to_string(),
+        base.display().to_string(),
+        manifest,
     ]
     .join("\n");
     let home = cache.join(format!("{:016x}", fnv1a(key.as_bytes())));
@@ -624,8 +663,8 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
             include: &include,
             libr,
             rcmd,
-            gnu_r_home,
-            toolchain: Toolchain::for_gnu_r_home(gnu_r_home)?,
+            base,
+            toolchain: Toolchain::for_base(base)?,
         },
     )
     .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));

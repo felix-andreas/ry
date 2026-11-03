@@ -3762,6 +3762,10 @@ fn class_item(
 
 /// Reads `[:name:]`, `[=c=]` or `[.c.]` at `index`: the delimiter, the name, and the index
 /// after the term.
+///
+/// TRE ends a class name at the first `:` and skips the character after it without checking
+/// that it is `]`, so `[[:lower::]]+` reads as `[[:lower:]]]+`. GNU R's own `install.packages`
+/// relies on this, with exactly that pattern.
 fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
     let kind = *chars.get(index + 1)?;
     if !matches!(kind, ':' | '=' | '.') {
@@ -3770,7 +3774,7 @@ fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
     let mut cursor = index + 2;
     let mut name = String::new();
     while cursor + 1 < chars.len() {
-        if chars[cursor] == kind && chars[cursor + 1] == ']' {
+        if chars[cursor] == kind && (kind == ':' || chars[cursor + 1] == ']') {
             return Some((kind, name, cursor + 2));
         }
         name.push(chars[cursor]);

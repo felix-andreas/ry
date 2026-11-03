@@ -3,6 +3,18 @@ title: News
 description: Release announcements and project news
 ---
 
+## Unreleased
+
+- **ry needs no GNU R to run R.** `ry run`, `ry load`, `ry test`, `ry document` and `ry install`
+  use a build of base R 4.6.2 that ships inside `ry`, so `R.version` reports R 4.6.2. Set
+  `R_HOME` to a GNU R installation to emulate that release instead ([Installation](/installation#r)).
+
+### Known limitations
+
+- **`ry R` still needs GNU R**, because it runs your code on GNU R itself.
+- **Linear algebra on Windows needs GNU R.** Windows has no system LAPACK, so `solve()` and its
+  relatives need `R_HOME` naming a GNU R installation, whose `Rblas.dll` and `Rlapack.dll` they call.
+
 ## ry 0.4.1-beta, on every platform
 
 *Released in November 2026 as a pre-release.*

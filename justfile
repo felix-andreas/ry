@@ -238,8 +238,33 @@ bump-version version:
     git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml
     git commit -m "chore: release {{ version }}"
 
-# Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) embedded in it,
-# LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
+# Build ry's base R from GNU R's pinned source release (tools/base-r) into target/base-r, where
+# every ry and test binary of this checkout finds it. `profile` picks the runtime that runs the build.
+base-r profile="release" target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile={{ quote(profile) }}
+    target={{ quote(target) }}
+    target_root="${CARGO_TARGET_DIR:-target}"
+    case "$profile" in dev | test) directory=debug ;; bench) directory=release ;; *) directory=$profile ;; esac
+    if [ -n "$target" ]; then
+    	cargo build --profile "$profile" --locked --target "$target" -p libr -p rcmd
+    	build="$target_root/$target/$directory"
+    	output="$target_root/$target/base-r"
+    else
+    	cargo build --profile "$profile" -p libr -p rcmd
+    	build="$target_root/$directory"
+    	output="$target_root/base-r"
+    fi
+    case "${target:-$(rustc -vV | sed -n 's/^host: //p')}" in
+    	*windows*) library=R.dll rcmd=ry-rcmd.exe ;;
+    	*apple*) library=libR.dylib rcmd=ry-rcmd ;;
+    	*) library=libR.so rcmd=ry-rcmd ;;
+    esac
+    tools/base-r/build.sh "$output" "$build/$rcmd" "$build/$library"
+
+# Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) and base R
+# embedded in it, LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
 # an LLVM mingw toolchain (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages
 # share the UCRT.
 package version target="":
@@ -257,9 +282,10 @@ package version target="":
     	*apple*) library=libR.dylib executable=ry ;;
     	*) library=libR.so executable=ry ;;
     esac
-    # The runtime is built first, because `ry` embeds it (crates/repl/build.rs).
-    cargo build --release --locked --target "$target" -p libr
-    RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" cargo build --release --locked --target "$target" -p ry-lang
+    # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs).
+    just base-r release "$target"
+    base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
+    RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and
@@ -429,7 +455,7 @@ package-tests *args:
 # Assemble ry's R home in .corpus/ry-home: bin/R, bin/Rscript and R CMD run on ry's runtime.
 ry-home:
     cargo build -q --release -p libr -p rcmd
-    ./target/release/ry-rcmd assemble .corpus/ry-home --include crates/libr/include --libr target/release/libR.so
+    ./target/release/ry-rcmd assemble .corpus/ry-home --include crates/libr/include --libr target/release/libR.so --base "${R_HOME:-target/base-r}"
 
 # Install the closure from source on ry's runtime into .corpus/ry-library: `just corpus-ry-install [--jobs N] [PKG...]`.
 corpus-ry-install *args: ry-home

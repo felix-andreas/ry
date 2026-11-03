@@ -25,8 +25,8 @@ also served as Markdown at [`/ry.md`](/ry.md).
 | `ry server` | The language server, which your editor starts |
 | `ry debug-adapter` | A Debug Adapter Protocol debugger |
 
-Checking, formatting and the editor never run R. Only the commands that run code need GNU R
-installed, and ry's runtime still reads base R from it. Install the
+Checking, formatting and the editor never run R, and ry's runtime brings its own base R 4.6.2, so
+only `ry R` needs GNU R installed. Install the
 [VS Code extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) or a
 binary ([Installation](/installation)).
 

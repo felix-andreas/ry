@@ -1,0 +1,16 @@
+[stdout]
+| [1] "\\name"  "TEXT"    "#ifdef"  "\\title" "TEXT"    "TEXT"   
+| [1] "\\section" "TEXT"     
+| [1] "TEXT"          "\\dots"        "TEXT"          "\\linkS4class"
+| [5] "TEXT"         
+| [1] "\\code"     "TEXT"       "UNKNOWN"    "LIST"       "TEXT"      
+| [6] "\\dontdiff" "TEXT"      
+[messages]
+[warnings]
+- newline within quoted string at <connection>:1 (in tools::parse_Rd(textConnection(text), fragment = TRUE))
+- <connection>:2: unknown macro '\\nosuchmacro' (in tools::parse_Rd(textConnection(text), fragment = TRUE))
+[errors]
+[value]
+character
+| c("\\code", "TEXT", "UNKNOWN", "LIST", "TEXT", "\\dontdiff", 
+| "TEXT")
