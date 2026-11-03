@@ -435,6 +435,13 @@ corpus-ry-install *args: ry-home
 oracle *args:
     cargo run -q -p oracle -- {{ args }}
 
+# Generates the seeded S4-heavy package (600 classes, 1,900 methods) into `dir` and times its first load on ry's runtime, split by S4 call, e.g. `just bench-s4-load .bench/s4heavy`.
+bench-s4-load dir="target/s4heavy" seed="20261102":
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/loader-bench/s4_package.py {{ dir }} --seed {{ seed }}
+    cd {{ dir }} && echo 'q()' | {{ justfile_directory() }}/target/release/ry run
+    cd {{ justfile_directory() }}/target && PKG={{ absolute_path(dir) }} ./release/ry run {{ justfile_directory() }}/tools/loader-bench/s4_profile.R
+
 # Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
 bench-gen *args:
     python3 -I tools/bench/generate.py {{ args }}

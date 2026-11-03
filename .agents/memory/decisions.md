@@ -2517,7 +2517,8 @@ graphical parameters, `file.append` and anonymous `file()` buffers.
 - **Target shape.** `crates/interp/src/linalg.rs` calls the system's BLAS and LAPACK, opened at runtime with `dlopen` (the workspace builds without them; an operation that needs a missing library is an R error), with GNU R's arguments, workspace queries and gfortran's hidden character lengths. On the same libraries the results are GNU R's bit for bit, which `crates/interp/tests/test_linalg.rs` pins.
 - **`dqrdc2` is Rust, written from its description** (R's LINPACK variant, which no system library ships), as are the `dqrsl` family and `dtrco`. They still call BLAS level 1 (`dnrm2`, `ddot`, `daxpy`, `dscal`, `dasum`) because those decide the bits: reference `dnrm2` is a scaled algorithm, not a plain square root of a sum.
 - **One table of base's native routines**, `native::BASE_ROUTINES`. `getRegisteredRoutines` derives from it, and every `.Call`, `.C` and `.Fortran` (the interpreter's and libr's) asks `native::call_base_routine` first, so `qr()` works with or without libR. A routine is base's when its `NativeSymbolInfo`'s `dll` is named `base`, or when it is named by a string with no `PACKAGE` or `PACKAGE = "base"`.
-- **GNU R's quirks are kept on purpose**: `%*%` uses BLAS unless an operand may hold a NaN or an infinity, then a plain loop (which also stands in when BLAS is missing, since reference BLAS sums in the same order); `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.
+- **The matrix products are ry's own kernels, not the installed BLAS.** `%*%`, `crossprod` and `tcrossprod` sum each entry's terms in reference `dgemm`/`dgemv`/`dsyrk`/`zgemm` order (columns added as axpys, so the inner loop vectorizes without reordering a sum), which is also the order of GNU R's NaN fallback loops, so one kernel serves both paths and the NaN screen is gone for reals. Previously they called whatever `libblas.so.3` was installed, so the bits followed the host: CI's OpenBLAS (an x86-64-v3 build with FMA kernels) moved `a %*% a` by 1 to 2 ULP. Now the result is GNU R's on its bundled reference BLAS on every machine and needs no library; on a machine whose GNU R uses OpenBLAS, ry's products differ from that GNU R's in the last bit, by design. Complex products use Fortran's plain multiply on finite operands (as `zgemm` does) and C99's otherwise. A faster kernel must keep each entry's sum sequential in the inner index (block over rows and columns only, no FMA); `backlog.md` tracks it.
+- **GNU R's quirks are kept on purpose**: `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.
 
 # Decision record: the default packages' utils, tools, grDevices and graphics routines
 
@@ -5764,18 +5765,56 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
   pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
   no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
-- **Held-back methods for other packages' generics** (`DeferredS4::foreign_generics`). Previously
+- **Held-back methods for other packages' generics** (`DeferredS4::foreign_methods`). Previously
   any `setMethod` on a generic the package did not define kept the whole unit eager, and nearly
   every S4 package defines a `show` method, so on the synthetic finance code base no S4 was held
   back. Such a method now qualifies when its signature names one of the package's own classes,
-  which means it can only be selected for objects of that class. Three doors are covered: a
-  dispatch (`methods::dispatch_generic` forces before reading the tables), `R_getGeneric` (the
-  name joins the deferred generics), and direct reads of the generic's `.MTable`/`.AllMTable`
-  by `getMethod`/`existsMethod`, which go through `.getGenericFromCache` with no C hook, so those
-  bindings become promises that put the real tables back and force (`.ry_s4_table_placeholder`).
-  Primitives, group generics and functions that are not yet generic stay eager
-  (`.ry_may_defer_s4`): they dispatch without `standardGeneric`, so an object read back from disk
-  could select the wrong method.
+  which means it can only be selected for objects of that class. Each kind of generic needs its
+  own door, because forcing on every dispatch of `initialize` or `length` would fire during the
+  load itself (`.ry_foreign_generic_kind`, `.ry_defer_s4`):
+  - A generic function (`show`, `initialize`, any `standardGeneric`): the placeholders are per
+    dispatch label, one promise per method in the generic's `.MTable`/`.AllMTable`, labelled as
+    `methods` labels them (`.ry_s4_label`: `matchSignature` padded with `ANY` to `.SigLength`).
+    A dispatch for another class never reads them, so it never forces; `getMethod`,
+    `existsMethod` and a dispatch for a held-back class read the label and force. A signature
+    longer than `.SigLength` keeps the unit eager. Another package's `setMethod()` on the same generic
+    reads every label (`methods:::.resetInheritedMethods`), so it forces the unit; a force during
+    this load from a method after the cursor reads the label with `get0`. Forcing restores each table's previous value
+    before the definitions run (`.ry_restore_s4_labels`).
+  - A primitive (`length`, `[`): primitives dispatch from C without `standardGeneric`, so
+    `s4_dispatch` forces only when a non-promise S4 argument's class is one of the unit's
+    classes (`interp::methods::Lookup::Primitive`). A held-back method can apply to nothing
+    else, so this is exact.
+  - A function that is not yet generic from another package (`as.list`, `toString`; one of the package's own
+    functions keeps the unit eager, since a placeholder would replace it): `setMethod` would make it generic
+    in the package namespace, so that name and `.__T__name:pkg` become placeholders and the name
+    joins the forcing generics.
+  - Group generics keep the unit eager: a group member dispatches through the group's table,
+    which no per-name placeholder covers.
+- **Class unions** (`S4Definition::Union`). A union of only the package's held-back classes is
+  held back with them. A union of only other packages' classes (`c("numeric", "NULL")`) runs in
+  place, because it edits the global class-cache entry of each member (GNU R changes
+  `.getClassesFromCache("numeric")@contains`, not `methods::.__C__numeric`), so no placeholder
+  in the package's namespace could stand in for it. A mixed union keeps the unit eager.
+- **No `cacheMetaData` while held back** (`.ry_apply`). The sync after a load called
+  `cacheMetaData`, which reads every `.__C__`/`.__T__` binding and so forced the unit. Each
+  definition already caches what it defines as it runs, and `.ry_force_s4` ends with the same
+  call, so the sync skips it while a unit is held back.
+- **Cross-check against eager.** Laziness changes when definitions run, not what they compute,
+  so the check is a whole-process comparison rather than an in-process invariant:
+  `crates/ry/tests/test_load.rs`
+  (`a_held_back_method_for_another_packages_generic_is_there_when_that_generic_needs_it`) runs
+  seven first-use probes (`show`, primitives, `as.list`, `print`, union membership,
+  `initialize` with `callNextMethod`, `readRDS` objects) lazily and eagerly and asserts identical
+  output, and `tools/loader-bench/s4_check.R` compares lazy, eager, cache-hit and GNU R results on
+  the generated package. The deferred-S4 rules are pinned in
+  `crates/loader/tests/reload/deferred_s4.test`.
+- **Measured** on a seeded S4-heavy package (`just bench-s4-load`, `tools/loader-bench/s4_package.py`:
+  2,863 S4 definitions). Eager, the first load took 5.7 to 5.9 s under `ry run`, 92% of it S4
+  (setMethod 2.8 s, setClass 2.3 s, setClassUnion 0.4 s, setGeneric 0.2 s), at about 1.3x GNU R per
+  call (`pkgload::load_all` 6.3 to 7.1 s, `library()` of an installed copy 0.6 s). Held back, the
+  load takes about 0.27 s; first S4 use costs about 0.42 s on a metadata-cache hit and the full
+  eager run on a miss.
 - **The S4 metadata cache** (`DeferredS4::cache_key`, `s4_cache_path` in `loader.rs`;
   `.ry_restore_s4`, `.ry_save_s4` in `runtime.R`). Previously every process ran the held-back
   definitions through the `methods` package (about 330 ms on the bench package, 1.7x GNU R, the gap

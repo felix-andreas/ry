@@ -155,10 +155,17 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
     }
     if let Some(deferred) = &plan.deferred_s4 {
         output.push_str(&format!("placeholders {}\n", deferred.names.join(" ")));
-        if !deferred.foreign_generics.is_empty() {
+        let mut foreign: Vec<&str> = deferred
+            .foreign_methods
+            .iter()
+            .map(|method| method.generic.as_str())
+            .collect();
+        foreign.sort_unstable();
+        foreign.dedup();
+        if !foreign.is_empty() {
             output.push_str(&format!(
                 "forced by other packages' generics {}\n",
-                deferred.foreign_generics.join(" ")
+                foreign.join(" ")
             ));
         }
         if deferred.cache_key.is_none() {

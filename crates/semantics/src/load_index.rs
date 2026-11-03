@@ -76,13 +76,16 @@ pub enum S4Definition {
     /// definition, `setGeneric` wraps an existing function and says so, which cannot wait.
     Generic { generic: String },
     /// `setMethod("generic", signature, ...)` or `setReplaceMethod`, whose generic is named as
-    /// R stores it (`name<-` for a replacement).
+    /// R stores it (`name<-` for a replacement). Each class in the signature comes with the
+    /// argument name written beside it, if any.
     Method {
         generic: String,
-        signature: Vec<String>,
+        signature: Vec<(Option<String>, String)>,
     },
     /// `setValidity("Class", ...)`.
     Validity { class: String },
+    /// `setClassUnion("Name", c("A", "B"))`, with its members as written.
+    Union { class: String, members: Vec<String> },
 }
 
 /// A class or method an item registers as a side effect, which a reload must undo when the
@@ -923,7 +926,7 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
             let generic = string_argument(0, "f")?;
             let signature = argument(1, "signature")?;
             let signature = match string_literal(signature) {
-                Some(class) => vec![class],
+                Some(class) => vec![(None, class)],
                 None => {
                     let call = call_parts(signature)?;
                     if !matches!(call.callee.as_str(), "signature" | "c") {
@@ -931,8 +934,10 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
                     }
                     call.arguments
                         .iter()
-                        .map(|argument| string_literal(&argument.value))
-                        .collect::<Option<Vec<String>>>()?
+                        .map(|argument| {
+                            Some((argument.name.clone(), string_literal(&argument.value)?))
+                        })
+                        .collect::<Option<Vec<_>>>()?
                 }
             };
             let generic = if callee == "setReplaceMethod" {
@@ -945,6 +950,26 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
         "setValidity" => Some(S4Definition::Validity {
             class: string_argument(0, "Class")?,
         }),
+        "setClassUnion" => {
+            let members = argument(1, "members")?;
+            let members = match string_literal(members) {
+                Some(member) => vec![member],
+                None => {
+                    let call = call_parts(members)?;
+                    if call.callee != "c" {
+                        return None;
+                    }
+                    call.arguments
+                        .iter()
+                        .map(|argument| string_literal(&argument.value))
+                        .collect::<Option<Vec<String>>>()?
+                }
+            };
+            Some(S4Definition::Union {
+                class: string_argument(0, "name")?,
+                members,
+            })
+        }
         _ => None,
     }
 }

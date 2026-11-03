@@ -102,7 +102,7 @@ function bodyToMarkdown(body: string): string {
     }
     const table = /^<BenchmarkTable\b(?:\s+programs=\{(\[[^\]]*\])\})?/.exec(line.trim());
     if (table) {
-      push(benchmarkTableMarkdown(table[1] === undefined ? undefined : JSON.parse(table[1])), false);
+      push(benchmarkTableMarkdown(headingLevel + 1, table[1] === undefined ? undefined : JSON.parse(table[1])), false);
       continue;
     }
     if (/^<BenchmarkPrograms\b/.test(line.trim())) {

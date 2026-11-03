@@ -1271,7 +1271,7 @@ JIT fits around them.
     Windows home, and its `R.exe RHOME` and `Rscript.exe` (loading digest, reporting `.utf8`
     locales and code page 65001) ran from it.
   - The BLAS path, with a stand-in `Rblas.dll` built from C that imports `xerbla_` from `R.dll`
-    as R's own does: `%*%` loads and calls it, and a bad argument becomes the R error `BLAS/LAPACK
+    as R's own does: ry loads and calls it, and a bad argument becomes the R error `BLAS/LAPACK
     routine 'DGEMM ' gave error code -3`. R's own `Rblas.dll` and `Rlapack.dll` import nothing
     else from R.dll, which their import tables show.
 

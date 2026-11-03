@@ -1,11 +1,22 @@
-//! Base R's linear algebra, pinned to GNU R 4.3.3's results bit for bit: the matrix products
-//! (BLAS), the `La_*` internals (LAPACK), `backsolve`, and the LINPACK routines base registers
-//! for `.Fortran`, `dqrdc2` among them. The expected values are GNU R's on the reference BLAS
-//! and LAPACK 3.12, the libraries both run on.
-//! OpenBLAS differs from them in the last bit, and installing it on Debian or Ubuntu makes it the
-//! `libblas.so.3` and `liblapack.so.3` alternative, which GNU R and ry then both load. So where
-//! Debian's reference libraries are installed, the test reruns itself with their directories on
-//! `LD_LIBRARY_PATH` (`run_on_reference_libraries`), which the loader reads only at startup.
+//! Base R's linear algebra, pinned to GNU R 4.3.3's results bit for bit: the matrix products,
+//! the `La_*` internals (LAPACK), `backsolve`, and the LINPACK routines base registers for
+//! `.Fortran`, `dqrdc2` among them. The expected values are GNU R's on the reference BLAS and
+//! LAPACK 3.12.
+//!
+//! The matrix products are ry's own kernels, which sum in reference BLAS's order, so their
+//! expected values hold on every machine. Everything else runs in the system's BLAS and LAPACK,
+//! as GNU R's does, and there the bits are the library's: OpenBLAS differs from the reference
+//! libraries in the last bit, and on the ill-conditioned `n` its pivoted QR differs by far more,
+//! in GNU R as in ry. So those cases have three sources of truth, tried in order:
+//!
+//! - Debian's reference libraries. Installing OpenBLAS on Debian or Ubuntu makes it the
+//!   `libblas.so.3` and `liblapack.so.3` alternative, so where the reference libraries are
+//!   installed beside it, the test reruns itself with their directories on `LD_LIBRARY_PATH`
+//!   (`run_on_reference_libraries`), which the loader reads only at startup, and compares with
+//!   the pinned bits.
+//! - A GNU R on the same libraries as ry, which computes the expected bits live
+//!   (`gnu_r_on_the_same_libraries`).
+//! - Neither: the library cases are skipped, and the products and errors are still checked.
 //!
 //! The interpreter runs here without base R and without libR, so the cases build their inputs
 //! from primitives and call `.Internal` and `.Fortran` directly. That also checks that base's
@@ -17,13 +28,19 @@ use {
         object::{Sexp, SexpType},
     },
     interp::{eval, lower, unwind::Unwind, values},
-    std::{env, path::PathBuf, process::Command},
+    std::{
+        collections::HashMap,
+        env, fs,
+        path::{Path, PathBuf},
+        process::Command,
+    },
 };
 
 /// The inputs: a 9 x 3 matrix `x`, a 9 x 5 matrix `n` whose second column nearly repeats its
 /// first (so `dqrdc2` must recompute that column's norm) and whose fourth is the sum of two
-/// others (so it is pivoted to the end), a square `a`, a positive definite `s`, the `dqrdc2`
-/// decomposition `q` of `n`, `chol(s)` as `r`, and LAPACK's QR of `x` as `lq`.
+/// others (so it is pivoted to the end), a square `a`, a positive definite `s` (`crossprod(a)` plus
+/// the identity, written out so that it does not depend on a matrix product), and the operands
+/// of the error cases. None of it needs BLAS or LAPACK.
 const SETUP: &str = r#"
 k <- 1:27
 x <- sin(k * 1.7) * 10 + cos(k * k * 0.3)
@@ -32,19 +49,17 @@ n <- c(x[1:9], x[1:9] + 1e-5 * sin(1:9), x[10:18], x[1:9] + x[10:18], x[19:27])
 dim(n) <- c(9L, 5L)
 a <- x[1:9]
 dim(a) <- c(3L, 3L)
-s <- .Internal(crossprod(a, NULL)) + c(1, 0, 0, 0, 1, 0, 0, 0, 1)
+s <- c(227.28022592975759, 109.49739889157084, -141.0618280708922, 109.49739889157084, 147.44149799296298, 12.261480308584972, -141.0618280708922, 12.261480308584972, 158.45948676578209)
+dim(s) <- c(3L, 3L)
 b <- c(1, 2, 3)
 y <- sin(1:9) * 3 + 1:9
 ym <- y
 dim(ym) <- c(9L, 1L)
-q <- .Fortran("dqrdc2", qr = n, 9L, 9L, 5L, 1e-7, rank = 0L, qraux = rep(0, 5), pivot = 1:5, rep(0, 10), PACKAGE = "base")
-r <- .Internal(La_chol(s, FALSE, -1))
 u <- rep(0, 27)
 dim(u) <- c(9L, 3L)
 v <- rep(0, 9)
 dim(v) <- c(3L, 3L)
 z <- a + a * 1i
-lq <- .Internal(La_qr(x))
 w <- u[1] + 0i
 dim(w) <- c(1L, 1L)
 singular <- c(1, 2, 2, 4)
@@ -55,8 +70,16 @@ zero_diagonal <- c(1, 0, 2, 0)
 dim(zero_diagonal) <- c(2L, 2L)
 "#;
 
-/// Each case's name, expression, and the bits of GNU R's result as doubles.
-const CASES: &[(&str, &str, &[u64])] = &[
+/// The decompositions the library cases start from: `dqrdc2`'s of `n` as `q`, `chol(s)` as `r`,
+/// and LAPACK's QR of `x` as `lq`.
+const DECOMPOSITIONS: &str = r#"
+q <- .Fortran("dqrdc2", qr = n, 9L, 9L, 5L, 1e-7, rank = 0L, qraux = rep(0, 5), pivot = 1:5, rep(0, 10), PACKAGE = "base")
+r <- .Internal(La_chol(s, FALSE, -1))
+lq <- .Internal(La_qr(x))
+"#;
+
+/// The matrix products: each case's name, expression, and the bits of GNU R's result.
+const PRODUCTS: &[(&str, &str, &[u64])] = &[
     (
         "matprod_vector",
         r#"x %*% c(1, 2, 3)"#,
@@ -117,6 +140,40 @@ const CASES: &[(&str, &str, &[u64])] = &[
             0x40a0413129514d58,
         ],
     ),
+    (
+        "complex_matprod_real",
+        r#"Re(z %*% z)"#,
+        &[
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+        ],
+    ),
+    (
+        "complex_matprod_imaginary",
+        r#"Im(z %*% z)"#,
+        &[
+            0x4075ed25966418e9,
+            0xc0715efff88c45b9,
+            0xc071bba5c679aa85,
+            0x40721bcaaaba6873,
+            0xc0345718f8716af8,
+            0xc0720d161b7106ec,
+            0xc05c1e5376672000,
+            0x40714b74f97286b4,
+            0x404536fb4bf303b7,
+        ],
+    ),
+];
+
+/// The cases that run in the system's BLAS and LAPACK, in the same form.
+const CASES: &[(&str, &str, &[u64])] = &[
     (
         "solve",
         r#".Internal(La_solve(a, b, 2.220446e-16))"#,
@@ -483,36 +540,6 @@ const CASES: &[(&str, &str, &[u64])] = &[
         &[0x40434b95947c149a],
     ),
     (
-        "complex_matprod_real",
-        r#"Re(z %*% z)"#,
-        &[
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-            0x0000000000000000,
-        ],
-    ),
-    (
-        "complex_matprod_imaginary",
-        r#"Im(z %*% z)"#,
-        &[
-            0x4075ed25966418e9,
-            0xc0715efff88c45b9,
-            0xc071bba5c679aa85,
-            0x40721bcaaaba6873,
-            0xc0345718f8716af8,
-            0xc0720d161b7106ec,
-            0xc05c1e5376672000,
-            0x40714b74f97286b4,
-            0x404536fb4bf303b7,
-        ],
-    ),
-    (
         "complex_solve_real",
         r#"Re(.Internal(La_solve_cmplx(z, b, 2.220446e-16)))"#,
         &[0x4010f2595635930f, 0xc00c1f0b84700619, 0x40109c447e0b9869],
@@ -591,32 +618,52 @@ fn linear_algebra_matches_gnu_r() {
     if run_on_reference_libraries() {
         return;
     }
-    if !system_lapack_present() {
-        eprintln!(
-            "skipping: the system BLAS and LAPACK (libblas.so.3, liblapack.so.3) are not installed"
-        );
-        return;
-    }
     // SAFETY: the heap is leaked, so it outlives the interpreter, and this is the only test in
     // its process that uses the interpreter.
     unsafe {
         let heap: &'static mut Heap = Box::leak(Box::new(Heap::new()));
         interp::install(heap, interp::default_hooks());
         evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
-        for (name, expression, expected) in CASES {
-            let value = evaluate(expression).unwrap_or_else(|failure| panic!("{name}: {failure}"));
-            let bits: Vec<u64> = match value.kind() {
-                SexpType::Real => values::reals(value)
-                    .iter()
-                    .map(|entry| entry.to_bits())
-                    .collect(),
-                SexpType::Integer => values::ints(value)
-                    .iter()
-                    .map(|&entry| f64::from(entry).to_bits())
-                    .collect(),
-                other => panic!("{name}: `{expression}` returned a {}", other.name()),
+        for (name, expression, expected) in PRODUCTS {
+            assert_eq!(
+                &result_bits(name, expression),
+                expected,
+                "{name}: `{expression}`"
+            );
+        }
+        if !system_lapack_present() {
+            eprintln!(
+                "skipping the library cases: the system BLAS and LAPACK (libblas.so.3, \
+                 liblapack.so.3) are not installed"
+            );
+            return;
+        }
+        evaluate(DECOMPOSITIONS)
+            .unwrap_or_else(|failure| panic!("the decompositions failed: {failure}"));
+        let libraries = loaded_libraries();
+        let live = if libraries == reference_libraries() {
+            None
+        } else if let Some(live) = gnu_r_on_the_same_libraries(&libraries) {
+            Some(live)
+        } else {
+            eprintln!(
+                "skipping the library cases: ry runs on {libraries:?}, which are not the reference \
+                 libraries, and no GNU R on PATH runs on them"
+            );
+            return;
+        };
+        for (name, expression, pinned) in CASES {
+            let expected = match &live {
+                Some(live) => live
+                    .get(*name)
+                    .unwrap_or_else(|| panic!("{name}: GNU R printed no result")),
+                None => *pinned,
             };
-            assert_eq!(&bits, expected, "{name}: `{expression}`");
+            assert_eq!(
+                &result_bits(name, expression),
+                expected,
+                "{name}: `{expression}` on {libraries:?}"
+            );
         }
         // Without base R's handlers an error goes to the default handler, which records the
         // message for `geterrmessage()` and jumps to top level.
@@ -632,6 +679,108 @@ fn linear_algebra_matches_gnu_r() {
             );
         }
     }
+}
+
+/// Evaluates a case and returns its result's bits, an integer's as a double's.
+unsafe fn result_bits(name: &str, expression: &str) -> Vec<u64> {
+    // SAFETY: the interpreter is installed, and the value comes from its heap.
+    unsafe {
+        let value = evaluate(expression).unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        match value.kind() {
+            SexpType::Real => values::reals(value)
+                .iter()
+                .map(|entry| entry.to_bits())
+                .collect(),
+            SexpType::Integer => values::ints(value)
+                .iter()
+                .map(|&entry| f64::from(entry).to_bits())
+                .collect(),
+            other => panic!("{name}: `{expression}` returned a {}", other.name()),
+        }
+    }
+}
+
+/// The files of the BLAS and LAPACK ry loaded, with every link resolved.
+unsafe fn loaded_libraries() -> [PathBuf; 2] {
+    let blas = interp::linalg::blas_library_path()
+        .unwrap_or_else(|| panic!("no BLAS loaded, though libblas.so.3 is installed"));
+    // SAFETY: the interpreter is installed, and the value comes from its heap.
+    let lapack = unsafe {
+        let value = evaluate(".Internal(La_library())")
+            .unwrap_or_else(|failure| panic!("La_library: {failure}"));
+        values::string_at(value, 0)
+            .unwrap_or_else(|| panic!("La_library returned NA"))
+            .into_owned()
+    };
+    [blas, lapack].map(|path| resolve(Path::new(&path)))
+}
+
+/// Debian's reference BLAS and LAPACK, with every link resolved.
+fn reference_libraries() -> [PathBuf; 2] {
+    [("blas", "libblas.so.3"), ("lapack", "liblapack.so.3")]
+        .map(|(directory, file)| resolve(&reference_directory(directory).join(file)))
+}
+
+fn reference_directory(name: &str) -> PathBuf {
+    PathBuf::from(format!("/usr/lib/{}-linux-gnu/{name}", env::consts::ARCH))
+}
+
+fn resolve(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Runs the library cases in the GNU R on `PATH` and returns each case's result bits, or `None`
+/// when there is no GNU R or it loads its libraries from other directories than `libraries`.
+/// Directories, not files, because `La_library()` names the file that defines `ilaver`, which
+/// for OpenBLAS's `liblapack.so.3` is the `libopenblas` GNU R loaded first.
+fn gnu_r_on_the_same_libraries(libraries: &[PathBuf; 2]) -> Option<HashMap<String, Vec<u64>>> {
+    let mut script = format!(
+        "{SETUP}{DECOMPOSITIONS}\
+         bits <- function(v) {{\n\
+           h <- paste(as.character(writeBin(as.double(v), raw(), endian = \"big\")), collapse = \"\")\n\
+           substring(h, seq(1, nchar(h), 16), seq(16, nchar(h), 16))\n\
+         }}\n\
+         cat(extSoftVersion()[[\"BLAS\"]], La_library(), \"\", sep = \"\\n\")\n"
+    );
+    for (name, expression, _) in CASES {
+        script.push_str(&format!(
+            "cat(\"{name}\", bits({{{expression}}}), \"\\n\")\n"
+        ));
+    }
+    let output = Command::new("Rscript")
+        .args(["--vanilla", "-e", &script])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "GNU R failed on the library cases:\n{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut lines = stdout.lines();
+    let gnu_r_libraries = [lines.next()?, lines.next()?].map(|path| resolve(Path::new(path)));
+    if gnu_r_libraries
+        .iter()
+        .zip(libraries)
+        .any(|(gnu_r, ry)| gnu_r.parent() != ry.parent())
+    {
+        eprintln!("GNU R runs on {gnu_r_libraries:?}, not beside ry's {libraries:?}");
+        return None;
+    }
+    let results = lines
+        .map(str::split_whitespace)
+        .filter_map(|mut words| {
+            let name = words.next()?.to_owned();
+            let bits = words
+                .map(|word| {
+                    u64::from_str_radix(word, 16)
+                        .unwrap_or_else(|failure| panic!("{name}: GNU R printed {word}: {failure}"))
+                })
+                .collect();
+            Some((name, bits))
+        })
+        .collect();
+    Some(results)
 }
 
 /// Evaluates `text` in the global environment and returns the last value, or the error message.
@@ -671,8 +820,7 @@ fn system_lapack_present() -> bool {
 /// or where those libraries are not installed.
 fn run_on_reference_libraries() -> bool {
     const CHILD: &str = "RY_TEST_REFERENCE_LIBRARIES";
-    let directories = ["blas", "lapack"]
-        .map(|name| PathBuf::from(format!("/usr/lib/{}-linux-gnu/{name}", env::consts::ARCH)));
+    let directories = ["blas", "lapack"].map(reference_directory);
     if env::var_os(CHILD).is_some() || !directories.iter().all(|directory| directory.is_dir()) {
         return false;
     }

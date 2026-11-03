@@ -997,7 +997,13 @@ RY_EXPORT char *R_HomeDir(void)
 
 extern void ry_run_exit_finalizers(void);
 extern void ry_remove_session_temp_dir(void);
-void R_CleanTempDir(void);
+
+/* Defined before R_CleanUp calls it: on Windows a function used before an exported
+ * redefinition cannot gain dllexport there. */
+RY_EXPORT void R_CleanTempDir(void)
+{
+    ry_remove_session_temp_dir();
+}
 
 RY_EXPORT void R_Suicide(const char *message)
 {
@@ -1027,11 +1033,6 @@ RY_EXPORT int R_EditFiles(int nfile, const char **file, const char **title, cons
     if (ptr_R_EditFiles != NULL)
         return ptr_R_EditFiles(nfile, file, title, editor);
     return 1;
-}
-
-RY_EXPORT void R_CleanTempDir(void)
-{
-    ry_remove_session_temp_dir();
 }
 
 RY_EXPORT void R_SaveGlobalEnv(void) {}

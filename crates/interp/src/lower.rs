@@ -19,7 +19,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize},
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -158,9 +158,21 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
         .map(|failure| {
             let offset = usize::from(failure.range.start()).min(text.len());
             pipe_bind_failure(text, offset).unwrap_or_else(|| {
+                let found = match failure.unexpected {
+                    Unexpected::Token(found) => Some(found),
+                    Unexpected::EndOfInput => None,
+                    Unexpected::Nothing => {
+                        return SyntaxFailure {
+                            message: failure.message.clone(),
+                            unexpected: None,
+                            offset,
+                            condition: None,
+                        };
+                    }
+                };
                 // An unterminated string runs to the end of the input, where ry's parser stops,
                 // but GNU R's lexer reports it as a token of its own.
-                let found = failure.found.or_else(|| {
+                let found = found.or_else(|| {
                     root.descendants_with_tokens()
                         .filter_map(SyntaxElement::into_token)
                         .find(|token| {

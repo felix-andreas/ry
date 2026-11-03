@@ -2,8 +2,9 @@
 //! `La_rs`, ...), `backsolve`, and the LINPACK routines base registers for `.Fortran`
 //! (`dqrdc2` and the `dqrsl` family, `dtrco`).
 //!
-//! Results must match GNU R bit for bit, so the numerical work runs in the same libraries GNU R
-//! links: its BLAS and LAPACK, found at runtime (the workspace builds without them; see
+//! Results must match GNU R bit for bit. The matrix products are ry's own kernels, which sum in
+//! reference BLAS's order and so match GNU R on its reference BLAS on every machine. The rest of
+//! the numerical work runs in the same libraries GNU R links: its BLAS and LAPACK, found at runtime (the workspace builds without them; see
 //! `library_candidates`), called with the same arguments, the same workspace queries and the
 //! same Fortran calling convention (every argument by reference, a hidden length after the
 //! arguments for each character argument). `dqrdc2` is R's own variant of LINPACK's QR, which no system library
@@ -165,10 +166,9 @@ enum Product {
     TransposedCross,
 }
 
-/// `%*%`, `crossprod` and `tcrossprod`, with GNU R's default `matprod` policy: BLAS unless an
-/// operand may hold a NaN or an infinity, where a plain loop keeps IEEE propagation that an
-/// optimized BLAS may not. Reference BLAS sums in the same order as that loop, so the loop also
-/// stands in for BLAS when the library is missing.
+/// `%*%`, `crossprod` and `tcrossprod`, as GNU R's default `matprod` computes them on its
+/// reference BLAS. They run in ry's own kernels rather than the installed BLAS, so they need no
+/// library and give the same bits on every machine.
 unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
     let internal = crate::interp()
         .builtin(call.op.primitive_index())
@@ -295,7 +295,14 @@ struct Shape {
     y_cols: usize,
 }
 
-unsafe fn real_product(
+/// The real products, summing each entry's terms in the order reference BLAS does (`dgemm`,
+/// `dgemv`, `dsyrk`), which is also the order of the plain loops GNU R falls back to for NaN and
+/// infinity. So the result is GNU R's on its bundled reference BLAS, bit for bit, whatever BLAS
+/// is installed and whatever the CPU: an optimized BLAS (OpenBLAS, MKL, Accelerate) blocks the
+/// sums and picks FMA and SIMD kernels by the host CPU, which moves the last bit. Every term
+/// keeps `x` on the left, as GNU R's loops do, because the left NaN's payload is the one that
+/// survives, and that keeps `NA` apart from `NaN`.
+fn real_product(
     product: Product,
     symmetric: bool,
     shape: &Shape,
@@ -313,174 +320,66 @@ unsafe fn real_product(
         z.fill(0.0);
         return;
     }
-    let blas = blas()
-        .ok()
-        .filter(|_| !may_have_nan_or_inf(x) && !may_have_nan_or_inf(y));
-    let (m, k, n) = (x_rows as i32, x_cols as i32, y_cols as i32);
-    let (one, zero, unit) = (1.0f64, 0.0f64, 1i32);
-    match (product, blas) {
-        (Product::Matrix, Some(blas)) => {
-            if y_cols == 1 {
-                (blas.dgemv)(
-                    c"N".as_ptr(),
-                    &m,
-                    &k,
-                    &one,
-                    x.as_ptr(),
-                    &m,
-                    y.as_ptr(),
-                    &unit,
-                    &zero,
-                    z.as_mut_ptr(),
-                    &unit,
-                    1,
-                );
-            } else if x_rows == 1 {
-                let y_rows = y_rows as i32;
-                (blas.dgemv)(
-                    c"T".as_ptr(),
-                    &y_rows,
-                    &n,
-                    &one,
-                    y.as_ptr(),
-                    &y_rows,
-                    x.as_ptr(),
-                    &unit,
-                    &zero,
-                    z.as_mut_ptr(),
-                    &unit,
-                    1,
-                );
-            } else {
-                (blas.dgemm)(
-                    c"N".as_ptr(),
-                    c"N".as_ptr(),
-                    &m,
-                    &n,
-                    &k,
-                    &one,
-                    x.as_ptr(),
-                    &m,
-                    y.as_ptr(),
-                    &k,
-                    &zero,
-                    z.as_mut_ptr(),
-                    &m,
-                    1,
-                    1,
-                );
-            }
-        }
-        (Product::Matrix, None) => {
-            for row in 0..x_rows {
-                for col in 0..y_cols {
-                    let mut sum = 0.0;
-                    for inner in 0..x_cols {
-                        sum += x[row + inner * x_rows] * y[inner + col * y_rows];
+    match product {
+        // `dgemm("N", "N")` adds whole columns, `z[, col] += x[, inner] * y[inner, col]`, which
+        // keeps each entry's order and lets the inner loop vectorize.
+        Product::Matrix => {
+            for (col, z_col) in z.chunks_exact_mut(x_rows).enumerate() {
+                z_col.fill(0.0);
+                for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
+                    let scale = y[inner + col * y_rows];
+                    for (entry, &value) in z_col.iter_mut().zip(x_col) {
+                        *entry += value * scale;
                     }
-                    z[row + col * x_rows] = sum;
                 }
             }
         }
-        (Product::Cross, Some(blas)) if symmetric => {
-            (blas.dsyrk)(
-                c"U".as_ptr(),
-                c"T".as_ptr(),
-                &k,
-                &m,
-                &one,
-                x.as_ptr(),
-                &m,
-                &zero,
-                z.as_mut_ptr(),
-                &k,
-                1,
-                1,
-            );
-            mirror_upper(z, x_cols);
-        }
-        (Product::Cross, Some(blas)) => {
-            (blas.dgemm)(
-                c"T".as_ptr(),
-                c"N".as_ptr(),
-                &k,
-                &n,
-                &m,
-                &one,
-                x.as_ptr(),
-                &m,
-                y.as_ptr(),
-                &m,
-                &zero,
-                z.as_mut_ptr(),
-                &k,
-                1,
-                1,
-            );
-        }
-        (Product::Cross, None) => {
-            for row in 0..x_cols {
-                for col in 0..y_cols {
+        // `dgemm("T", "N")` and `dsyrk("U", "T")` take a dot product per entry; `dsyrk` fills
+        // the upper triangle, mirrored below.
+        Product::Cross => {
+            for col in 0..y_cols {
+                let y_col = &y[col * y_rows..][..y_rows];
+                let rows = if symmetric { col + 1 } else { x_cols };
+                for row in 0..rows {
+                    let x_col = &x[row * x_rows..][..x_rows];
                     let mut sum = 0.0;
-                    for inner in 0..x_rows {
-                        sum += x[inner + row * x_rows] * y[inner + col * y_rows];
+                    for (&left, &right) in x_col.iter().zip(y_col) {
+                        sum += left * right;
                     }
                     z[row + col * x_cols] = sum;
                 }
             }
+            if symmetric {
+                mirror_upper(z, x_cols);
+            }
         }
-        (Product::TransposedCross, Some(blas)) if symmetric => {
-            (blas.dsyrk)(
-                c"U".as_ptr(),
-                c"N".as_ptr(),
-                &m,
-                &k,
-                &one,
-                x.as_ptr(),
-                &m,
-                &zero,
-                z.as_mut_ptr(),
-                &m,
-                1,
-                1,
-            );
-            mirror_upper(z, x_rows);
-        }
-        (Product::TransposedCross, Some(blas)) => {
-            let y_rows = y_rows as i32;
-            (blas.dgemm)(
-                c"N".as_ptr(),
-                c"T".as_ptr(),
-                &m,
-                &y_rows,
-                &k,
-                &one,
-                x.as_ptr(),
-                &m,
-                y.as_ptr(),
-                &y_rows,
-                &zero,
-                z.as_mut_ptr(),
-                &m,
-                1,
-                1,
-            );
-        }
-        (Product::TransposedCross, None) => {
-            for row in 0..x_rows {
-                for col in 0..y_rows {
-                    let mut sum = 0.0;
-                    for inner in 0..x_cols {
-                        sum += x[row + inner * x_rows] * y[col + inner * y_rows];
+        // `dgemm("N", "T")` and `dsyrk("U", "N")` add whole columns,
+        // `z[, col] += x[, inner] * y[col, inner]`.
+        Product::TransposedCross => {
+            for (col, z_col) in z.chunks_exact_mut(x_rows).enumerate() {
+                let rows = if symmetric { col + 1 } else { x_rows };
+                let z_col = &mut z_col[..rows];
+                z_col.fill(0.0);
+                for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
+                    let scale = y[col + inner * y_rows];
+                    for (entry, &value) in z_col.iter_mut().zip(x_col) {
+                        *entry += value * scale;
                     }
-                    z[row + col * x_rows] = sum;
                 }
+            }
+            if symmetric {
+                mirror_upper(z, x_rows);
             }
         }
     }
 }
 
-unsafe fn complex_product(
+/// The complex products, in reference `zgemm`'s order for the same reasons as `real_product`.
+/// GNU R calls `zgemm` unless an operand holds a NaN or an infinity, and `zgemm` multiplies with
+/// Fortran's plain formula, which overflows to NaN where C99's product, the one GNU R's fallback
+/// loop uses, recovers an infinity. `zgemm`'s scaling by `alpha = 1` cannot change a bit,
+/// because the sums start at positive zero and so never hold a negative zero.
+fn complex_product(
     product: Product,
     shape: &Shape,
     x: &[Rcomplex],
@@ -493,8 +392,9 @@ unsafe fn complex_product(
         y_rows,
         y_cols,
     } = *shape;
+    let zero = Rcomplex { r: 0.0, i: 0.0 };
     if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
-        z.fill(Rcomplex { r: 0.0, i: 0.0 });
+        z.fill(zero);
         return;
     }
     let finite = |values: &[Rcomplex]| {
@@ -502,58 +402,59 @@ unsafe fn complex_product(
             .iter()
             .all(|value| value.r.is_finite() && value.i.is_finite())
     };
-    let blas = blas().ok().filter(|_| finite(x) && finite(y));
-    let one = Rcomplex { r: 1.0, i: 0.0 };
-    let zero = Rcomplex { r: 0.0, i: 0.0 };
-    let (x_rows_int, y_rows_int) = (x_rows as i32, y_rows as i32);
-    let (z_rows, z_cols, inner_count, transpose_x, transpose_y) = match product {
-        Product::Matrix => (x_rows, y_cols, x_cols, false, false),
-        Product::Cross => (x_cols, y_cols, x_rows, true, false),
-        Product::TransposedCross => (x_rows, y_rows, x_cols, false, true),
+    let multiply = if finite(x) && finite(y) {
+        fortran_multiply
+    } else {
+        c99_multiply
     };
-    if let Some(blas) = blas {
-        let transa = if transpose_x { c"T" } else { c"N" };
-        let transb = if transpose_y { c"T" } else { c"N" };
-        let (m, n, k) = (z_rows as i32, z_cols as i32, inner_count as i32);
-        (blas.zgemm)(
-            transa.as_ptr(),
-            transb.as_ptr(),
-            &m,
-            &n,
-            &k,
-            &one,
-            x.as_ptr(),
-            &x_rows_int,
-            y.as_ptr(),
-            &y_rows_int,
-            &zero,
-            z.as_mut_ptr(),
-            &m,
-            1,
-            1,
-        );
-        return;
-    }
-    for row in 0..z_rows {
-        for col in 0..z_cols {
-            let mut sum = Rcomplex { r: 0.0, i: 0.0 };
-            for inner in 0..inner_count {
-                let left = if transpose_x {
-                    x[inner + row * x_rows]
-                } else {
-                    x[row + inner * x_rows]
-                };
-                let right = if transpose_y {
-                    y[col + inner * y_rows]
-                } else {
-                    y[inner + col * y_rows]
-                };
-                let term = c99_multiply(left, right);
-                sum.r += term.r;
-                sum.i += term.i;
+    let add = |sum: &mut Rcomplex, term: Rcomplex| {
+        sum.r += term.r;
+        sum.i += term.i;
+    };
+    match product {
+        Product::Matrix => {
+            for (col, z_col) in z.chunks_exact_mut(x_rows).enumerate() {
+                z_col.fill(zero);
+                for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
+                    let scale = y[inner + col * y_rows];
+                    for (entry, &value) in z_col.iter_mut().zip(x_col) {
+                        add(entry, multiply(value, scale));
+                    }
+                }
             }
-            z[row + col * z_rows] = sum;
         }
+        Product::Cross => {
+            for col in 0..y_cols {
+                let y_col = &y[col * y_rows..][..y_rows];
+                for row in 0..x_cols {
+                    let x_col = &x[row * x_rows..][..x_rows];
+                    let mut sum = zero;
+                    for (&left, &right) in x_col.iter().zip(y_col) {
+                        add(&mut sum, multiply(left, right));
+                    }
+                    z[row + col * x_cols] = sum;
+                }
+            }
+        }
+        Product::TransposedCross => {
+            for (col, z_col) in z.chunks_exact_mut(x_rows).enumerate() {
+                z_col.fill(zero);
+                for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
+                    let scale = y[col + inner * y_rows];
+                    for (entry, &value) in z_col.iter_mut().zip(x_col) {
+                        add(entry, multiply(value, scale));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The product gfortran compiles for `COMPLEX*16` under Fortran's rules, with no NaN recovery.
+fn fortran_multiply(left: Rcomplex, right: Rcomplex) -> Rcomplex {
+    Rcomplex {
+        r: left.r * right.r - left.i * right.i,
+        i: left.r * right.i + left.i * right.r,
     }
 }
 
@@ -615,21 +516,7 @@ fn c99_multiply(left: Rcomplex, right: Rcomplex) -> Rcomplex {
     }
 }
 
-/// GNU R's cheap screen for NaN and infinity: it sums neighbours, so two huge finite values that
-/// overflow also send the product down the loop, which gives the same result.
-fn may_have_nan_or_inf(values: &[f64]) -> bool {
-    let odd = values.len() % 2;
-    if odd == 1 && !values[0].is_finite() {
-        return true;
-    }
-    values[odd..]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .any(|pair| !(pair[0] + pair[1]).is_finite())
-}
-
-/// `dsyrk` fills the upper triangle only.
+/// Copies a square matrix's upper triangle to its lower one.
 fn mirror_upper(z: &mut [f64], size: usize) {
     for col in 0..size {
         for row in col + 1..size {
@@ -3010,10 +2897,6 @@ const LAPACK_SEARCH: LibrarySearch = LibrarySearch {
 };
 
 fortran_library!(Blas, BLAS_SEARCH, {
-    dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
-    dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
-    dsyrk: fn(Text, Text, Integer, Integer, Double, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
-    zgemm: fn(Text, Text, Integer, Integer, Integer, Complex, Complex, Integer, Complex, Integer, Complex, ComplexOut, Integer, TextLength, TextLength);
     dtrsm: fn(Text, Text, Text, Text, Integer, Integer, Double, Double, Integer, DoubleOut, Integer, TextLength, TextLength, TextLength, TextLength);
     dnrm2: fn(Integer, Double, Integer) -> f64;
     ddot: fn(Integer, Double, Integer, Double, Integer) -> f64;
@@ -3115,7 +2998,7 @@ fn lapack() -> R<DirectFortran<Lapack>> {
 pub fn blas_library_path() -> Option<String> {
     // SAFETY: as for `blas`.
     let library = BLAS.get_or_init(|| unsafe { Blas::open() }).as_ref().ok()?;
-    platform::library_path(library.dgemm as *const c_void)
+    platform::library_path(library.ddot as *const c_void)
 }
 
 thread_local! {

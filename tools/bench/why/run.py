@@ -8,7 +8,7 @@ Marketplace show as they are.
 
 Usage: tools/bench/why/run.py [--ry PATH] [--filter NAME] [--repeat N] [--write]
 """
-import argparse, json, os, pathlib, platform, re, subprocess, sys, tempfile
+import argparse, json, math, os, pathlib, platform, re, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -133,17 +133,22 @@ def main():
             print(f"wrote {readme}")
 
 def readme_table(rows):
+    # A README cannot show the site's CPU and Memory tabs, so one table carries both.
     by_name = {row["program"]: row for row in rows}
     lines = [
-        "| program | GNU R | ry | ry, typed and strict | peak memory, GNU R / ry / typed |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
+    # Python's format rounds a half to even, and the site's `toFixed` rounds it up, so 140.5 MiB
+    # would read 140 here and 141 on the site.
+    def mebibytes(value):
+        return math.floor(value + 0.5)
     for name in readme_programs:
         row = by_name[name]
         peak = row["peak_mib"]
         lines.append(
-            f"| `{name}` | {row['gnu_r']:.3f} s | {row['ry']:.3f} s ({row['gnu_r'] / row['ry']:.1f}x) | {row['ry_typed']:.3f} s "
-            f"| {peak['gnu_r']:.0f} / {peak['ry']:.0f} / {peak['ry_typed']:.0f} MiB |"
+            f"| `{name}` | {row['gnu_r']:.3f} s | {row['ry']:.3f} s | {row['ry_typed']:.3f} s | {row['gnu_r'] / row['ry']:.1f}x "
+            f"| {mebibytes(peak['gnu_r'])} / {mebibytes(peak['ry'])} / {mebibytes(peak['ry_typed'])} MiB |"
         )
     return "\n".join(lines)
 
