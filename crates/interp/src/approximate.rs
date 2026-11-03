@@ -1,4 +1,6 @@
-//! Approximate matching: `agrep`, `agrepl` and `adist`.
+//! Approximate matching: `agrep`, `agrepl` and `adist`, and the approximate regular expressions
+//! of TRE, whose bounds such as `{+}` or `{~1}` allow edits in one part of a pattern
+//! ([`ApproximateRegex`]).
 //!
 //! A pattern, literal or a regular expression, compiles to a Thompson automaton, and the text
 //! runs through it while every automaton state carries the cheapest edit cost that reaches it.
@@ -19,7 +21,12 @@ use {
         values::{self, alloc, get_attr, length, set_attr, set_elt, symbols},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
-    regex_syntax::hir::{Class, Hir, HirKind, Look},
+    regex_syntax::{
+        ParserBuilder,
+        hir::{Class, Hir, HirKind, Look},
+    },
+    rustc_hash::FxHashSet,
+    std::collections::VecDeque,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -564,13 +571,24 @@ enum State {
         look: Look,
         next: usize,
     },
+    /// Records the text position in capture slot `slot`.
+    Save {
+        slot: usize,
+        next: usize,
+    },
+    /// Enters or leaves approximate scope `scope` of a TRE pattern.
+    Settings {
+        scope: usize,
+        enter: bool,
+        next: usize,
+    },
     Match,
 }
 
 impl Automaton {
     fn compile(hir: &Hir) -> Automaton {
         let mut states = vec![State::Match];
-        let start = compile_hir(hir, 0, &mut states);
+        let start = compile_hir(hir, 0, &mut states, &capture_roles(hir));
         Automaton { states, start }
     }
 
@@ -638,6 +656,9 @@ impl Automaton {
                             relax(&mut current, &mut worklist, *next, edits);
                         }
                     }
+                    State::Save { next, .. } | State::Settings { next, .. } => {
+                        relax(&mut current, &mut worklist, *next, edits);
+                    }
                     State::Character { next, .. } => {
                         if let Some(edits) = edits.delete(limits) {
                             relax(&mut current, &mut worklist, *next, edits);
@@ -685,7 +706,7 @@ fn relax(states: &mut [Option<Edits>], worklist: &mut Vec<usize>, state: usize, 
 }
 
 /// Compiles `hir` into states that continue at `next`, and returns its entry state.
-fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>) -> usize {
+fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>, roles: &[Option<Role>]) -> usize {
     match hir.kind() {
         HirKind::Empty => next,
         HirKind::Literal(literal) => {
@@ -717,15 +738,53 @@ fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>) -> usize {
             push(states, State::Character { ranges, next })
         }
         HirKind::Look(look) => push(states, State::Look { look: *look, next }),
-        HirKind::Capture(capture) => compile_hir(&capture.sub, next, states),
+        HirKind::Capture(capture) => match roles.get(capture.index as usize).copied().flatten() {
+            Some(Role::Group(group)) => {
+                let close = push(
+                    states,
+                    State::Save {
+                        slot: 2 * group + 1,
+                        next,
+                    },
+                );
+                let body = compile_hir(&capture.sub, close, states, roles);
+                push(
+                    states,
+                    State::Save {
+                        slot: 2 * group,
+                        next: body,
+                    },
+                )
+            }
+            Some(Role::Scope(scope)) => {
+                let leave = push(
+                    states,
+                    State::Settings {
+                        scope,
+                        enter: false,
+                        next,
+                    },
+                );
+                let body = compile_hir(&capture.sub, leave, states, roles);
+                push(
+                    states,
+                    State::Settings {
+                        scope,
+                        enter: true,
+                        next: body,
+                    },
+                )
+            }
+            None => compile_hir(&capture.sub, next, states, roles),
+        },
         HirKind::Concat(parts) => parts
             .iter()
             .rev()
-            .fold(next, |next, part| compile_hir(part, next, states)),
+            .fold(next, |next, part| compile_hir(part, next, states, roles)),
         HirKind::Alternation(branches) => {
             let entries = branches
                 .iter()
-                .map(|branch| compile_hir(branch, next, states))
+                .map(|branch| compile_hir(branch, next, states, roles))
                 .collect();
             push(states, State::Split(entries))
         }
@@ -734,7 +793,7 @@ fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>) -> usize {
                 None => {
                     // A loop: the split either runs the body again or leaves.
                     let split = push(states, State::Split(Vec::new()));
-                    let body = compile_hir(&repetition.sub, split, states);
+                    let body = compile_hir(&repetition.sub, split, states, roles);
                     if let Some(State::Split(targets)) = states.get_mut(split) {
                         *targets = vec![body, next];
                     }
@@ -743,7 +802,7 @@ fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>) -> usize {
                 Some(max) => {
                     let mut entry = next;
                     for _ in repetition.min..max {
-                        let body = compile_hir(&repetition.sub, entry, states);
+                        let body = compile_hir(&repetition.sub, entry, states, roles);
                         entry = push(states, State::Split(vec![body, next]));
                     }
                     entry
@@ -756,11 +815,11 @@ fn compile_hir(hir: &Hir, next: usize, states: &mut Vec<State>) -> usize {
                 Some(_) => repetition.min,
             };
             if repetition.max.is_none() && repetition.min > 0 {
-                let body = compile_hir(&repetition.sub, entry, states);
+                let body = compile_hir(&repetition.sub, entry, states, roles);
                 entry = body;
             }
             for _ in 0..required {
-                entry = compile_hir(&repetition.sub, entry, states);
+                entry = compile_hir(&repetition.sub, entry, states, roles);
             }
             entry
         }
@@ -791,5 +850,691 @@ fn look_holds(look: Look, text: &[char], position: usize) -> bool {
         Look::WordStartAscii | Look::WordStartUnicode => !word(before) && word(after),
         Look::WordEndAscii | Look::WordEndUnicode => word(before) && !word(after),
         _ => true,
+    }
+}
+
+/// What a capture group of a translated pattern stands for.
+#[derive(Clone, Copy)]
+enum Role {
+    /// A capture group of the R pattern, numbered from 0.
+    Group(usize),
+    /// An approximate scope, which the translation writes as a group named
+    /// `tre_approximate_<scope>`.
+    Scope(usize),
+}
+
+/// The name prefix of the groups that mark approximate scopes in a translated pattern.
+pub(crate) const SCOPE_GROUP: &str = "tre_approximate_";
+
+/// The role of each capture group of `hir`, by capture index.
+fn capture_roles(hir: &Hir) -> Vec<Option<Role>> {
+    fn collect(hir: &Hir, captures: &mut Vec<(u32, Option<usize>)>) {
+        match hir.kind() {
+            HirKind::Capture(capture) => {
+                let scope = capture
+                    .name
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix(SCOPE_GROUP))
+                    .and_then(|scope| scope.parse().ok());
+                captures.push((capture.index, scope));
+                collect(&capture.sub, captures);
+            }
+            HirKind::Repetition(repetition) => collect(&repetition.sub, captures),
+            HirKind::Concat(parts) | HirKind::Alternation(parts) => {
+                for part in parts {
+                    collect(part, captures);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut captures = Vec::new();
+    collect(hir, &mut captures);
+    captures.sort_unstable_by_key(|&(index, _)| index);
+    let mut roles = vec![None; captures.last().map_or(0, |&(index, _)| index as usize + 1)];
+    let mut groups = 0;
+    for (index, scope) in captures {
+        roles[index as usize] = Some(match scope {
+            Some(scope) => Role::Scope(scope),
+            None => {
+                groups += 1;
+                Role::Group(groups - 1)
+            }
+        });
+    }
+    roles
+}
+
+/// The settings of one approximate bound, as TRE's `tre_parse_bound` leaves them: `None` is a
+/// setting the bound leaves unset, so that the enclosing settings stay in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ApproximateSettings {
+    pub(crate) insertion_cost: Option<i64>,
+    pub(crate) deletion_cost: Option<i64>,
+    pub(crate) substitution_cost: Option<i64>,
+    pub(crate) cost_limit: i64,
+    pub(crate) insertions: Option<i64>,
+    pub(crate) deletions: Option<i64>,
+    pub(crate) substitutions: Option<i64>,
+    pub(crate) edits: i64,
+}
+
+/// A pattern with approximate scopes, matched as TRE's approximate matcher
+/// (`tre_tnfa_run_approx`) does, because R code relies on its exact results: `^a{+}$` allows
+/// insertions only before the `a`, so it matches `"ba"` but not `"ab"`.
+///
+/// TRE matches over positions, each of which consumes one pattern character, and the
+/// transitions between them carry the assertions, capture tags and settings met on the way. The
+/// pattern is built here as a Thompson automaton and then folded into the same shape: a
+/// position per character state plus the final position, with the epsilon paths between them
+/// as transitions.
+///
+/// Two of TRE's accidents are not reproduced. Nested scopes combine their settings in path
+/// order, where TRE can read uninitialized memory, and ties between equally costly paths go to
+/// the earlier start alone, where TRE compares every capture tag.
+pub(crate) struct ApproximateRegex {
+    positions: Vec<Position>,
+    initial: Vec<Transition>,
+    final_position: usize,
+    group_count: usize,
+}
+
+/// A match: its character range and the character range of each capture group.
+pub(crate) type ApproximateMatch = (usize, usize, Vec<Option<(usize, usize)>>);
+
+struct Position {
+    /// The characters this position consumes; the final position consumes none.
+    ranges: Vec<(char, char)>,
+    transitions: Vec<Transition>,
+}
+
+#[derive(Clone)]
+struct Transition {
+    target: usize,
+    /// The assertions on the way, as a set of `ASSERT_*` bits.
+    assertions: u8,
+    /// The capture slots set to the position where the transition is taken.
+    saves: Vec<usize>,
+    /// The settings met on the way, combined; `None` when there were none.
+    settings: Option<[Setting; SETTING_COUNT]>,
+}
+
+/// One entry of TRE's parameter array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    Unset,
+    Default,
+    Value(i64),
+}
+
+const COST_INSERTION: usize = 0;
+const COST_DELETION: usize = 1;
+const COST_SUBSTITUTION: usize = 2;
+const COST_LIMIT: usize = 3;
+const MOST_INSERTIONS: usize = 4;
+const MOST_DELETIONS: usize = 5;
+const MOST_SUBSTITUTIONS: usize = 6;
+const MOST_EDITS: usize = 7;
+const DEPTH: usize = 8;
+const SETTING_COUNT: usize = 9;
+
+const ASSERT_LINE_START: u8 = 1;
+const ASSERT_LINE_END: u8 = 2;
+const ASSERT_WORD_START: u8 = 4;
+const ASSERT_WORD_END: u8 = 8;
+const ASSERT_WORD_BOUNDARY: u8 = 16;
+const ASSERT_NOT_WORD_BOUNDARY: u8 = 32;
+
+/// TRE's `INT_MAX`, the bound that stands for no bound.
+pub(crate) const UNBOUNDED: i64 = i32::MAX as i64;
+
+/// The deepest nesting of settings TRE's matcher has room for.
+const MOST_DEPTH: usize = 3;
+
+/// Indices into a level of [`Reach::costs`].
+const COST: usize = 0;
+const INSERTIONS: usize = 1;
+const DELETIONS: usize = 2;
+const SUBSTITUTIONS: usize = 3;
+const EDITS: usize = 4;
+
+/// The settings in force on a path: TRE's `regaparams_t`.
+#[derive(Clone, Copy)]
+struct Params {
+    insertion_cost: Option<i64>,
+    deletion_cost: Option<i64>,
+    substitution_cost: Option<i64>,
+    cost_limit: i64,
+    insertions: i64,
+    deletions: i64,
+    substitutions: i64,
+    edits: i64,
+}
+
+/// The cost of an edit when nothing sets it.
+const DEFAULT_COST: i64 = 1;
+
+/// What `regexec` passes to TRE's approximate matcher: unit costs and no edits at all, so
+/// that edits happen only inside a scope that allows them. An edit whose cost a scope leaves
+/// unset is free inside the scope, but still costs [`DEFAULT_COST`] toward the whole match.
+const DEFAULT_PARAMS: Params = Params {
+    insertion_cost: Some(DEFAULT_COST),
+    deletion_cost: Some(DEFAULT_COST),
+    substitution_cost: Some(DEFAULT_COST),
+    cost_limit: 0,
+    insertions: UNBOUNDED,
+    deletions: UNBOUNDED,
+    substitutions: UNBOUNDED,
+    edits: 0,
+};
+
+/// The cheapest known path to a position, at one text position: TRE's
+/// `tre_tnfa_approx_reach_t` without the capture slots, which live beside it.
+#[derive(Clone, Copy)]
+struct Reach {
+    /// The text position the entry belongs to; older entries are stale.
+    at: i64,
+    params: Params,
+    depth: usize,
+    /// The cost and the edit counts within each nesting level of settings, with the totals at
+    /// level 0.
+    costs: [[i64; 5]; MOST_DEPTH + 1],
+    /// Where the match on this path starts.
+    start: i64,
+}
+
+const UNREACHED: Reach = Reach {
+    at: -2,
+    params: DEFAULT_PARAMS,
+    depth: 0,
+    costs: [[0; 5]; MOST_DEPTH + 1],
+    start: -1,
+};
+
+impl ApproximateRegex {
+    /// Compiles a translated pattern whose approximate scopes have `scopes` as their settings.
+    pub(crate) fn compile(
+        pattern: &str,
+        scopes: &[ApproximateSettings],
+        ignore_case: bool,
+    ) -> Result<ApproximateRegex, String> {
+        let hir = ParserBuilder::new()
+            .case_insensitive(ignore_case)
+            .build()
+            .parse(pattern)
+            .map_err(|failure| failure.to_string())?;
+        let roles = capture_roles(&hir);
+        let group_count = roles
+            .iter()
+            .filter(|role| matches!(role, Some(Role::Group(_))))
+            .count();
+        let mut states = vec![State::Match];
+        let start = compile_hir(&hir, 0, &mut states, &roles);
+        let mut position_of = vec![usize::MAX; states.len()];
+        let mut positions = Vec::new();
+        for (index, state) in states.iter().enumerate() {
+            let ranges = match state {
+                State::Character { ranges, .. } => ranges.clone(),
+                State::Match => Vec::new(),
+                _ => continue,
+            };
+            position_of[index] = positions.len();
+            positions.push(Position {
+                ranges,
+                transitions: Vec::new(),
+            });
+        }
+        let initial = transitions_from(start, &states, &position_of, scopes);
+        for (index, state) in states.iter().enumerate() {
+            if let State::Character { next, .. } = state {
+                positions[position_of[index]].transitions =
+                    transitions_from(*next, &states, &position_of, scopes);
+            }
+        }
+        Ok(ApproximateRegex {
+            positions,
+            initial,
+            final_position: position_of[0],
+            group_count,
+        })
+    }
+
+    pub(crate) fn group_count(&self) -> usize {
+        self.group_count
+    }
+
+    /// The best match in `text`, as TRE's approximate matcher finds it: the cheapest, then the
+    /// one that starts first, then the one that ends last. `not_bol` keeps `^` from matching at
+    /// the start, as `REG_NOTBOL` does for the searches after the first in `gsub`.
+    pub(crate) fn search(&self, text: &[char], not_bol: bool) -> R<Option<ApproximateMatch>> {
+        let count = self.positions.len();
+        let slot_count = 2 * self.group_count;
+        let mut reach = vec![UNREACHED; count];
+        let mut reach_next = vec![UNREACHED; count];
+        let mut slots = vec![-1i64; count * slot_count];
+        let mut slots_next = vec![-1i64; count * slot_count];
+        let mut path_slots = vec![-1i64; slot_count];
+        let mut best = Best {
+            end: -1,
+            start: -1,
+            cost: UNBOUNDED,
+            slots: vec![-1; slot_count],
+        };
+        let mut queue = VecDeque::new();
+        let mut position = 0;
+        let mut previous: i64 = -1;
+        loop {
+            let here = position as i64;
+            // Initial positions join until a match without edits is found.
+            if best.cost > 0 {
+                for transition in &self.initial {
+                    let target = transition.target;
+                    if reach_next[target].at >= here
+                        || assertions_fail(transition.assertions, text, position, not_bol)
+                    {
+                        continue;
+                    }
+                    let entry = &mut reach_next[target];
+                    *entry = Reach {
+                        at: here,
+                        start: here,
+                        ..UNREACHED
+                    };
+                    if let Some(settings) = &transition.settings {
+                        apply_settings(entry, settings)?;
+                    }
+                    let target_slots = &mut slots_next[target * slot_count..][..slot_count];
+                    target_slots.fill(-1);
+                    for &slot in &transition.saves {
+                        target_slots[slot] = here;
+                    }
+                    if target == self.final_position {
+                        best.record(here, entry, target_slots);
+                    }
+                }
+            }
+            // An insertion skips a text character and stays at the same position.
+            for id in 0..count {
+                let source = reach[id];
+                if source.at != previous {
+                    continue;
+                }
+                let depth = source.depth;
+                let level = source.costs[depth];
+                let cost = level[COST] + source.params.insertion_cost.unwrap_or(0);
+                if cost > source.params.cost_limit
+                    || level[INSERTIONS] + 1 > source.params.insertions
+                    || level[EDITS] + 1 > source.params.edits
+                {
+                    continue;
+                }
+                let total = if depth > 0 {
+                    source.costs[0][COST] + source.params.insertion_cost.unwrap_or(DEFAULT_COST)
+                } else {
+                    cost
+                };
+                if reach_next[id].at == here && total >= reach_next[id].costs[0][COST] {
+                    continue;
+                }
+                let mut entry = Reach { at: here, ..source };
+                count_edit(&mut entry, depth, cost, total, INSERTIONS, 1);
+                reach_next[id] = entry;
+                slots_next[id * slot_count..][..slot_count]
+                    .copy_from_slice(&slots[id * slot_count..][..slot_count]);
+            }
+            // A deletion takes a transition without consuming its character, repeatedly, until
+            // no position can be reached more cheaply.
+            queue.clear();
+            queue.extend((0..count).filter(|&id| reach_next[id].at == here));
+            while let Some(id) = queue.pop_front() {
+                let source = reach_next[id];
+                let depth = source.depth;
+                let level = source.costs[depth];
+                let cost = level[COST] + source.params.deletion_cost.unwrap_or(0);
+                if cost > source.params.cost_limit
+                    || level[DELETIONS] + 1 > source.params.deletions
+                    || level[EDITS] + 1 > source.params.edits
+                {
+                    continue;
+                }
+                let total = if depth > 0 {
+                    source.costs[0][COST] + source.params.deletion_cost.unwrap_or(DEFAULT_COST)
+                } else {
+                    cost
+                };
+                for transition in &self.positions[id].transitions {
+                    let target = transition.target;
+                    if assertions_fail(transition.assertions, text, position, not_bol)
+                        || loses(&reach_next[target], here, total, source.start)
+                    {
+                        continue;
+                    }
+                    path_slots.copy_from_slice(&slots_next[id * slot_count..][..slot_count]);
+                    for &slot in &transition.saves {
+                        path_slots[slot] = here;
+                    }
+                    let mut entry = Reach { at: here, ..source };
+                    if let Some(settings) = &transition.settings {
+                        apply_settings(&mut entry, settings)?;
+                    }
+                    // TRE takes the new settings but stays at the nesting level it came from.
+                    entry.depth = depth;
+                    count_edit(&mut entry, depth, cost, total, DELETIONS, 1);
+                    reach_next[target] = entry;
+                    slots_next[target * slot_count..][..slot_count].copy_from_slice(&path_slots);
+                    if target == self.final_position {
+                        best.record(here, &entry, &path_slots);
+                    }
+                    queue.push_back(target);
+                }
+            }
+            let Some(&character) = text.get(position) else {
+                break;
+            };
+            previous = here;
+            position += 1;
+            let here = position as i64;
+            std::mem::swap(&mut reach, &mut reach_next);
+            std::mem::swap(&mut slots, &mut slots_next);
+            // Each reached position consumes the character, exactly or as a substitution.
+            for id in 0..count {
+                let source = reach[id];
+                if source.at < previous {
+                    continue;
+                }
+                let exact = self.positions[id]
+                    .ranges
+                    .iter()
+                    .any(|&(low, high)| low <= character && character <= high);
+                let depth = source.depth;
+                let level = source.costs[depth];
+                let (cost, total, error) = if exact {
+                    (level[COST], source.costs[0][COST], 0)
+                } else {
+                    let cost = level[COST] + source.params.substitution_cost.unwrap_or(0);
+                    if cost > source.params.cost_limit
+                        || level[SUBSTITUTIONS] + 1 > source.params.substitutions
+                        || level[EDITS] + 1 > source.params.edits
+                    {
+                        continue;
+                    }
+                    let total = if depth > 0 {
+                        source.costs[0][COST]
+                            + source.params.substitution_cost.unwrap_or(DEFAULT_COST)
+                    } else {
+                        cost
+                    };
+                    (cost, total, 1)
+                };
+                for transition in &self.positions[id].transitions {
+                    let target = transition.target;
+                    if assertions_fail(transition.assertions, text, position, not_bol)
+                        || loses(&reach_next[target], here, total, source.start)
+                    {
+                        continue;
+                    }
+                    path_slots.copy_from_slice(&slots[id * slot_count..][..slot_count]);
+                    for &slot in &transition.saves {
+                        path_slots[slot] = here;
+                    }
+                    let mut entry = Reach { at: here, ..source };
+                    if let Some(settings) = &transition.settings {
+                        apply_settings(&mut entry, settings)?;
+                    }
+                    count_edit(&mut entry, depth, cost, total, SUBSTITUTIONS, error);
+                    reach_next[target] = entry;
+                    slots_next[target * slot_count..][..slot_count].copy_from_slice(&path_slots);
+                    if target == self.final_position {
+                        best.record(here, &entry, &path_slots);
+                    }
+                }
+            }
+        }
+        if best.end < 0 {
+            return Ok(None);
+        }
+        let groups = best
+            .slots
+            .chunks(2)
+            .map(|pair| match pair {
+                &[start, end] if start >= 0 && end >= 0 => Some((start as usize, end as usize)),
+                _ => None,
+            })
+            .collect();
+        Ok(Some((best.start as usize, best.end as usize, groups)))
+    }
+}
+
+/// The best match found so far.
+struct Best {
+    end: i64,
+    start: i64,
+    cost: i64,
+    slots: Vec<i64>,
+}
+
+impl Best {
+    /// Takes a match ending at `end` if it is cheaper, or as cheap and starts no later.
+    fn record(&mut self, end: i64, entry: &Reach, slots: &[i64]) {
+        let cost = entry.costs[0][COST];
+        if self.end < 0 || cost < self.cost || (cost == self.cost && entry.start <= self.start) {
+            self.end = end;
+            self.start = entry.start;
+            self.cost = cost;
+            self.slots.copy_from_slice(slots);
+        }
+    }
+}
+
+/// Whether a path costing `total` from a match start of `start` loses to the entry already at
+/// the target: a costlier path loses, and so does an equally costly one that starts no earlier.
+fn loses(existing: &Reach, here: i64, total: i64, start: i64) -> bool {
+    existing.at == here
+        && (total > existing.costs[0][COST]
+            || (total == existing.costs[0][COST] && start >= existing.start))
+}
+
+/// Charges an edit of kind `kind` (`count` of them, 0 or 1) at nesting level `depth`, whose cost
+/// becomes `cost`, with `total` as the overall cost.
+fn count_edit(entry: &mut Reach, depth: usize, cost: i64, total: i64, kind: usize, count: i64) {
+    entry.costs[depth][COST] = cost;
+    entry.costs[depth][kind] += count;
+    entry.costs[depth][EDITS] += count;
+    if depth > 0 {
+        entry.costs[0][COST] = total;
+        entry.costs[0][kind] += count;
+        entry.costs[0][EDITS] += count;
+    }
+}
+
+/// TRE's `tre_set_params`. An unset substitution cost makes substitutions free within the scope
+/// (TRE stores the unset marker as the cost), while they still count at the default cost
+/// overall. TRE asserts that settings nest at most three deep, and R reports a failed
+/// assertion as an error.
+fn apply_settings(entry: &mut Reach, settings: &[Setting; SETTING_COUNT]) -> R<()> {
+    let depth = match settings[DEPTH] {
+        Setting::Value(depth) => depth.max(0) as usize,
+        Setting::Unset | Setting::Default => entry.depth,
+    };
+    if depth > MOST_DEPTH {
+        return Err(error(
+            "assertion 'value <= 3' failed in executing regexp: file 'tre-match-approx.c', line 141\n",
+        ));
+    }
+    if depth > entry.depth {
+        for level in &mut entry.costs[entry.depth + 1..=depth] {
+            *level = [0; 5];
+        }
+    }
+    entry.depth = depth;
+    let params = &mut entry.params;
+    let cost = |setting: Setting, current: Option<i64>, default: Option<i64>| match setting {
+        Setting::Default => default,
+        Setting::Unset => current,
+        Setting::Value(value) => Some(value),
+    };
+    params.insertion_cost = cost(
+        settings[COST_INSERTION],
+        params.insertion_cost,
+        DEFAULT_PARAMS.insertion_cost,
+    );
+    params.deletion_cost = cost(
+        settings[COST_DELETION],
+        params.deletion_cost,
+        DEFAULT_PARAMS.deletion_cost,
+    );
+    params.substitution_cost = cost(
+        settings[COST_SUBSTITUTION],
+        None,
+        DEFAULT_PARAMS.substitution_cost,
+    );
+    let limit = |setting: Setting, current: i64, default: i64| match setting {
+        Setting::Default => default,
+        Setting::Unset => current,
+        Setting::Value(value) => value,
+    };
+    params.cost_limit = limit(
+        settings[COST_LIMIT],
+        params.cost_limit,
+        DEFAULT_PARAMS.cost_limit,
+    );
+    params.insertions = limit(
+        settings[MOST_INSERTIONS],
+        params.insertions,
+        DEFAULT_PARAMS.insertions,
+    );
+    params.deletions = limit(
+        settings[MOST_DELETIONS],
+        params.deletions,
+        DEFAULT_PARAMS.deletions,
+    );
+    params.substitutions = limit(
+        settings[MOST_SUBSTITUTIONS],
+        params.substitutions,
+        DEFAULT_PARAMS.substitutions,
+    );
+    params.edits = limit(settings[MOST_EDITS], params.edits, DEFAULT_PARAMS.edits);
+    Ok(())
+}
+
+/// TRE's assertion check: whether any assertion in `assertions` fails at text position
+/// `position`. TRE's `\b` holds at both ends of the text whatever is there, and its `\B` at
+/// neither.
+fn assertions_fail(assertions: u8, text: &[char], position: usize, not_bol: bool) -> bool {
+    if assertions == 0 {
+        return false;
+    }
+    let word = |character: Option<&char>| {
+        character.is_some_and(|&character| character == '_' || character.is_alphanumeric())
+    };
+    let before = word(position.checked_sub(1).and_then(|index| text.get(index)));
+    let at_end = position >= text.len();
+    let after = word(text.get(position));
+    let has = |bit: u8| assertions & bit != 0;
+    (has(ASSERT_LINE_START) && (position > 0 || not_bol))
+        || (has(ASSERT_LINE_END) && !at_end)
+        || (has(ASSERT_WORD_START) && (before || !after))
+        || (has(ASSERT_WORD_END) && (!before || after))
+        || (has(ASSERT_WORD_BOUNDARY) && position != 0 && !at_end && before == after)
+        || (has(ASSERT_NOT_WORD_BOUNDARY) && (position == 0 || at_end || before != after))
+}
+
+/// The transitions from Thompson state `from` to the positions its epsilon paths reach, in
+/// priority order. A state is entered once per set of assertions, so the first path to it
+/// decides its capture slots and settings.
+fn transitions_from(
+    from: usize,
+    states: &[State],
+    position_of: &[usize],
+    scopes: &[ApproximateSettings],
+) -> Vec<Transition> {
+    let mut transitions = Vec::new();
+    let mut seen = FxHashSet::default();
+    let mut stack = vec![(
+        from,
+        Transition {
+            target: usize::MAX,
+            assertions: 0,
+            saves: Vec::new(),
+            settings: None,
+        },
+    )];
+    while let Some((state, mut path)) = stack.pop() {
+        if !seen.insert((state, path.assertions)) {
+            continue;
+        }
+        match &states[state] {
+            State::Character { .. } | State::Match => {
+                path.target = position_of[state];
+                transitions.push(path);
+            }
+            State::Split(targets) => {
+                for &target in targets.iter().rev() {
+                    stack.push((target, path.clone()));
+                }
+            }
+            State::Look { look, next } => {
+                path.assertions |= assertion_bit(*look);
+                stack.push((*next, path));
+            }
+            State::Save { slot, next } => {
+                path.saves.push(*slot);
+                stack.push((*next, path));
+            }
+            State::Settings { scope, enter, next } => {
+                let entered = scope_settings(*scope, *enter, scopes);
+                let combined = path.settings.get_or_insert([Setting::Unset; SETTING_COUNT]);
+                for (setting, new) in combined.iter_mut().zip(entered) {
+                    if new != Setting::Unset {
+                        *setting = new;
+                    }
+                }
+                stack.push((*next, path));
+            }
+        }
+    }
+    transitions
+}
+
+/// The parameter array TRE puts on entering (`enter`) or leaving scope `scope`. Scopes are
+/// numbered in the order TRE expands them, so the scope entered sits one level deeper than the
+/// number of scopes before it, and leaving restores the defaults at that number.
+fn scope_settings(
+    scope: usize,
+    enter: bool,
+    scopes: &[ApproximateSettings],
+) -> [Setting; SETTING_COUNT] {
+    let depth = Setting::Value(scope as i64 + i64::from(enter));
+    let settings = match scopes.get(scope) {
+        Some(settings) if enter => settings,
+        _ => {
+            let mut defaults = [Setting::Default; SETTING_COUNT];
+            defaults[DEPTH] = depth;
+            return defaults;
+        }
+    };
+    let optional = |value: Option<i64>| value.map_or(Setting::Unset, Setting::Value);
+    let mut array = [Setting::Unset; SETTING_COUNT];
+    array[COST_INSERTION] = optional(settings.insertion_cost);
+    array[COST_DELETION] = optional(settings.deletion_cost);
+    array[COST_SUBSTITUTION] = optional(settings.substitution_cost);
+    array[COST_LIMIT] = Setting::Value(settings.cost_limit);
+    array[MOST_INSERTIONS] = optional(settings.insertions);
+    array[MOST_DELETIONS] = optional(settings.deletions);
+    array[MOST_SUBSTITUTIONS] = optional(settings.substitutions);
+    array[MOST_EDITS] = Setting::Value(settings.edits);
+    array[DEPTH] = depth;
+    array
+}
+
+fn assertion_bit(look: Look) -> u8 {
+    match look {
+        Look::Start | Look::StartLF | Look::StartCRLF => ASSERT_LINE_START,
+        Look::End | Look::EndLF | Look::EndCRLF => ASSERT_LINE_END,
+        Look::WordStartAscii | Look::WordStartUnicode => ASSERT_WORD_START,
+        Look::WordEndAscii | Look::WordEndUnicode => ASSERT_WORD_END,
+        Look::WordAscii | Look::WordUnicode => ASSERT_WORD_BOUNDARY,
+        Look::WordAsciiNegate | Look::WordUnicodeNegate => ASSERT_NOT_WORD_BOUNDARY,
+        _ => 0,
     }
 }

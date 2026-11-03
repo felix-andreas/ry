@@ -1,0 +1,97 @@
+[stdout]
+| ^a{+}$               TRUE FALSE TRUE FALSE FALSE TRUE TRUE FALSE 
+| ^a{-}$               FALSE FALSE TRUE TRUE FALSE FALSE FALSE FALSE 
+| ^a{#}$               FALSE FALSE TRUE FALSE TRUE FALSE FALSE FALSE 
+| ^a{~}$               TRUE TRUE TRUE TRUE TRUE TRUE TRUE TRUE 
+| ^a{~1}$              FALSE FALSE TRUE TRUE TRUE TRUE TRUE FALSE 
+| ^a{+1}$              FALSE FALSE TRUE FALSE FALSE TRUE TRUE FALSE 
+| ^a{+2}$              TRUE FALSE TRUE FALSE FALSE TRUE TRUE FALSE 
+| ^a{+0}$              FALSE FALSE TRUE FALSE FALSE FALSE FALSE FALSE 
+| ^a{0}$               FALSE FALSE FALSE TRUE FALSE FALSE FALSE FALSE 
+| ^a{0+}$              FALSE FALSE FALSE TRUE FALSE FALSE FALSE FALSE 
+| a{+}                 TRUE TRUE TRUE FALSE FALSE TRUE TRUE TRUE 
+| ^a{+}b$              FALSE FALSE FALSE FALSE FALSE FALSE FALSE TRUE 
+| ^a{1i<2}$            warning: TRE pattern compilation error 'Invalid contents of {}' 
+| ^a{+}?$              TRUE FALSE TRUE FALSE FALSE TRUE TRUE FALSE 
+| ^a{0,1}{+}$          TRUE FALSE TRUE TRUE FALSE TRUE TRUE FALSE 
+| ^a{+-}$              TRUE TRUE TRUE TRUE TRUE TRUE TRUE TRUE 
+| [1] TRUE
+| [1] TRUE
+| ^a{,1}$              FALSE TRUE FALSE FALSE FALSE FALSE 
+| ^a{,2}$              TRUE TRUE TRUE TRUE FALSE FALSE 
+| ^a{,3}$              TRUE TRUE TRUE TRUE TRUE FALSE 
+| ^a{,}$               FALSE TRUE FALSE FALSE FALSE FALSE 
+| ^a{0,}$              TRUE TRUE TRUE TRUE TRUE TRUE 
+| ^a{2}{,1}$           FALSE FALSE TRUE FALSE FALSE FALSE 
+| ^a{+}??$             TRUE TRUE TRUE TRUE TRUE TRUE 
+| {2}a                 TRUE TRUE TRUE 
+| a{0}b                FALSE FALSE FALSE 
+| a{0,0}               TRUE TRUE TRUE 
+| a{255}               FALSE FALSE FALSE 
+| ^(ab){+}$            TRUE TRUE TRUE TRUE FALSE FALSE TRUE TRUE 
+| ^(ab){-}$            TRUE FALSE FALSE FALSE TRUE TRUE FALSE FALSE 
+| ^(ab){#}$            TRUE FALSE FALSE FALSE FALSE FALSE FALSE FALSE 
+| ^(ab){~1}$           TRUE TRUE TRUE TRUE TRUE TRUE FALSE FALSE 
+| ^(a|b){+1}$          TRUE FALSE FALSE FALSE TRUE TRUE FALSE FALSE 
+| ^a{+}b{+}c{+}$       FALSE FALSE FALSE FALSE 
+| ^(a{+}b){-}$         FALSE FALSE FALSE FALSE 
+| [1] "a" "a" "a" "a"
+| [1] "bc"
+| [1] "b"  "b"  "ab"
+| [1] "Xc" "bc"
+| [1] "Xc" "bc"
+| [1] "abc"
+| [1] "abc"
+| [1] "[a|b]"  "[a|xb]" "abxc"  
+| [1] "b---b" "xyz"   ""     
+| [1]  2 -1
+| attr(,"match.length")
+| [1]  1 -1
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] 2 7
+| attr(,"match.length")
+| [1] 2 2
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [[1]]
+| [1] 2 2 3
+| attr(,"match.length")
+| [1] 4 1 2
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| 
+| [[1]]
+| [1] "a" "b" ""  "c" ""  ""  "d"
+| 
+| [1] FALSE  TRUE
+| [1] FALSE FALSE
+| ^a{*}$               warning: TRE pattern compilation error 'Invalid contents of {}' 
+| ^a{?}$               warning: TRE pattern compilation error 'Invalid contents of {}' 
+| ^a{}$                warning: TRE pattern compilation error 'Invalid contents of {}' 
+| ^a{ 1}$              warning: TRE pattern compilation error 'Invalid contents of {}' 
+| ^a{,0}$              warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{256}               warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{2,1}               warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{2                  warning: TRE pattern compilation error 'Missing '}'' 
+| a{2}*                warning: TRE pattern compilation error 'Invalid use of repetition operators' 
+| a{2}+                warning: TRE pattern compilation error 'Invalid use of repetition operators' 
+| a{+}*                warning: TRE pattern compilation error 'Invalid use of repetition operators' 
+| a{2+}                warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{,2+}               warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{1,2+}              warning: TRE pattern compilation error 'Invalid contents of {}' 
+| a{1,2#}              warning: TRE pattern compilation error 'Invalid contents of {}' 
+| [1] "assertion 'value <= 3' failed in executing regexp: file 'tre-match-approx.c', line 141\n"
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

@@ -2452,8 +2452,14 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   doubles past `INT_MAX`), but `x[i]` and `x[[i]]` on one expand the whole vector once, keeping
   the expansion in data2, because subsetting does not call `Elt` or `Extract_subset` (the item
   above). Subsetting `seq_len(2^31)` therefore allocates 16 GB where GNU R reads elements.
-- **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
-  supported; exact settings such as `{+}` compile to nothing, as in GNU R.
+- **Approximate matching has two engines.** POSIX patterns with TRE bounds such as `{+}` run on
+  `ApproximateRegex` (`decisions.md`, "TRE approximate regular expressions"), but `agrep`,
+  `agrepl` and `adist` still use the older edit-cost NFA in `crates/interp/src/approximate.rs`.
+  Move them onto `ApproximateRegex`, which already has TRE's cost model. `aregexec` is not
+  implemented at all ("there is no .Internal function 'aregexec'").
+- **`strptime` drops a leap second.** `strptime("2020-01-01 10:59:60.5", "%Y-%m-%d %H:%M:%OS")`
+  gives 11:00:00.5 where GNU R keeps `sec = 60.5`, because the parsed time is stored as epoch
+  seconds before the `POSIXlt` fields are built.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
   bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
   the "deparse may be incomplete" warning.

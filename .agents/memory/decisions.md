@@ -5190,6 +5190,28 @@ check` releases its trees once, and memoized records are compact" below).
   does. ry's bytecode holds binding cells and type feedback that have no GNU R type, so native
   code that walks objects (`lobstr::obj_size`) failed on them.
 
+## TRE approximate regular expressions
+
+- **Previous shape.** A TRE bound with settings (`{+}`, `{~1}`, `{2i+1d<3}`) was read by a
+  separate scanner (`approximate_settings`) and either dropped or rejected as unsupported, and
+  plain bounds went through `parse_interval`, which missed TRE's quirks. So `grepl("^a{+}$",
+  "aaa")` was FALSE instead of TRUE.
+- **Target shape.** One reader, `strings::parse_bound`, ports `tre_parse_bound`, so counts,
+  settings and errors agree with GNU R by construction. It also reproduces TRE's expansion quirks:
+  `{,n}` allows `n + 1` copies (`{,1}` exactly one), and an approximate bound that needs copies
+  (`{2+}`, `{1,2#}`) is "Invalid contents of {}".
+- A pattern with settings and no backreference compiles to `Matcher::Approximate`
+  (`approximate::ApproximateRegex`), a port of `tre_tnfa_run_approx` over a position automaton.
+  The translator marks each scope as a named group (`SCOPE_GROUP` plus its index), and the
+  automaton turns those groups into parameter changes on transitions. With a backreference TRE
+  uses its backtracking matcher, which ignores the settings, so ry does the same.
+- Details that only show up against GNU R: the nesting depth is counted in `{` order and more than
+  three scopes trip TRE's `value <= 3` assertion, but only when a match reaches the fourth; an
+  unset cost is free inside its scope yet counts 1 toward the whole match; ties go to the earlier
+  start; minimal repetition is ignored; a later search in `gsub` or `gregexpr` runs on the rest of
+  the text with `REG_NOTBOL`.
+- `strings__tre_bounds` pins the behavior.
+
 ## TRE minimal repetitions over alternatives
 
 - GNU R's TRE, when no submatches are asked for (`regexpr`, `gregexpr`, `grepl`), minimizes the

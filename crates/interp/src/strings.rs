@@ -10,6 +10,9 @@
 
 use {
     crate::{
+        approximate::{
+            ApproximateMatch, ApproximateRegex, ApproximateSettings, SCOPE_GROUP, UNBOUNDED,
+        },
         builtins::{BuiltinDef, Call, builtin, internal, require},
         coerce::{coerce_vector, integer_digits},
         conditions::warning,
@@ -2888,6 +2891,9 @@ enum Matcher {
         regex: Rc<PerlRegex>,
         locations: Rc<RefCell<PerlCaptureLocations>>,
     },
+    /// A POSIX pattern with approximate settings such as `{+}`, run as TRE's approximate
+    /// matcher runs it.
+    Approximate(Rc<ApproximateRegex>),
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2916,6 +2922,35 @@ impl Matcher {
             return Ok(matcher);
         }
         let translated = translate(pattern);
+        let failure = |reason: String| -> crate::unwind::Unwind {
+            match errors {
+                CompileErrors::Quoted => {
+                    if let Err(unwind) =
+                        warning(format!("TRE pattern compilation error '{reason}'"))
+                    {
+                        return unwind;
+                    }
+                    error(format!(
+                        "invalid regular expression '{pattern}', reason '{reason}'"
+                    ))
+                }
+                CompileErrors::Wide => {
+                    error(format!("invalid regular expression, reason '{reason}'"))
+                }
+                CompileErrors::Regexec => error(format!("regcomp error: '{reason}'")),
+            }
+        };
+        if !translated.scopes.is_empty() && translated.problem.is_none() {
+            let regex = ApproximateRegex::compile(
+                &translated.pattern,
+                &translated.scopes,
+                options.ignore_case,
+            )
+            .map_err(failure)?;
+            let matcher = Matcher::Approximate(Rc::new(regex));
+            remember(key, &matcher);
+            return Ok(matcher);
+        }
         let build = |longest: bool| {
             if let Some(problem) = translated.problem {
                 return Err(problem.to_owned());
@@ -2967,20 +3002,7 @@ impl Matcher {
                 regex: Rc::new(regex),
                 fresh_start: translated.fresh_start,
             },
-            Err(reason) => {
-                return Err(match errors {
-                    CompileErrors::Quoted => {
-                        warning(format!("TRE pattern compilation error '{reason}'"))?;
-                        error(format!(
-                            "invalid regular expression '{pattern}', reason '{reason}'"
-                        ))
-                    }
-                    CompileErrors::Wide => {
-                        error(format!("invalid regular expression, reason '{reason}'"))
-                    }
-                    CompileErrors::Regexec => error(format!("regcomp error: '{reason}'")),
-                });
-            }
+            Err(reason) => return Err(failure(reason)),
         };
         remember(key, &matcher);
         Ok(matcher)
@@ -3041,6 +3063,8 @@ impl Matcher {
                 .find_at(text.as_bytes(), from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(perl_matching_error),
+            Matcher::Approximate(regex) => Ok(approximate_search(regex, text, from)?
+                .map(|groups| groups[0].unwrap_or((from, from)))),
         }
     }
 
@@ -3057,6 +3081,7 @@ impl Matcher {
         }
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
+            Matcher::Approximate(regex) => approximate_search(regex, text, from),
             Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
                 Ok(self.find_at(text, from)?.map(|span| vec![Some(span)]))
             }
@@ -3125,7 +3150,7 @@ impl Matcher {
             Matcher::Pattern { fresh_start, .. } | Matcher::Automaton { fresh_start, .. } => {
                 *fresh_start
             }
-            Matcher::Literal(_) | Matcher::Perl { .. } => false,
+            Matcher::Literal(_) | Matcher::Perl { .. } | Matcher::Approximate(_) => false,
         }
     }
 
@@ -3137,6 +3162,7 @@ impl Matcher {
                 regex.captures_len().saturating_sub(1)
             }
             Matcher::Perl { regex, .. } => regex.captures_len().saturating_sub(1),
+            Matcher::Approximate(regex) => regex.group_count(),
         }
     }
 
@@ -3155,8 +3181,33 @@ impl Matcher {
                 .skip(1)
                 .map(|name| name.clone().unwrap_or_default())
                 .collect(),
+            Matcher::Approximate(regex) => vec![String::new(); regex.group_count()],
         }
     }
+}
+
+/// Searches `text` from byte `from` with an approximate pattern, and returns the match and its
+/// groups as byte ranges. TRE gets only the rest of the text for every search after the first,
+/// and with `REG_NOTBOL`, so `^` cannot match there and `\b` sees no character before it.
+fn approximate_search(regex: &ApproximateRegex, text: &str, from: usize) -> R<Option<Groups>> {
+    let rest = &text[from..];
+    let characters: Vec<char> = rest.chars().collect();
+    let Some((start, end, groups)): Option<ApproximateMatch> =
+        regex.search(&characters, from > 0)?
+    else {
+        return Ok(None);
+    };
+    let mut offsets: Vec<usize> = rest
+        .char_indices()
+        .map(|(offset, _)| from + offset)
+        .collect();
+    offsets.push(text.len());
+    let span = |(start, end): (usize, usize)| (offsets[start], offsets[end]);
+    Ok(Some(
+        std::iter::once(Some(span((start, end))))
+            .chain(groups.into_iter().map(|group| group.map(span)))
+            .collect(),
+    ))
 }
 
 fn remember(key: (String, bool, bool), matcher: &Matcher) {
@@ -3232,6 +3283,10 @@ pub(crate) struct Translation {
     /// `^` still cannot match there. Only patterns without `^` qualify, since searching from a
     /// fresh start would let `^` match too.
     fresh_start: bool,
+    /// The settings of each approximate scope, such as the `{+}` of `a{+}`, which the pattern
+    /// writes as a group named [`SCOPE_GROUP`] and the scope's number. A pattern with scopes
+    /// runs on [`ApproximateRegex`], as TRE runs it on its approximate matcher.
+    pub(crate) scopes: Vec<ApproximateSettings>,
 }
 
 pub(crate) fn translate(pattern: &str) -> Translation {
@@ -3245,20 +3300,34 @@ pub fn translate_byte_regex(pattern: &str) -> String {
 }
 
 /// Translates a POSIX pattern whose classes (`\s`, `[[:space:]]`) follow Unicode, or only ASCII.
+///
+/// TRE runs a pattern with approximate settings on its approximate matcher, unless the pattern
+/// has backreferences, which only its backtracking matcher supports and which ignores the
+/// settings. The first pass finds out, and a pattern for the approximate matcher is translated
+/// again with its scopes.
 fn translate_classes(pattern: &str, unicode: bool) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
+    let (translation, approximate) = translate_pass(&chars, unicode, false);
+    if approximate {
+        translate_pass(&chars, unicode, true).0
+    } else {
+        translation
+    }
+}
+
+/// One translation of `chars`, with approximate scopes when `approximate`, and whether the
+/// pattern needs TRE's approximate matcher.
+fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translation, bool) {
     let mut problem = None;
     let mut minimal = false;
     let mut word_assertion = false;
     let mut start_anchor = false;
-    let mut output = String::with_capacity(pattern.len() + 8);
+    let mut settings_seen = false;
+    let mut backreference = false;
+    let mut scopes = Vec::new();
+    let mut output = String::with_capacity(chars.len() + 8);
     // In POSIX syntax `.` matches a newline too.
     output.push_str("(?s)");
-    // TRE runs a pattern with approximate-matching settings on its approximate matcher, which
-    // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
-    let approximate = (0..chars.len()).any(|index| {
-        (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
-    });
     // Where each open group starts in `output`, and whether it captures.
     let mut groups: Vec<(usize, bool)> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
@@ -3288,13 +3357,21 @@ fn translate_classes(pattern: &str, unicode: bool) -> Translation {
             }
             '\\' => {
                 word_assertion |= matches!(chars.get(index + 1), Some('b' | 'B' | '<' | '>'));
-                index = translate_escape(&chars, index, unicode, &mut output, &mut problem);
+                backreference |= matches!(chars.get(index + 1), Some('1'..='9'));
+                index = translate_escape(
+                    chars,
+                    index,
+                    unicode,
+                    approximate,
+                    &mut output,
+                    &mut problem,
+                );
                 atom = Some(start);
                 quantified = false;
                 continue;
             }
             '[' => {
-                index = translate_class(&chars, index, unicode, &mut output, &mut problem);
+                index = translate_class(chars, index, unicode, &mut output, &mut problem);
                 atom = Some(start);
                 quantified = false;
                 continue;
@@ -3372,52 +3449,65 @@ fn translate_classes(pattern: &str, unicode: bool) -> Translation {
                     }
                 }
             },
-            '{' if approximate && approximate_settings(&chars, index).is_some() => {
-                // Settings without a `~` cost limit allow no errors, so the atom matches
-                // exactly; a real cost limit needs an approximate matcher ry does not have.
-                if let Some((next, exact)) = approximate_settings(&chars, index) {
-                    if !exact {
-                        problem.get_or_insert("approximate matching is not supported");
+            '{' => {
+                let bound = match parse_bound(chars, index) {
+                    Ok(bound) => bound,
+                    Err(reason) => {
+                        // TRE stops at the first error, which is the one it reports.
+                        problem.get_or_insert(reason);
+                        break;
                     }
-                    index = next;
-                }
-                continue;
-            }
-            '{' => match (parse_interval(&chars, index), atom) {
-                (Some((interval, next)), Some(atom_start)) => {
-                    if quantified {
-                        // `x{2}{3}` repeats the repetition, which the `regex` crate only
-                        // accepts with an explicit group.
-                        output.insert_str(atom_start, "(?:");
+                };
+                index = bound.end;
+                let repetition = match bound.repetition() {
+                    Ok(repetition) => repetition,
+                    Err(reason) => {
+                        problem.get_or_insert(reason);
+                        break;
+                    }
+                };
+                let Some(repetition) = repetition else {
+                    // `{0}` and `{0,0}` match the empty string, settings and all.
+                    if let Some(atom_start) = atom {
+                        output.truncate(atom_start);
+                    }
+                    atom = None;
+                    quantified = false;
+                    continue;
+                };
+                settings_seen |= bound.settings.is_some();
+                match (bound.settings, atom) {
+                    (Some(settings), atom_start) if approximate => {
+                        // A bound with nothing before it repeats the empty string, which still
+                        // opens a scope that counts toward TRE's nesting.
+                        let body = atom_start.map(|start| output.split_off(start));
+                        let scope = scopes.len();
+                        scopes.push(settings);
+                        output.push_str(&format!("(?P<{SCOPE_GROUP}{scope}>"));
+                        if let Some(body) = body {
+                            output.push_str(&format!("(?:{body}){repetition}"));
+                        }
                         output.push(')');
+                        quantified = true;
                     }
-                    output.push_str(&interval);
-                    quantified = true;
-                    index = next;
-                    if chars.get(index) == Some(&'?') {
-                        if !approximate {
+                    (_, Some(atom_start)) => {
+                        if quantified {
+                            // `x{2}{3}` repeats the repetition, which the `regex` crate only
+                            // accepts with an explicit group.
+                            output.insert_str(atom_start, "(?:");
+                            output.push(')');
+                        }
+                        output.push_str(&repetition);
+                        quantified = true;
+                        if bound.minimal && !approximate {
                             minimal |= !groups.iter().any(|&(_, capturing)| capturing);
                             output.push('?');
                         }
-                        index += 1;
                     }
-                    continue;
+                    (_, None) => {}
                 }
-                (None, _) => {
-                    // TRE rejects a malformed interval, which the engine would read literally.
-                    problem.get_or_insert(if chars[index..].contains(&'}') {
-                        "Invalid contents of {}"
-                    } else {
-                        "Missing '}'"
-                    });
-                    output.push('{');
-                }
-                (Some(_), None) => {
-                    output.push_str("\\{");
-                    atom = Some(start);
-                    quantified = false;
-                }
-            },
+                continue;
+            }
             '}' | ']' => {
                 output.push('\\');
                 output.push(character);
@@ -3437,12 +3527,14 @@ fn translate_classes(pattern: &str, unicode: bool) -> Translation {
         }
         index += 1;
     }
-    Translation {
+    let translation = Translation {
         pattern: output,
         problem,
         minimal,
         fresh_start: word_assertion && !start_anchor,
-    }
+        scopes,
+    };
+    (translation, settings_seen && !backreference)
 }
 
 /// What TRE's `\s` and `[[:space:]]` match: glibc's `iswspace`, which leaves out the
@@ -3462,6 +3554,7 @@ fn translate_escape(
     chars: &[char],
     index: usize,
     unicode: bool,
+    approximate: bool,
     output: &mut String,
     problem: &mut Option<&'static str>,
 ) -> usize {
@@ -3479,6 +3572,12 @@ fn translate_escape(
         return next;
     }
     match escaped {
+        // The approximate matcher checks `\b` and `\B` as TRE does.
+        'b' | 'B' if approximate => {
+            output.push('\\');
+            output.push(escaped);
+            next
+        }
         // TRE's `\b` matches at the start and the end of the subject whatever the characters
         // there are, so `regexpr("\\b", " ")` is 1.
         'b' => {
@@ -3721,60 +3820,206 @@ fn push_class_literal(output: &mut String, character: char) {
     output.push(character);
 }
 
-/// TRE's approximate-matching settings at a `{`, such as `{+}`, `{-2}` or `{~1,+2}`: each
-/// item is one of `+`, `-`, `#` or `~` with an optional count. Returns the index after the
-/// closing brace and whether the settings allow no errors (no `~` limit, or `~0`).
-fn approximate_settings(chars: &[char], index: usize) -> Option<(usize, bool)> {
-    if chars.get(index) != Some(&'{') {
-        return None;
-    }
-    let mut cursor = index + 1;
-    let mut exact = true;
-    let mut items = 0;
-    loop {
-        match chars.get(cursor)? {
-            '}' if items > 0 => return Some((cursor + 1, exact)),
-            ',' | ' ' if items > 0 => cursor += 1,
-            &operator @ ('+' | '-' | '#' | '~') => {
-                cursor += 1;
-                let count = read_number(chars, &mut cursor);
-                if operator == '~' && count != Some(0) {
-                    exact = false;
-                }
-                items += 1;
-            }
-            _ => return None,
+/// A bound `{...}` as TRE reads it: a repetition count, approximate-matching settings, or both.
+struct Bound {
+    /// The counts, `-1` where the bound leaves one out.
+    minimum: i64,
+    maximum: i64,
+    settings: Option<ApproximateSettings>,
+    /// Whether a `?` follows, asking for minimal repetition.
+    minimal: bool,
+    /// The index after the bound and its `?`.
+    end: usize,
+}
+
+const INVALID_BOUND: &str = "Invalid contents of {}";
+const MISSING_BRACE: &str = "Missing '}'";
+const INVALID_REPETITION: &str = "Invalid use of repetition operators";
+/// TRE's `RE_DUP_MAX`.
+const MOST_REPEATS: i64 = 255;
+
+impl Bound {
+    /// The quantifier in the `regex` crate's syntax, or `None` when the bound matches only the
+    /// empty string. TRE expands a bound into copies of its atom, and two quirks of that
+    /// expansion decide what some bounds mean: `{,n}` makes `n + 1` optional copies (and `{,1}`
+    /// exactly one), and an approximate bound that needs copies (`{2+}`, `{1,2~}`) is rejected,
+    /// because its settings end up attached to the copies' sequence instead of a repetition.
+    fn repetition(&self) -> Result<Option<String>, &'static str> {
+        let (minimum, maximum) = match (self.minimum, self.maximum) {
+            (0, 0) => return Ok(None),
+            (minimum, maximum) if minimum < 0 && maximum < 0 => (1, 1),
+            counts => counts,
+        };
+        if self.settings.is_some() && (minimum > 1 || maximum > 1) {
+            return Err(INVALID_BOUND);
         }
+        Ok(Some(match (minimum, maximum) {
+            (-1, 0) => return Err(INVALID_BOUND),
+            (-1, 1) => "{1}".to_owned(),
+            (-1, maximum) => format!("{{0,{}}}", maximum + 1),
+            (minimum, -1) => format!("{{{minimum},}}"),
+            (minimum, maximum) if minimum == maximum => format!("{{{minimum}}}"),
+            (minimum, maximum) => format!("{{{minimum},{maximum}}}"),
+        }))
     }
 }
 
-/// Reads an interval `{m}`, `{m,}` or `{m,n}` at `index` into the `regex` crate's form, with
-/// POSIX's `{,n}` written as `{0,n}`. Returns `None` when the brace does not start an interval.
-fn parse_interval(chars: &[char], index: usize) -> Option<(String, usize)> {
-    let mut cursor = index + 1;
-    let minimum = read_number(chars, &mut cursor);
-    let mut maximum = None;
-    let comma = chars.get(cursor) == Some(&',');
-    if comma {
+/// Reads the bound whose `{` is at `open`, as TRE's `tre_parse_bound` does. After the counts
+/// come the settings: `+`, `-`, `#` and `~` with an optional number limit insertions,
+/// deletions, substitutions and all edits (no number means no limit), and an equation such as
+/// `2i + 1d < 5` sets the costs of insertions, deletions and substitutions and keeps the total
+/// below a limit. Commas and spaces between the settings are skipped.
+fn parse_bound(chars: &[char], open: usize) -> Result<Bound, &'static str> {
+    let end = chars.len();
+    let contents = open + 1;
+    let mut cursor = contents;
+    let mut minimum = -1;
+    if chars.get(cursor).is_some_and(char::is_ascii_digit) {
+        minimum = tre_integer(chars, &mut cursor);
+    }
+    let mut maximum = minimum;
+    if chars.get(cursor) == Some(&',') {
         cursor += 1;
-        maximum = read_number(chars, &mut cursor);
+        maximum = tre_integer(chars, &mut cursor);
     }
-    if chars.get(cursor) != Some(&'}') {
-        return None;
+    if (maximum >= 0 && minimum > maximum) || maximum > MOST_REPEATS {
+        return Err(INVALID_BOUND);
     }
-    if let (Some(minimum), Some(maximum)) = (minimum, maximum)
-        && minimum > maximum
-    {
-        return None;
+    let unlimited = |limit: i64| if limit < 0 { UNBOUNDED } else { limit };
+    let (mut insertion_cost, mut deletion_cost, mut substitution_cost) = (None, None, None);
+    let (mut insertions, mut deletions, mut substitutions) = (None, None, None);
+    let (mut cost_limit, mut edits) = (None, None);
+    let (mut approximate, mut counts_set, mut costs_set) = (false, false, false);
+    loop {
+        let start = cursor;
+        // Like TRE, each run of counts or costs is read once, and both stop one character
+        // before the end of the pattern.
+        let counts_read = counts_set;
+        while !counts_read && cursor + 1 < end {
+            let operator = chars[cursor];
+            let limit = match operator {
+                '+' => &mut insertions,
+                '-' => &mut deletions,
+                '#' => &mut substitutions,
+                '~' => &mut edits,
+                ',' | ' ' => {
+                    cursor += 1;
+                    continue;
+                }
+                _ => break,
+            };
+            cursor += 1;
+            *limit = Some(unlimited(tre_integer(chars, &mut cursor)));
+            if operator == '~' {
+                approximate = true;
+            } else {
+                counts_set = true;
+            }
+        }
+        let costs_read = costs_set;
+        while !costs_read && cursor + 1 < end {
+            match chars[cursor] {
+                '+' | ' ' => cursor += 1,
+                '<' => {
+                    cursor += 1;
+                    while chars.get(cursor) == Some(&' ') {
+                        cursor += 1;
+                    }
+                    let limit = tre_integer(chars, &mut cursor);
+                    cost_limit = Some(if limit < 0 { UNBOUNDED } else { limit - 1 });
+                    approximate = true;
+                }
+                ',' => {
+                    cursor += 1;
+                    break;
+                }
+                character if character.is_ascii_digit() => {
+                    let cost = tre_integer(chars, &mut cursor);
+                    let Some(&kind) = chars.get(cursor) else {
+                        return Err(MISSING_BRACE);
+                    };
+                    *match kind {
+                        'i' => &mut insertion_cost,
+                        'd' => &mut deletion_cost,
+                        's' => &mut substitution_cost,
+                        _ => return Err(INVALID_BOUND),
+                    } = Some(cost);
+                    cursor += 1;
+                    costs_set = true;
+                }
+                _ => break,
+            }
+        }
+        if cursor == start {
+            break;
+        }
     }
-    let text = match (minimum, comma, maximum) {
-        (Some(minimum), false, _) => format!("{{{minimum}}}"),
-        (Some(minimum), true, None) => format!("{{{minimum},}}"),
-        (Some(minimum), true, Some(maximum)) => format!("{{{minimum},{maximum}}}"),
-        (None, true, Some(maximum)) => format!("{{0,{maximum}}}"),
-        _ => return None,
+    if cursor >= end {
+        return Err(MISSING_BRACE);
+    }
+    if cursor == contents || chars[cursor] != '}' {
+        return Err(INVALID_BOUND);
+    }
+    cursor += 1;
+    let minimal = match chars.get(cursor) {
+        Some('?') => {
+            cursor += 1;
+            true
+        }
+        Some('*' | '+') => return Err(INVALID_REPETITION),
+        _ => false,
     };
-    Some((text, cursor + 1))
+    let settings = (approximate || costs_set || counts_set).then(|| {
+        // Once a count or a cost is given, an edit with neither is not allowed at all.
+        let limit = |limit: Option<i64>, cost: Option<i64>| {
+            if !(costs_set || counts_set) || limit.is_some() {
+                limit
+            } else if cost.is_some() {
+                Some(UNBOUNDED)
+            } else {
+                Some(0)
+            }
+        };
+        ApproximateSettings {
+            insertion_cost,
+            deletion_cost,
+            substitution_cost,
+            cost_limit: cost_limit.unwrap_or(UNBOUNDED),
+            insertions: limit(insertions, insertion_cost),
+            deletions: limit(deletions, deletion_cost),
+            substitutions: limit(substitutions, substitution_cost),
+            edits: edits.unwrap_or(UNBOUNDED),
+        }
+    });
+    Ok(Bound {
+        minimum,
+        maximum,
+        settings,
+        minimal,
+        end: cursor,
+    })
+}
+
+/// TRE's `tre_parse_int`: the decimal number at `cursor`, or `-1` when there are no digits or
+/// the number does not fit in an `int`.
+fn tre_integer(chars: &[char], cursor: &mut usize) -> i64 {
+    let mut number: i64 = -1;
+    let mut overflow = false;
+    while let Some(digit) = chars
+        .get(*cursor)
+        .and_then(|character| character.to_digit(10))
+    {
+        if number < 0 {
+            number = 0;
+        }
+        if number <= (UNBOUNDED - 9) / 10 {
+            number = number * 10 + i64::from(digit);
+        } else {
+            overflow = true;
+        }
+        *cursor += 1;
+    }
+    if overflow { -1 } else { number }
 }
 
 #[inline]
