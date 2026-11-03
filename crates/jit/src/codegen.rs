@@ -56,8 +56,8 @@ thread_local! {
 }
 
 /// Header offsets, as `heap::object` lays objects out.
-const KIND: i32 = 0;
-const FLAGS: i32 = 2;
+pub(crate) const KIND: i32 = 0;
+pub(crate) const FLAGS: i32 = 2;
 const REFCOUNT: i32 = 6;
 const ATTRIB: i32 = 8;
 pub(crate) const LENGTH: i32 = 16;
@@ -66,7 +66,7 @@ const ALTREP_FLAG: i64 = 1 << 1;
 /// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
 /// plain vector, whose operator and indexing rules differ.
 const ARRAY_FLAG: i64 = 1 << 4;
-const OBJECT_FLAG: i64 = 1 << 0;
+pub(crate) const OBJECT_FLAG: i64 = 1 << 0;
 
 /// Compiles `plan` and returns its entry point, its deoptimization exits and the size of its
 /// machine code in bytes.
@@ -3304,6 +3304,8 @@ impl<'p, 'b> Translator<'p, 'b> {
                     None => self.builder.ins().iconst(I8, 0),
                 };
             }
+            // Tier 1 never speculates on a record type, which only native functions hold.
+            Ty::Rec(_) | Ty::Obj => return self.builder.ins().iconst(I8, 0),
             Ty::Int | Ty::Num => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
             Ty::Lgl => (SexpType::Logical, true),

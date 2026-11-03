@@ -33,7 +33,7 @@ use {
             EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
             TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
-        records::Layouts,
+        records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
         strings::{Encoding, StringTable},
     },
@@ -1049,6 +1049,7 @@ impl Heap {
             }
         }
         object.init_record(layout, &slots);
+        self.observe_slots(layout, &slots);
         Ok(object)
     }
 
@@ -1073,7 +1074,15 @@ impl Heap {
         }
         object.init_record(layout, slots);
         object.mark_not_mutable();
+        self.observe_slots(layout, slots);
         Ok(object)
+    }
+
+    /// Adds the kinds of `slots`, a new value of layout `layout`, to the layout's slot profile.
+    unsafe fn observe_slots(&mut self, layout: u32, slots: &[Slot]) {
+        for (index, slot) in slots.iter().enumerate() {
+            self.layouts.observe(layout, index, slot_kind_of(*slot));
+        }
     }
 
     /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
@@ -1089,6 +1098,8 @@ impl Heap {
             old.decrement_refcount();
         }
         record.set_record_slot_unbarriered(index, slot);
+        self.layouts
+            .observe(record.record_layout(), index, slot_kind_of(slot));
     }
 
     /// The interned `CHARSXP` for `bytes` in `encoding`, which `Rf_mkCharLenCE` returns. ASCII
@@ -2787,5 +2798,21 @@ unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, t
         std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
         std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
         std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+    }
+}
+
+/// The [`slot_kind`] bit of a record slot's value.
+unsafe fn slot_kind_of(slot: Slot) -> u8 {
+    match slot {
+        Slot::Real(_) => slot_kind::DOUBLE,
+        Slot::Integer(_) => slot_kind::INTEGER,
+        Slot::Logical(_) => slot_kind::LOGICAL,
+        Slot::Handle(handle) => unsafe {
+            if handle.kind() == SexpType::Record && handle.attrib().kind() == SexpType::Nil {
+                slot_kind::RECORD
+            } else {
+                slot_kind::OTHER
+            }
+        },
     }
 }

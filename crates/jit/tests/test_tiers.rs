@@ -2111,3 +2111,149 @@ fn render(model: &Model) -> String {
         Model::Error => "stop(\"the model fails\")".to_owned(),
     }
 }
+
+/// Typed closures over records, tuples and tags run as native functions once the JIT is on:
+/// construction, field reads, `match` and recursion over a tagged union. Each program must give
+/// the same values and errors with the JIT off, on, and forced, including where a field holds
+/// `NA`, an integer overflows, or no arm matches.
+#[test]
+fn fuzz_typed_record_natives_agree_with_tier_zero() {
+    with_interpreter(|| {
+        let mut runs = 0;
+        for_each_seed(150, |seed| {
+            let mut rng = SplitMix64(seed);
+            let program = record_program(&mut rng);
+            let calls: Vec<String> = (0..5)
+                .map(|_| {
+                    let n = rng.below(12);
+                    let x = ["1.5", "-2", "0", "NA_real_", "3.25", "1e308"][rng.below(6)];
+                    let k = ["3L", "0L", "NA_integer_", "2147483647L", "-4L"][rng.below(5)];
+                    format!("({n}L, {x}, {k})")
+                })
+                .collect();
+            let modes = [Mode::Off, Mode::On, Mode::Force];
+            // SAFETY: the interpreter is installed.
+            let outcomes: Vec<Vec<String>> = unsafe {
+                modes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &mode)| {
+                        jit::install_mode(mode);
+                        let suffix = format!("_{seed}_{index}");
+                        let text = program.replace('@', &suffix);
+                        run(&text);
+                        let outcomes = calls
+                            .iter()
+                            .map(|call| run(&format!("total{suffix}{call}")))
+                            .collect();
+                        jit::install_mode(Mode::Off);
+                        outcomes
+                    })
+                    .collect()
+            };
+            runs += 1;
+            for (mode, outcome) in modes.iter().zip(&outcomes).skip(1) {
+                for (index, (expected, got)) in outcomes[0].iter().zip(outcome).enumerate() {
+                    assert_eq!(
+                        expected, got,
+                        "seed {seed}, {mode:?}, call total{}:\n{program}",
+                        calls[index]
+                    );
+                }
+            }
+        });
+        assert!(runs > 0);
+    });
+}
+
+/// A program of typed functions over a record, a tagged union and a recursive tree, ending in
+/// `total@(n, x, k)`, with `@` standing for a suffix that keeps each run's functions apart.
+fn record_program(rng: &mut SplitMix64) -> String {
+    let scalar = |rng: &mut SplitMix64| {
+        [
+            "x",
+            "x * 2",
+            "x - i",
+            "i * k",
+            "x / i",
+            "max(x, i)",
+            "min(k, i)",
+            "abs(x) + 1",
+            "k + 0.5",
+            "i %/% 2L + k",
+            "-x",
+        ][rng.below(11)]
+        .to_owned()
+    };
+    let mut arms = vec![
+        format!(
+            "    :Circle(r = r) => r * {}",
+            ["r", "2", "x"][rng.below(3)]
+        ),
+        "    :Rect(w = w, h = h) => w * h".to_owned(),
+        format!("    :Dot => {}", ["0", "x", "1L"][rng.below(3)]),
+        "    :Pair(a = a, b = b) => a - b".to_owned(),
+    ];
+    shuffle(rng, &mut arms);
+    arms.truncate(rng.below(arms.len()) + 1);
+    if rng.chance(1, 2) {
+        arms.push(format!(
+            "    _ => {}",
+            ["-1", "x", "NA_real_"][rng.below(3)]
+        ));
+    }
+    let point_fields = if rng.chance(1, 2) {
+        format!("(x = {}, y = {})", scalar(rng), scalar(rng))
+    } else {
+        format!("(y = {}, x = {})", scalar(rng), scalar(rng))
+    };
+    let accumulate = match rng.below(4) {
+        0 => "acc <- acc + area@(s, x)",
+        1 => "acc <- acc + area@(s, x) + p$x * p$y",
+        2 => "acc <- acc + p[[\"y\"]] + depth@(tree@(i %% 4L, x))",
+        _ => "acc <- acc + max(area@(s, x), p$x) + sum@(tree@(i %% 3L, x))",
+    };
+    format!(
+        "shape@ <- function(i: integer, x: double, k: integer) {{
+  m <- i %% 5L
+  if (m == 0L) :Circle(r = {circle}) else if (m == 1L) :Rect(w = {width}, h = {height}) else if (m == 2L) :Dot else if (m == 3L) :Pair(a = {left}, b = {right}) else :Other(v = i)
+}}
+area@ <- function(s, x: double) -> double {{
+  match (s) {{
+{arms}
+  }}
+}}
+point@ <- function(i: integer, x: double, k: integer) {point_fields}
+tree@ <- function(d: integer, x: double) {{
+  if (d <= 0L) return(:Leaf(value = x))
+  :Node(left = tree@(d - 1L, x + 1), right = tree@(d - 2L, x * 2))
+}}
+depth@ <- function(t) -> integer {{
+  match (t) {{
+    :Leaf(value = v) => 1L
+    :Node(left = l, right = r) => max(depth@(l), depth@(r)) + 1L
+  }}
+}}
+sum@ <- function(t) -> double {{
+  match (t) {{
+    :Leaf(value = v) => v
+    :Node(left = l, right = r) => sum@(l) + sum@(r)
+  }}
+}}
+total@ <- function(n: integer, x: double, k: integer) -> double {{
+  acc <- 0
+  for (i in seq_len(n)) {{
+    s <- shape@(i, x, k)
+    p <- point@(i, x, k)
+    {accumulate}
+  }}
+  acc
+}}",
+        circle = scalar(rng),
+        width = scalar(rng),
+        height = scalar(rng),
+        left = scalar(rng),
+        right = scalar(rng),
+        arms = arms.join("\n"),
+    )
+}

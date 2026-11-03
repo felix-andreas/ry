@@ -89,6 +89,12 @@ pub enum Ty {
     /// A closure made by a `function` expression of this body, in this activation's
     /// environment: its formals and its body as source.
     Closure(Sexp, Sexp),
+    /// A plain (attribute-free) record, tuple or tag of exactly this interned layout. Only native
+    /// functions hold one, as a pointer to the object.
+    Rec(u32),
+    /// A plain record, tuple or tag of any layout, as a value of a tagged union is: native code
+    /// reads its layout when it matches it.
+    Obj,
     /// Any boxed value.
     Boxed,
 }
@@ -118,6 +124,11 @@ impl Ty {
 
     pub fn is_array(self) -> bool {
         matches!(self, Ty::IntArr | Ty::DblArr | Ty::LglArr)
+    }
+
+    /// Whether this is a plain record, tuple or tag, of a known layout or not.
+    pub fn is_record(self) -> bool {
+        matches!(self, Ty::Rec(_) | Ty::Obj)
     }
 
     /// The scalar type of one element.
@@ -1079,7 +1090,7 @@ impl Lowering<'_> {
 const UNUSED: usize = usize::MAX;
 
 /// Why a body is not compiled.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Refusal(pub &'static str);
 
 /// The refusal for a body that has not run far enough to have the type feedback it needs,
@@ -2809,6 +2820,7 @@ impl<'a> Builder<'a> {
             .collect();
         if let Some(types) = types
             && let Some(native) = native::native_for(function, &types)
+            && native.result.is_unboxed()
         {
             // The native function reads nothing of this frame, so the variables stay as they
             // are.

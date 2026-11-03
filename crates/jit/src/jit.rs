@@ -97,6 +97,7 @@ pub fn install_mode(mode: Mode) {
         entry_threshold: entries,
         back_edge,
         back_edge_threshold: back_edges,
+        call: native::call,
     }));
 }
 
