@@ -9,6 +9,12 @@ typed benchmark programs within 1.5 to 2 times the time of equivalent Rust progr
 Rust-shaped data and calls: values in registers, flat structs, direct calls, no per-value type
 checks, no tracing collector, and no allocation the program did not ask for.
 
+The contract gives `List<F64>`, `List<Bool>` and `List<Str>` R's vector layouts, so that they
+pass to C without a copy, and makes a `Str` a `CHARSXP`. That assumes typed values live on the R
+heap. This draft makes them native values freed by reference counts (`decisions.md`, "Typed values
+are native, immutable, acyclic and freed by reference counts"), so every list crosses to R by a
+copy, and the contract is amended to match.
+
 ## The shape in one example
 
 ```r
@@ -86,11 +92,13 @@ the file, so the four test processes a CI machine runs share one copy, and only 
 private to each. A file is written once, to a temporary name that is then renamed into place, so a
 process never maps a half-written file.
 
-**Standalone executables.** `ry build --exe` writes one executable in the spirit of `bun compile`:
-ry's runtime, the program's bytecode for its untyped code, and the code cache file for its typed
-code, appended as a section that the executable maps read-only at start. Plain `ry build` keeps
-building a source tarball as `devtools::build()` does, which existing workflows depend on, so the
-executable is an option of the same command rather than its default. Packages with compiled code
+**Standalone executables.** `ry build --exe main.R` writes one executable in the spirit of
+`bun compile`: ry's runtime, the bytecode of the script and of the strict files it sources, and the
+code cache file for their typed code, appended as a section that the executable maps read-only at
+start. Running the executable runs the script as `ry run main.R` does, with its arguments in
+`commandArgs()`. Plain `ry build` on a package writes a source tarball as `devtools::build()` does,
+which existing workflows depend on, so the executable is an option of the same command for a
+script, which has an entry point, and not its default for a package, which has none. Packages with compiled code
 load from the library as they do under `ry run`, because their shared objects are built against
 `libR` and are not part of the program.
 
@@ -153,10 +161,10 @@ the contract's, and this section fixes the native side.
 | `I128`, `U128`, `Dec` | two integer registers | none | native number object |
 | `Bool` | one byte | none | length-one `logical` |
 | `Str` | three words, the bytes inline up to 23 | UTF-8 bytes past 23 | length-one `character` |
-| `List<T>` | a pointer | count, length, capacity, then the items unboxed | an R vector |
-| `Dict<K, V>`, `Set<T>` | a pointer | count, an entry array, an index table | an R list |
+| `List<T>` | a pointer | count, length, capacity, then the items unboxed | an R list |
+| `Dict<K, V>`, `Set<T>` | a pointer | count, an entry array, an index table | ry's `dict` or `set` kind |
 | record, tuple | its fields, flattened, when they fit in four words, else a pointer | count, then the fields | R record |
-| tag union | a tag plus the largest payload, when that fits in four words, else a pointer | count, tag, payload | R tag |
+| tag union | a tag plus the largest payload, when that fits in four words, else a pointer | count, tag, that variant's payload | R tag |
 | function | a code pointer and a captures pointer | count, then the captures | closure |
 
 **Strings.** A `Str` is UTF-8 bytes with no terminator, as in Roc and Rust. A string of up to 23
@@ -177,22 +185,23 @@ and doubles the capacity otherwise.
 **Dicts and sets.** A `Dict` keeps its entries in one array in insertion order and a separate
 open-addressing index of 32-bit positions into that array, which is the layout of Roc's `Dict`
 and of Python's. Iteration walks the dense array, a lookup probes the small index, and removal
-moves the last entry into the freed position. The hash is a fixed-seed function, because a seed
-drawn from the operating system would make iteration order differ between runs, and the
-robustness contract forbids that. A `Set<T>` is a `Dict<T, {}>` with no value array.
+moves the last entry into the freed position. Iteration order is insertion order, so the hash seed
+never reaches output. The seed is drawn once per process, which keeps input from a web request or a
+parsed file from forcing collisions on purpose, and the test harnesses fix it from their one seed
+so a failing run replays. A `Set<T>` is a `Dict<T, {}>` with no value array.
 
 **Records and tags.** A record's fields are stored in name order, the order R-side records use
 (`crates/interp/src/records.rs`), so converting between the two never reorders. A tag stores its
-tag as a small integer in the union's declaration order and its payload in the union's largest
-payload size. Each native object starts with a 32-bit reference count. The type, which the compiled
+tag as the index of its name in the union's sorted tag list, as `records-and-tags.md` assigns it, and
+each variant's block is allocated at that variant's own size. Each native object starts with a 32-bit reference count. The type, which the compiled
 code knows statically, fixes everything else, so the object carries no layout id and no type
 header.
 
 **Flattening.** A record or tag that never escapes a function is never allocated: its fields are
 SSA values. An escaping one that fits in four words is passed and returned in registers, as Rust's
 ABI does for small structs, and stored inline in lists and other records. A recursive type such as
-`Node` is always a pointer, and each `:Num` costs one 16-byte block: the count, the tag, and the
-double.
+`Node` is always a pointer, and each `:Num` costs one 16-byte block: a 32-bit count, a 32-bit tag,
+and the double at offset 8. An `:Add` block is 24 bytes.
 
 ## Calling convention
 
@@ -251,8 +260,9 @@ return this value or this failure), so the frame redesign can land without touch
 
 **Closures.** A typed closure that captures by value under the contract's rule is a code pointer
 and a counted block of its captured values at their natural width. A closure never captures
-itself: a recursive local function refers to itself through a lifted top-level definition, as in
-Roc, which keeps closures acyclic. Where the checker knows the exact closure at a call site, as for
+itself: recursive and mutually recursive local functions are lifted to top-level definitions that
+call each other by name and take their captures as extra parameters, as in Roc, which keeps
+closures acyclic. Where the checker knows the exact closure at a call site, as for
 a lambda passed to `List.map` in the same function, the call is direct and the lambda inlines,
 which is Roc's lambda-set specialization. Value tracking extends it across functions in one
 namespace: a function-typed parameter that only lambdas of its own namespace reach is specialized
@@ -290,9 +300,11 @@ use passes, and then removes what it can:
   record or a string touch no count.
 - **Moves.** A variable's last use is a move, so passing it costs nothing, and a `dup` followed by
   a `drop` of the same value cancels.
-- **Field moves.** Reading a field out of a record that dies at that point moves the field instead
-  of duplicating it. So `state <- (..state, items = List.append(state$items, x))` holds `items`
-  uniquely and appends in place, instead of copying the list each iteration.
+- **Field moves.** An update `(..r, f = e)` whose source `r` dies at that point takes every field
+  out of `r` instead of duplicating them, and the reads of `r` inside `e` read the taken fields. So
+  in `state <- (..state, items = List.append(state$items, x))`, `items` is held uniquely and appends
+  in place, and the new record reuses the old one's block, instead of copying the list each
+  iteration.
 - **Drop specialization.** A `drop` of a value whose type is known inlines the decrement and, on
   zero, frees the block and drops each field. A recursive type is freed by a loop over a work list,
   not by recursion, so dropping a long chain of `Node`s cannot overflow the stack.
@@ -305,11 +317,20 @@ the new value without going through the allocator: a `match` arm that takes a `:
 builds a `:Neg` writes into the old block. This is Perceus's reuse analysis, which Roc applies the
 same way.
 
-**R values inside typed code.** A native value can hold an R value only through the explicit
-boundary types, such as an opaque `R` value field. Such a field holds a preserved reference: it is
+**References go one way.** A native value can hold an R value, through the explicit boundary types
+such as an opaque `R` value field, but an R value never holds a native one: every native value
+that crosses to R is converted to its R form, a typed closure included, whose R form is an R closure
+over the R forms of its captures that calls the compiled body through an entry stub. Without
+references from R into the native heap, no cycle can run through both heaps, so a preserved R value
+can never keep the native block that preserves it alive.
+
+**R values inside typed code.** An R field in a native block holds a preserved reference: it is
 registered with the collector's precious set when stored and released when its block is dropped.
-An R value held only in a compiled function's locals is reachable from the caller's frame or
-protected by the stub that received it, so compiled frames need no stack maps.
+An R value in a compiled function's locals is rooted on the collector's handle stack: the entry
+stub, an exit stub's result and every conversion to an R form push it, and the function releases to
+its handle mark at return and on the failure path. Native values need no rooting at all, so compiled
+frames carry no stack maps, and the roots `r-runtime.md` lists for JIT frames are handle-stack
+entries for typed code.
 
 **Threads.** R evaluation is single-threaded, so counts are plain 32-bit integers with no atomic
 operations. A count that would overflow saturates, and a saturated value is never freed, which
@@ -363,9 +384,10 @@ user-facing wording and the diagnostic codes follow the native-types contract.
   one before each in-place update and each reuse, a live count before each read, and the bound
   before each list read whose bounds check was removed. A failed check panics with the function and
   the fact, so a soundness bug in the IR shows up as a precise failure instead of corrupt memory.
-- **No leaks.** Reference counting is deterministic, so a program that returns no native value
-  frees every native block it allocated. Each run in the matrix ends by asserting that the native
-  pools hold no live block, which catches a missing `drop` on the run that introduced it.
+- **No leaks.** Reference counting is deterministic and R holds no references into the native
+  heap, so a program that returns no native value frees every native block it allocated. Each run
+  in the matrix ends by asserting that the native pools hold no live block apart from saturated
+  ones, which catches a missing `drop` on the run that introduced it.
 
 ## What is built in one change
 

@@ -79,5 +79,5 @@ stubs, and why they are native builtins that are always available on ry's runtim
 
 How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time from the checker's
 types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
-environment, stack-map rooting, uniqueness-based updates, and boxing only at the R boundary. It
-builds to the runtime contract of the native-types design.
+environment, native values freed by compiler-inserted reference counts with in-place reuse, and
+conversion only at the R boundary. It builds to the runtime contract of the native-types design.

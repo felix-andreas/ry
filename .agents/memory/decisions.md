@@ -7303,6 +7303,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
   sees them, so compiled frames need no stack maps. R values stay under the collector and meet
   typed code only at the boundary: an entry stub checks a guess and runs a second compiled copy
   that reads the R value in place, or the program converts explicitly (`List.from_r`).
+  References go one way: a native block may preserve an R value, but every native value crossing
+  to R is converted (a typed closure becomes an R closure over converted captures), so no cycle
+  runs through both heaps. R values in compiled locals sit on the handle stack.
 - **Why.** Exact counts make in-place update a count-of-one test, freeing deterministic, and a leak
   checkable at the end of every test run. Native layouts (inline small strings, unboxed lists of
   flattened records, a dense-entry `Dict`) are the Rust-shaped data the 1.5 to 2 times Rust bar
