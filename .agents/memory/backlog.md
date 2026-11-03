@@ -607,6 +607,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   `Native` and roots the closure a second time. Refusals are never retried, so mutual recursion
   (`ev` calls `od` calls `ev`) is refused for good: the inner call hits the `COMPILING` cycle guard.
   Compile a strongly connected group of functions together instead, and root closures weakly.
+  Typed closures compile at their first call, so a typed closure created per iteration
+  (`lapply(xs, function(i) { g <- function(x: double) x + 1; g(i) })`) compiles and roots once per
+  closure and reaches `MAX_NATIVES` (4096), after which natives are off for the session. Key the cache
+  by the closure's body and formals, not the closure, and pass the environment at call time.
 - **Native recursion has no machine-stack check.** It is bounded only by `max_depth`
   (`jit_depth_budget`). That is safe today only because `options(expressions =)` never raises
   `max_depth` once the option exists (`set_option` in `crates/interp/src/envir.rs` returns early)

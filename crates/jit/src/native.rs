@@ -46,7 +46,7 @@ use {
             INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
             RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS,
         },
-        records::slot_kind,
+        records::{Fields, slot_kind},
     },
     interp::{annotations, bytecode, records, values},
     rustc_hash::{FxHashMap, FxHashSet},
@@ -626,6 +626,20 @@ unsafe fn singleton(layout: u32) -> Result<Sexp, Refusal> {
 }
 
 /// The slot of `layout` that holds the field `name`.
+/// Whether a layout `$` and `[[` may read is positional (a tuple) or named (a record). A tag's
+/// payload is read only by `match`, and a dict or set has no fields, so the interpreter raises
+/// an error for both and native code leaves them to it.
+unsafe fn plain_fields(layout: u32) -> Result<bool, Refusal> {
+    let refused = Refusal("`$` or `[[` of a tag, a dict or a set");
+    let shape = interp::heap().layouts.get(layout).ok_or(refused)?;
+    match shape.fields {
+        _ if shape.tag.is_some() => Err(refused),
+        Fields::Positional(_) => Ok(true),
+        Fields::Named(_) => Ok(false),
+        Fields::Dict | Fields::Set => Err(refused),
+    }
+}
+
 unsafe fn slot_named(layout: u32, name: Sexp) -> Result<usize, Refusal> {
     interp::heap()
         .layouts
@@ -1267,6 +1281,7 @@ impl<'p> Walker<'p> {
                     }
                     _ => return Err(Refusal("`$` with a computed field")),
                 };
+                plain_fields(layout)?;
                 let index = slot_named(layout, name)?;
                 self.read_field(emitter, subject.value, layout, index)
             }
@@ -1398,10 +1413,7 @@ impl<'p> Walker<'p> {
             return Err(Refusal("`[[` of a record of unknown shape"));
         };
         let refused = Refusal("`[[` of a record with an index native code does not resolve");
-        let positional = interp::heap()
-            .layouts
-            .get(layout)
-            .is_some_and(|shape| shape.names().is_empty());
+        let positional = plain_fields(layout)?;
         let slot = match index.kind() {
             SexpType::String if values::length(index) == 1 && !positional => slot_named(
                 layout,
@@ -1825,10 +1837,8 @@ impl<'p> Walker<'p> {
             emitter.loops.pop();
             emitter.builder.ins().jump(next, &[]);
             emitter.builder.switch_to_block(next);
-            if let Some(mark) = mark
-                && !carries
-            {
-                emitter.release_handles(mark, None);
+            if let Some(mark) = mark {
+                self.release_iteration(emitter, mark, carries);
             }
             emitter.check_interrupt();
             let current = emitter.builder.use_var(index);
@@ -1841,6 +1851,31 @@ impl<'p> Walker<'p> {
             kind: Kind::Known(Ty::Bottom),
             value: None,
         })
+    }
+
+    /// Releases what an iteration allocated, at a loop's back edge. When the iteration stored a
+    /// record in a local from before the loop, that local's current record must survive, so
+    /// every record local still in scope is rooted again above the mark; the handle stack
+    /// then stays the same size across iterations.
+    fn release_iteration(&self, emitter: &mut Emitter<'_>, mark: Value, carries: bool) {
+        if !carries {
+            emitter.release_handles(mark, None);
+            return;
+        }
+        let mut kept = self
+            .locals
+            .iter()
+            .filter(|(_, ty, _)| ty.is_record())
+            .filter_map(|&(_, _, variable)| variable);
+        let first = kept
+            .next()
+            .map(|variable| emitter.builder.use_var(variable));
+        emitter.release_handles(mark, first);
+        for variable in kept {
+            let value = emitter.builder.use_var(variable);
+            let top = emitter.handle_mark();
+            emitter.release_handles(top, Some(value));
+        }
     }
 
     /// `while (condition) body`, or `repeat body` without a condition, as a statement.
@@ -1876,10 +1911,8 @@ impl<'p> Walker<'p> {
             emitter.loops.pop();
             emitter.builder.ins().jump(latch, &[]);
             emitter.builder.switch_to_block(latch);
-            if let Some(mark) = mark
-                && !carries
-            {
-                emitter.release_handles(mark, None);
+            if let Some(mark) = mark {
+                self.release_iteration(emitter, mark, carries);
             }
             emitter.builder.ins().jump(header, &[]);
             emitter.builder.switch_to_block(exit);
@@ -2859,6 +2892,7 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
     let mut formal = formals;
     let mut types: SmallVec<[Ty; 4]> = SmallVec::new();
     let mut words: SmallVec<[u64; 4]> = SmallVec::new();
+    let mut read: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
     for arg in args {
         if formal.kind() != SexpType::Pairlist
             || formal.tag() == values::symbols().dots
@@ -2867,6 +2901,9 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
             return None;
         }
         let value = argument_value(arg.value)?;
+        if arg.value.kind() == SexpType::Promise && arg.value.car() == values::unbound() {
+            read.push((arg.value, value));
+        }
         let (ty, word) = argument_word(value)?;
         types.push(ty);
         words.push(word);
@@ -2898,6 +2935,12 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
             .ok_or_else(|| interp::unwind::error("a native function returned no record")),
     };
     heap.release_handles(mark);
+    // The call read each unforced argument promise, so it is forced now: a promise shared
+    // through `...` must keep the value this call saw, as if tier 0 had forced it.
+    for (promise, value) in read {
+        heap.set_car(promise, value);
+        heap.set_tag(promise, values::nil());
+    }
     interp::interp().visible = true;
     Some(value)
 }
@@ -2921,7 +2964,11 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
         // A promise of a constant evaluates to the constant itself.
         return Some(symbol);
     }
-    if symbol.kind() != SexpType::Symbol || value.tag() == values::nil() {
+    // A checked promise runs its annotation check when forced, which only tier 0 does.
+    if symbol.kind() != SexpType::Symbol
+        || value.tag() == values::nil()
+        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
+    {
         return None;
     }
     let cell = interp::eval::find_cell(symbol, value.tag())?;

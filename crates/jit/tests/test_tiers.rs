@@ -867,9 +867,9 @@ fn formal_shadows_enclosing_function() {
 fn fully_typed_closure_compiles_at_its_first_call() {
     // The signature stands in for the profile, so a first call runs compiled code: a typed
     // scalar function runs as a native function from its first call, whose values fix the
-    // argument types, unless an argument is a promise of a computation (`c(1, 2.5)`), which only
-    // the frame may force; a straight-line body then waits until it is hot. A call whose values the declared types do not predict still gets tier 0's
-    // answer.
+    // argument types, unless an argument is a promise of a computation (`c(1, 2.5)`), which
+    // only the frame may force; a straight-line body then waits until it is hot. A call whose
+    // values the declared types do not predict still gets tier 0's answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
         let cases = [
@@ -1045,6 +1045,47 @@ const RETURNS: &[(&str, &str)] = &[
 /// pass and fail their checks, too many and too few, and returning values that may fail the
 /// return check, against the same calls with the JIT off. The calls repeat, so compiled code
 /// that deoptimizes after its first call is exercised too.
+#[test]
+fn typed_natives_keep_tier_zero_semantics_at_their_edges() {
+    // `$` and `[[` of a tag are errors, so no native reads a payload that way. A promise a
+    // native call read is forced, so a later reader through `...` sees the same value.
+    // A loop that rebinds a record runs natively and leaves nothing rooted once it returns.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let cases = [
+            (
+                "type Pos = :Pos(double)\nfp <- function(t: Pos) -> double t[[1]]\nfp(:Pos(1))",
+                "error: a tag has no items; read its payload with `match`",
+            ),
+            (
+                "type Opt = :Some(v: double) | :None\nfo <- function(t: Opt) -> double t$v\nfo(:Some(v = 1))",
+                "error: a tag has no fields; read its payload with `match`",
+            ),
+            (
+                "fd <- function(y: double) -> double y + 1\n\
+                 hd <- function(...) { fd(...); xd <<- 2; list(...)[[1]] }\n\
+                 xd <- 1\nhd(xd)",
+                "1",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(run(text), expected, "{text}");
+        }
+        run("fg <- function(n: integer) -> double {\n\
+             s <- (x = 0, y = 1)\n\
+             i <- 0L\n\
+             while (i < n) { s <- (x = s$x + 1, y = s$y); i <- i + 1L }\n\
+             s$x\n}");
+        // The first call compiles, which roots the closure for the session.
+        assert_eq!(run("fg(10L)"), "10");
+        let before = interp::heap().handle_mark();
+        assert_eq!(run("fg(100000L)"), "1e+05");
+        assert_eq!(interp::heap().handle_mark(), before);
+        assert!(has_compiled_code("fg"), "the record loop runs natively");
+        jit::install_mode(Mode::Off);
+    });
+}
+
 #[test]
 fn fuzz_typed_closures_agree_with_tier_zero() {
     with_interpreter(|| {
