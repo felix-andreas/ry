@@ -132,9 +132,9 @@ Smaller gaps:
   - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
-- The Zed extension's binary download asks for the latest non-pre-release, which is `0.1.1` with
-  `roughly-*` assets, so it fails; `editors/zed/src/lib.rs`. The install page tells users to put
-  `ry` on `PATH` meanwhile.
+- The Zed extension downloads the newest pre-release's archive (`editors/zed/src/lib.rs`), and
+  0.4.0-beta has only the Linux one, so on macOS and Windows the download fails until a release
+  ships every platform. The install page tells users there to put `ry` on `PATH`.
 
 ## Open: what `ry check` still reports on the GNU R corpus
 

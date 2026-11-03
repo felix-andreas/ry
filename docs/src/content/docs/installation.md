@@ -14,37 +14,37 @@ binary for **Linux x86_64, macOS on Apple silicon, and Windows x86_64**. On any 
 install the [command-line binary](#command-line) and set the `ry.path` setting to it, or put `ry` on
 your `PATH`.
 
-On Linux, use extension 0.3.2 or newer. Earlier versions bundle a binary that starts only under
-Nix.
-
-The latest release, 0.3.2-beta, has the checker, formatter and language server, but not ry's own
-runtime. The runtime, and everything on this site that needs it (`ry run` on ry's runtime, records
-and tags at run time, `DataFrame`), is in 0.4.0-beta, which is not released yet. Until it is, build
-from a clone of the repository (`just try`).
+The current extension, 0.3.2, bundles ry 0.3.2-beta (on Linux, earlier versions bundle a binary
+that starts only under Nix), which has the checker, formatter and language
+server but not ry's own runtime. To get the runtime (`ry run` on ry's runtime, records and tags at
+run time, `DataFrame`), install the [0.4.0-beta binary](#command-line) on Linux and set `ry.path`
+to it. On macOS and Windows, build from a clone of the repository (`just try`).
 
 Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
-extension there is also called "ry"). Download the `.vsix` for your platform from
-[Releases](https://github.com/felix-andreas/ry/releases) and run **Extensions: Install from VSIX...**
-instead.
+extension there is also called "ry"). Download the `.vsix` for your platform from the
+[0.3.2-beta release](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta) and run
+**Extensions: Install from VSIX...** instead.
 
 ## Command line
 
-**Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has one archive
-per platform: `ry-x86_64-unknown-linux-gnu.tar.gz`,
-`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL,
-because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
-points at 0.1.1. On a Mac:
+**Prebuilt binary.** The latest release,
+[0.4.0-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.0-beta), has one archive, for
+Linux x86_64: `ry-x86_64-unknown-linux-gnu.tar.gz`. It holds `ry` alone, with ry's runtime built
+in, plus `LICENSE` and `THIRD_PARTY_NOTICES`, and it needs glibc 2.35 or newer. Name the tag in the
+URL, because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
+points at 0.1.1:
 
 ```bash
-curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.3.2-beta/ry-aarch64-apple-darwin.tar.gz | tar xz
+curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.4.0-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ry --version
 ```
 
-On Linux, use `ry-x86_64-unknown-linux-gnu.tar.gz` the same way. From 0.3.2-beta it runs on any
-x86_64 distribution with glibc 2.17 or newer. The binary in 0.3.1-beta and earlier starts only under
-Nix, and fails elsewhere with `cannot execute: required file not found`. The Linux archives of the
-next release are built on Ubuntu 22.04 and need glibc 2.35 or newer.
+0.4.0-beta has no macOS or Windows archive. On those platforms, install
+`ry-aarch64-apple-darwin.tar.gz` or `ry-x86_64-pc-windows-gnu.zip` from the
+[0.3.2-beta release](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta) the same way.
+Those binaries have the checker, formatter and language server but not ry's runtime, which you get
+by building from a clone of the repository (`just try`).
 
 **From source**, with [rustup](https://rustup.rs). ry builds on a nightly Rust toolchain, and
 `cargo install` does not read the toolchain the repository pins, so name a nightly yourself:
@@ -104,9 +104,10 @@ From 0.4.0-beta on, a release archive holds `ry` alone: ry's runtime (`libR.so`,
 that directory cannot hold a library (it is read-only, or mounted `noexec`), set `XDG_CACHE_HOME`
 to another directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in
 `deps/`, or in `../lib/ry/` takes precedence over the built-in one, which is how a development
-build and a distribution's package find theirs. The Windows runtime is built for `x86_64-pc-windows-gnullvm` and is meant to ship as
-`ry-x86_64-pc-windows-gnullvm.zip` (the 0.3.2-beta archive above is the older `x86_64-pc-windows-gnu` one, without
-a runtime), but it has only run under Wine so far, never on Windows itself. Until a release proves
+build and a distribution's package find theirs. The Windows runtime is built for
+`x86_64-pc-windows-gnullvm` and is meant to ship as `ry-x86_64-pc-windows-gnullvm.zip` (the
+0.3.2-beta archive above is the older `x86_64-pc-windows-gnu` one, without a runtime), but no
+release has shipped it yet, and it has only run under Wine so far, never on Windows itself. Until a release proves
 it, treat `ry run` and `ry load` on Windows as experimental; `ry R` works everywhere.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged. Those binaries
@@ -125,8 +126,9 @@ The Zed extension is not in Zed's registry yet, so install it as a dev extension
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
 Zed has no built-in R support, so install the [R extension](https://zed.dev/extensions/r) first, and
-put the [command-line binary](#command-line) on your `PATH`: the extension's automatic download
-finds only 0.1.1, from before the rename, and fails.
+put the [command-line binary](#command-line) on your `PATH` on macOS and Windows. Without one, the
+extension downloads the newest release's archive for your platform, which works on Linux, but
+0.4.0-beta has no macOS or Windows archive, so there the download fails.
 
 ## RStudio
 

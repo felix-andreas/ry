@@ -170,19 +170,20 @@ that runtime runs.
 
 ### Installing
 
-Each release has one archive per platform, for Linux (x86_64), macOS (Apple silicon) and Windows
-(x86_64): `ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz` and
-`ry-x86_64-pc-windows-gnullvm.zip`. Each holds the single `ry` binary, and each platform's VS Code
-extension bundles the same binary. The Linux binary is built on Ubuntu 22.04 and needs glibc 2.35 or
-newer. [Installation](/installation) has every other way to install ry.
+This release has one archive, for Linux x86_64: `ry-x86_64-unknown-linux-gnu.tar.gz`. It holds the
+single `ry` binary, with ry's runtime built in, and needs glibc 2.35 or newer. macOS and Windows
+archives, and a VS Code extension that bundles the new binary, follow in a later release.
+[Installation](/installation) shows how to install the archive and what to use on other platforms.
 
 ### Known limitations
 
 - **ry's runtime still needs GNU R**, version 4.3 or later built as a shared library, because it
   reads base R's sources and the default packages from that installation. `ry check`, `ry fmt` and
   `ry server` need no R.
-- **The macOS and Windows runtimes are experimental.** Before this release's smoke test they had not
-  run on a real Mac or Windows machine (Windows only under Wine). Linux is the tested platform.
+- **Linux x86_64 only.** This release has no macOS or Windows archive. The VS Code extension on
+  the Marketplace is still 0.3.2, which bundles 0.3.2-beta without ry's runtime and has none of
+  the debugger and console features above. The Windows runtime has run only under
+  Wine so far.
 - **Peak memory is often higher than GNU R's.** On the benchmark programs, ry uses more memory on
   eight of eleven, up to 1.8 times as much (`drawdown`, 133 MiB against 73 MiB).
 - **Not every package passes its tests yet**: 9 of the 164 packages that pass on GNU R still fail on

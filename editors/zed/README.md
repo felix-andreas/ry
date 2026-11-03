@@ -29,7 +29,9 @@ The extension finds the language server in this order, and stops at the first hi
 2. **`ry` on your `PATH`**.
 3. The **latest GitHub release**, downloaded and cached automatically.
 
-So you need nothing extra for the common case. Point it at your own build with:
+On Linux you need nothing extra. The latest release, 0.4.0-beta, has no macOS or Windows archive,
+so on those platforms put `ry` on your `PATH` or set its path in your LSP settings. Point it at your
+own build with:
 
 ```json
 // settings.json
