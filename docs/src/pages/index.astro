@@ -366,7 +366,7 @@ const checkerModes = [
 
 1 problem in 1 file`,
         caption: "Plain R with no annotations: types are inferred, and the bug is found anyway.",
-        link: { href: "/guides/checking", label: "Checking guide" },
+        link: { href: "/tutorial/check", label: "Checking guide" },
     },
     {
         key: "typed",
@@ -384,7 +384,7 @@ ${checkerCode.replace('message("fee: " + fee)', 'message("fee: ", fee)')}`,
 
 1 problem in 1 file`,
         caption: "With that bug fixed, one `#:` comment finds the next. R reads it as a comment, so the file still runs on GNU R.",
-        link: { href: "/type-checking/overview#annotations", label: "Annotations" },
+        link: { href: "/tutorial/types#annotate", label: "Annotations" },
     },
 ];
 
@@ -653,7 +653,7 @@ const year = new Date().getFullYear();
                                     <div class="code" set:html={markChanged(highlightR(formatterSample.after), formatterSample.afterChanged)} />
                                 </div>
                             </div>
-                            <p class="stage-foot"><span></span><a href="/guides/checking#formatting">Formatting guide</a></p>
+                            <p class="stage-foot"><span></span><a href="/tutorial/check#format">Formatting guide</a></p>
                         </div>
                         <div class="lsp-panel" role="tabpanel" id="panel-lsp" aria-labelledby="tab-lsp" tabindex="0" hidden>
                         <div
@@ -733,7 +733,7 @@ const year = new Date().getFullYear();
                                         </div>
                                     </div>
                                 </div>
-                                <p class="stage-foot"><span></span><a href="/guides/editors">Editor setup</a></p>
+                                <p class="stage-foot"><span></span><a href="/installation#editors">Editor setup</a></p>
                             </div>
                         </div>
 

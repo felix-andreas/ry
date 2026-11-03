@@ -34,7 +34,7 @@ features work, with no configuration and no R session behind them.
 Running code needs GNU R installed, because ry's runtime reads base R's own R code from it. On
 Windows, the console has no connection to the editor, so the plot panel, `View()` and attaching the
 debugger to the console are not available there. R Markdown, Quarto and Sweave chunks get the same
-features. The [editor guide](https://ry-lang.org/guides/editors) lists everything.
+features. [Editor settings](https://ry-lang.org/reference/configuration#editor-settings) lists the extension's options.
 
 ## Type checking
 

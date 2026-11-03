@@ -1,0 +1,351 @@
+---
+title: Moving from data.table
+description: The DataFrame equivalent of each common data.table idiom
+---
+
+Your data.table code keeps running unchanged on ry, so moving it is optional. What a move buys you
+is the checker: a [DataFrame](/reference/dataframes) query is typed column by column, so a misspelled
+column or a sum of a text column is reported before the query runs. You can move one query at a
+time, because `as.DataFrame(dt)` converts a `data.table` and `as.data.table(df)` converts back,
+keeping every column's type.
+
+ry can do most of the rewriting for you, as [Rewriting automatically](#rewriting-automatically)
+shows. Each section below shows a data.table idiom and then its DataFrame equivalent, with the
+output of `ry run`. The examples share one table:
+
+```r
+sales <- DataFrame(
+  region = ["eu", "us", "eu", "asia"],
+  units = [3L, 5L, 2L, 7L],
+  price = [1.5, 2, 3, 0.5]
+)
+sales
+```
+
+```text ry run runtime=ry exact
+   region units price
+   <char> <int> <num>
+1:     eu     3   1.5
+2:     us     5   2.0
+3:     eu     2   3.0
+4:   asia     7   0.5
+```
+
+## Reading a file
+
+| data.table | DataFrame |
+| --- | --- |
+| `fread("sales.csv")` | `DataFrame.read_csv("sales.csv")` |
+| `fread("sales.csv", stringsAsFactors = TRUE)` | `DataFrame.read_csv("sales.csv", strings_as_factors = TRUE)` |
+
+When the path is a string literal, the checker reads the file and types every column.
+
+## Filtering rows: `dt[i]`
+
+```r
+dt[units > 2L & region != "asia"]
+```
+
+`DataFrame.filter` keeps the rows where every condition holds:
+
+```r
+sales |> DataFrame.filter(col("units") > 2L, col("region") != "asia")
+```
+
+```text ry run runtime=ry exact continue
+   region units price
+   <char> <int> <num>
+1:     eu     3   1.5
+2:     us     5   2.0
+```
+
+## Selecting and computing columns: `dt[, j]`
+
+```r
+dt[, .(region, units)]
+dt[, .(revenue = units * price)]
+```
+
+`DataFrame.select` takes column names as strings and computed columns as named expressions:
+
+```r
+sales |> DataFrame.select("region", "units")
+sales |> DataFrame.select(revenue = col("units") * col("price"))
+```
+
+```text ry run runtime=ry exact continue
+   region units
+   <char> <int>
+1:     eu     3
+2:     us     5
+3:     eu     2
+4:   asia     7
+   revenue
+     <num>
+1:     4.5
+2:    10.0
+3:     6.0
+4:     3.5
+```
+
+## Grouping: `dt[, j, by]`
+
+```r
+dt[, .(units = sum(units)), by = region]
+```
+
+`DataFrame.group_by` names the groups, and `GroupBy.agg` gives each aggregation:
+
+```r
+sales |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(units = col("units") |> Expr.sum())
+```
+
+```text ry run runtime=ry exact continue
+   region units
+   <char> <int>
+1:     eu     5
+2:     us     5
+3:   asia     7
+```
+
+## Adding a column: `:=`
+
+```r
+dt[, revenue := units * price]
+```
+
+`DataFrame.with_columns` returns a new DataFrame with the column added or replaced, so assign the
+result. A DataFrame follows R's copy-on-modify rule instead of updating in place, so a copy you took
+earlier keeps its old columns:
+
+```r
+sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+sales
+```
+
+```text ry run runtime=ry exact continue
+   region units price revenue
+   <char> <int> <num>   <num>
+1:     eu     3   1.5     4.5
+2:     us     5   2.0    10.0
+3:     eu     2   3.0     6.0
+4:   asia     7   0.5     3.5
+```
+
+To change only some rows, as `dt[units > 2L, flag := TRUE]` does, compute the column for every row
+with `Expr.if_else(test, yes, no)`.
+
+## Joins: keys and `on =`
+
+```r
+regions[sales, on = "region"]
+# or, with a key
+setkey(regions, region)
+regions[sales]
+```
+
+`X[Y]` keeps every row of `Y`, which is a left join of `Y` with `X`. `DataFrame.join` names both
+sides and the kind of join, and needs no key:
+
+```r
+regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])
+DataFrame.join(sales, regions, on = "region", how = "left")
+```
+
+```text ry run runtime=ry exact continue
+   region units price revenue manager
+   <char> <int> <num>   <num>  <char>
+1:     eu     3   1.5     4.5     Ana
+2:     us     5   2.0    10.0      Bo
+3:     eu     2   3.0     6.0     Ana
+4:   asia     7   0.5     3.5    <NA>
+```
+
+The left table's columns come first. Use `left_on` and `right_on` when the key names differ, and
+`DataFrame.join_asof` for a rolling join (`roll = TRUE`).
+
+## Ordering: `setorder`
+
+```r
+setorder(dt, region, -units)
+```
+
+`DataFrame.sort` returns the sorted table, with one `descending` flag per column:
+
+```r
+sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
+```
+
+```text ry run runtime=ry exact continue
+   region units price revenue
+   <char> <int> <num>   <num>
+1:   asia     7   0.5     3.5
+2:     eu     3   1.5     4.5
+3:     eu     2   3.0     6.0
+4:     us     5   2.0    10.0
+```
+
+## Windows, ranks, reshaping and dates
+
+| data.table | DataFrame |
+| --- | --- |
+| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = col("x") / Expr.over(Expr.sum(col("x")), "g"))` |
+| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(col("x"), descending = TRUE), "g"))` |
+| `dcast(dt, g ~ k, value.var = "x", fun.aggregate = sum)` | `DataFrame.pivot(df, on = "k", index = "g", values = "x", agg = "sum")` |
+| `CJ`-style pairing, or `dt[, .(v = 1:n), by = .(id)]` | `DataFrame.join(df, DataFrame(v = 1:n), how = "cross")` |
+| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = col("day") + 28L)` |
+| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = col("due") - col("day"))` |
+
+[Working with DataFrames](/reference/dataframes/#windows-and-ranks) shows each with its output.
+
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run`, and most queries on a
+`data.table` run on the same engine as [DataFrames](/reference/dataframes). A `data.table` keeps all of data.table's
+behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
+when it can produce exactly what data.table would, meaning the same values, attributes, printing
+and warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, and a table with extra attributes or classes;
+- code inside data.table's own namespace, except a grouped query without `:=`, which is how
+  `dcast` aggregates;
+- a query without `by` that only picks rows and whole columns, such as `x[i]`,
+  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
+  data.table copies them faster and with less memory;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
+- a grouped `sum` of an integer column whose values could overflow while they add up, because
+  data.table then returns doubles even when each group's total fits;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a rolling join with `roll = "nearest"`, a non-equi join whose join columns have different types
+  in the two tables, `by = .EACHI` over a non-equi join or with a `j` that reads a join column,
+  and `:=` together with `nomatch`;
+- a query that warns or fails.
+
+data.table's own test suite, `test.data.table()`, passes in full under ry, with every query either
+answered by ry or handed to data.table.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```text
+[ry] dt[x > 1L, .(n = .N), by = g]
+        g     n
+   <char> <int>
+1:      b     1
+2:      a     1
+[data.table] dt[x > 1L]
+Key: <g>
+        g     x
+   <char> <int>
+1:      a     3
+2:      b     2
+```
+
+## Finding the data.table code
+
+Set the `data-table` lint to `"warn"` in `ry.toml` to have `ry check` and the editor mark each call
+that creates a data.table (`data.table()`, `fread()`, `as.data.table()` and `setDT()`) with its
+DataFrame equivalent:
+
+```toml
+[lint]
+data-table = "warn"
+```
+
+## Rewriting automatically
+
+The editor offers each rewrite in this guide as a code action, on the `data-table` lint's warning
+and on any query, `:=`, `fread()` or `setorder()` it can translate, along with one action that
+rewrites the whole file. From the command line, `ry migrate data-table` prints the rewrites as a
+diff, and `--write` applies them:
+
+```r
+library(data.table)
+sales <- fread("sales.csv")
+totals <- sales[units > 2L, .(units = sum(units), n = .N), by = region]
+sales[, revenue := units * price]
+setorder(sales, region, -units)
+```
+
+```text
+$ ry migrate data-table --write report.R
+applied 4 rewrites in 1 file
+```
+
+```r
+library(data.table)
+sales <- DataFrame.read_csv("sales.csv")
+totals <- sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum(), n = Expr.len())
+sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+sales <- sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
+```
+
+The DataFrame verbs do not accept a data.table, so a rewritten query, `:=` or `setorder()` on a
+table that is still a data.table converts it first, as in `as.DataFrame(sales) |> DataFrame.filter(...)`.
+The whole-file rewrite leaves the conversion out for a name like `sales` above, whose every
+assignment it rewrites into a DataFrame; a function parameter typed `data.table` keeps it.
+
+The whole-file rewrite never hands a DataFrame to code that still expects a data.table. A
+rewritten table may flow only into other rewritten code, into `$`, `[[` or a shape function such
+as `nrow()` or `names()`, or out of a function as its return value. A query in that last place
+runs on the DataFrame and converts the result back, so the function's callers still receive a
+data.table:
+
+```r
+top <- function(sales: data.table) {
+  return(sales[units > 2L])
+}
+# becomes
+top <- function(sales: data.table) {
+  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
+}
+```
+
+Any other form whose table would reach other code is left as it is, such as `fread()` whose result
+goes to `saveRDS()`, a `data.table()` a function returns, or a table some later `:=` still updates
+in place. The editor still offers each of those as a single code action.
+
+Delete `library(data.table)` once nothing in the file needs it, and run `ry fmt` to break the long
+chains over several lines.
+
+A query is rewritten only when the checker types its table as a data.table or a DataFrame, so
+`values[values > 2]` on a vector is left alone. Inside the brackets, a bare name is a column when
+the checker knows the table's columns and the name is one of them. When the columns are not known,
+a name is a column unless it is a variable in scope or a name the project defines, a base constant such as
+`pi` or `letters`, or one of data.table's own symbols such as `.SD`. That rule matches data.table,
+which also looks a name up among the columns first.
+
+Anything without an exact equivalent is left as it is rather than rewritten approximately:
+
+- a query on row numbers (`dt[1:2]`), a column read as a vector (`dt[, units]`), or a `j` that mixes
+  per-row columns with aggregations;
+- an aggregation other than `sum`, `mean`, `median`, `min`, `max`, `sd`, `var`, `first`, `last`
+  and `.N`, such as `uniqueN()`;
+- `:=` inside a function, with `by =`, or removing a column with `NULL`, because the rewrite assigns
+  the result to the table's own name and a function's caller would no longer see the change;
+- `dt[i, col := value]` unless the checker knows the columns: a new column takes `NA` in the other
+  rows, and an existing one is rewritten only for a constant of the column's own type;
+- a join after `setkey()`, since finding the key needs the order the statements run in, and a join
+  on `on =` unless the checker knows both tables' columns and they share none but the keys, because
+  data.table names a shared column `i.col` and `DataFrame.join` names it `col_right`;
+- `fread()` of anything but a literal path ending in `.csv`, or with any argument other than the
+  path and `stringsAsFactors`, and `data.table()` with `key`, `keep.rownames`, `check.names` or
+  `stringsAsFactors`.
+
+Two differences remain after a rewrite. The DataFrame aggregations skip missing values, so
+`sum(units)` over a column with an `NA` gives a number instead of `NA`. `DataFrame.sort` places
+missing values last, where `setorder()` places them first.

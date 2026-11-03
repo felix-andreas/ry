@@ -8,13 +8,13 @@ import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
 Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
-[strict mode](/type-checking/strict-mode) on ry. All three compute the same result.
+[strict mode](/tutorial/fully-typed#strict-mode) on ry. All three compute the same result.
 
 <BenchmarkTable />
 
 Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types add
 a second gain where typed functions work on numbers, records and `match`: such a function runs as
-native code from its first call, so `orders` and `expr_tree` run 13 and 80 times faster typed than
+native code from its first call, so `orders` and `expr_tree` run 13 and 83 times faster typed than
 on GNU R. Typed code that builds vectors or strings (`bond_book`, `report`) runs as fast as untyped
 code, and ry usually peaks higher in memory than GNU R.
 

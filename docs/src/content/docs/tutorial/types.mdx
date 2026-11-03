@@ -1,0 +1,273 @@
+---
+title: Type your code
+description: "Switch on type checking, let inference find type errors in plain R, and pin contracts with #: comments"
+sidebar:
+  label: 2. Type your code
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**Goal:** find type errors in plain R before it runs. You switch type checking on, read what
+inference finds, and add annotations where code meets other code. Everything on this page runs
+nothing, and the annotations are comments, so the code keeps running on GNU R.
+
+## Switch it on
+
+```toml
+# ry.toml
+[check]
+typing = true
+```
+
+A `# typing: on` comment at the top of a file switches it on for that file alone, and
+`# typing: off` switches it off, so you can adopt types one file at a time.
+
+## Inference
+
+ry infers types from how values are used, so unannotated code is checked as it is:
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+   --[R/discount.R:2:21]
+ 1 | apply_discount <- function(price, rate) price * (1 - rate)
+ 2 | apply_discount(100, "0.2")
+   |                     ^^^^^
+```
+
+`-` and `*` need numbers, so both parameters must be numbers. A function is as general as its body
+allows, and hovering it in the editor shows the inferred type:
+
+```r
+identity2 <- function(x) x           # <T> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+```
+
+`T` is any type, and `T: numeric` is `integer` or `double`, so `increment(2.5)` is a `double` and
+`increment("a")` is an error.
+
+## Annotate
+
+Inference cannot know what a function is meant to accept, or what a file holds. A `#:` comment
+directly above an assignment states it, and every use is checked against it. The same annotation
+can also be written inline, which [step 3](/tutorial/runtime#inline-annotations) covers; the tabs
+show each spelling, and your choice is remembered across pages.
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+apply_rate <- function(price, rate) price * rate
+
+rate <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_rate <- function(price, rate) price * rate
+
+#: double
+rate <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `double`, found `character`
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+apply_rate <- function(price: double, rate: double) -> double price * rate
+
+rate: double <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `double`, found `character`
+```
+
+</TabItem>
+</Tabs>
+
+The body is checked against the signature too, so a function declared `-> double` that returns a
+string is an error at the return value. Argument names are part of a function's type, because R
+matches arguments by name as often as by position:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+greet <- function(name, greeting = "hello") paste(greeting, name)
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") paste(greeting, name)
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character paste(greeting, name)
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+
+`[greeting]` marks a parameter callers may omit. Annotate where code meets other code: exported
+functions, values read from files, and any contract you want enforced. Inference covers the rest.
+
+## Shapes
+
+R has no scalars, but an `if` condition needs exactly one value, and a list is used for records,
+tuples and dictionaries alike. ry's types tell these apart, and your code does not change:
+
+| Type | Holds | Example |
+| --- | --- | --- |
+| `integer` | exactly one element | `1L` |
+| `integer[]` | any length | `c(1L, 2L)` |
+| `integer[named]` | any length, with names | `c(a = 1L)` |
+| `list{name: character, age: integer}` | fixed fields | `list(name = "Ada", age = 36L)` |
+| `list{integer, character}` | fixed positions | `list(1L, "ok")` |
+| `list[integer]` | any length | `lapply(words, nchar)` |
+| `list[named: integer]` | looked up by key | `[[key]]` gives `integer \| NULL` |
+| `character \| NULL` | either | `NULL` default |
+
+`double` accepts `integer` and `logical`, but a number never passes for `character`. A fixed-field
+list makes `$` checkable, where R silently returns `NULL` for a misspelled field:
+
+```r
+person <- list(name = "Ada", age = 36L)
+person$nmae
+```
+
+```text ry check typing
+type-mismatch
+
+  x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
+```
+
+## NULL
+
+A value that may be `NULL` has a union type, and using it as if it were not is an error:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(config: list{retries: integer} | NULL) -> integer
+retries <- function(config) {
+  config$retries
+}
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+retries <- function(config: list{retries: integer} | NULL) -> integer {
+  config$retries
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `integer`, found `integer | NULL`
+```
+
+An `is.null()` test *narrows* the type for the rest of the function, so adding
+`if (is.null(config)) return(3L)` as the first line clears the error. `is.character()`,
+`is.numeric()` and the other `is.*` tests narrow the same way.
+
+## Unknown
+
+Values ry cannot model have the type `Unknown`, which fits everywhere, so one unmodeled construct
+never causes a cascade of false errors. The main sources are base `data.frame` columns, S4 and R6
+objects, and packages ry has no stub for. An annotation gives such a value a type, and every later
+use is checked against it:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+amount <- df$amount
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: double
+amount <- df$amount
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+amount: double <- df$amount
+```
+
+</TabItem>
+</Tabs>
+
+ry ships types for base R, the default packages, `data.table`, `dplyr`, `ggplot2` and `testthat`,
+and export lists for the rest of the tidyverse and other common packages. For any other package, a
+stub file declares what you call, and turns the unresolved-name check back on:
+
+```text
+# stubs/dbclient.Rtypes
+@type Session
+connect : fn(host: character) -> Session
+```
+
+[Authoring stubs](/development/authoring-stubs) has the format. A clean run does not say how much
+was `Unknown`; [strict mode](/tutorial/fully-typed#strict-mode) does.
+[Limitations](/reference/type-system#limitations) lists what is not checked.
+
+**You can now** switch on type checking, read inferred types, annotate functions and values with
+`#:` comments, handle `NULL`, and give `Unknown` values a type.
+**Next:** [run on ry's runtime](/tutorial/runtime).

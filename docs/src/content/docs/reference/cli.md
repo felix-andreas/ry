@@ -20,12 +20,8 @@ ry debug COMMAND               # developer aids for working on ry itself
 ```
 
 `format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`,
-`build`, `install` and `debug-adapter` run R, and all of them except `R` run it on ry's runtime with
-the base R 4.6.2 built into `ry`, so they need no GNU R. `R_HOME`, when set, names a GNU R
-installation for ry's runtime to load base R from instead, which emulates that release
-([installation](/installation#r) has the details). `ry R` and `--runtime gnu-r` run GNU R itself:
-the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
-built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
+`build`, `install` and `debug-adapter` run R, and all of them except `R` run it on ry's runtime.
+[How ry finds R](#how-ry-finds-r) says where that runtime and base R come from.
 
 ## check
 
@@ -70,7 +66,7 @@ The editor offers the same fixes as quick fixes.
 `--annotate` writes the inferred type of each unannotated top-level function and binding in the
 named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
 says, prints how many it added, and then reports what is left.
-[Strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode) shows it at work. A binding
+[Strict mode](/tutorial/fully-typed#strict-mode) shows it at work. A binding
 whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
@@ -128,12 +124,12 @@ ry migrate data-table             # print the rewrites for the project as a diff
 ry migrate data-table R/ --write  # rewrite the files under R/ in place
 ```
 
-`ry migrate data-table` rewrites data.table code as [DataFrame](/guides/dataframes) code, applying
+`ry migrate data-table` rewrites data.table code as [DataFrame](/reference/dataframes) code, applying
 the same rewrites the editor offers as code actions. It takes files and directories, or the whole
 project when given none. Without `--write`, it prints a diff of each file to stderr and leaves the
 files alone. Either way it prints a one-line summary to stdout and exits 0. Each form it rewrites,
 and each it leaves alone, is listed in
-[Moving from data.table](/guides/from-data-table#rewriting-automatically).
+[Moving from data.table](/reference/from-data-table#rewriting-automatically).
 
 ## run and R
 
@@ -150,12 +146,12 @@ stops a script with exit status 1, as with `Rscript`, and so does `q(status = 1)
 only what the script prints, with no startup banner.
 
 Before anything runs, both commands check the script, and the console checks each command, against
-the project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations)
-warnings, and in [strict mode](/type-checking/strict-mode) they print every error and refuse code
+the project's `ry.toml`. They print the [inline annotation](/tutorial/runtime#inline-annotations)
+warnings, and in [strict mode](/tutorial/fully-typed#strict-mode) they print every error and refuse code
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
-function boundaries](/type-checking/inline-annotations#running-annotated-code), and GNU R runs the
+function boundaries](/reference/type-system#inline-annotations-at-run-time), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
@@ -166,12 +162,21 @@ with a warning, as GNU R's does. Like GNU R's, `pdf` cannot repeat or reflect a 
 and stops it at its ends instead. knitr and rmarkdown documents with plot chunks render. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
-The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
-guide](/guides/running) describes what its completion knows. Started inside an R package, either
-console [loads it](/guides/running) and reloads what changed before each command, and
-`--no-load` turns that off. `--keybindings` and `--no-load` apply
-only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
-checked under its own name before the console opens, and a strict-mode refusal exits 1.
+Started inside an R package, either console [loads it](/reference/package-loading) and reloads what
+changed before each command; `--no-load` turns that off. In the console:
+
+- Tab completes names from the type checker's view of the code you typed, with each field's type.
+  `--keybindings vi` switches to vi keys.
+- Lines typed while a command runs are queued and run in order. Ctrl-C interrupts the command and
+  discards the queue.
+- `browser()` stops at a `Browse[1]>` prompt: `n` runs the next statement, `s` steps in, `f`
+  finishes the function, `c` continues, `Q` quits, and `where` shows the call stack. In a script,
+  `browser()` does nothing, as in a non-interactive R session.
+- `?mean` and `help()` print R's help pages; `help_type = "html"` opens them in a browser.
+
+`--keybindings` and `--no-load` apply only to a console, so passing either with a script is a usage
+error. With `-i FILE`, the file is checked under its own name before the console opens, and a
+strict-mode refusal exits 1.
 
 With standard input piped (`echo '1 + 1' | ry run`), the console skips the editor, the prompt and
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
@@ -209,7 +214,7 @@ A value outside a variable's range is ignored, as on GNU R.
 
 ## load and server
 
-`ry load` [loads the package](/guides/running) at `PATH` (default: the one containing the
+`ry load` [loads the package](/reference/package-loading) at `PATH` (default: the one containing the
 current directory) on ry's runtime, then runs each `-e EXPR` and the `-f FILE` script, and exits
 like `ry run`. `ry load --r-entry` prints the R code that gives a plain R session the same
 `load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in the scripts
@@ -292,7 +297,13 @@ instead.
 `ry debug-adapter` serves one debug session over the
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
 output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
-script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments. On Unix, the `ry run` console serves the same protocol on a socket, so an editor can attach to it while you work.
+script's status. The launch arguments are `program` (the script), `args`, `stopOnEntry`, `prelude`
+(R code run first, such as `load_all("."); library(testthat)`) and `testName` (run only the
+`test_that()` block with that description).
+
+On Unix, the `ry run` console serves the same protocol on a socket, so an editor can attach to it
+while you work: connect to the socket named in `$TMPDIR/ry-<uid>/console-<pid>.json` and send
+`initialize` and then `attach`.
 
 ## debug
 
@@ -315,6 +326,43 @@ aids for working on ry itself.
 
 A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not
 a `2`.
+
+## How ry finds R
+
+`ry check`, `ry fmt` and `ry server` run no R. The other commands except `ry R` run on ry's runtime,
+which needs base R (the R code of the base and default packages):
+
+- **Built in.** A build from source carries base R 4.6.2 inside `ry` and extracts it into
+  `~/.cache/ry/base/` on first use, once per release. `R.version`, `getRversion()` and `R.home()`
+  then describe that copy. The 0.4.1-beta release does not have it and needs `R_HOME` or a GNU R on
+  `PATH`.
+- **`R_HOME`.** When set to a GNU R installation (4.3 or newer, built as a shared library), ry's
+  runtime loads base R from it and behaves like that release where R changed between releases.
+  An `R_HOME` that holds no base R is an error, not a fallback.
+- **`RY_BASE_R`** names a base R tree built by `just base-r`. Without it, a `base-r/` directory
+  beside `ry`, one or two directories up, or in `../lib/ry/base-r` takes precedence over the built-in
+  copy, which is how a development build and a distribution package find theirs.
+
+ry's runtime itself (`libR.so`, `libR.dylib` or `R.dll`) is built into `ry` and extracted into
+`~/.cache/ry/runtime/` (`$XDG_CACHE_HOME`, or `%LOCALAPPDATA%` on Windows) on first use. If that
+directory cannot hold a library (read-only, or mounted `noexec`), set `XDG_CACHE_HOME` to another
+directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in `deps/`, or in
+`../lib/ry/` takes precedence over the built-in one.
+
+`ry R` and `--runtime gnu-r` run GNU R itself: the R in `R_HOME` if it is set, and otherwise the one
+`R RHOME` reports on your `PATH`. It must be built as a shared library, as the CRAN builds are, and
+on Windows it must be R 4.2 or newer.
+
+Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) loads the system's BLAS and LAPACK on
+first use: `libblas.so.3` and `liblapack.so.3` on Linux, Accelerate on macOS. With `R_HOME` set, ry
+also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds them on NixOS),
+then for GNU R's own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every
+place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas.dll` and
+`Rlapack.dll`. Compiled package code links the same libraries.
+
+On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged: it loads a copy
+of each package library, cached under `~/Library/Caches/ry/rebound/`, that names ry's runtime
+instead of GNU R's `libR`.
 
 ## JSON output
 
