@@ -2951,12 +2951,10 @@ impl<'db> Checker<'db, '_> {
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect(),
-                        condition_only: module[parameters]
-                            .iter()
-                            .filter(|parameter| {
-                                self.read_only_as_condition(*body, parameter.name) == Some(true)
-                            })
-                            .map(|parameter| Name::new(self.db, parameter.name))
+                        condition_only: self
+                            .condition_only_names(*body, &module[parameters])
+                            .into_iter()
+                            .map(|name| Name::new(self.db, name))
                             .collect(),
                         null_unless,
                         reduces,
@@ -8361,47 +8359,70 @@ impl<'db> Checker<'db, '_> {
             .any_child(id, |child| self.writes_name(child, name))
     }
 
-    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
-    /// `Some(true)` when every read of `name` under `id` is the whole condition of an `if` or a
-    /// `while`, `Some(false)` when some read is anything else, and `None` when there is no read.
-    /// A nested function's reads count as other reads, since it may rebind the name.
-    fn read_only_as_condition(&self, id: ExprId, name: Symbol) -> Option<bool> {
+    /// The parameters whose every read under `body` is the whole condition of an `if` or a
+    /// `while`, and which are read at least once. A nested function's reads count like any
+    /// other. One walk serves every parameter, since a walk per parameter is quadratic in
+    /// long signatures.
+    fn condition_only_names(&self, body: ExprId, parameters: &[Formal]) -> Vec<Symbol> {
+        // Per parameter: read as a whole condition, and read some other way.
+        let mut reads: Vec<(Symbol, bool, bool)> = parameters
+            .iter()
+            .map(|parameter| (parameter.name, false, false))
+            .collect();
+        if reads.is_empty() {
+            return Vec::new();
+        }
+        self.record_condition_reads(body, &mut reads);
+        reads
+            .into_iter()
+            .filter(|&(_, as_condition, otherwise)| as_condition && !otherwise)
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    fn record_condition_reads(&self, id: ExprId, reads: &mut [(Symbol, bool, bool)]) {
         let module = self.module;
-        let strip = |mut id: ExprId| {
-            while let ExpressionKind::Paren(inner) = module.kind(id) {
-                id = *inner;
+        // A condition that is a tracked name, through any parentheses, is a condition read
+        // of it, and holds no other read.
+        let condition_name = |mut condition: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(condition) {
+                condition = *inner;
             }
-            id
-        };
-        let is_name = |id: ExprId| matches!(module.kind(strip(id)), ExpressionKind::NameRef(read) if *read == name);
-        let join = |left: Option<bool>, right: Option<bool>| match (left, right) {
-            (Some(false), _) | (_, Some(false)) => Some(false),
-            (None, other) | (other, None) => other,
-            (Some(true), Some(true)) => Some(true),
+            match module.kind(condition) {
+                ExpressionKind::NameRef(name) => reads.iter().position(|read| read.0 == *name),
+                _ => None,
+            }
         };
         match module.kind(id) {
-            ExpressionKind::NameRef(read) if *read == name => Some(false),
+            ExpressionKind::NameRef(name) => {
+                if let Some(read) = reads.iter_mut().find(|read| read.0 == *name) {
+                    read.2 = true;
+                }
+            }
             ExpressionKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } if is_name(*condition) => {
-                let branches = join(
-                    self.read_only_as_condition(*then_branch, name),
-                    else_branch.and_then(|branch| self.read_only_as_condition(branch, name)),
-                );
-                join(Some(true), branches)
+            } if let Some(position) = condition_name(*condition) => {
+                let (then_branch, else_branch) = (*then_branch, *else_branch);
+                if let Some(read) = reads.get_mut(position) {
+                    read.1 = true;
+                }
+                self.record_condition_reads(then_branch, reads);
+                if let Some(branch) = else_branch {
+                    self.record_condition_reads(branch, reads);
+                }
             }
-            ExpressionKind::While { condition, body } if is_name(*condition) => {
-                join(Some(true), self.read_only_as_condition(*body, name))
+            ExpressionKind::While { condition, body }
+                if let Some(position) = condition_name(*condition) =>
+            {
+                let body = *body;
+                if let Some(read) = reads.get_mut(position) {
+                    read.1 = true;
+                }
+                self.record_condition_reads(body, reads);
             }
-            _ => {
-                let mut verdict = None;
-                module.for_each_child(id, |child| {
-                    verdict = join(verdict, self.read_only_as_condition(child, name));
-                });
-                verdict
-            }
+            _ => module.for_each_child(id, |child| self.record_condition_reads(child, reads)),
         }
     }
 

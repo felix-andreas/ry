@@ -27,6 +27,7 @@ use {
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
             derive_from_syntax, project_fold_shares,
         },
+        lints::LintLevel,
         metadata::{
             NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -934,12 +935,6 @@ fn analyze_project_with(
             semantics::item_interface_edges(db, item);
         }
     });
-    // The group walk records one dependency edge per item, and salsa keeps that capacity in the
-    // handle's reused query-stack frame, so every later query at the same depth would clear a
-    // table sized for the whole project. A throwaway handle takes the walk and drops the frame.
-    if let Some(project) = ProjectFiles::try_get(&db) {
-        semantics::project_interface_groups(&db.clone(), project);
-    }
     // Whether the file's findings are known, from the record or from this run.
     let has_findings: Vec<bool> = (0..files.len())
         .map(|index| recorded[index].is_some() || checked(index))
@@ -948,43 +943,38 @@ fn analyze_project_with(
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
-        let rendered = document_diagnostics(db, files[index], &config);
-        apply_suppressions(rendered, files[index].text(db))
-    }) {
-        per_file[index] = diagnostics;
-    }
-    // Computed last so the `unused-import` lint sees the whole package.
-    let mut namespace = None;
-    if let Some(namespace_source) = &namespace_source {
-        let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
-        let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
-        let mut problems =
-            namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
-        // R resolves an export with `exists()` from the namespace, which inherits through base
-        // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
-        let defines = |name: &str| {
-            ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_binds(&db, files, name))
-                || semantics::check::DEFAULT_SEARCH_PATH
-                    .iter()
-                    .any(|package| namespace_exports(&db, package, name))
-        };
-        problems.extend(namespace::namespace_export_problems(
-            &namespace_file.exports,
-            &namespace_file.imports,
-            &defines,
-            &knows,
-            &exports,
-            &used_tokens,
-        ));
-        problems.extend(namespace::unused_import_diagnostics(
-            &namespace_file.imports,
-            &used_tokens,
-            config.lint.unused_import,
-        ));
-        namespace = Some((namespace_path, namespace_source.clone(), problems));
-    }
+    // The namespace verdict reads only naming and the stubs, so it runs on a spare handle
+    // beside the group walk and the checks instead of after them, on cores the checks leave
+    // idle as they finish.
+    let namespace = thread::scope(|scope| {
+        let verdict = namespace_source.as_ref().map(|namespace_source| {
+            let db = db.clone();
+            let (namespace_file, used_tokens) = (&namespace_file, &used_tokens);
+            let unused_import = config.lint.unused_import;
+            let namespace_path = namespace_path.clone();
+            scope.spawn(move || {
+                let problems = namespace_problems(&db, namespace_file, used_tokens, unused_import);
+                (namespace_path, namespace_source.clone(), problems)
+            })
+        });
+        // The group walk records one dependency edge per item, and salsa keeps that capacity
+        // in the handle's reused query-stack frame, so every later query at the same depth
+        // would clear a table sized for the whole project. A throwaway handle takes the walk
+        // and drops the frame.
+        if let Some(project) = ProjectFiles::try_get(&db) {
+            semantics::project_interface_groups(&db.clone(), project);
+        }
+        for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
+            let rendered = document_diagnostics(db, files[index], &config);
+            apply_suppressions(rendered, files[index].text(db))
+        }) {
+            per_file[index] = diagnostics;
+        }
+        verdict.map(|verdict| match verdict.join() {
+            Ok(verdict) => verdict,
+            Err(panic) => std::panic::resume_unwind(panic),
+        })
+    });
     if cache == CacheUse::ReadWrite {
         let positions: FxHashMap<SourceFile, u32> = files
             .iter()
@@ -1042,6 +1032,42 @@ fn analyze_project_with(
         },
         reused,
     ))
+}
+
+/// The `NAMESPACE` findings: imports of unknown names, exports nothing defines, and, as the
+/// `unused-import` lint, imports no file uses.
+fn namespace_problems(
+    db: &RootDatabase,
+    namespace_file: &NamespaceFile,
+    used_tokens: &FxHashSet<&str>,
+    unused_import: LintLevel,
+) -> Vec<Diagnostic> {
+    let knows = |package: &str| namespace_known(db, package).unwrap_or(false);
+    let exports = |package: &str, name: &str| namespace_exports(db, package, name);
+    let mut problems =
+        namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
+    // R resolves an export with `exists()` from the namespace, which inherits through base
+    // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
+    let defines = |name: &str| {
+        ProjectFiles::try_get(db).is_some_and(|files| semantics::package_binds(db, files, name))
+            || semantics::check::DEFAULT_SEARCH_PATH
+                .iter()
+                .any(|package| namespace_exports(db, package, name))
+    };
+    problems.extend(namespace::namespace_export_problems(
+        &namespace_file.exports,
+        &namespace_file.imports,
+        &defines,
+        &knows,
+        &exports,
+        used_tokens,
+    ));
+    problems.extend(namespace::unused_import_diagnostics(
+        &namespace_file.imports,
+        used_tokens,
+        unused_import,
+    ));
+    problems
 }
 
 /// A package's analysis kept from one check to the next within a process, so a check after
