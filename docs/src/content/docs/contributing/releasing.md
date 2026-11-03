@@ -21,21 +21,19 @@ one runs locally as well:
 `release-publish` needs `gh` signed in, and outside the workflow it needs a `VSCE_PAT`, because
 without one it publishes with `--oidc`, which works only inside GitHub Actions.
 
-## Enabling the workflows
+## The workflows
 
-Agents cannot write to `.github/workflows/`, so they stage workflow files in `.github/pending/`,
-which mirrors the final layout. A maintainer moves everything staged there into place with one
-command from the repository root, then commits and pushes:
+`.github/workflows/` holds three workflows: `release.yml`, `docs.yml` (the docs deploy below) and
+`ci.yml`. CI runs only when started by hand (from the Actions tab, on any ref), not on pushes or pull
+requests. The orchestrating agent starts it on main at its hourly check when main has new commits.
+
+Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
+in `.github/pending/workflows/`, which mirrors the final layout. A maintainer then moves it into place
+from the repository root, commits and pushes:
 
 ```bash
 git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
 ```
-
-`.github/pending/workflows/release.yml` becomes the release workflow,
-`.github/pending/workflows/docs.yml` the docs deploy workflow, and
-`.github/pending/workflows/ci.yml` replaces the live CI workflow. CI runs only when started by hand
-(from the Actions tab, on any ref), not on pushes or pull requests. The orchestrating agent starts it
-on main at its hourly check when main has new commits.
 
 ## Deploying the docs site
 
