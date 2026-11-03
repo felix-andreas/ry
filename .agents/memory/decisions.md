@@ -405,15 +405,11 @@ multi-line span brackets draw from those too, so it is filtered out of the rende
 The filter matches only a line that is nothing but the rule, because a nested report indents its
 own in the parent's colour.
 
-The README's hero image is generated, and its renderer had to learn the palette.
-`scripts/render-diagnostic-svg.rs` runs `ry check` under a pty and turns the ANSI it emits into an
-SVG, because GitHub strips escapes from a code block but honours a `<style>` block inside an
-embedded SVG. Its SGR parser matched whole escape bodies. That handled the previous renderer's
-single-parameter codes and silently dropped every compound one the graphical reporter emits, such
-as `36;1;4` for the underlined locus and `35;1` for the caret. The failure mode is a monochrome
-image that still looks plausible, so the render is worth an eye after any change to the palette.
-Parameters are applied one at a time now, and cyan, magenta, green, yellow and underline were
-added. The snippet-closing-rule width is read off miette 7.6, which hardcodes it.
+The README shows its diagnostics as the plain ASCII `ry check` prints into a pipe, not as an image:
+GitHub strips ANSI escapes from a code block, and an image rendered from them is one more artifact
+that nothing checks and that loses the text for search and screen readers.
+
+The snippet-closing-rule width is read off miette 7.6, which hardcodes it.
 `check_draws_the_snippet_as_a_window` fails if an upgrade moves it, which was verified by changing
 the constant.
 

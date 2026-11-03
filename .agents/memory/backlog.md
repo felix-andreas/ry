@@ -2066,9 +2066,9 @@ tagging fences `r` for Zed if that proves distant.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
   rather than the newest build, and the installation page names the tag in each URL. Promoting a
   release would let the docs recommend `latest` instead.
-- **The README's diagnostic image is not checked.** `docs/` samples are tests (`test_docs`), but
-  `.github/diagnostic.svg` is rendered by `scripts/render-diagnostic-svg.rs` and goes stale when a
-  message or blame range changes; re-run it after such a change.
+- **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
+  two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
+  a message or blame range changes; re-capture them after such a change.
 - **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 3,500 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.

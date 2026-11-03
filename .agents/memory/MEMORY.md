@@ -212,7 +212,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **R installs in agent containers** (`apt-get install -y --no-install-recommends r-base-core`, or the CRAN apt repo for a current R). `fs` needs `libuv1-dev`, and the tidyverse needs `libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev libfreetype-dev libpng-dev libjpeg-dev`. Free disk first (`target/debug/incremental`).
 - **Export manifests** (`types/*.exports`) come from a live session (`Rscript scripts/export-manifests.R`) on an R at least as new as the recorded one, because a hand-written or older-R manifest turns real exports into false `unresolved` findings. Meta-packages expand through `stubs::META_PACKAGE_MEMBERS`.
 - **Stubs** are declaration-only `.Rtypes` files in `types/`, using the `#:` grammar with the loader in `semantics/src/stubs.rs`. They are a set-once salsa input, and project `stubs/*.Rtypes` files override them. An overload set ends with an `Any` fallback.
-- **Landing-page and README samples are captured from the running tools**, never hand-edited, and the landing markup renders through `set:html` because Astro strips whitespace-only content. The landing samples are tests (`test_docs`); a changed message or blame range means re-capturing the README image with `scripts/render-diagnostic-svg.rs`.
+- **Landing-page and README samples are captured from the running tools**, never hand-edited, and the landing markup renders through `set:html` because Astro strips whitespace-only content. The landing samples are tests (`test_docs`); the README's two diagnostics are plain text from `ry check` piped to a file (ASCII, no colour), which nothing checks, so re-capture them when a message or blame range changes.
 
 ### Conventions
 

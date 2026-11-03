@@ -9,15 +9,15 @@ The released `ry` program is licensed under the GNU General Public License, vers
 The reason is that parts of ry's runtime are translations of GNU R's C code, such as its
 distribution functions, random number generators and plotmath, so the crates that contain them,
 and every crate that links one, are GPL. The tooling crates that do not link the runtime (the
-parser, formatter, type checker and editor features) stay under the permissive Universal
-Permissive License (UPL-1.0), so they remain reusable as libraries in any project. The C headers
+parser, formatter, type checker and editor features) are under the Universal Permissive License
+(UPL-1.0), so any project can reuse them as libraries. The C headers
 that packages compile against are LGPL-2.1-or-later, as R's own headers are, so a compiled package
 may choose its own licence. This is the arrangement R itself uses, with GPL code behind LGPL
 headers, and it resembles FFmpeg, whose build becomes GPL when its GPL parts are enabled.
 
 Some Rust crates that `ry` links are Apache-2.0, which is compatible with version 3 of the GPL but
 not version 2, so the `ry` binary as a whole is passed on under GPL-3.0-or-later. ry's own sources
-remain available under version 2 or later.
+are available under version 2 or later.
 
 The full texts are in [`LICENSE`](https://github.com/felix-andreas/ry/blob/main/LICENSE), and each
 release archive carries it. The source code of a release is its git tag.
@@ -44,7 +44,7 @@ release archive carries it. The source code of a release is its git tag.
 | third-party crates and C libraries in `ry` | their own; see [`THIRD_PARTY_NOTICES`](https://github.com/felix-andreas/ry/blob/main/THIRD_PARTY_NOTICES) |
 
 A crate is GPL exactly when it contains code translated from GNU R or depends on a crate that
-does. `repl` embeds the built `libR` as bytes but does not link it, so it stays UPL-1.0. A VS Code
+does. `repl` embeds the built `libR` as bytes but does not link it, so it is UPL-1.0. A VS Code
 extension built for one platform bundles the `ry` binary, so its `LICENSE` holds the MIT licence
 for the extension's own code followed by ry's `LICENSE`, and it carries `THIRD_PARTY_NOTICES`.
 
