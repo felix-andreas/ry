@@ -75,6 +75,24 @@ pub struct Heap {
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
     escaped: Vec<Sexp>,
+    /// The elements each escaped list held when it escaped. Native stores through the pointer
+    /// bypass the counts, so retiring the escape recounts the list from this snapshot.
+    escaped_lists: Vec<(Sexp, Vec<Sexp>)>,
+    /// Objects a store left without a counted reference, which the next reconcile frees if no
+    /// root holds them either (`Heap::reconcile`).
+    zero_count: Vec<Sexp>,
+    /// The table size that runs the next reconcile. Entries a root holds stay in the table, so
+    /// the trigger counts the entries added since the last one.
+    reconcile_at: usize,
+    /// The large-vector bytes the entries added since the last reconcile would free, as
+    /// [`Heap::note_zero`] estimates them.
+    zero_bytes: usize,
+    /// Live objects whose fields do not count (`flag_bits::UNTRACKED`): their fields are roots
+    /// for a reconcile.
+    untracked: Vec<Sexp>,
+    /// Under [`GcPolicy::verify`], what a reconcile would have freed, checked against the full
+    /// collection that runs instead.
+    expect_dead: Vec<Sexp>,
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
     ready_to_finalize: Vec<Sexp>,
@@ -205,7 +223,9 @@ pub trait RootSource {
 
 pub struct Marker<'a> {
     stack: &'a mut Vec<Sexp>,
-    space: &'a mut Space,
+    /// `None` while the zero-count table is reconciled: every object a source names is then
+    /// collected into `stack` as a root, without marking or tracing.
+    space: Option<&'a mut Space>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -360,6 +380,8 @@ pub struct GcStats {
     pub minor_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
+    /// Large vectors freed by reconciling the zero-count table, apart from a collection.
+    pub vectors_released: u64,
     pub live_objects: u64,
     pub live_bytes: u64,
     pub pages: u64,
@@ -529,6 +551,12 @@ impl Heap {
             young_large: Vec::new(),
             remembered: Vec::new(),
             escaped: Vec::new(),
+            escaped_lists: Vec::new(),
+            zero_count: Vec::new(),
+            reconcile_at: RECONCILE_ENTRIES,
+            zero_bytes: 0,
+            untracked: Vec::new(),
+            expect_dead: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
             weak_pairs: Vec::new(),
@@ -863,8 +891,10 @@ impl Heap {
         ) {
             for index in length..old {
                 let dropped = vector.element(index as usize);
-                dropped.decrement_refcount();
                 vector.set_element_unbarriered(index as usize, self.known.nil);
+                if dropped.release_reference() {
+                    self.note_zero(dropped);
+                }
             }
         }
         vector.set_length(length);
@@ -1305,7 +1335,9 @@ impl Heap {
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
             new.increment_refcount();
-            old.decrement_refcount();
+            if old.release_reference() {
+                self.note_zero(old);
+            }
         }
         self.write_barrier(parent, new);
     }
@@ -1319,6 +1351,7 @@ impl Heap {
         object.cdr().decrement_refcount();
         object.tag().decrement_refcount();
         object.set_flag(flag_bits::UNTRACKED, true);
+        self.untracked.push(object);
     }
 
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {
@@ -1357,7 +1390,10 @@ impl Heap {
             let value = from.stored_element(from_start + offset);
             if tracked {
                 value.increment_refcount();
-                to.stored_element(to_start + offset).decrement_refcount();
+                let old = to.stored_element(to_start + offset);
+                if old.release_reference() {
+                    self.note_zero(old);
+                }
             }
             to.set_element_unbarriered(to_start + offset, value);
         }
@@ -1416,6 +1452,14 @@ impl Heap {
         if vector.gc_bits() & gc_bits::ESCAPED == 0 {
             vector.set_gc_bit(gc_bits::ESCAPED, true);
             self.escaped.push(vector);
+            if matches!(vector.kind(), SexpType::List | SexpType::Expression)
+                && vector.tracks_references()
+            {
+                let elements = (0..vector.length() as usize)
+                    .map(|index| vector.stored_element(index))
+                    .collect();
+                self.escaped_lists.push((vector, elements));
+            }
         }
     }
 
@@ -1427,6 +1471,18 @@ impl Heap {
     /// package touched once would be rescanned by every minor collection for the rest of the
     /// session.
     pub unsafe fn retire_escaped(&mut self) {
+        // Native code may have replaced elements without counting either side, so the counts
+        // move from what the list held when it escaped to what it holds now.
+        for (vector, before) in std::mem::take(&mut self.escaped_lists) {
+            for index in 0..vector.length() as usize {
+                vector.stored_element(index).increment_refcount();
+            }
+            for old in before {
+                if old.release_reference() {
+                    self.note_zero(old);
+                }
+            }
+        }
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
@@ -1962,6 +2018,12 @@ impl Heap {
         if self.inhibit > 0 {
             return;
         }
+        // A reconcile scans every root, so it runs once the table could free enough to pay for
+        // that, or has grown enough to need bounding. Running one at every large allocation
+        // made package test suites a sixth slower, because entries a root holds stay listed.
+        if self.zero_bytes >= RECONCILE_BYTES || self.zero_count.len() >= self.reconcile_at {
+            self.reconcile(keep);
+        }
         match self.policy.stress {
             GcStress::EveryAllocation => {
                 // A major collection marks the whole heap, so running one every few allocations
@@ -2002,6 +2064,220 @@ impl Heap {
             self.stress_counter = 0;
             self.collect_keeping(Collection::Major, keep, request);
         }
+    }
+
+    /// Remembers that the last counted reference to `object` went away, when a reconcile could
+    /// reclaim it: a list, whose release gives up its elements, or a large atomic vector, whose
+    /// memory a reconcile frees.
+    #[inline]
+    unsafe fn note_zero(&mut self, object: Sexp) {
+        if !reclaimable(object) {
+            return;
+        }
+        // An entry a root held at the last reconcile is still listed, but losing a counted
+        // reference again is news about it all the same.
+        if object.gc_bits() & gc_bits::ZERO_LISTED == 0 {
+            object.set_gc_bit(gc_bits::ZERO_LISTED, true);
+            self.zero_count.push(object);
+        }
+        self.zero_bytes += self.reclaimable_bytes(object);
+    }
+
+    /// The bytes freeing `object` would return: its own if it is a large atomic vector, and for
+    /// a list, those of the large atomic vectors among its first elements that it alone holds,
+    /// which is where a data frame's or a `list(...)` of results' columns are.
+    unsafe fn reclaimable_bytes(&self, object: Sexp) -> usize {
+        if object.kind() != SexpType::List {
+            return self.size_of(object);
+        }
+        (0..(object.length() as usize).min(64))
+            .map(|index| object.stored_element(index))
+            .filter(|&element| {
+                element.refcount() == 1
+                    && element.kind() != SexpType::List
+                    && reclaimable(element)
+            })
+            .map(|element| self.size_of(element))
+            .sum()
+    }
+
+    /// Frees what the zero-count table proves dead without waiting for a collection, the way
+    /// GNU R's reference counts would if it freed on them, which it does not.
+    ///
+    /// An entry with no counted reference can still be held through a reference the counts do
+    /// not see: a root (the protect stack, the precious set, a native call's handouts, an
+    /// interpreter frame), the fields of an untracked object, an escaped list's elements, a weak
+    /// reference, or the allocation's own `keep`. Those references are gathered shallowly and
+    /// flagged, which costs one pass over the roots rather than a trace of the heap. Every other
+    /// reference to a heap object is a counted field, so an entry at count zero that no root
+    /// names is unreachable.
+    ///
+    /// A dead list gives up its elements, which may cascade to their own last references, and
+    /// stays for the sweep with its fields cleared; a dead large atomic vector is freed at once,
+    /// which is what returns a temporary's pages before the next collection would.
+    unsafe fn reconcile(&mut self, keep: &[Sexp]) {
+        if self.inhibit > 0 || self.zero_count.is_empty() {
+            return;
+        }
+        self.zero_bytes = 0;
+        let entries = std::mem::take(&mut self.zero_count);
+        let mut work: Vec<Sexp> = Vec::new();
+        for &object in &entries {
+            if object.refcount() == 0 {
+                work.push(object);
+            } else {
+                object.set_gc_bit(gc_bits::ZERO_LISTED, false);
+            }
+        }
+        if work.is_empty() {
+            self.reconcile_at = RECONCILE_ENTRIES;
+            return;
+        }
+        let mut roots = self.shallow_roots(keep);
+        for &root in &roots {
+            root.set_gc_bit(gc_bits::HELD, true);
+        }
+        // Held entries stay in the table: the root that holds one can drop it without a store,
+        // and the next reconcile looks again.
+        let mut held = Vec::new();
+        work.retain(|&object| {
+            if object.gc_bits() & (gc_bits::HELD | gc_bits::ESCAPED) != 0 {
+                held.push(object);
+                false
+            } else {
+                object.set_gc_bit(gc_bits::ZERO_LISTED, false);
+                true
+            }
+        });
+        let verify = self.policy.verify;
+        let nil = self.known.nil;
+        let mut freed = false;
+        while let Some(object) = work.pop() {
+            if object.gc_bits() & gc_bits::RELEASED != 0 {
+                continue;
+            }
+            object.set_gc_bit(gc_bits::RELEASED, true);
+            let give_up = |child: Sexp, work: &mut Vec<Sexp>, held: &mut Vec<Sexp>| {
+                if !child.release_reference()
+                    || child.gc_bits() & gc_bits::RELEASED != 0
+                    || !(reclaimable(child) || child.kind() == SexpType::Pairlist)
+                {
+                    return;
+                }
+                if child.gc_bits() & (gc_bits::HELD | gc_bits::ESCAPED) == 0 {
+                    child.set_gc_bit(gc_bits::ZERO_LISTED, false);
+                    work.push(child);
+                } else if reclaimable(child) && child.gc_bits() & gc_bits::ZERO_LISTED == 0 {
+                    child.set_gc_bit(gc_bits::ZERO_LISTED, true);
+                    held.push(child);
+                }
+            };
+            give_up(object.attrib(), &mut work, &mut held);
+            object.set_attrib_unbarriered(nil);
+            match object.kind() {
+                SexpType::List => {
+                    for index in 0..object.length() as usize {
+                        give_up(object.stored_element(index), &mut work, &mut held);
+                        object.set_element_unbarriered(index, nil);
+                    }
+                }
+                SexpType::Pairlist => {
+                    give_up(object.car(), &mut work, &mut held);
+                    give_up(object.cdr(), &mut work, &mut held);
+                    give_up(object.tag(), &mut work, &mut held);
+                    object.set_car_unbarriered(nil);
+                    object.set_cdr_unbarriered(nil);
+                    object.set_tag_unbarriered(nil);
+                }
+                _ => {
+                    if verify {
+                        self.expect_dead.push(object);
+                    } else if object.gc_bits() & gc_bits::REMEMBERED == 0 {
+                        self.free_released(object);
+                        freed = true;
+                    }
+                    continue;
+                }
+            }
+            if verify {
+                self.expect_dead.push(object);
+            }
+        }
+        for root in roots.drain(..) {
+            root.set_gc_bit(gc_bits::HELD, false);
+        }
+        self.zero_count = held;
+        self.reconcile_at = self.zero_count.len() + RECONCILE_ENTRIES;
+        if freed {
+            self.refresh_live_stats();
+        }
+        if verify && !self.expect_dead.is_empty() {
+            // Nothing was freed, so the full collection that checks the released objects are
+            // unreachable is also the one that reclaims them.
+            self.collect_keeping(Collection::Major, keep, 0);
+        }
+    }
+
+    /// Every object a reference the counts do not see points at, for [`Heap::reconcile`]. A
+    /// root's own fields are counted, so its children need no visit.
+    unsafe fn shallow_roots(&mut self, keep: &[Sexp]) -> Vec<Sexp> {
+        let mut roots = Vec::with_capacity(4096);
+        roots.extend(self.known.all());
+        roots.extend_from_slice(keep);
+        let stacks = &self.roots;
+        for stack in [
+            &stacks.globals,
+            &stacks.protect.stack,
+            &stacks.handles,
+            &stacks.handouts,
+        ] {
+            roots.extend_from_slice(&stack.entries);
+        }
+        roots.extend(stacks.precious.keys().copied());
+        let sources = std::mem::take(&mut self.sources);
+        for (_, source) in &sources {
+            source.trace(&mut Marker {
+                stack: &mut roots,
+                space: None,
+            });
+        }
+        self.sources = sources;
+        for &weak in self.weak_refs.iter().chain(&self.ready_to_finalize) {
+            roots.extend([
+                weak,
+                weak.weak_key(),
+                weak.weak_value(),
+                weak.weak_finalizer(),
+            ]);
+        }
+        for &object in &self.untracked {
+            roots.extend([object.car(), object.cdr(), object.tag(), object.attrib()]);
+        }
+        for &vector in &self.escaped {
+            if !vector.is_altrep() && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+            {
+                roots.extend(
+                    (0..vector.length() as usize).map(|index| vector.stored_element(index)),
+                );
+            }
+        }
+        roots
+    }
+
+    /// Frees a large atomic vector a reconcile found dead. Its bytes stay counted until a collection
+    /// recounts them (a minor one for a young vector, a major one for an old one), so a reconcile returns pages early without moving the
+    /// collections. Uncounting them would put the next collection off, and the dead temporaries
+    /// only a collection finds, such as a forced promise's value, would pile up meanwhile: a
+    /// loop of `y <- rep(runif(1e6), 10)` then peaked a quarter higher.
+    unsafe fn free_released(&mut self, object: Sexp) {
+        if object.gc_bits() & gc_bits::MARK == 0
+            && let Some(position) = self.young_large.iter().rposition(|&young| young == object)
+        {
+            self.young_large.swap_remove(position);
+        }
+        self.free_large(object);
+        self.stats.vectors_released += 1;
+        self.stats.objects_freed += 1;
     }
 
     /// Whether allocating `request` more bytes, as one large vector or as small objects, runs a
@@ -2100,6 +2376,23 @@ impl Heap {
         // Before the sweep, while a mark still means "survives".
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
+        self.escaped_lists
+            .retain(|(object, _)| space.is_marked(*object));
+        self.zero_count.retain(|&object| space.is_marked(object));
+        self.untracked.retain(|&object| space.is_marked(object));
+        if !self.expect_dead.is_empty() {
+            let expect_dead = std::mem::take(&mut self.expect_dead);
+            for &object in &expect_dead {
+                if self.space.is_marked(object) {
+                    panic!(
+                        "a reconcile would have freed a live {:?} of length {} (refcount {})",
+                        object.kind(),
+                        object.length(),
+                        object.refcount()
+                    );
+                }
+            }
+        }
         match kind {
             Collection::Minor => {
                 self.strings.remove_dead_young(&self.space);
@@ -2217,7 +2510,7 @@ impl Heap {
         for (_, source) in &sources {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
-                space: &mut self.space,
+                space: Some(&mut self.space),
             };
             source.trace(&mut marker);
         }
@@ -2798,8 +3091,13 @@ impl RootStack {
 
 impl Marker<'_> {
     pub unsafe fn mark(&mut self, object: Sexp) {
-        if self.space.mark(object) {
-            self.stack.push(object);
+        match &mut self.space {
+            Some(space) => {
+                if space.mark(object) {
+                    self.stack.push(object);
+                }
+            }
+            None => self.stack.push(object),
         }
     }
 }
@@ -2809,6 +3107,30 @@ impl Sexp {
         self.set_length(length);
         self.set_capacity(capacity);
     }
+}
+
+/// Entries the zero-count table gathers before a reconcile bounds it, however little they would
+/// free.
+const RECONCILE_ENTRIES: usize = 1 << 16;
+
+/// Large-vector bytes the zero-count table must stand to free before a reconcile runs for them.
+/// A package's test session has about 20,000 roots, which take about 100 µs to scan, so a
+/// reconcile pays for itself only when it frees megabytes.
+const RECONCILE_BYTES: usize = 4 << 20;
+
+/// Whether a reconcile can reclaim `object` once nothing holds it: a list, by giving up its
+/// elements, or a large atomic vector, by freeing it. ALTREP objects keep their own data.
+unsafe fn reclaimable(object: Sexp) -> bool {
+    !object.is_altrep()
+        && match object.kind() {
+            SexpType::List => true,
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw => object.size_class() == LARGE_CLASS,
+            _ => false,
+        }
 }
 
 /// Every type code a vector can have, for generators and tests.
