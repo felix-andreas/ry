@@ -799,7 +799,8 @@ impl Session {
 
     fn act(&mut self, entropy: &mut impl Entropy) -> Result<(), SessionFailure> {
         match entropy.below(100) {
-            0..=29 => self.edit(entropy),
+            0..=26 => self.edit(entropy),
+            27..=29 => self.press_enter(entropy)?,
             30..=34 => self.type_burst(entropy),
             35..=41 => self.open_document(entropy),
             42..=45 => self.close_document(entropy),
@@ -944,6 +945,120 @@ impl Session {
                 self.run_steps(1);
             }
         }
+    }
+
+    /// Enter pressed up to three times in a row with format-on-type on: the editor inserts the
+    /// line break and the line's indentation, waits for the on-type answer and applies it. The
+    /// answer may lay out the finished line, but the line breaks around the cursor stay exactly
+    /// as typed.
+    fn press_enter(&mut self, entropy: &mut impl Entropy) -> Result<(), SessionFailure> {
+        let Some(uri) = self.pick_open(entropy) else {
+            return Ok(());
+        };
+        let parsed = Url::parse(&uri).expect("open URIs parse");
+        let utf8 = self.options.utf8;
+        let mut cursor = {
+            let text = &self.open[&uri].1;
+            let offset = char_boundary(text, entropy.below(text.len() + 1));
+            match entropy.below(3) {
+                0 => text.len(),
+                1 => text[offset..]
+                    .find('\n')
+                    .map_or(text.len(), |at| offset + at),
+                _ => offset,
+            }
+        };
+        self.mark_input_change();
+        self.unchanged_since_sync.insert(uri.clone());
+        self.current_pushes.insert(uri.clone());
+        for _ in 0..1 + entropy.below(3) {
+            let (version, text) = self
+                .open
+                .get_mut(&uri)
+                .expect("Enter targets an open document");
+            let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
+            let indentation: String = text[line_start..cursor]
+                .chars()
+                .take_while(|character| *character == ' ' || *character == '\t')
+                .collect();
+            let typed = format!("\n{indentation}");
+            let at = position_of(text, cursor, utf8);
+            text.insert_str(cursor, &typed);
+            cursor += typed.len();
+            *version += 1;
+            let notification = Notification::DidChange(lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier::new(
+                    parsed.clone(),
+                    *version,
+                ),
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: Some(lsp_types::Range::new(at, at)),
+                    range_length: None,
+                    text: typed,
+                }],
+            });
+            self.notify(notification);
+
+            let text = self.open[&uri].1.clone();
+            let position = position_of(&text, cursor, utf8);
+            self.report.requests += 1;
+            let Some(response) = ask(
+                &mut self.simulation,
+                RequestKind::OnTypeFormatting,
+                &parsed,
+                position,
+            ) else {
+                return Err(self.fail(format!(
+                    "on-type formatting at {position:?} in {uri} got no response from an idle server"
+                )));
+            };
+            let value = response.map_err(|error| {
+                self.fail(format!(
+                    "on-type formatting at {position:?} in {uri} failed: {error:?}"
+                ))
+            })?;
+            let edits: Vec<lsp_types::TextEdit> =
+                serde_json::from_value::<Option<_>>(value.clone())
+                    .map_err(|error| {
+                        self.fail(format!(
+                            "on-type formatting at {position:?} in {uri} answered {value}: {error}"
+                        ))
+                    })?
+                    .unwrap_or_default();
+            self.log(format!(
+                "enter at {position:?} in {uri} -> {} edits",
+                edits.len()
+            ));
+            let formatted = apply_text_edits(&text, &edits, utf8);
+            check_enter(&text, cursor, &formatted).map_err(|problem| {
+                self.fail(format!(
+                    "on-type formatting after Enter at {position:?} in {uri} {problem}\ntext:\n{text}\nformatted:\n{formatted}"
+                ))
+            })?;
+            if formatted == text {
+                continue;
+            }
+            cursor = formatted.len() - (text.len() - cursor);
+            let (version, buffer) = self
+                .open
+                .get_mut(&uri)
+                .expect("Enter targets an open document");
+            *version += 1;
+            *buffer = formatted.clone();
+            let notification = Notification::DidChange(lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier::new(
+                    parsed.clone(),
+                    *version,
+                ),
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: formatted,
+                }],
+            });
+            self.notify(notification);
+        }
+        Ok(())
     }
 
     fn open_document(&mut self, entropy: &mut impl Entropy) {
@@ -1599,6 +1714,76 @@ pub fn position_of(text: &str, offset: usize, utf8: bool) -> Position {
         column.encode_utf16().count()
     };
     Position::new(line as u32, character as u32)
+}
+
+/// The byte offset of a protocol position, clamped to the end of its line and of the text.
+fn offset_of(text: &str, position: Position, utf8: bool) -> usize {
+    let line_start: usize = text
+        .split_inclusive('\n')
+        .take(position.line as usize)
+        .map(str::len)
+        .sum();
+    let line = text[line_start..].split('\n').next().unwrap_or_default();
+    let mut units = 0;
+    for (index, character) in line.char_indices() {
+        if units >= position.character as usize {
+            return line_start + index;
+        }
+        units += match utf8 {
+            true => character.len_utf8(),
+            false => character.len_utf16(),
+        };
+    }
+    line_start + line.len()
+}
+
+/// `text` with non-overlapping protocol edits applied, as an editor applies a response.
+fn apply_text_edits(text: &str, edits: &[lsp_types::TextEdit], utf8: bool) -> String {
+    let mut ranges: Vec<(usize, usize, &str)> = edits
+        .iter()
+        .map(|edit| {
+            (
+                offset_of(text, edit.range.start, utf8),
+                offset_of(text, edit.range.end, utf8),
+                edit.new_text.as_str(),
+            )
+        })
+        .collect();
+    ranges.sort_by_key(|&(start, end, _)| std::cmp::Reverse((start, end)));
+    let mut result = text.to_owned();
+    for (start, end, new_text) in ranges {
+        result.replace_range(start..end, new_text);
+    }
+    result
+}
+
+/// The on-type contract for Enter: `formatted` keeps the cursor's line, every blank line next to
+/// it, and the line break before them exactly as `text` has them, so formatting may lay out
+/// only the code before. `cursor` is where the caret stands in `text`.
+fn check_enter(text: &str, cursor: usize, formatted: &str) -> Result<(), String> {
+    let is_blank = |line: &str| line.trim().is_empty();
+    let mut kept_from = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
+    while kept_from > 0 {
+        let line_start = text[..kept_from - 1].rfind('\n').map_or(0, |at| at + 1);
+        if !is_blank(&text[line_start..kept_from]) {
+            break;
+        }
+        kept_from = line_start;
+    }
+    let kept = &text[kept_from..];
+    let Some(before) = formatted.strip_suffix(kept) else {
+        return Err(format!(
+            "changed the cursor's line, a blank line next to it, or a line after them ({kept:?} is gone)"
+        ));
+    };
+    let last_line = before
+        .strip_suffix('\n')
+        .map(|rest| &rest[rest.rfind('\n').map_or(0, |at| at + 1)..]);
+    match last_line {
+        None if before.is_empty() => Ok(()),
+        Some(line) if !is_blank(line) => Ok(()),
+        _ => Err("added or removed a line break before the cursor's line".to_owned()),
+    }
 }
 
 fn random_document(entropy: &mut impl Entropy) -> String {
