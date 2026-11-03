@@ -37,6 +37,17 @@
 |   ..$ d: chr "y"
 |   ..- attr(*, "class")= chr "outer"
 |   ..- attr(*, "extra")= num 5
+| List of 2
+|  $ a: chr "called"
+|  $ b: list()
+| List of 2
+|  $ a: chr "called"
+|  $ b: NULL
+|  Named chr "called"
+|  - attr(*, "names")= chr "a"
+| List of 2
+|  $ a: chr "called"
+|  $ b: list()
 [messages]
 [warnings]
 [errors]
