@@ -60,6 +60,9 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
         // Below 1e9 this still demands the same integer.
         "qbinom" | "qpois" | "qnbinom" | "qnbinom_mu" => (1e-9, 0.0),
         "ptukey" => (5e-13, 1e-16),
+        // Rounding picks one of two neighbouring doubles, so the same algorithm gives the same
+        // double, and one unit in the last place off is the wrong answer.
+        "fround" | "fprec" => (0.0, 0.0),
         // GNU R 4.3 computes the Poisson density with the extended deviance ebd0; ry uses
         // Loader's bd0, which agrees to about 1e-14 at moderate arguments.
         "dpois" | "dpois_raw" | "dgamma" | "dchisq" | "dnbinom_mu" => (2e-13, 0.0),

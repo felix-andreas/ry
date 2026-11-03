@@ -2980,6 +2980,13 @@ pub fn r_at_least(major: u32, minor: u32) -> bool {
     (version.major, version.minor) >= (major, minor)
 }
 
+/// Whether the emulated R is `major.minor.patch` or later, for the rare change GNU R made in a
+/// patch release.
+pub fn r_at_least_release(major: u32, minor: u32, patch: u32) -> bool {
+    let version = r_version();
+    (version.major, version.minor, version.patch) >= (major, minor, patch)
+}
+
 /// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
 /// guard for them also checks the revision, so ry reports at least this one
 /// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).

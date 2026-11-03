@@ -78,6 +78,31 @@ add("fprec", x = c(NA, -123.456789, 0, 1e-320, 0.000123456, 3.14159265358979, 12
     digits = c(NaN, -2, 0, 1, 3, 7, 15, 22, 23, Inf))
 add("fround", x = c(NA, -2.5, -0.15, 0, 0.15, 0.5, 1.005, 2.675, 1234.5678, 5e-324, 1e15 + 0.3, 1e300, Inf),
     digits = c(NaN, -3, -1, 0, 1, 2, 3, 10, 400, -400))
+# Rounding decides between the two doubles nearest the decimals around x, so these cases put x
+# on a decimal, halfway between two, and a few units in the last place to either side, at
+# every precision both functions handle, including tiny numbers that need more than 308
+# decimals. The seed keeps the generated cases fixed.
+set.seed(20261103)
+nudged <- function(x) {
+    ulp <- 2^(floor(log2(abs(x))) - 52)
+    as.vector(outer(x, -2:2, function(x, k) x + k * ulp))
+}
+decimals <- function(count, figures) floor(runif(count, 10^(figures - 1), 10^figures))
+for (d in c(-8:17, 20, 300, 305, 310, 315, 320, 323)) {
+    m <- c(decimals(6, sample(1:12, 6, replace = TRUE)), 1, 5, 25, 995)
+    whole <- c(m, m + 0.5) / 10^d
+    random <- 10^runif(20, -d - 3, 16 - d) * sample(c(-1, 1), 20, replace = TRUE)
+    add("fround", x = c(nudged(whole), -nudged(whole[1:4]), random), digits = d)
+}
+add("fround", x = c(99.21 + 1e-14, 0.9549 + 1.1102230246251565e-16, 0.285, 2.5, 3.5, -0.5, 1e-310),
+    digits = c(-0.7, -0.5, -0.4, 0.4, 0.5, 1.49, 1.5, 2, 4, 308.6, 322.6, 323.4))
+for (dig in c(-1, 0:22, 23)) {
+    figures <- max(1, min(dig, 16))
+    e <- sample(-40:40, 8, replace = TRUE)
+    whole <- c(decimals(8, figures) * 10^e, (decimals(4, figures) + 0.5) * 10^e[1:4])
+    random <- 10^runif(20, -320, 305) * sample(c(-1, 1), 20, replace = TRUE)
+    add("fprec", x = c(nudged(whole), random, 1.5e-310, 2.5e-320), digits = dig)
+}
 add("logspace_add", x = c(-Inf, -800, -1, 0, 3), y = c(-Inf, -799, 0, 50))
 add("logspace_sub", x = c(0, 3, 750), y = c(-Inf, -800, -1, -1e-20))
 add("logspace_sum", n = c(0, 1, 2, 3), a = c(-1, 700), b = c(0, -Inf), c = c(2, -50))

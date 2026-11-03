@@ -2419,70 +2419,43 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// R's `round(x, digits)`: of the two candidates at `digits` decimals, the one closer to `x`,
-/// and on a tie the one with an even last digit.
-pub fn round_digits(x: f64, digits: i32) -> f64 {
-    if !x.is_finite() {
-        return x;
+/// `signif` of a complex number, GNU R's `z_prec_r`: both parts are rounded to the same
+/// decimal place, the one that leaves the larger finite part `digits` significant digits, so
+/// the smaller part keeps only the decimals the larger one has.
+fn signif_complex(z: Rcomplex, digits: f64) -> Rcomplex {
+    const MAX_DIGITS: i32 = 22;
+    let larger = [z.r.abs(), z.i.abs()]
+        .into_iter()
+        .filter(|part| part.is_finite())
+        .fold(0.0, f64::max);
+    if larger == 0.0 {
+        return z;
     }
-    if digits > 308 {
-        return x;
-    }
-    if digits < -308 {
-        return 0.0;
-    }
-    if digits == 0 {
-        return x.round_ties_even();
-    }
-    let scale = 10f64.powi(digits);
-    let scaled = x * scale;
-    if !scaled.is_finite() {
-        return x;
-    }
-    let lower = scaled.floor();
-    let upper = scaled.ceil();
-    if lower == upper {
-        return x;
-    }
-    let lower_value = lower / scale;
-    let upper_value = upper / scale;
-    let lower_distance = (x - lower_value).abs();
-    let upper_distance = (upper_value - x).abs();
-    if lower_distance < upper_distance {
-        lower_value
-    } else if upper_distance < lower_distance {
-        upper_value
-    } else if lower % 2.0 == 0.0 {
-        lower_value
-    } else {
-        upper_value
-    }
-}
-
-pub fn signif_digits(x: f64, digits: i32) -> f64 {
-    if !x.is_finite() || x == 0.0 {
-        return x;
-    }
-    // Seventeen significant digits already reproduce any double exactly.
-    let digits = digits.clamp(1, 17);
-    let text = format!("{:.*e}", (digits - 1) as usize, x);
-    text.parse().unwrap_or(x)
-}
-
-/// `signif` of a complex number counts the significant digits of its larger part, so the
-/// smaller part keeps only the decimals the larger one has.
-fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
-    let larger = z.r.abs().max(z.i.abs());
-    let decimals = digits.max(1) - 1 - larger.log10().floor() as i32;
-    if z.r == 0.0 || z.i == 0.0 || !larger.is_finite() || decimals > 308 {
-        return Rcomplex {
-            r: signif_digits(z.r, digits),
-            i: signif_digits(z.i, digits),
+    if !digits.is_finite() {
+        return if digits > 0.0 {
+            z
+        } else {
+            Rcomplex { r: 0.0, i: 0.0 }
         };
     }
+    let dig = rmath::c_int_cast((digits + 0.5).floor()).max(1);
+    if dig > MAX_DIGITS {
+        return z;
+    }
+    let decimals = dig - larger.log10().floor() as i32 - 1;
+    if decimals > 306 {
+        // 10^decimals would overflow, so the parts are scaled up first.
+        let pow10 = 1.0e4;
+        let digits = (decimals - 4) as f64;
+        return Rcomplex {
+            r: rmath::fround(pow10 * z.r, digits) / pow10,
+            i: rmath::fround(pow10 * z.i, digits) / pow10,
+        };
+    }
+    let digits = decimals as f64;
     Rcomplex {
-        r: round_digits(z.r, decimals),
-        i: round_digits(z.i, decimals),
+        r: rmath::fround(z.r, digits),
+        i: rmath::fround(z.i, digits),
     }
 }
 
@@ -2530,51 +2503,33 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             if length(digits) == 0 {
                 return Err(call.error("invalid second argument of length 0"));
             }
-            let value = values::as_real_scalar(digits);
-            // `NA` digits make every element `NA`, which `i32::MIN` stands for below.
-            if value.is_nan() {
-                i32::MIN
-            } else {
-                round_digit_count(value)
-            }
+            // Only a complex `x` reaches here with `NA` digits, which make every element `NA`.
+            values::as_real_scalar(digits)
         }
         None => {
             if significant {
-                6
+                6.0
             } else {
-                0
+                0.0
             }
         }
     };
     let operand = values::materialize(operand)?;
+    let round = if significant {
+        rmath::fprec
+    } else {
+        rmath::fround
+    };
     match operand.kind() {
-        SexpType::Integer | SexpType::Logical
-            if digits != i32::MIN && (!significant || digits >= 10) =>
-        {
-            if digits >= 0 || operand.kind() == SexpType::Logical {
-                let result = coerce_vector(operand, SexpType::Integer)?;
-                return Ok(result);
-            }
-            let result = coerce_vector(operand, SexpType::Real)?;
-            let result = values::duplicate(result)?;
-            for value in values::reals_mut(result) {
-                *value = round_digits(*value, digits);
-            }
-            Ok(result)
-        }
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
             let count = length(operand);
             let result = alloc(SexpType::Real, count)?;
             for index in 0..count {
                 let x = real_at(operand, index);
-                values::reals_mut(result)[index] = if digits == i32::MIN {
+                values::reals_mut(result)[index] = if is_na_real(x) {
                     NA_REAL
-                } else if x.is_nan() {
-                    x
-                } else if significant {
-                    signif_digits(x, digits)
                 } else {
-                    round_digits(x, digits)
+                    round(x, digits)
                 };
             }
             values::copy_most_attributes(operand, result, true)?;
@@ -2585,7 +2540,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             let result = alloc(SexpType::Complex, count)?;
             for index in 0..count {
                 let z = values::complexes(operand)[index];
-                values::complexes_mut(result)[index] = if digits == i32::MIN {
+                values::complexes_mut(result)[index] = if digits.is_nan() {
                     Rcomplex {
                         r: NA_REAL,
                         i: NA_REAL,
@@ -2594,8 +2549,8 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
                     signif_complex(z, digits)
                 } else {
                     Rcomplex {
-                        r: round_digits(z.r, digits),
-                        i: round_digits(z.i, digits),
+                        r: rmath::fround(z.r, digits),
+                        i: rmath::fround(z.i, digits),
                     }
                 };
             }
@@ -2606,8 +2561,8 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     }
 }
 
-/// `round` or `signif` with several `digits`, recycled against `x` as GNU R's binary math
-/// functions recycle; the attributes come from the longer argument.
+/// `round` or `signif` with several `digits`, recycled against `x` as GNU R's `math2` recycles
+/// them; the attributes come from the longer argument.
 unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Sexp> {
     let operand = values::materialize(operand)?;
     let digits = coerce_vector(digits, SexpType::Real)?;
@@ -2618,6 +2573,11 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
         operand_count.max(digits_count)
     };
     let result = alloc(SexpType::Real, count)?;
+    let round = if significant {
+        rmath::fprec
+    } else {
+        rmath::fround
+    };
     for index in 0..count {
         let x = real_at(operand, index % operand_count);
         let digit = values::reals(digits)[index % digits_count];
@@ -2627,12 +2587,7 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
         } else if x.is_nan() || digit.is_nan() {
             f64::NAN
         } else {
-            let digit = round_digit_count(digit);
-            if significant {
-                signif_digits(x, digit)
-            } else {
-                round_digits(x, digit)
-            }
+            round(x, digit)
         };
     }
     let source = if operand_count >= digits_count {
@@ -2642,11 +2597,6 @@ unsafe fn round_recycled(operand: Sexp, digits: Sexp, significant: bool) -> R<Se
     };
     values::copy_most_attributes(source, result, true)?;
     Ok(result)
-}
-
-/// A `digits` argument as an integer count, rounded half up as GNU R's `floor(digits + 0.5)`.
-fn round_digit_count(digits: f64) -> i32 {
-    (digits + 0.5).floor().clamp(-1e6, 1e6) as i32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

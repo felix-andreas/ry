@@ -407,7 +407,8 @@ pub fn pythag(a: f64, b: f64) -> f64 {
     a.hypot(b)
 }
 
-/// `signif(x, digits)`: rounds to `digits` significant decimal digits.
+/// `signif(x, digits)`, GNU R's `fprec`: `x` rounded to `digits` significant decimal digits by
+/// scaling it with a power of ten, rounding half to even, and scaling back.
 pub fn fprec(x: f64, digits: f64) -> f64 {
     const MAX_DIGITS: i32 = 22;
     const MAX10E: i32 = 308;
@@ -417,18 +418,18 @@ pub fn fprec(x: f64, digits: f64) -> f64 {
     if !finite(x) {
         return x;
     }
-    let digits = if !finite(digits) {
-        if digits > 0.0 {
-            return x;
-        }
-        1.0
-    } else {
+    let digits = if finite(digits) {
         digits
+    } else if digits > 0.0 {
+        return x;
+    } else {
+        1.0
     };
     if x == 0.0 {
         return x;
     }
-    let mut dig = digits.round() as i32;
+    // C's `round`, which rounds half away from zero.
+    let mut dig = c_int_cast(digits.round());
     if dig > MAX_DIGITS {
         return x;
     } else if dig < 1 {
@@ -439,28 +440,34 @@ pub fn fprec(x: f64, digits: f64) -> f64 {
     let mut e10 = dig - 1 - l10.floor() as i32;
     if l10.abs() < (MAX10E - 2) as f64 {
         let mut p10 = 1.0;
+        // Numbers below 10^(dig - 1) * 1e-308, whose scale factor alone would overflow.
         if e10 > MAX10E {
             p10 = r_pow_di(10.0, e10 - MAX10E);
             e10 = MAX10E;
         }
+        // A positive power of ten is exactly representable up to 1e22, so the scaling
+        // multiplies or divides by one rather than by its inexact reciprocal.
         if e10 > 0 {
             let pow10 = r_pow_di(10.0, e10);
-            sgn * ((x * pow10 * p10).round_ties_even() / pow10) / p10
+            sgn * (forceint((x * pow10) * p10) / pow10) / p10
         } else {
             let pow10 = r_pow_di(10.0, -e10);
-            sgn * ((x / pow10).round_ties_even() * pow10)
+            sgn * (forceint(x / pow10) * pow10)
         }
-    } else if l10 < 0.0 {
-        // Below 1e-306 the scale factor 10^e10 overflows; the decimal formatter rounds the
-        // exact binary value to `dig` digits instead, which is the answer GNU R gives.
-        let text = format!("{:.*e}", (dig - 1) as usize, x);
-        sgn * text.parse::<f64>().unwrap_or(x)
     } else {
-        let do_round = MAX10E as f64 - l10 >= r_pow_di(10.0, -dig);
-        let e2 = dig + if e10 > 0 { 1 } else { 6 };
+        // Up to R 4.5.0 the headroom below the largest double counted only its 308 whole
+        // decades, so `signif(1.09e308, 2)` truncated to 1e308.
+        let largest = if l10 > 0.0 && !crate::system::r_at_least_release(4, 5, 1) {
+            MAX10E as f64
+        } else {
+            f64::MAX.log10()
+        };
+        let do_round = largest - l10 >= r_pow_di(10.0, -dig);
+        let e2 = dig + (if e10 > 0 { 1 } else { -1 }) * MAX_DIGITS;
         let p10 = r_pow_di(10.0, e2);
         let big_p10 = r_pow_di(10.0, e10 - e2);
-        let mut x = x * p10 * big_p10;
+        let mut x = x * p10;
+        x *= big_p10;
         if do_round {
             x += 0.5;
         }
@@ -469,49 +476,69 @@ pub fn fprec(x: f64, digits: f64) -> f64 {
     }
 }
 
-/// `round(x, digits)`: of the two decimal neighbours of `x` with `digits` decimals, the one
-/// closer to `x` as a double, the even one on a tie, so `round(0.15, 1)` is 0.1 because the
-/// double nearest 0.15 lies below it.
+/// `round(x, digits)`, GNU R's `fround`: of the two neighbours of `x` with `digits` decimals,
+/// each computed as a double by scaling with a power of ten, the one closer to `x`, and on a
+/// tie the one with an even last digit. So `round(0.15, 1)` is 0.1, because the double nearest
+/// 0.15 lies below it, and `round(99.21 + 1e-14, 2)` is the double nearest 99.21 even though
+/// scaling `x` by 100 already gives a whole number.
 pub fn fround(x: f64, digits: f64) -> f64 {
-    const MAX_DIGITS: f64 = 308.0;
+    const MAX10E: i32 = 308;
+    // Large `digits` matter for tiny numbers, down to the subnormals' 10^-323.
+    const MAX_DIGITS: f64 = (MAX10E + f64::DIGITS as i32) as f64;
     if x.is_nan() || digits.is_nan() {
         return x + digits;
     }
-    if !finite(x) || digits > MAX_DIGITS + 15.0 || x == 0.0 {
+    if !finite(x) {
         return x;
     }
-    if digits < -MAX_DIGITS {
+    if digits > MAX_DIGITS || x == 0.0 {
+        return x;
+    } else if digits < -MAX10E as f64 {
         return 0.0;
-    }
-    if digits == 0.0 {
+    } else if digits == 0.0 {
         return forceint(x);
     }
     let dig = (digits + 0.5).floor() as i32;
     let (sgn, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+    // About log10(x), and enough to tell that `x` has no digits left to round away.
     let l10x = std::f64::consts::LOG10_2 * (0.5 + logb(x));
     if l10x + dig as f64 > f64::DIGITS as f64 {
         return sgn * x;
     }
-    let (x10, i10, down, up);
-    if dig > 0 {
+    let (i10, down, up);
+    if dig <= MAX10E {
+        // Neither 10^dig nor `x` scaled by it overflows here.
         let pow10 = r_pow_di(10.0, dig);
-        x10 = pow10 * x;
+        let x10 = x * pow10;
         i10 = x10.floor();
         down = i10 / pow10;
         up = x10.ceil() / pow10;
     } else {
-        let pow10 = r_pow_di(10.0, -dig);
-        x10 = x / pow10;
+        // `x` is far below 1, about 10^-305 or less, and 10^dig would overflow.
+        let p10 = r_pow_di(10.0, dig - MAX10E);
+        let pow10 = r_pow_di(10.0, MAX10E);
+        let x10 = (x * pow10) * p10;
         i10 = x10.floor();
-        down = i10 * pow10;
-        up = x10.ceil() * pow10;
+        down = i10 / pow10 / p10;
+        up = x10.ceil() / pow10 / p10;
     }
-    let du = up - x;
-    let dd = x - down;
-    sgn * if du < dd || (du == dd && i10 % 2.0 == 1.0) {
+    let distance_up = up - x;
+    let distance_down = x - down;
+    sgn * if distance_up < distance_down || (i10 % 2.0 == 1.0 && distance_up == distance_down) {
         up
     } else {
         down
+    }
+}
+
+/// C's conversion of a double to `int`, which truncates and is undefined out of range. On
+/// x86-64 the instruction gives `INT_MIN` there, so GNU R's `signif(x, 1e10)` keeps one digit,
+/// while ARM saturates as Rust's `as` does.
+pub fn c_int_cast(x: f64) -> c_int {
+    if cfg!(target_arch = "x86_64") && !(x > -2147483649.0 && x < 2147483648.0) {
+        c_int::MIN
+    } else {
+        x as c_int
     }
 }
 

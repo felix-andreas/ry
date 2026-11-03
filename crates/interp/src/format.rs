@@ -571,9 +571,9 @@ fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
         }
         if decimals > 306 {
             let scale = 1.0e4;
-            return crate::arith::round_digits(part * scale, decimals - 4) / scale;
+            return crate::rmath::fround(part * scale, (decimals - 4) as f64) / scale;
         }
-        crate::arith::round_digits(part, decimals)
+        crate::rmath::fround(part, decimals as f64)
     };
     Rcomplex {
         r: round(value.r, decimals),
