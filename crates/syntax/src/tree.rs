@@ -1490,6 +1490,58 @@ impl<'a> NodeRef<'a> {
             })
     }
 
+    /// This node and every element under it whose kind `wanted` accepts, tokens included, in
+    /// preorder. One scan of the kind column, so the elements a walk ignores are never built.
+    pub fn elements_of_kind<F: Fn(SyntaxKind) -> bool>(
+        self,
+        wanted: F,
+    ) -> impl Iterator<Item = ElementRef<'a>> + use<'a, F> {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        let first = self.index;
+        tree.columns
+            .kinds
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(move |&(_, &kind)| wanted(kind))
+            .map(move |(offset, _)| element_ref(tree, first + offset as u32))
+    }
+
+    /// The tokens under this node whose kind `wanted` accepts, in source order, skipping the
+    /// whole subtree of every node `pruned` accepts (this one included). Kinds are tested on
+    /// the kind column, so only the wanted tokens are built.
+    pub fn tokens_outside<P: Fn(SyntaxKind) -> bool, W: Fn(SyntaxKind) -> bool>(
+        self,
+        pruned: P,
+        wanted: W,
+    ) -> impl Iterator<Item = TokenRef<'a>> + use<'a, P, W> {
+        let tree = self.tree;
+        let end = tree.end(self.index);
+        let mut index = self.index;
+        std::iter::from_fn(move || {
+            while index < end {
+                let current = index;
+                let kind = tree.kind(current);
+                if kind.is_node() {
+                    index = if pruned(kind) {
+                        tree.end(current)
+                    } else {
+                        current + 1
+                    };
+                    continue;
+                }
+                index = current + 1;
+                if wanted(kind) {
+                    return Some(token_ref(tree, current));
+                }
+            }
+            None
+        })
+    }
+
     /// Whether any element under this one, this one included, has a kind `wanted` accepts.
     /// One scan of the kind column, so it is far cheaper than a walk and suits a test that
     /// lets a walk be skipped.

@@ -2217,40 +2217,34 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 /// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
-    let root = node.node_ref();
-    let mut nested: Option<NodeRef<'_>> = None;
-    let mut count = 0;
-    for element in root.descendants_with_tokens() {
-        if nested.is_some_and(|function| function.encloses(element)) {
-            continue;
-        }
-        let token = match element {
-            NodeOrToken::Node(child) => {
-                if child.kind() == SyntaxKind::FUNCTION_DEF {
-                    nested = Some(child);
-                }
-                continue;
-            }
-            NodeOrToken::Token(token) => token,
-        };
-        let writes = match token.kind() {
-            SyntaxKind::LESS_MINUS
-            | SyntaxKind::LESS2_MINUS
-            | SyntaxKind::MINUS_GREATER
-            | SyntaxKind::MINUS_GREATER2
-            | SyntaxKind::COLON_EQ
-            | SyntaxKind::FOR_KW => true,
+    node.node_ref()
+        .tokens_outside(
+            |kind| kind == SyntaxKind::FUNCTION_DEF,
+            |kind| {
+                matches!(
+                    kind,
+                    SyntaxKind::LESS_MINUS
+                        | SyntaxKind::LESS2_MINUS
+                        | SyntaxKind::MINUS_GREATER
+                        | SyntaxKind::MINUS_GREATER2
+                        | SyntaxKind::COLON_EQ
+                        | SyntaxKind::FOR_KW
+                        | SyntaxKind::EQ
+                        | SyntaxKind::SPECIAL
+                        | SyntaxKind::IDENT
+                )
+            },
+        )
+        .filter(|token| match token.kind() {
             SyntaxKind::EQ => token.parent().map(NodeRef::kind) == Some(SyntaxKind::BINARY_EXPR),
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
             SyntaxKind::IDENT => matches!(
                 token.text().trim_matches('`'),
                 ":=" | "setnames" | "setcolorder"
             ),
-            _ => false,
-        };
-        count += usize::from(writes);
-    }
-    count
+            _ => true,
+        })
+        .count()
 }
 
 /// Every other file whose items a check of `file` can read exports from, transitively through

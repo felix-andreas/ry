@@ -193,11 +193,11 @@ pub fn collect_used_tokens<'a>(
             out.insert(name);
         }
     };
-    for token in root.node_ref().tokens() {
+    for token in root
+        .node_ref()
+        .tokens_outside(|_| false, |kind| !kind.is_trivia())
+    {
         let kind = token.kind();
-        if kind.is_trivia() {
-            continue;
-        }
         let text = token.text();
         insert(text);
         if kind == SyntaxKind::STRING {

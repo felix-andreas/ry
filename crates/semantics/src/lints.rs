@@ -387,7 +387,37 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
     let mut region: Option<NodeRef<'_>> = None;
     // The walk reads borrowed nodes and makes an owned one only where a cheap test says a lint
     // may fire.
-    for element in top.descendants_with_tokens() {
+    let visited = |kind| {
+        matches!(
+            kind,
+            SyntaxKind::ANNOTATION
+                | SyntaxKind::TYPE_ASCRIPTION
+                | SyntaxKind::RETURN_TYPE
+                | SyntaxKind::TYPE_DEFINITION
+                | SyntaxKind::NEW_TYPE
+                | SyntaxKind::PURE_MARKER
+                | SyntaxKind::TYPE_BINDER_LIST
+                | SyntaxKind::BINARY_EXPR
+                | SyntaxKind::ARGUMENT_LIST
+                | SyntaxKind::PARAMETER
+                | SyntaxKind::NAME
+                | SyntaxKind::CALL_EXPR
+                | SyntaxKind::BRACE_EXPR
+                | SyntaxKind::UNARY_EXPR
+                | SyntaxKind::IF_EXPR
+                | SyntaxKind::WHILE_EXPR
+                | SyntaxKind::SUBSET_EXPR
+                | SyntaxKind::FUNCTION_DEF
+                | SyntaxKind::COMMENT
+                | SyntaxKind::STRING
+                | SyntaxKind::DOUBLE
+                | SyntaxKind::INTEGER
+                | SyntaxKind::COMPLEX
+        )
+    };
+    // Only the region openers and the kinds a lint inspects are visited. A region stays open
+    // across the skipped elements, but nothing is decided on those.
+    for element in top.elements_of_kind(visited) {
         if region.is_some_and(|region| !region.encloses(element)) {
             region = None;
         }
