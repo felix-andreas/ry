@@ -487,9 +487,9 @@ bench-migrate *args:
     cargo build --release -p libr
     python3 -I tools/bench/migrate/fuzz.py {{ args }}
 
-# Move the workflows agents staged in .github/pending (their token cannot write .github/workflows)
-# into place, then commit and push them.
-install-workflows:
+# Apply what agents staged in .github/pending for a maintainer (their token cannot write
+# .github/workflows): move each workflow into place, then commit and push.
+accept:
     git mv -f .github/pending/* .github/workflows/
-    git commit -m "ci: install the staged workflows"
+    git commit -m "ci: accept the staged workflows"
     git push
