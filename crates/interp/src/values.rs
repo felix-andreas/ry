@@ -12,6 +12,7 @@ use {
         records::NativeKind,
         strings::Encoding,
     },
+    memchr::memchr,
     rustc_hash::FxHashMap,
     std::borrow::Cow,
 };
@@ -927,6 +928,9 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
 #[cold]
 unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
     let bytes = charsxp.bytes();
+    // GNU R reads `CHAR()` as a C string, so native code that trims a string in place by
+    // writing a NUL into it (udunits' `ut_trim`, called by units) shortens the text R sees.
+    let bytes = memchr(0, bytes).map_or(bytes, |end| &bytes[..end]);
     // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
     // chunks. The bit is only a hint, since native code can set any of a string's flags.
     if charsxp.has_gp(gp::ASCII)

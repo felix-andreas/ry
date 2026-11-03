@@ -729,6 +729,33 @@ fn edge_cases_gnu_r_accepts() {
         r.strings(dim_names),
         vec![Some("x".to_owned()), Some("y".to_owned())]
     );
+    // GNU R reads a string up to its first NUL, so text trimmed in place reads shorter.
+    let trimmed = r
+        .call("rytest_trim_in_place", &[r.string(" m / s ")])
+        .expect("a string trimmed in place");
+    let false_value = r.data("R_FalseValue");
+    let substituted = r.eval_expression(r.call_expression(
+        ".Internal",
+        &[(
+            None,
+            r.call_expression(
+                "sub",
+                &[
+                    (None, r.string("$")),
+                    (None, r.string("!")),
+                    (None, trimmed),
+                    (None, false_value),
+                    (None, r.data("R_TrueValue")),
+                    (None, false_value),
+                    (None, false_value),
+                ],
+            ),
+        )],
+    ));
+    assert_eq!(
+        r.strings(substituted.expect("sub on a string trimmed in place")),
+        vec![Some("m / s!".to_owned())]
+    );
 
     let message = r.string("inner");
     let inner = r.call_expression(
