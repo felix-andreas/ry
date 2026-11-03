@@ -31,6 +31,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4Valid", 2, do_valid),
     internal("ryS4Is", 2, do_is),
     internal("ryS4Extends", 1, do_extends),
+    internal("ryS4SetGeneric", 1, do_set_generic),
+    internal("ryS4SetMethod", 1, do_set_method),
 ];
 
 /// GNU R 4.3.3's functions that get a fast path, with the [`stable_hash`] of the formals and
@@ -912,4 +914,856 @@ unsafe fn is_true(value: Sexp) -> bool {
 
 unsafe fn is_false(value: Sexp) -> bool {
     value.kind() == SexpType::Logical && length(value) == 1 && values::ints(value)[0] == 0
+}
+
+// Definitions. `setGeneric`, `setMethod` and `setClass` run once per definition when a package
+// loads, and their R code makes hundreds of calls each. Their fast paths take the shapes package
+// code uses (a new standard generic, a method with a plain signature for an existing standard
+// generic) and build exactly the objects the R code builds. Each checks every condition the R
+// code branches on before it changes anything, and bails out on any other shape.
+
+/// `setGeneric(name, def)` for a new standard generic: `def` is a closure whose body is
+/// `standardGeneric(name)`, no function called `name` is visible from `where`, and every other
+/// argument is missing. Builds the generic `makeGeneric()` builds, with its methods tables, and
+/// does what `.GenericAssign()` does: binds it in `where`, caches it in `.genericTable`, and
+/// binds an empty copy of its methods table as the `.__T__` metadata.
+unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let skip = values::scalar_bool(false)?;
+    let Some(name) = forced_arg(frame, "name")? else {
+        return Ok(skip);
+    };
+    if !is_plain_name(name) {
+        return Ok(skip);
+    }
+    let name_text = name.element(0);
+    let methods = interp().globals.methods_namespace;
+    if in_basic_funs(name_text.bytes())? {
+        return Ok(skip);
+    }
+    for argument in [
+        "group",
+        "valueClass",
+        "package",
+        "signature",
+        "useAsDefault",
+        "genericFunction",
+        "simpleInheritanceOnly",
+    ] {
+        if !eval::is_missing(install(argument)?, frame)? {
+            return Ok(skip);
+        }
+    }
+    if eval::is_missing(install("def")?, frame)? {
+        return Ok(skip);
+    }
+    let Some(place) = forced_arg(frame, "where")? else {
+        return Ok(skip);
+    };
+    if place.kind() != SexpType::Environment {
+        return Ok(skip);
+    }
+    let name_symbol = install_text(name_text)?;
+    if visible_function(name_symbol, place)? != Visible::None {
+        return Ok(skip);
+    }
+    if crate::envir::is_namespace(place) {
+        if standard_packages_define(name_symbol)? != Some(false) {
+            return Ok(skip);
+        }
+    } else if visible_function(name_symbol, methods)? != Visible::None {
+        return Ok(skip);
+    }
+    let Some(def) = forced_arg(frame, "def")? else {
+        return Ok(skip);
+    };
+    if def.kind() != SexpType::Closure
+        || !is_standard_generic_call(crate::bytecode::closure_body(def), name_text.bytes())?
+    {
+        return Ok(skip);
+    }
+    let Some(package) = package_name(place)? else {
+        return Ok(skip);
+    };
+    let table_symbol = table_meta_symbol(name_text.bytes(), package.element(0).bytes())?;
+    if !assignable(place, name_symbol) || !assignable(place, table_symbol) {
+        return Ok(skip);
+    }
+    let Some(generics) = methods_value(".genericTable")? else {
+        return Ok(skip);
+    };
+    if generics.kind() != SexpType::Environment {
+        return Ok(skip);
+    }
+    match quiet_value(name_symbol, generics)? {
+        None => {}
+        Some(previous) if previous.kind() == SexpType::Closure => {
+            let previous_package = get_attr(previous, install("package")?);
+            if !(previous_package.kind() == SexpType::String
+                && length(previous_package) == 1
+                && previous_package.element(0) == package.element(0))
+            {
+                return Ok(skip);
+            }
+        }
+        Some(_) => return Ok(skip),
+    }
+    let formal_names = formal_names(def.car());
+    if formal_names.is_empty() {
+        return Ok(skip);
+    }
+    let mut signature: Vec<Sexp> = formal_names.clone();
+    if signature.len() > 1 {
+        signature.retain(|&symbol| symbol != symbols().dots);
+    }
+    if signature == [symbols().dots] {
+        return Ok(skip);
+    }
+
+    let generic = make_generic(name_text, def, package, &formal_names, &signature)?;
+    eval::define(name_symbol, generic, place)?;
+    eval::define(name_symbol, generic, generics)?;
+    let table = hashed_env(generic.tag())?;
+    eval::define(table_symbol, table, place)?;
+    values::scalar_bool(true)
+}
+
+/// The generic function `makeGeneric(name, def, NULL, package = package)` makes from `def`, with
+/// the tables `.setupMethodsTables()` puts in its environment.
+unsafe fn make_generic(
+    name_text: Sexp,
+    def: Sexp,
+    package: Sexp,
+    formal_names: &[Sexp],
+    signature: &[Sexp],
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let package_symbol = install("package")?;
+    let generic_name = values::scalar_string_charsxp(name_text)?;
+    values::set_attr(generic_name, package_symbol, package)?;
+    let env = hashed_env(def.tag())?;
+    let generic = values::triple(SexpType::Closure, def.car(), def.cdr(), env)?;
+    eval::define(install(".Generic")?, generic_name, env)?;
+    eval::define(install(".Methods")?, nil(), env)?;
+    eval::define(install(".SigLength")?, values::scalar_real(1.0)?, env)?;
+    let signature_symbols = values::list_vector(signature)?;
+    eval::define(install(".SigArgs")?, signature_symbols, env)?;
+    let methods_table = hashed_env(env)?;
+    eval::define(install(".MTable")?, methods_table, env)?;
+    let all_table = hashed_env(env)?;
+    eval::define(install(".AllMTable")?, all_table, env)?;
+
+    let signature_names = alloc_strings(signature.len())?;
+    for (index, symbol) in signature.iter().enumerate() {
+        heap.set_element(signature_names, index, symbol.car());
+    }
+    let skeleton = generic_skeleton(generic_name, def.car(), formal_names)?;
+    let attributes: [(&str, Sexp); 8] = [
+        ("generic", generic_name),
+        ("package", package),
+        ("group", values::alloc(SexpType::List, 0)?),
+        ("valueClass", alloc_strings(0)?),
+        ("signature", signature_names),
+        ("default", s4_null()?),
+        ("skeleton", skeleton),
+        ("class", methods_class("standardGeneric")?),
+    ];
+    for (attribute, value) in attributes {
+        values::set_attr(generic, install(attribute)?, value)?;
+    }
+    append_attributes(def, generic)?;
+    generic.set_gp_bits(gp::S4_OBJECT, true);
+    Ok(generic)
+}
+
+/// `generic.skeleton(name, def, NULL)`: a call of a function with the generic's formals that
+/// reports the missing default method, on the formals as symbols. Arguments after `...` are
+/// passed by name.
+unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Sexp]) -> R<Sexp> {
+    let message = values::scalar_string(
+        "invalid call in method dispatch to '%s' (no default method)",
+    )?;
+    let format = lcons(
+        install("gettextf")?,
+        cons(message, cons(generic_name, nil())?)?,
+    )?;
+    let domain = values::cons_tagged(values::scalar_logical(heap::object::NA_LOGICAL)?, nil(), install("domain")?)?;
+    let body = lcons(install("stop")?, cons(format, domain)?)?;
+    let fallback = values::triple(SexpType::Closure, formals, body, values::base_env())?;
+    let dots = formal_names.iter().position(|&symbol| symbol == symbols().dots);
+    let mut arguments = nil();
+    for (index, &symbol) in formal_names.iter().enumerate().rev() {
+        let tag = match dots {
+            Some(dots) if dots + 1 < formal_names.len() && index > dots => symbol,
+            _ => nil(),
+        };
+        arguments = values::cons_tagged(symbol, arguments, tag)?;
+    }
+    lcons(fallback, arguments)
+}
+
+/// `setMethod(f, signature, definition)` for a standard generic found from `where`, a closure
+/// with the generic's formals, and a signature of class names the class cache defines. Does what
+/// the R code does: caches the method in the generic's tables and in `where`'s `.__T__`
+/// metadata, then resets the inherited methods, without the quadratic table rebuild.
+unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let skip = values::scalar_bool(false)?;
+    let Some(name) = forced_arg(frame, "f")? else {
+        return Ok(skip);
+    };
+    if !is_plain_name(name) || name.element(0).bytes() == b"as.double" {
+        return Ok(skip);
+    }
+    let Some(place) = forced_arg(frame, "where")? else {
+        return Ok(skip);
+    };
+    if place.kind() != SexpType::Environment || place.has_gp(gp::FRAME_LOCKED) {
+        return Ok(skip);
+    }
+    let name_symbol = install_text(name.element(0))?;
+    let generic = crate::methods::visible_generic(name_symbol, place)?;
+    if !is_standard_generic(generic)? {
+        return Ok(skip);
+    }
+    // `getGeneric()` caches a generic it finds that is also the global binding.
+    if let Some(global) = quiet_value(name_symbol, values::global_env())? {
+        if values::is_function(global) {
+            let cached = methods_value(".genericTable")?
+                .map(|table| quiet_value(name_symbol, table))
+                .transpose()?
+                .flatten();
+            if global != generic || cached != Some(generic) {
+                return Ok(skip);
+            }
+        }
+    }
+    let table_symbol = table_meta_symbol(
+        slot_text(generic, "generic")?,
+        slot_text(generic, "package")?,
+    )?;
+    let sealed_check_table = match visible_function(name_symbol, place)? {
+        Visible::None => None,
+        Visible::Function(function) if function == generic => {
+            match quiet_value(table_symbol, place)? {
+                Some(table) if table.kind() == SexpType::Environment => Some(table),
+                Some(_) => return Ok(skip),
+                None => None,
+            }
+        }
+        _ => return Ok(skip),
+    };
+
+    let Some(signature) = forced_arg(frame, "signature")? else {
+        return Ok(skip);
+    };
+    let Some(signature) = match_signature(signature, generic)? else {
+        return Ok(skip);
+    };
+    crate::heap().root(signature);
+    let Some(definition) = forced_arg(frame, "definition")? else {
+        return Ok(skip);
+    };
+    if definition.kind() != SexpType::Closure
+        || definition.has_gp(gp::S4_OBJECT)
+        || values::class_attr(definition) != nil()
+    {
+        return Ok(skip);
+    }
+    if !same_formals(definition.car(), generic.car()) {
+        return Ok(skip);
+    }
+    let env = generic.tag();
+    let (Some(methods_table), Some(all_table)) = (
+        quiet_value(install(".MTable")?, env)?,
+        quiet_value(install(".AllMTable")?, env)?,
+    ) else {
+        return Ok(skip);
+    };
+    if methods_table.kind() != SexpType::Environment || all_table.kind() != SexpType::Environment {
+        return Ok(skip);
+    }
+    let Some(signature_length) = quiet_value(install(".SigLength")?, env)?
+        .and_then(|length| usize::try_from(values::as_integer_scalar(length)).ok())
+    else {
+        return Ok(skip);
+    };
+    let Some(signature) = match_signature_length(signature, signature_length)? else {
+        return Ok(skip);
+    };
+    crate::heap().root(signature);
+    let label = signature_label(signature)?;
+    if let Some(table) = sealed_check_table
+        && let Some(existing) = quiet_value(label, table)?
+        && (existing.kind() == SexpType::Environment
+            || values::inherits(existing, "SealedMethodDefinition"))
+    {
+        return Ok(skip);
+    }
+    if !methods_flag(".noMlistsFlag", true)? || !cache_on_assign(place)? || duplicate_classes()? {
+        return Ok(skip);
+    }
+    let meta_table = match quiet_value(table_symbol, place)? {
+        Some(table) if table.kind() == SexpType::Environment => Some(table),
+        Some(_) => return Ok(skip),
+        None => None,
+    };
+    // `.resetInheritedMethods()` turns a `MethodWithNext` it keeps back into a plain method
+    // with `as()`, which runs R code.
+    let direct = with_label(crate::heap().frame_symbols(methods_table), label);
+    let all = with_label(crate::heap().frame_symbols(all_table), label);
+    let copy_all = direct.iter().any(|symbol| !all.contains(symbol));
+    for &symbol in &direct {
+        if symbol == label {
+            continue;
+        }
+        let source = if copy_all { methods_table } else { all_table };
+        match quiet_value(symbol, source)? {
+            Some(method) if !values::inherits(method, "MethodWithNext") => {}
+            _ => return Ok(skip),
+        }
+    }
+
+    let method = method_definition(definition, signature, generic)?;
+    eval::define(label, method, methods_table)?;
+    eval::define(label, method, all_table)?;
+    let meta_table = match meta_table {
+        Some(table) => table,
+        None => {
+            let table = hashed_env(env)?;
+            eval::define(table_symbol, table, place)?;
+            table
+        }
+    };
+    eval::define(label, method, meta_table)?;
+    reset_inherited_methods(methods_table, all_table)?;
+    values::scalar_bool(true)
+}
+
+/// `.resetInheritedMethods(fenv, mtable)` once no kept method is a `MethodWithNext`: drops the
+/// inherited methods from `.AllMTable`, and copies the direct ones in again when one is missing.
+unsafe fn reset_inherited_methods(methods_table: Sexp, all_table: Sexp) -> R<()> {
+    let heap = crate::heap();
+    let direct = heap.frame_symbols(methods_table);
+    let all = heap.frame_symbols(all_table);
+    for &symbol in &all {
+        if !direct.contains(&symbol) {
+            heap.remove_binding(all_table, symbol)?;
+        }
+    }
+    if direct.iter().any(|symbol| !all.contains(symbol)) {
+        for &symbol in &direct {
+            let value = eval::find_var_in_frame(symbol, methods_table)?;
+            eval::define(symbol, value, all_table)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `MethodDefinition` that `asMethodDefinition(definition, signature)` makes, with its
+/// `generic` slot set: a copy of the closure with the signature as its `target` and `defined`
+/// slots.
+unsafe fn method_definition(definition: Sexp, signature: Sexp, generic: Sexp) -> R<Sexp> {
+    let method = values::triple(
+        SexpType::Closure,
+        definition.car(),
+        definition.cdr(),
+        definition.tag(),
+    )?;
+    let target = signature_object(signature, slot(generic, "signature")?)?;
+    for (attribute, value) in [
+        ("target", target),
+        ("defined", target),
+        ("generic", get_attr(generic, install("generic")?)),
+        ("class", methods_class("MethodDefinition")?),
+    ] {
+        values::set_attr(method, install(attribute)?, value)?;
+    }
+    append_attributes(definition, method)?;
+    method.set_gp_bits(gp::S4_OBJECT, true);
+    Ok(method)
+}
+
+/// A `signature` object for a matched signature: its class names, named by the generic's
+/// signature arguments `arguments` (which `.MakeSignature()` names them by when padding dropped
+/// the names `matchSignature()` gave, the same ones), with their packages.
+unsafe fn signature_object(signature: Sexp, arguments: Sexp) -> R<Sexp> {
+    let count = length(signature);
+    let object = alloc_strings(count)?;
+    let names = alloc_strings(count)?;
+    for index in 0..count {
+        crate::heap().set_element(object, index, signature.element(index));
+        let name = if index < length(arguments) {
+            arguments.element(index)
+        } else {
+            values::na_string()
+        };
+        crate::heap().set_element(names, index, name);
+    }
+    let package_symbol = install("package")?;
+    values::set_attr(object, symbols().names, names)?;
+    values::set_attr(object, package_symbol, get_attr(signature, package_symbol))?;
+    values::set_attr(object, symbols().class, methods_class("signature")?)?;
+    object.set_gp_bits(gp::S4_OBJECT, true);
+    Ok(object)
+}
+
+/// `matchSignature(signature, generic, where)` for an unnamed or exactly named character
+/// signature: one class name per signature argument, `ANY` for the ones left out and trailing
+/// ones dropped, named by the arguments, with the classes' packages as its `package`
+/// attribute. Classes come from the class cache; `None` for anything else.
+unsafe fn match_signature(signature: Sexp, generic: Sexp) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    let arguments = slot(generic, "signature")?;
+    if arguments.kind() != SexpType::String {
+        return Ok(None);
+    }
+    let count = length(signature);
+    if signature.kind() != SexpType::String && !(signature == nil() || count == 0) {
+        return Ok(None);
+    }
+    let package_symbol = install("package")?;
+    let mut cell = signature.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() != symbols().names && cell.tag() != package_symbol {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    if count == 0 {
+        return Ok(Some(alloc_strings(0)?));
+    }
+    if count > length(arguments) {
+        return Ok(None);
+    }
+    let given_packages = get_attr(signature, package_symbol);
+    if given_packages != nil()
+        && (given_packages.kind() != SexpType::String || length(given_packages) != count)
+    {
+        return Ok(None);
+    }
+    let mut classes = Vec::with_capacity(count);
+    let mut packages = Vec::with_capacity(count);
+    for index in 0..count {
+        let class = signature.element(index);
+        if class == values::na_string() {
+            return Ok(None);
+        }
+        let given = if given_packages == nil() {
+            values::blank_string()
+        } else {
+            given_packages.element(index)
+        };
+        let package = if given.bytes().is_empty() {
+            let Some(definition) = cached_class(values::scalar_string_charsxp(class)?)? else {
+                return Ok(None);
+            };
+            let package = slot(definition, "package")?;
+            if package.kind() != SexpType::String || length(package) != 1 {
+                return Ok(None);
+            }
+            package.element(0)
+        } else {
+            given
+        };
+        classes.push(class);
+        packages.push(package);
+    }
+    // Named elements go to the arguments of the same name, unnamed ones to the rest in order,
+    // as `match.call()` matches them; a partial or unknown name is left to the R code.
+    let argument_count = length(arguments);
+    let mut positions = vec![usize::MAX; count];
+    let names = values::names(signature);
+    let mut taken = vec![false; argument_count];
+    if names != nil() {
+        for index in 0..count {
+            let name = names.element(index).bytes();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(position) = position_of(arguments, name) else {
+                return Ok(None);
+            };
+            if taken[position] {
+                return Ok(None);
+            }
+            taken[position] = true;
+            positions[index] = position;
+        }
+    }
+    let mut next = 0;
+    for position in &mut positions {
+        if *position != usize::MAX {
+            continue;
+        }
+        while next < argument_count && taken[next] {
+            next += 1;
+        }
+        if next == argument_count {
+            return Ok(None);
+        }
+        taken[next] = true;
+        *position = next;
+    }
+    let any = values::mkchar("ANY")?;
+    let methods = values::mkchar("methods")?;
+    let mut value = vec![any; argument_count];
+    let mut value_packages = vec![methods; argument_count];
+    for index in 0..count {
+        value[positions[index]] = classes[index];
+        value_packages[positions[index]] = packages[index];
+    }
+    let mut kept = argument_count;
+    while kept > 1 && value[kept - 1].bytes() == b"ANY" {
+        kept -= 1;
+    }
+    let result = alloc_strings(kept)?;
+    let result_names = alloc_strings(kept)?;
+    let result_packages = alloc_strings(kept)?;
+    for index in 0..kept {
+        heap.set_element(result, index, value[index]);
+        heap.set_element(result_names, index, arguments.element(index));
+        heap.set_element(result_packages, index, value_packages[index]);
+    }
+    values::set_attr(result, symbols().names, result_names)?;
+    values::set_attr(result, package_symbol, result_packages)?;
+    Ok(Some(result))
+}
+
+/// `.matchSigLength(signature, ...)` for a generic that dispatches on `signature_length`
+/// arguments: pads with `ANY` or drops trailing `ANY`s. `None` when the signature is longer,
+/// which makes the R code rebuild the generic's tables.
+unsafe fn match_signature_length(signature: Sexp, signature_length: usize) -> R<Option<Sexp>> {
+    let count = length(signature);
+    let mut kept = count;
+    while kept > signature_length && signature.element(kept - 1).bytes() == b"ANY" {
+        kept -= 1;
+    }
+    if kept > signature_length {
+        return Ok(None);
+    }
+    let package_symbol = install("package")?;
+    let packages = get_attr(signature, package_symbol);
+    let size = signature_length.max(kept);
+    let result = alloc_strings(size)?;
+    let result_packages = alloc_strings(size)?;
+    let any = values::mkchar("ANY")?;
+    let methods = values::mkchar("methods")?;
+    for index in 0..size {
+        let (class, package) = if index < kept {
+            (signature.element(index), packages.element(index))
+        } else {
+            (any, methods)
+        };
+        crate::heap().set_element(result, index, class);
+        crate::heap().set_element(result_packages, index, package);
+    }
+    values::set_attr(result, package_symbol, result_packages)?;
+    Ok(Some(result))
+}
+
+// Definition helpers.
+
+/// The value of the argument `name` in `frame`, forced as the R body forces it at this point,
+/// which runs whatever code the promise holds. `None` when the argument is missing.
+unsafe fn forced_arg(frame: Sexp, name: &str) -> R<Option<Sexp>> {
+    let Some(cell) = crate::heap().frame_cell(frame, install(name)?) else {
+        return Ok(None);
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        return Ok(None);
+    }
+    let value = cell.cdr();
+    if value == missing_arg() || value == unbound() {
+        return Ok(None);
+    }
+    eval::value_of(value).map(Some)
+}
+
+/// A single, non-empty string without attributes.
+unsafe fn is_plain_name(value: Sexp) -> bool {
+    value.kind() == SexpType::String
+        && length(value) == 1
+        && value.attrib() == nil()
+        && value.element(0) != values::na_string()
+        && !value.element(0).bytes().is_empty()
+}
+
+/// The value bound to `name` in the methods namespace.
+unsafe fn methods_value(name: &str) -> R<Option<Sexp>> {
+    quiet_value(install(name)?, interp().globals.methods_namespace)
+}
+
+/// `inBasicFuns(name)`: whether the methods package keeps an implicit generic for the base
+/// function `name`, which `setGeneric()` treats specially.
+unsafe fn in_basic_funs(name: &[u8]) -> R<bool> {
+    let Some(functions) = methods_value(".BasicFunsList")? else {
+        return Ok(true);
+    };
+    Ok(match element(functions, name) {
+        None => false,
+        Some(value) => !is_false(value),
+    })
+}
+
+#[derive(PartialEq, Eq)]
+enum Visible {
+    None,
+    Function(Sexp),
+}
+
+/// `getFunction(name, mustFind = FALSE, where = env)`: the first function bound to `symbol` from
+/// `env` outward, up to the base namespace for a namespace and up to the base environment
+/// otherwise. Bindings are forced as `get0()` forces them.
+unsafe fn visible_function(symbol: Sexp, env: Sexp) -> R<Visible> {
+    let last = if crate::envir::is_namespace(env) {
+        values::base_namespace()
+    } else {
+        values::base_env()
+    };
+    let mut frame = env;
+    loop {
+        if let Some(cell) = crate::heap().frame_cell(frame, symbol) {
+            let value = eval::value_of(eval::cell_value(cell)?)?;
+            if values::is_function(value) {
+                return Ok(Visible::Function(value));
+            }
+        }
+        if frame == last || frame == values::empty_env() {
+            return Ok(Visible::None);
+        }
+        frame = frame.enclosure();
+    }
+}
+
+/// `.getFromStandardPackages(name)` finding nothing: `Some(false)` when no standard package
+/// namespace defines a function `name`, `None` when the namespaces are not loaded yet, which the
+/// R code does first.
+unsafe fn standard_packages_define(symbol: Sexp) -> R<Option<bool>> {
+    let Some(namespaces) = methods_value(".standardPackageNamespaces")? else {
+        return Ok(None);
+    };
+    if namespaces.kind() != SexpType::Environment {
+        return Ok(None);
+    }
+    let symbols = crate::heap().frame_symbols(namespaces);
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+    for namespace_symbol in symbols {
+        let namespace = eval::value_of(eval::find_var_in_frame(namespace_symbol, namespaces)?)?;
+        if namespace.kind() != SexpType::Environment {
+            return Ok(None);
+        }
+        if let Some(cell) = crate::heap().frame_cell(namespace, symbol) {
+            let value = eval::value_of(eval::cell_value(cell)?)?;
+            if values::is_function(value) {
+                return Ok(Some(true));
+            }
+        }
+    }
+    Ok(Some(false))
+}
+
+/// Whether `body` is exactly the call `standardGeneric("name")`.
+unsafe fn is_standard_generic_call(body: Sexp, name: &[u8]) -> R<bool> {
+    let Some([(tag, argument)]) = call_args::<1>(body, "standardGeneric")? else {
+        return Ok(false);
+    };
+    Ok(tag == nil()
+        && argument.kind() == SexpType::String
+        && length(argument) == 1
+        && argument.attrib() == nil()
+        && argument.element(0).bytes() == name)
+}
+
+/// `getPackageName(env)` where the answer needs no search: the environment's `.packageName`, or
+/// `.GlobalEnv` for the global environment.
+unsafe fn package_name(env: Sexp) -> R<Option<Sexp>> {
+    if env == values::global_env() {
+        if crate::heap()
+            .frame_cell(env, install(".packageName")?)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        return values::scalar_string(".GlobalEnv").map(Some);
+    }
+    match quiet_value(install(".packageName")?, env)? {
+        Some(name)
+            if name.kind() == SexpType::String
+                && length(name) == 1
+                && name.attrib() == nil()
+                && name.element(0) != values::na_string() =>
+        {
+            Ok(Some(name))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `.TableMetaName(name, package)`: the symbol `.__T__name:package`.
+unsafe fn table_meta_symbol(name: &[u8], package: &[u8]) -> R<Sexp> {
+    let mut text = b".__T__".to_vec();
+    text.extend_from_slice(name);
+    text.push(b':');
+    text.extend_from_slice(package);
+    values::install_bytes(&text)
+}
+
+/// Whether `assign(symbol, value, env)` succeeds without calling an active binding.
+unsafe fn assignable(env: Sexp, symbol: Sexp) -> bool {
+    match crate::heap().frame_cell(env, symbol) {
+        Some(cell) => !cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING),
+        None => !env.has_gp(gp::FRAME_LOCKED),
+    }
+}
+
+/// The names of a formals pairlist, as symbols.
+unsafe fn formal_names(formals: Sexp) -> Vec<Sexp> {
+    let mut names = Vec::new();
+    let mut cell = formals;
+    while cell.kind() == SexpType::Pairlist {
+        names.push(cell.tag());
+        cell = cell.cdr();
+    }
+    names
+}
+
+/// Whether a method's formals have the generic's names and give no argument a default the
+/// generic's lacks, so `matchDefaults()` leaves the method as it is.
+unsafe fn same_formals(method: Sexp, generic: Sexp) -> bool {
+    let (mut method, mut generic) = (method, generic);
+    while method.kind() == SexpType::Pairlist && generic.kind() == SexpType::Pairlist {
+        if method.tag() != generic.tag()
+            || (method.car() == missing_arg() && generic.car() != missing_arg())
+        {
+            return false;
+        }
+        method = method.cdr();
+        generic = generic.cdr();
+    }
+    method == nil() && generic == nil()
+}
+
+/// `new.env(TRUE, parent)`, whose hash table size decides the order its names list in.
+unsafe fn hashed_env(parent: Sexp) -> R<Sexp> {
+    let env = values::new_env(parent)?;
+    crate::heap().set_frame_hashed(env, 29);
+    Ok(env)
+}
+
+unsafe fn alloc_strings(count: usize) -> R<Sexp> {
+    values::alloc(SexpType::String, count)
+}
+
+/// The symbol a `NULL` slot holds.
+unsafe fn s4_null() -> R<Sexp> {
+    values::install_bytes(b"\x01NULL\x01")
+}
+
+/// A class attribute for a class of the methods package.
+unsafe fn methods_class(class: &str) -> R<Sexp> {
+    let value = values::scalar_string(class)?;
+    values::set_attr(value, install("package")?, values::scalar_string("methods")?)?;
+    Ok(value)
+}
+
+/// Appends the attributes of `from` that `to` lacks, after its own: setting the data part of an
+/// S4 function keeps the function's attributes, such as its `srcref`, after the slots.
+unsafe fn append_attributes(from: Sexp, to: Sexp) -> R<()> {
+    let mut cell = from.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        if !has_attribute(to, cell.tag()) {
+            values::set_attr(to, cell.tag(), cell.car())?;
+        }
+        cell = cell.cdr();
+    }
+    Ok(())
+}
+
+/// Whether `generic` is a plain `standardGeneric` whose methods dispatch through its own tables:
+/// not a group generic, a member of a group, or the generic of a primitive.
+unsafe fn is_standard_generic(generic: Sexp) -> R<bool> {
+    if generic.kind() != SexpType::Closure || !generic.has_gp(gp::S4_OBJECT) {
+        return Ok(false);
+    }
+    let class = values::class_attr(generic);
+    if length(class) != 1 || class.element(0).bytes() != b"standardGeneric" {
+        return Ok(false);
+    }
+    let group = get_attr(generic, install("group")?);
+    if group.kind() != SexpType::List || length(group) != 0 {
+        return Ok(false);
+    }
+    let default = get_attr(generic, install("default")?);
+    if matches!(default.kind(), SexpType::Builtin | SexpType::Special)
+        || values::inherits(default, "internalDispatchMethod")
+    {
+        return Ok(false);
+    }
+    for name in ["generic", "package"] {
+        let value = get_attr(generic, install(name)?);
+        if value.kind() != SexpType::String || length(value) != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(get_attr(generic, install("signature")?).kind() == SexpType::String)
+}
+
+/// The text of a slot that holds a single string.
+unsafe fn slot_text<'a>(object: Sexp, name: &str) -> R<&'a [u8]> {
+    Ok(get_attr(object, install(name)?).element(0).bytes())
+}
+
+/// `.sigLabel(signature)`: the class names joined by `#`, as a symbol.
+unsafe fn signature_label(signature: Sexp) -> R<Sexp> {
+    let mut text = Vec::new();
+    for index in 0..length(signature) {
+        if index > 0 {
+            text.push(b'#');
+        }
+        text.extend_from_slice(signature.element(index).bytes());
+    }
+    values::install_bytes(&text)
+}
+
+/// Whether the methods package's flag `name` is the single logical `expected`.
+unsafe fn methods_flag(name: &str, expected: bool) -> R<bool> {
+    Ok(methods_value(name)?.is_some_and(|value| {
+        if expected {
+            is_true(value)
+        } else {
+            is_false(value)
+        }
+    }))
+}
+
+/// `cacheOnAssign(env)`: the environment's `.cacheOnAssign` is unset or `TRUE`.
+unsafe fn cache_on_assign(env: Sexp) -> R<bool> {
+    match crate::heap().frame_cell(env, install(".cacheOnAssign")?) {
+        None => Ok(true),
+        Some(_) => Ok(quiet_value(install(".cacheOnAssign")?, env)?
+            .is_some_and(|value| value == nil() || is_true(value))),
+    }
+}
+
+/// `.duplicateClassesExist()`: whether two packages define a class of the same name, which makes
+/// the methods tables key methods by package too. Unknown counts as yes.
+unsafe fn duplicate_classes() -> R<bool> {
+    let Some(table) = methods_value(".classTable")? else {
+        return Ok(true);
+    };
+    if table.kind() != SexpType::Environment {
+        return Ok(true);
+    }
+    Ok(!quiet_value(install("#HAS_DUPLICATE_CLASS_NAMES")?, table)?
+        .is_some_and(|value| is_false(value)))
+}
+
+fn with_label(mut symbols: Vec<Sexp>, label: Sexp) -> Vec<Sexp> {
+    if !symbols.contains(&label) {
+        symbols.push(label);
+    }
+    symbols
 }

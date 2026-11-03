@@ -758,6 +758,13 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(generic)
 }
 
+/// `getGeneric(name, where = env)` for a plain name: the generic visible from `env`, after
+/// running whatever deferred definitions create it, or `NULL`.
+pub(crate) unsafe fn visible_generic(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    force_deferred(symbol_name(symbol).as_bytes(), Lookup::Generic)?;
+    find_generic(symbol, env, "")
+}
+
 /// What a lookup that may need deferred definitions is after, by name.
 pub(crate) enum Lookup<'a> {
     /// A class missing from the class cache.
