@@ -18,7 +18,7 @@ with them.
 ```r
 dot <- function(x: List<F64>, y: List<F64>) -> F64 {
   total <- 0
-  for (i in 1:List.len(x)) total <- total + x[[i]] * y[[i]]
+  for (i in List.range(1, List.len(x))) total <- total + x[[i]] * y[[i]]
   total
 }
 
@@ -26,12 +26,13 @@ values: List<F64> <- List.map(List.range(0, 999999), \(i) Num.to_f64(i) / 999999
 dot(values, List.reverse(values))
 ```
 
-Every value here is ry's own. `List.len` returns an `I64`, so `1:List.len(x)` is a `List<I64>`
-range and `i` an `I64`. `0` is a literal, which takes the type its uses ask for, here `F64`. Nothing
+Every value here is ry's own. `List.len` returns an `I64`, and `List.range(a, b)` is the
+`List<I64>` from `a` to `b`, both included and empty when `b < a`, so `i` is an `I64`. `0` is a literal, which takes the type its uses ask for, here `F64`. Nothing
 can be `NA`, so the loop needs no missing-value checks, and `List<F64>` is one contiguous buffer of
 unboxed doubles, so `x[[i]]` is a bounds check and a load.
 
-The same function with an R vector is a type error that names the conversion:
+The same function with an R vector is a type error that names the conversion (illustrative
+wording):
 
 ```text
 type-mismatch
@@ -52,7 +53,8 @@ type-mismatch
   provide.
 - **Hindley-Milner** (`decisions.md`, "The type system is Hindley-Milner"). Every feature here is
   unification over the existing constraint mechanism. Row variables for records and tag unions are
-  the one addition to the unifier, and they are Hindley-Milner (Rémy).
+  the one addition to the unifier. They are Hindley-Milner (Rémy), and they reverse the settled
+  "no row variables" rule, as [Records, tuples and tags](#records-tuples-and-tags) explains.
 - **One boundary.** An R value becomes a ry value only through a conversion function that checks
   it. A ry value whose representation R already has (`F64`, `Bool`, `Str` and Lists of them) fits
   the R type directly, because nothing R code relies on is lost.
@@ -74,7 +76,8 @@ This design changes four things:
   `List<Str>`, `List.sum` takes a `List` of numbers. R lists and vectors reach it through
   `List.from_r` and its siblings.
 - **Records and tag unions gain row variables**, so a function can take any record that has a
-  `name` field, as in Roc.
+  `name` field, as in Roc. This reverses the native-records decision that ry has no row variables,
+  and it lands after the scalar and `List` work.
 
 ## Gap analysis against Roc
 
@@ -140,20 +143,35 @@ the boundary refuses it, so an `F64` never holds R's missing value.
 
 ### Literals
 
-A number literal has no fixed type in typed code. It takes the type its uses demand, as a Roc
-literal does, and when nothing demands one it is R's: `5` and `1.5` are `double`, `5L` is
-`integer`. So plain R code types exactly as before, and in
+A number literal has R's type unless a ry number type asks for it: `5` and `1.5` are `double`, and
+`5L` is `integer`. So plain R code types exactly as before. A ry type asks for a literal in three
+places:
 
-```r
-total <- 0
-for (x in xs) total <- total + x
-```
+- **An expected type.** A literal checked against a ry number type takes it: an argument for a
+  typed parameter, the value of an annotated variable, a function's result, a `List` item or a
+  record field whose type is known.
+- **The other operand.** In an arithmetic operator or comparison whose other operand has a ry number
+  type, the literal takes that type, so `n + 1` with `n: I64` is an `I64`.
+- **A variable written with a literal.** `total <- 0` gives `total` a literal type that its first
+  arithmetic use decides. A use with a ry number type `N` makes it `N`. Any other use, or the end of
+  the function, gives it R's type. So in
 
-with `xs: List<F64>`, `total` is an `F64`, because its later write demands one.
+  ```r
+  total <- 0
+  for (x in xs) total <- total + x
+  ```
+
+  with `xs: List<F64>`, `total` is an `F64`, while in plain R `n <- 0; n <- n + 1L` keeps `n` a
+  `double`, by R's promotion order. The literal type is an inference variable with a literal
+  constraint. The variable is decided by unification before any join of the variable's writes sees
+  it, so a join never meets an undecided literal.
+
+`-` written directly before a literal is part of it, so `-2147483648` is an `I32` and `-128i8` an
+`I8`, as in Roc.
 
 | Literal | May become |
 | --- | --- |
-| `5`, `5L`, `0x1F` | any number type that holds the value, or R's `double` (`integer` for `5L`) |
+| `5`, `5L`, `0x1F`, `1e3` | any number type that holds the value, or R's `double` (`integer` for `5L`) |
 | `1.5`, `1e-3` | `F32`, `F64`, `Dec`, or R's `double` |
 | `5i64`, `5u8`, `1.5f32`, `1.5dec` | exactly that type |
 
@@ -163,11 +181,13 @@ a ry type: `Num.nan_f64` and `Num.infinity_f64` are the ry spellings.
 
 The suffixes are new syntax. R reads `5u8`, `1.5f32` and `1.5dec` as a number followed by a name,
 and `5i64` as the complex `5i` followed by `64`, so each is a syntax error in R today. `5i` alone
-keeps its R meaning.
+keeps its R meaning. A hex literal takes only the `i` and `u` suffixes (`0xFFu8`), because `f`, `d`,
+`e` and `c` are hex digits: R reads `0x1Ff32` as the number `0x1FF32`, and so does ry.
 
-At run time a literal is the R value it always was. An operator or typed boundary that receives an
-R number where a ry number is required converts it, and an inexact conversion is an error, so the
-interpreter needs no type information to run typed code. A compiler folds the conversion away.
+At run time an unsuffixed literal is the R value it always was. Where the checker gave it a ry type,
+the operator or typed parameter that receives it converts it, which the interpreter can do without
+type information. This conversion applies only to literals and to unannotated values the checker
+already accepted. It refuses `NA` and an inexact value, and a compiler folds it away.
 
 ### Arithmetic
 
@@ -197,7 +217,8 @@ for `NA`.
 number types. A conversion that may lose the value has a `_checked` form that returns
 `Result<T, :OutOfBounds>`, and the unchecked form is an error when the value does not fit, as
 Roc's crash. `Num.round`, `Num.floor`, `Num.ceiling` and `Num.truncate` take a fractional number
-and return an `I64`, as Roc's do.
+and return an `I64`, as Roc's do. This replaces the standard-library design's rounding that keeps
+the number type, which was written for R's `double`.
 
 ## `Bool`
 
@@ -228,7 +249,8 @@ A `List<T>` is an ordered sequence of ry values of one type, with value semantic
   with that item replaced.
 - `xs[i]` with a `List<I64>` of positions or a `List<Bool>` mask is a `List<T>`; negative positions
   leave items out, as in R.
-- `for (x in xs)` binds `x` as `T`, and `a:b` with two ry integers is a `List` of that type.
+- `for (x in xs)` binds `x` as `T`. `List.range(a, b)` counts up from `a` to `b` inclusive and is
+  empty when `b < a`. `a:b` keeps R's meaning, including counting down, and takes R numbers only.
 - A `List` has no names, no attributes, no `NA` and no recycling.
 
 A `List<T>` holds ry values only: `List<double>` is an `annotation` error that suggests
@@ -239,6 +261,12 @@ A `List<T>` holds ry values only: `List<double>` is an `annotation` error that s
 The literals, `match` and exhaustiveness are unchanged (`records-and-tags.md` and the type system
 reference). Four additions bring them to Roc's level:
 
+Row variables reverse the decision that native records have none (`decisions.md`, native records;
+type system reference, "Records"). They stay inside Hindley-Milner because a row is its own kind of
+type, not a union member: a tag row `..E` binds to a row of tags by plain unification, so the rule
+that a union never constrains a variable keeps holding. `decisions.md` records the reversal when it
+is built.
+
 - **Open records.** `Record{name: Str, ..}` is any record with at least a `name` field, and the
   `..` is a row variable: `function<R>(r: Record{name: Str, ..R}) -> Record{name: Str, ..R}` returns
   the same record type it was given. A row variable binds to the remaining fields by unification
@@ -247,7 +275,10 @@ reference). Four additions bring them to Roc's level:
   handles `:Ok` and passes every other tag on keeps their types, as Roc's `[Ok I64]e` does. The
   bare `..` keeps today's meaning: an anonymous row the function cannot pass on.
 - **Record update.** `(..point, x = 3)` is a copy of `point` with `x` replaced, and every replaced
-  field must exist, as in Roc. `point$x <- 3` stays the statement form.
+  field must exist, as in Roc. `point$x <- 3` stays the statement form. `..point` is an ordinary R
+  identifier, so `(..point, x = 3)` is today a record holding a variable named `..point`; a name
+  starting with `..` first in a parenthesized record literal becomes a spread. A `..rest` in a
+  record pattern binds the remaining fields as a record.
 - **Punning in patterns.** `(x =, y =)` binds the fields `x` and `y` to names of the same spelling,
   where `(x, y)` would be a tuple pattern. A record literal does not pun, because `(x, y)` is a tuple.
 
@@ -261,8 +292,9 @@ Two pattern forms join the table in the type system reference:
 | `[p1, ..]`, `[p1, ..rest]`, `[.., last]` | a `List` with at least those items; `rest` binds the remainder as a `List<T>` |
 | `p as name` | what `p` matches, binding the whole value to `name` |
 
-Coverage treats a list pattern as a constructor per length, with `..` covering every longer length,
-as Maranget's algorithm does for Roc's list patterns. A suffixed number literal is a literal
+Patterns are ry syntax inside `match`, so `..rest` there is a binder, not the R identifier it is in
+an expression. Coverage treats a list pattern as a constructor per length, with `..` covering every
+longer length, as Maranget's algorithm does for Roc's list patterns. A suffixed number literal is a literal
 pattern of its type.
 
 ## Equality, hashing and printing
@@ -271,9 +303,11 @@ ry has no abilities or methods, because traits are declined (`decisions.md`). Ro
 `is_eq`, `to_hash` and `to_inspect` for every structural type whose parts have them, and ry builds
 the same three in, for every ry type except functions:
 
-- **Equality.** `a == b` on two values of the same ry type is structural equality, a `Bool`. A
-  function is a `type-mismatch` there, as Roc's functions have no `is_eq`. Floats compare as IEEE 754, so
-  `NaN != NaN`.
+- **Equality.** `a == b` on two values of the same ry type is structural equality, a `Bool`, except
+  on two `List`s, whose `==` depends on [question 2](#2-operators-on-lists). A function is a
+  `type-mismatch` there, as Roc's functions have no `is_eq`, and generic code says so with an `eq`
+  constraint (`<T: eq>`), which every ry type but a function satisfies. Floats compare as IEEE 754,
+  so `NaN != NaN`.
 - **Hashing.** A `Dict` key or `Set` element is any ry value but a function, hashed structurally. A
   `NaN` key is an error when it is inserted.
 - **Printing.** `print` and `format` show a ry value as the literal that rebuilds it (`5i64`,
@@ -328,8 +362,18 @@ conversion, and at run time the R function refuses it with the error records alr
   `str` or `bool` literal). Unification binds it like any constrained variable, and a variable
   still unbound when its function is generalized takes R's type. This is Roc's literal typing with
   R's defaults, and it is Hindley-Milner defaulting.
-- New constraints for generic code: `number` (every ry number type), `int` (the integer types) and
-  `frac` (`F32`, `F64`, `Dec`), so `List.sum : <T: number> fn(list: List<T>) -> T`.
+- New constraints for generic code: `number` (every ry number type), `int` (the integer types),
+  `frac` (`F32`, `F64`, `Dec`) and `eq` (every ry type but a function), so
+  `List.sum : <T: number> fn(list: List<T>) -> T`. The literal constraints are internal and never
+  written.
+- The constraint lattice gains a ry side. Two ry constraints meet at the narrower one (`int` and
+  `frac` meet only at an error, `number` with either is that one, `eq` with any is the other). A
+  ry constraint never meets an R one (`numeric`, `atomic`, `scalar numeric`, `key`), so a variable
+  is either an R number or a ry number, and the meet is a `type-mismatch`. `key` and `item` widen to
+  admit every `eq` ry type. A literal constraint meets `numeric` by taking R's type and meets a ry
+  constraint by staying a literal of that constraint.
+- The rule that a whole-number `double` literal fits an `integer` parameter is the expected-type
+  case of literal typing above, so it stays and needs no special case.
 - The existing `numeric` constraint and R's coercion order are unchanged, and apply to R types only.
 
 ## Runtime contract
@@ -355,8 +399,8 @@ provides them.
 **Lists.**
 
 - A `List<T>` is contiguous, with items stored unboxed at their natural width when `T` is a number
-  or `Bool` (8 bytes for `F64`, `I64` and `U64`, 4 for `I32` and `F32`, 1 for `U8`), and as handles
-  otherwise. `List<F64>`, `List<Bool>` and `List<Str>` use R's `double`, `logical` and `character`
+  (8 bytes for `F64`, `I64` and `U64`, 4 for `I32` and `F32`, 1 for `U8`), as R's 4-byte
+  `logical` for `Bool`, and as handles otherwise. `List<F64>`, `List<Bool>` and `List<Str>` use R's `double`, `logical` and `character`
   vector layouts, so they pass to R code and C code without a copy, as `Array<T>` does today.
 - An update through `xs[[i]] <- v`, `List.set`, `List.append` and the like reuses the storage when
   the list is uniquely held (`decisions.md`, "Standard library updates reuse a uniquely held
@@ -368,7 +412,16 @@ provides them.
 - An R number reaching an operator or a typed parameter that requires a ry number converts there,
   and an inexact conversion is an error. Compiled code folds literal conversions.
 - The boundary functions in [The R boundary](#the-r-boundary) are the only places an R vector is
-  scanned for `NA`.
+  scanned for `NA`. The conversion of a literal or an accepted scalar at an operator checks one
+  value.
+
+**Closures.**
+
+- A typed closure captures by value whenever no variable it captures is written after the capture
+  or through `<<-`, and the checker reports this per closure, so such a closure needs no R
+  environment. A closure that fails the test keeps R's environment semantics.
+- `match` coverage is decided statically: a non-exhaustive `match` on a closed type is an error, so
+  compiled code needs no fallback arm.
 
 **What the language side provides now.** Until the runtime has native integer kinds, the
 interpreter carries a correct implementation: native numbers as heap objects, `List`s of them as
@@ -395,13 +448,17 @@ so Roc's `"Hello ${name}"` cannot work inside an ordinary string. Interpolation 
 **a. An `f` prefix, as in Python** (recommended: the most widely known spelling)
 
 ```r
-greet <- function(name: Str, count: I64) -> Str f"Hello {name}, you have {count} messages"
+greet <- function(name: Str, count: I64) -> Str {
+  f"Hello {name}, you have {count} messages"
+}
 ```
 
 **b. A `$` prefix, as in C#**
 
 ```r
-greet <- function(name: Str, count: I64) -> Str $"Hello {name}, you have {count} messages"
+greet <- function(name: Str, count: I64) -> Str {
+  $"Hello {name}, you have {count} messages"
+}
 ```
 
 **c. No interpolation**
@@ -413,13 +470,16 @@ greet <- function(name: Str, count: I64) -> Str {
 ```
 
 R reads `f"..."` as a name followed by a string and `$"..."` as a `$` with nothing before it, so
-both are syntax errors in R today. In a and b, `{expr}` may hold any expression whose type is a
+both are syntax errors in R today. `$"..."` is free only where an expression starts: after a value,
+as in `x $"a"`, it is R's `$` operator, so b cannot follow a value on the same line. In a and b, `{expr}` may hold any expression whose type is a
 `Str` or a number, and `{{` writes a brace.
 
 ### 2. Operators on lists
 
-**a. Elementwise, as today's `Array` and R's vectors** (recommended: what an R reader expects,
-and the compiler gets a whole-list kernel without fusion)
+In a, `a == b` on two lists is a `List<Bool>`, as R's `==` on vectors, so whole-list equality is
+`List.is_eq`; in b it is one `Bool`. That is why the second line differs.
+
+**a. Elementwise, as today's `Array` and R's vectors** (recommended: what an R reader expects)
 
 ```r
 normalize <- function(xs: List<F64>) -> List<F64> (xs - List.min(xs)) / (List.max(xs) - List.min(xs))
@@ -436,8 +496,6 @@ normalize <- function(xs: List<F64>) -> List<F64> {
 }
 same <- function(a: List<I64>, b: List<I64>) -> Bool a == b
 ```
-
-In a, `a == b` on two lists is a `List<Bool>`, as R's `==` on vectors; in b it is one `Bool`.
 
 ### 3. Propagating an error
 
@@ -469,39 +527,40 @@ parse_point <- function(text: Str) -> Result<Record{x: I64, y: I64}, :InvalidNum
 }
 ```
 
-In a and b, an `:Err` returns from the enclosing function at once. `try f(x)` with no parenthesis
-after `try` is a syntax error in R, so a is free, while `try (f(x))` stays R's `try`. b changes the
-meaning of R text in one case: R reads a `?` at the end of a line as its help operator continuing
-onto the next line, so b would break a two-line `topic ?\n package` help call.
+In a and b, an `:Err` returns from the enclosing function at once. `try f(x)` with a name after
+`try` is a syntax error in R, so a takes that form only. `try (f(x))`, `try -x`, `try[x]` and a
+`try` at the end of a line keep their R meanings, so `try` applies to a name or call written
+directly after it. b has a sharper limit: R reads a `?` at the end of a line as its binary help
+operator with the next line as its right side, so a `?` can never end a statement, which is where
+Roc and Rust code puts it most.
 
 ### 4. The type of lengths and positions
 
-**a. `I64`** (recommended: R positions may be negative, as in `xs[-1]`, and `n - 1L` on an empty
-list stays meaningful)
+**a. `I64`** (recommended: R positions may be negative, as in `xs[-1]`)
 
 ```r
-last_two <- function(xs: List<Str>) -> List<Str> {
-  n <- List.len(xs)
-  if (n < 2) xs else List.sublist(xs, n - 1, 2)
+drop_last_three <- function(xs: List<Str>) -> List<Str> {
+  List.take_first(xs, Num.max(List.len(xs) - 3, 0))
 }
 ```
 
 **b. `U64`, as in Roc**
 
 ```r
-last_two <- function(xs: List<Str>) -> List<Str> {
+drop_last_three <- function(xs: List<Str>) -> List<Str> {
   n <- List.len(xs)
-  if (n < 2) xs else List.sublist(xs, n - 1, 2)
+  if (n < 3) [] else List.take_first(xs, n - 3)
 }
 ```
 
-The programs read the same; the difference is that in b, `n - 3` on a list of two items is an
-overflow error, and a negative position cannot be written with an index of the length's type.
+In b, `List.len(xs) - 3` on a list of two items is an overflow error, so the subtraction needs a
+guard, and a negative position such as `xs[-1]` cannot be written with the length's type.
 
 ## Settled choices
 
 - ry has Roc's thirteen number types, `Bool` and `Str`, none with `NA`.
-- Literals take the type their uses demand, defaulting to R's.
+- Literals have R's type unless an expected type, the other operand or a later use asks for a ry
+  number type.
 - `List<T>` replaces `Array<T>` and holds ry values only.
 - `F64`, `Bool`, `Str` and Lists of them share R's representation and fit R types directly; every
   other crossing is an explicit conversion.
