@@ -94,9 +94,10 @@ fuzz-all seconds="120":
 stats path=".":
     cargo run -q -p ry-lang -- debug analysis-stats {{ path }}
 
-# Corpus perf and memory budgets; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
+# Corpus perf and memory budgets, and the benchmark memory budget; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
 perf:
     cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+    cargo test -p ry-lang --release --test test_perf -- --ignored --nocapture
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench *args:

@@ -2781,8 +2781,9 @@ fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
 const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 
 /// Every top-level name the file's items bind, as `(name, position in the item tree, item)`
-/// sorted by name and then position, so a lookup is a binary search rather than a scan of the
-/// item list. One exactly sized array, because every file keeps it for the whole run, and a
+/// sorted by the name's symbol index and then position, so a lookup is a binary search over
+/// integers rather than a scan of the item list. Only each name's run is ever read, so the
+/// order between names may differ between runs. One exactly sized array, because every file keeps it for the whole run, and a
 /// map of per-name vectors cost four times the memory.
 #[salsa::tracked(returns(ref))]
 fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32, Item<'db>)> {
@@ -2799,7 +2800,7 @@ fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32,
             }
         }
     }
-    binders.sort_unstable_by_key(|&(name, index, _)| (name, index));
+    binders.sort_unstable_by_key(|&(name, index, _)| (name.index(), index));
     ThinVec::from(binders)
 }
 
@@ -2894,9 +2895,10 @@ impl<'db> FrameBinders<'db> {
     }
 
     fn binder(&self, name: Symbol, deferred: bool) -> Option<Item<'db>> {
+        let key = name.index();
         let start = self
             .binders
-            .partition_point(|&(binder, _, _)| binder < name);
+            .partition_point(|&(binder, _, _)| binder.index() < key);
         let length = self.binders[start..].partition_point(|&(binder, _, _)| binder == name);
         let binders = &self.binders[start..start + length];
         if deferred && self.test && binders.iter().any(|&(_, _, binder)| binder == self.item) {

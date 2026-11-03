@@ -702,6 +702,18 @@ memoization), resident bytes per line, and the p50 and p95 latency from a keystr
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
+`crates/ry/tests/test_perf.rs` holds the memory budget of a whole cold `ry check --no-cache` with
+type errors on. It generates the three 300,000-line benchmark code bases with
+`tools/bench/generate.py`, runs the release binary on each, and fails when one peaks above
+256 MiB resident. It reads the child's own peak with `wait4`, so it measures the process the user
+would run, allocator included. It is ignored by default for the same reasons:
+
+```sh
+cargo test -p ry-lang --release --test test_perf -- --ignored --nocapture
+```
+
+`just perf` runs both suites.
+
 ## Guidelines
 
 - Add or tighten a fixture before writing a parser-local or crate-local unit test.
