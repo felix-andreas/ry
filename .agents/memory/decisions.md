@@ -6435,8 +6435,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     reads types straight from the inference table, so exhaustiveness does not need them.
   - `sourced_definition` returns early for a file that sources nothing; the tracked part is
     `sourced_name_definition`.
-  - `item_frame_binders` is a `SortedMap` instead of a hash table, and `TypeScheme::binders` is a
-    `ThinVec`, because one of each lives per item for the whole run.
+  - `TypeScheme::binders` is a `ThinVec`, because one lives per item for the whole run. A one-shot
+    check builds an item's frame binders inside its `item_check` instead of memoizing
+    `item_frame_binders`.
   - mimalloc's purge delay is 10 ms instead of a second (`crates/ry/src/main.rs`), so the trees
     freed during the run return to the OS before the peak, which is late in the check.
 - **Correctness.** JSON findings are byte-identical against main on all three benchmark code bases.
@@ -6450,3 +6451,43 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Incremental.** The server path keeps every memo and firewall; only the tracked names changed
   (`parse_memo`, `item_syntax_memo`, `item_annotation_syntax_memo`), and `test_incremental.rs`
   pins the first two under those names.
+
+# Decision record: the one-shot check scans kind columns and overlaps its serial phases
+
+- **Previous source.** Whole-file readers (lints, write-token counts, used namespace tokens, the
+  syntax sites) visited every element in preorder and tested each one. Item HIR, binder memos and
+  per-item syntax flags were separate allocations and separate queries. The lexer scanned comments
+  and strings byte by byte, `TreeBuilder::finish` made two passes, the namespace verdict, the
+  project name maps and the cyclic group walk ran serially between parallel phases, and
+  `classify_non_local_read` fetched the package name maps through salsa for every read.
+- **Weakness.** The cold check was about 18.7 G instructions on finance and peaked at 297-306 MiB,
+  1-3 MiB under the old 300 MiB target, so one feature would have broken it.
+- **Target shape.**
+  - `NodeRef::descendants_of_kind`, `NodeRef::elements_of_kind` and `NodeRef::tokens_outside`
+    scan the kind column and touch only wanted elements; `tokens_outside` jumps over a pruned
+    node's subtree. Lints, `write_tokens`, `collect_used_tokens` (non-trivia only) and
+    `file_syntax_sites` use them.
+  - Item HIR is one exactly sized allocation, and one `item_syntax_flags` query answers the
+    per-item syntax questions; items with no annotation skip the annotation walks.
+  - A one-shot check skips the per-item frame binder memo (binders are built inside the item
+    check) and keeps rarely set `ItemNaming` and `ItemCheck` fields behind one optional box.
+  - The lexer finds comment ends and string delimiters with `memchr2`, and `TreeBuilder::finish`
+    computes preorder positions and parents in one backward loop.
+  - The namespace verdict runs beside checking, the project name maps are built on throwaway
+    database handles between naming and edges, and `project_interface_groups` runs on a cloned
+    handle beside the parallel edge pass.
+  - `ReadContext` holds the file's package definition and conditional-slot maps, fetched once,
+    and `package_scheme_exists_in` takes a probe closure so both paths share one rule.
+  - Measured and kept: the per-item `SalsaGlobals::layer` memo. Skipping it in one-shot mode cost
+    about 64 M instructions, because `name.symbol()` is dearer than the memo hit.
+- **Correctness.** JSON findings are byte-identical against main on all three benchmark code bases
+  after every step.
+- **Performance.** Finance went from 18.7 G to 17.6 G instructions under whole-process callgrind
+  (the typed strict 60K-line package from 3.90 G to 3.73 G). Peak RSS is 222-228 MiB in release
+  under the memory-budget test (`cold_check_memory_budget` in `crates/ry/tests/test_perf.rs`, which
+  fails above 256 MiB). Wall time is about 1.0-1.05 s on a quiet 4-core machine and 1.05-1.23 s on
+  a loaded one, against 1.08-1.36 s before, so the 1 s target is borderline. The profile is flat:
+  the parser and tree builder (about 1.4 G), the lexer (about 0.65 G) and spread salsa fetch costs
+  are what remain, besides `infer_ordinary_call`.
+- **Incremental.** The server path keeps every memo and firewall. The new scans are pure reads of
+  one tree, and the throwaway handles share the one-shot database's memos.

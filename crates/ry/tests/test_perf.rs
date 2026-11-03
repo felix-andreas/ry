@@ -14,8 +14,8 @@ use std::{
     time::Instant,
 };
 
-/// Peak resident set of one cold `ry check --no-cache` of a code base. Measured at about
-/// 250 MiB, so a feature that grows memory by a few percent shows up here first.
+/// Peak resident set of one cold `ry check --no-cache` of a code base. Measured at 222-228 MiB
+/// on the generated benches, so a feature that grows memory by a few percent shows up here first.
 const PEAK_RESIDENT_KIB: i64 = 256 * 1024;
 
 const BENCHES: [&str; 3] = ["finbench", "dsbench", "biobench"];

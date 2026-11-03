@@ -199,7 +199,8 @@ Most tree readers look for a handful of node kinds in a large file, so they walk
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
 over a node and its parent and makes owned nodes only for the matches. The per-file site collectors
 share one pass over the nodes, `file_syntax_sites`, which tests each role only on the kinds that
-can carry it. The syntax lints scan every element in preorder (`NodeRef::descendants_with_tokens`),
+can carry it. The syntax lints scan the kind column for the element kinds a lint or an annotation region
+can start at (`NodeRef::elements_of_kind`),
 track the enclosing annotation region by position (`NodeRef::encloses`), and make an owned node
 (`syntax::node_at`) only where a cheap test says a lint may fire. A borrowed `TokenRef` reads its
 kind, range and text only when asked, because a child walk mostly checks kinds.
@@ -401,7 +402,8 @@ answers each name with a hash probe, instead of interning a name and going throu
 or `test_name`. A frame binder comes from the file's binders, read once per reader, instead of
 the per-item `item_frame_binders` memo and a `frame_binder` memo per name it does not list. And
 `item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
-instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+instead of one `interface_group` walk per item; `ry check` runs that walk on a cloned handle
+beside the parallel edge pass. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
 per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
