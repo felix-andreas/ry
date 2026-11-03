@@ -3056,21 +3056,24 @@ pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
-    combine_args(&args, &[], false, true)
+    combine_args(&args, &[], false, true, false)
 }
 
 /// `na_tags` marks the arguments whose tag stands for an NA name; it may be shorter than `args`.
+/// `named` says the arguments come from a vector with a names attribute, which makes the result
+/// named even when every name is blank, as GNU R's `unlist` does.
 pub unsafe fn combine_args(
     args: &[Arg],
     na_tags: &[bool],
     recursive: bool,
     use_names: bool,
+    named: bool,
 ) -> R<Sexp> {
     let mut flattener = Flattener {
         kind: SexpType::Nil,
         values: Vec::new(),
         names: Vec::new(),
-        any_names: false,
+        any_names: named,
         recursive,
         use_names,
     };
@@ -3082,7 +3085,9 @@ pub unsafe fn combine_args(
     }
     if matches!(flattener.kind, SexpType::List | SexpType::Expression) {
         flattener.recursive = recursive;
-    } else if let Some(result) = combine_unnamed_atomic(args, flattener.kind)? {
+    } else if !named
+        && let Some(result) = combine_unnamed_atomic(args, flattener.kind)?
+    {
         return Ok(result);
     }
     for (index, arg) in args.iter().enumerate() {
@@ -3163,7 +3168,7 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
             args.push(*arg);
         }
     }
-    combine_args(&args, &[], recursive, use_names)
+    combine_args(&args, &[], recursive, use_names, false)
 }
 
 unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
@@ -3182,25 +3187,23 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
         object
     };
     let names = values::names(list);
-    let args: Vec<Arg> = (0..length(list))
+    let args = (0..length(list))
         .map(|index| {
             let tag = if names != nil() && !values::is_blank(names.element(index)) {
-                crate::heap()
-                    .install_char(names.element(index))
-                    .unwrap_or(nil())
+                crate::heap().install_char(names.element(index))?
             } else {
                 nil()
             };
-            Arg {
+            Ok(Arg {
                 tag,
                 value: list.element(index),
-            }
+            })
         })
-        .collect();
+        .collect::<R<Vec<Arg>>>()?;
     let na_tags: Vec<bool> = (0..length(list))
         .map(|index| names != nil() && names.element(index) == values::na_string())
         .collect();
-    combine_args(&args, &na_tags, recursive, use_names)
+    combine_args(&args, &na_tags, recursive, use_names, names != nil())
 }
 
 unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {

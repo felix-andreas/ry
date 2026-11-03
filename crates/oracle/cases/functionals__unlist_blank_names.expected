@@ -1,0 +1,15 @@
+[stdout]
+| [1] "" ""
+| [1] "" "" ""
+| NULL
+| [1] "" ""
+| NULL
+|     
+| "a" 
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

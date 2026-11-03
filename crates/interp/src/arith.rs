@@ -3087,7 +3087,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
         vec![Arg {
             tag: nil(),
-            value: crate::subset::combine_args(&items, &[], true, false)?,
+            value: crate::subset::combine_args(&items, &[], true, false, false)?,
         }]
     } else {
         items
