@@ -13,6 +13,7 @@ use {
     },
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     loader::SourceEncoding,
+    memchr::memchr2_iter,
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
@@ -574,18 +575,33 @@ fn analyze_project_with(
     });
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
-    let mut paths = collect_r_files(walk, exclude.as_ref())?;
-    // `exclude` scopes the project walk; it does not veto a file named directly.
-    for target in requested {
-        if !target.is_dir() && !paths.contains(target) {
-            paths.push(target.clone());
-        }
-    }
-
     let mut db = match purpose {
         Purpose::Diagnostics => RootDatabase::one_shot(),
         Purpose::Rewrites => RootDatabase::one_shot_with_editor_facts(),
     };
+    // The sources and the environment are independent inputs, and a large `NAMESPACE` takes
+    // as long to parse as the walk and the reads take, so the two overlap. `DESCRIPTION` is
+    // read first because it names the sources' encoding.
+    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+    let encoding = SourceEncoding::of(description_source.as_deref().unwrap_or_default());
+    let (sources, environment) = thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut paths = collect_r_files(walk, exclude.as_ref())?;
+            // `exclude` scopes the project walk; it does not veto a file named directly.
+            for target in requested {
+                if !target.is_dir() && !paths.contains(target) {
+                    paths.push(target.clone());
+                }
+            }
+            Ok::<_, CommandError>(read_sources(paths, encoding))
+        });
+        let environment = install_environment(&db, root, &config, description_source);
+        match reader.join() {
+            Ok(sources) => (sources, environment),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    });
+    let sources = sources?;
     let ProjectEnvironment {
         metadata,
         namespace_source,
@@ -596,14 +612,13 @@ fn analyze_project_with(
         stub_problems,
         data_files,
         failures: environment_failures,
-    } = install_environment(&db, root, &config);
+    } = environment;
     failures += environment_failures;
     let namespace_path = root.join("NAMESPACE");
 
-    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
-    let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-    let encoding = SourceEncoding::of(description_source.as_deref().unwrap_or_default());
-    for (path, read) in read_sources(paths, encoding) {
+    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(sources.len());
+    let mut reported: Vec<bool> = Vec::with_capacity(sources.len());
+    for (path, read) in sources {
         let (source, document) = match read {
             Ok(read) => read,
             Err(err) => {
@@ -1060,7 +1075,8 @@ pub(crate) fn check_package_code(
         _ => {
             // Kept for edits, so the queries keep their firewalls.
             let db = RootDatabase::default();
-            let installed = install_environment(&db, root, config);
+            let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+            let installed = install_environment(&db, root, config, description_source);
             let project = ProjectFiles::builder(Vec::new())
                 .durability(Durability::HIGH)
                 .new(&db);
@@ -1218,11 +1234,13 @@ struct ProjectEnvironment {
 }
 
 /// Reads the inputs of the project at `root` besides its R files (stubs, settings,
-/// `DESCRIPTION`, `NAMESPACE` and data files) into `db`, which holds no inputs yet.
+/// `NAMESPACE` and data files) into `db`, which holds no inputs yet, along with the already
+/// read `DESCRIPTION`.
 fn install_environment(
     db: &RootDatabase,
     root: &Path,
     config: &config::Config,
+    description_source: Option<String>,
 ) -> ProjectEnvironment {
     let mut failures = 0;
     // Override stubs fold on top of the shipped corpus (later sources win); an
@@ -1262,7 +1280,6 @@ fn install_environment(
         .as_deref()
         .map(parse_namespace)
         .unwrap_or_default();
-    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let dependencies = description_source
         .as_deref()
         .map(parse_description_dependencies)
@@ -2218,18 +2235,12 @@ impl LineStarts {
     fn new(text: &str) -> LineStarts {
         let mut starts = vec![0u32];
         let bytes = text.as_bytes();
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            match bytes[offset] {
-                b'\r' => {
-                    // `\r\n` is one break, not two.
-                    offset += usize::from(bytes.get(offset + 1) == Some(&b'\n'));
-                    starts.push(offset as u32 + 1);
-                }
-                b'\n' => starts.push(offset as u32 + 1),
-                _ => {}
+        for offset in memchr2_iter(b'\n', b'\r', bytes) {
+            // `\r\n` is one break, not two: its `\n` ends the line.
+            if bytes[offset] == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
+                continue;
             }
-            offset += 1;
+            starts.push(offset as u32 + 1);
         }
         LineStarts { starts }
     }

@@ -3808,6 +3808,7 @@ dependencies = [
  "libc",
  "libmimalloc-sys",
  "loader",
+ "memchr",
  "miette",
  "portable-pty",
  "rcmd",

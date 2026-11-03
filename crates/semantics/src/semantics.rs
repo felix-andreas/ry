@@ -1062,6 +1062,11 @@ fn expression_annotations<'db>(
     // Each annotated statement once, in source order, with its `#:` block if it has one.
     let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
+    // Most items carry no annotation at all, and a scan of the kind column proves that far
+    // faster than the walk below.
+    if !root.node_ref().any_kind(annotations::may_mark_site) {
+        return Vec::new();
+    }
     // One walk for both kinds of site; the item tree is position-free, so the file's
     // recorded sites cannot stand in for it.
     let (comments, inline_sites): (Vec<SyntaxNode>, Vec<SyntaxNode>) =
@@ -2119,12 +2124,48 @@ pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> ThinVec<It
     ThinVec::from(targets)
 }
 
-/// Whether the item's top-level writes are at most its own binding, read off its syntax so the
-/// common case needs no naming pass. It is memoized on its own because the naming pass runs
-/// after a one-shot check has released the item's tree.
+/// Facts read off an item's own syntax that passes need after a one-shot check has released
+/// the item's tree. They share one memo because each is a `bool` that rarely changes, and a
+/// memo per fact costs more to keep than the fact costs to compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ItemSyntaxFlags {
+    /// The item's top-level writes are at most its own binding, so the common case needs no
+    /// naming pass.
+    pub binds_only_own_name: bool,
+    /// Its `#:` block carries `@pure`.
+    pub comment_pure: bool,
+    /// It binds a function marked `@pure function`, which counts only while inline
+    /// annotations are enabled.
+    pub inline_pure: bool,
+}
+
 #[salsa::tracked(returns(copy))]
+pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFlags {
+    let comment_pure = item_annotation_syntax(db, item)
+        .is_some_and(|syntax| annotations::declares_pure(&syntax.syntax_node()));
+    let Some(syntax) = item_syntax(db, item) else {
+        return ItemSyntaxFlags {
+            comment_pure,
+            ..ItemSyntaxFlags::default()
+        };
+    };
+    let root = syntax.syntax_node();
+    let inline_pure = root.kind() == SyntaxKind::BINARY_EXPR
+        && root.children().any(|child| {
+            child.kind() == SyntaxKind::FUNCTION_DEF
+                && child
+                    .children()
+                    .any(|part| part.kind() == SyntaxKind::PURE_MARKER)
+        });
+    ItemSyntaxFlags {
+        binds_only_own_name: binds_only_own_name(db, item, &root),
+        comment_pure,
+        inline_pure,
+    }
+}
+
 pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
-    item_syntax(db, item).is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
+    item_syntax_flags(db, item).binds_only_own_name
 }
 
 fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {

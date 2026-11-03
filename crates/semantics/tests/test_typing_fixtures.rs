@@ -251,7 +251,7 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
             TopLevel::Generator => "generator",
             TopLevel::Effect { .. } => "effect",
         };
-        let pure = if *item_declared_pure(db, span.item) {
+        let pure = if item_declared_pure(db, span.item) {
             " (pure)"
         } else {
             ""

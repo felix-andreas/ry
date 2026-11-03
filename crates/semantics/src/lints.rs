@@ -13,7 +13,7 @@ use {
         ast::BinaryExpr,
         is_inline_annotation_kind,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, node_text,
+        node_text,
     },
 };
 
@@ -405,10 +405,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 if !may_lint(node, parent, config) {
                     continue;
                 }
-                let range = node.range();
-                let Some(red) = node_at(root, kind, range) else {
-                    panic!("syntax_lints: no node of kind {kind:?} at {range:?}");
-                };
+                let red = root.at(node);
                 match kind {
                     SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
                     SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),

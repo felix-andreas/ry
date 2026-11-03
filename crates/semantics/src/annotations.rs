@@ -208,6 +208,20 @@ pub fn is_inline_site(node: &SyntaxNode) -> bool {
     is_inline_site_ref(node.node_ref())
 }
 
+/// Whether a subtree holding an element of `kind` may hold a `#:` annotation or an inline
+/// site: every site is or contains one of these kinds, so a subtree without any has none.
+pub fn may_mark_site(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::ANNOTATION
+            | SyntaxKind::TYPE_DEFINITION
+            | SyntaxKind::NEW_EXPR
+            | SyntaxKind::TYPE_ASCRIPTION
+            | SyntaxKind::TYPE_BINDER_LIST
+            | SyntaxKind::RETURN_TYPE
+    )
+}
+
 /// [`is_inline_site`] on a borrowed node, for whole-file searches.
 pub fn is_inline_site_ref(node: NodeRef<'_>) -> bool {
     match node.kind() {

@@ -398,7 +398,6 @@ impl fmt::Debug for Tree {
 /// Builds a [`Tree`] from a parser's events. A node is only known to wrap the elements after a
 /// checkpoint once the parser opens it there, so elements arrive in postorder (children before
 /// their parent) and [`TreeBuilder::finish`] lays them out in preorder in one linear pass.
-#[derive(Default)]
 pub(crate) struct TreeBuilder {
     kinds: Vec<SyntaxKind>,
     starts: Vec<TextSize>,
@@ -414,6 +413,16 @@ pub(crate) struct TreeBuilder {
 pub(crate) struct Checkpoint(u32);
 
 impl TreeBuilder {
+    pub(crate) fn with_capacity(elements: usize) -> TreeBuilder {
+        TreeBuilder {
+            kinds: Vec::with_capacity(elements),
+            starts: Vec::with_capacity(elements),
+            firsts: Vec::with_capacity(elements),
+            open: Vec::new(),
+            offset: TextSize::new(0),
+        }
+    }
+
     pub(crate) fn token(&mut self, kind: SyntaxKind, len: TextSize) {
         let index = self.next_index();
         self.kinds.push(kind);
@@ -1456,6 +1465,19 @@ impl<'a> NodeRef<'a> {
         (self.index..tree.end(self.index))
             .filter(move |&index| tree.is_node(index))
             .map(move |index| NodeRef { tree, index })
+    }
+
+    /// Whether any element under this one, this one included, has a kind `wanted` accepts.
+    /// One scan of the kind column, so it is far cheaper than a walk and suits a test that
+    /// lets a walk be skipped.
+    pub fn any_kind(self, wanted: impl Fn(SyntaxKind) -> bool) -> bool {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        tree.columns
+            .kinds
+            .get(start..end)
+            .is_some_and(|kinds| kinds.iter().any(|&kind| wanted(kind)))
     }
 
     /// The first node in preorder under this one, this one included, with `kind` and exactly

@@ -178,8 +178,8 @@ annotation never keeps the whole file's tree alive.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
-agreement candidates in `diagnostics.rs`, `item_name_range`, `item_binds_only_own_name`,
-`top_level::item_declared_pure`, and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+agreement candidates in `diagnostics.rs`, `item_name_range`, `item_syntax_flags` (whether
+an item binds only its own name, and whether it is declared pure), and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
 joins it with the rest (a bare `setClass` call is reported only when the file does not bind

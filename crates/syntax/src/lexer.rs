@@ -18,8 +18,9 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     let mut lexer = Lexer {
         text,
         pos: 0,
-        // R averages a little over four bytes a token, so this rarely regrows.
-        tokens: Vec::with_capacity(text.len() / 4),
+        // Counting whitespace runs as tokens, R averages under three bytes a token and rarely
+        // fewer than two and a half.
+        tokens: Vec::with_capacity(text.len() / 2),
         errors: Vec::new(),
         in_annotation: false,
     };
