@@ -3806,12 +3806,19 @@ first lines R had already read, leaving R mid-command.
   diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
   in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
   source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
+- **One tagline: "A type checker and a fast runtime for R, written in Rust."** It is the README's
+  line, and the landing page's subhead and meta description, the Starlight site description,
+  `getting-started.mdx`, `ry.mdx`, the Zed extension and the `ry-lang` crate repeat it word for
+  word (user direction). It names the two things a reader cannot get elsewhere; the linter,
+  formatter and language server follow in the body. The hero heading "A toolchain for R." is drawn
+  by the user-owned particle animation, so it keeps its own wording.
 - **The migration is sold as moving your code into the future, not as switching to ry.** The
   destination is the future of the code base (typed, checked on every edit, safe for agents to
   change, fast), and ry is the tool that takes it there, usable today on the code it already has.
-  The pitch avoids "migrate to ry" and "switch to ry", and step 4 is called "Go fully typed" rather
-  than "Move to ry's types". The blue-to-purple Venn story stays and reads as the code moving
-  forward.
+  The pitch avoids "migrate to ry", and step 4 is called "Go fully typed" rather than "Move to ry's
+  types". Step 3 is "Switch to the ry runtime" (user direction), because that is the one step that
+  changes what runs the code, and it names the gain plainly: inline types and ry's own features.
+  The blue-to-purple Venn story reads as the code moving forward.
 - **The landing page sells features first and the migration last.** Below the hero come three
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
@@ -3861,8 +3868,8 @@ first lines R had already read, leaving R mid-command.
   data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
   `tools/bench/table` result. No placeholder tabs.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
-  have, add types as `#:` comments, switch to inline types (which ry also enforces at run time),
-  then go fully typed under strict mode. Each step is optional and reversible, which is what makes adopting
+  have, add types as `#:` comments, switch to the ry runtime (inline types, which it also enforces
+  at run time, and ry's own features), then go fully typed under strict mode. Each step is optional and reversible, which is what makes adopting
   ry safe for an existing code base. `why-ry.mdx` tells it in full.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
   GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
@@ -3871,8 +3878,10 @@ first lines R had already read, leaving R mid-command.
   says so instead of implying that types buy speed. When typed runtime features do get faster, the
   third column shows it without a rewrite of the copy.
 - **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
-  have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Go fully
-  typed" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.mdx` and the
+  have" and "2. Type your code" hold what works on GNU R and on ry's runtime alike, and "3. Switch
+  to the ry runtime" (inline annotations, records and tags, Arrays) and "4. Go fully typed"
+  (nominal types, DataFrame, strict mode) hold what needs ry's runtime. Records come before nominal
+  types, because nominal types are taught as the named form of a record or union shape. The landing page, `why-ry.mdx` and the
   sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
   not moved, so every URL and cross-link keeps working.
 - **Rejected:** opening the landing page with the Venn diagram and the migration (it explains a
@@ -3887,8 +3896,8 @@ first lines R had already read, leaving R mid-command.
 - **Shape:** every record, tuple or tag union is structural by default (`alias` only names it), and
   `type Name = ...` (or `#: @type`) wraps it in a nominal type. That gives a 2x2 grid, structural or
   nominal for product and for sum types, with one mechanism instead of a separate "declared record"
-  or "declared union" concept. The user guide teaches it as a table in
-  `type-checking/records-and-tags.mdx`; the contract is the reference section "Nominal records,
+  or "declared union" concept. The user guide teaches it in
+  `type-checking/custom-types.mdx` (a record pair and a union); the contract is the reference section "Nominal records,
   tuples and tags".
 - **Construction:** `@Name(...)` is the only constructor, and its parentheses are the value's own,
   so `@Point(x = 1, y = 2)` is a record and `@UserId(id = 1L,)` a one-field record. A bare value of

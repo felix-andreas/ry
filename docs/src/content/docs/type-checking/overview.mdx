@@ -14,6 +14,9 @@ an existing codebase can have many such findings and you should choose when to f
 typing = true
 ```
 
+Like everything in steps 1 and 2, type checking works on code you run on GNU R as well as on ry's
+runtime: it runs nothing, and its `#:` comments keep a file plain R.
+
 ## Nothing to annotate
 
 ry infers types from how values are used, so unannotated code is checked as it is:
@@ -53,10 +56,28 @@ contains. An annotation states that type, and ry then checks it against the valu
 use, so a wrong call is reported at the call instead of deep inside the function.
 
 You can write an annotation as a `#:` comment directly above the assignment, which keeps the file
-plain R that every tool can run, or inline, in the code itself. Both spellings mean the same, and
-every typed example on this site offers both in tabs, with the tab you pick remembered:
+plain R that every tool can run, or inline, in the code itself. Both spellings mean the same. Typed
+examples on this site show them in tabs beside the plain R you start from (Untyped), and the tab you
+pick is remembered:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+apply_rate <- function(price, rate) price * rate
+
+rate <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -67,6 +88,12 @@ apply_rate <- function(price, rate) price * rate
 rate <- readRDS("rate.rds")
 
 apply_rate(rate, "x")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `double`, found `character`
 ```
 
 </TabItem>
@@ -80,14 +107,17 @@ rate: double <- readRDS("rate.rds")
 apply_rate(rate, "x")
 ```
 
-</TabItem>
-</Tabs>
-
 ```text ry check typing
 type-mismatch
 
   x expected `double`, found `character`
 ```
+
+</TabItem>
+</Tabs>
+
+Untyped, ry knows only that `*` needs a number. With the signature, it reports the type the function
+declares.
 
 The body is checked too, so a function declared `-> double` that returns a string is an error at the
 return value. Inference already covers the inside of a function, so annotate where code meets other
@@ -103,6 +133,16 @@ as often as by position. A parameter callers may omit must have a default: inlin
 itself marks it as optional, and in a comment you write `[greeting]`:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r

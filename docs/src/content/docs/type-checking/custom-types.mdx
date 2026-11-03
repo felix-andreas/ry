@@ -1,24 +1,159 @@
 ---
-title: Custom types
-description: Declaring your own types, so values with the same shape stay apart
+title: Nominal types
+description: Named types that keep values with the same shape apart, and make one constructor the only way to create a value
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Every type so far is *structural*: two types are the same if they have the same shape. Any
-`list(name = "Ada")` is a `list{name: character}`, and every `double` is interchangeable with every
-other. That is the right default for R, where values are plain data, but it cannot tell Celsius from
-Fahrenheit, or a user ID from an email address.
+Records and tag unions are *structural*: a value fits a type when it has the right shape, whatever
+the type is called. `alias` only gives a shape a name, so these two types are the same type, and
+passing a Fahrenheit temperature where Celsius is expected goes unnoticed:
 
-`alias` names a shape and keeps it structural, while `type` declares a *nominal* type, distinct by
-name. Both also work for ry's own records, tuples and tag unions, as
-[Records and tags](/type-checking/records-and-tags/#structural-or-nominal) shows.
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
-## Nominal types
+```r
+alias Celsius = Record{degrees: double}
+alias Fahrenheit = Record{degrees: double}
 
-A *nominal* type is distinct by name, even from a type with the same shape. `type` declares one,
-and `@Money(value)` marks the one place that creates its values. The comment spelling is
-`#: @type` and `#: @new`:
+boils <- function(water: Celsius) -> logical water$degrees >= 100
+
+oven: Fahrenheit <- (degrees = 350,)
+boils(oven)   # no error: both are a record with one `degrees` field
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Celsius {Record{degrees: double}}
+
+#: @alias Fahrenheit {Record{degrees: double}}
+
+#: fn(water: Celsius) -> logical
+boils <- function(water) water$degrees >= 100
+
+#: Fahrenheit
+oven <- (degrees = 350,)
+boils(oven)   # no error: both are a record with one `degrees` field
+```
+
+</TabItem>
+</Tabs>
+
+`type` declares a *nominal* type instead: a named type that is distinct from every other type, even
+one with exactly the same shape. A value gets the type only from its constructor, `@Fahrenheit(...)`,
+so the mix-up is an error. The comment spellings are `#: @type` and `#: @new`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+
+boils <- function(water: Celsius) -> logical water$degrees >= 100
+
+oven <- @Fahrenheit(degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Celsius {Record{degrees: double}}
+
+#: @type Fahrenheit {Record{degrees: double}}
+
+#: fn(water: Celsius) -> logical
+boils <- function(water) water$degrees >= 100
+
+#: @new Fahrenheit
+oven <- (degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `Celsius`, found `Fahrenheit`
+```
+
+Choose `type` when values share a shape but must not mix, such as two units, or a user ID and an
+order ID. Choose `alias` when any value of the shape will do. Everything else works as it does for
+the structural form: `$` reads a field, `match` checks every case, and at run time `@Fahrenheit(x)`
+is just `x`. The parentheses of `@Name(...)` belong to the value inside, so `@Fahrenheit(degrees =
+350,)` is a one-field record, `@Pair(1L, "a")` a tuple, and `@Shape(:Circle(radius = 1))` a tag.
+
+## One constructor
+
+Only `@Name(...)` creates a value of a nominal type, so when it appears in one function, that
+function is the only way to make one. Here `@Email(...)` appears only in `check_email()`, so every
+`:Verified` address in the program has passed the check. A tag written anywhere else does not fit,
+although its shape does:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Email =
+  | :Verified(address: character)
+  | :Unverified(address: character)
+
+check_email <- function(address: character) -> Email {
+  if (grepl("@", address)) {
+    @Email(:Verified(address = address))
+  } else {
+    @Email(:Unverified(address = address))
+  }
+}
+
+email: Email <- :Verified(address = "nobody")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Email {
+#:   | :Verified(address: character)
+#:   | :Unverified(address: character)
+#: }
+
+#: fn(address: character) -> Email
+check_email <- function(address) {
+  if (grepl("@", address)) {
+    #: @new Email
+    :Verified(address = address)
+  } else {
+    #: @new Email
+    :Unverified(address = address)
+  }
+}
+
+#: Email
+email <- :Verified(address = "nobody")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `Email`, found `:Verified(address: character)`. The value has the right shape, but `Email` is a nominal type, so only `@Email(...)` or `#: @new Email` creates one
+```
+
+## Over R values
+
+`type` works over any type, not only ry's records and tags. With `type UserId = character` and
+`type OrderId = character`, passing an `OrderId` where a `UserId` is expected is an error, although
+both are strings at run time. Over an R list, the `#:` spelling keeps the file plain R that GNU R
+runs:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Comments">
@@ -32,11 +167,6 @@ money <- function(amount, currency) {
   #: @new Money
   structure(list(amount = amount, currency = currency), class = "Money")
 }
-
-#: fn(m: Money) -> double
-amount_of <- function(m) m$amount
-
-amount_of(list(amount = 1, currency = "EUR"))
 ```
 
 </TabItem>
@@ -49,28 +179,13 @@ money <- function(amount: double, currency: character) -> Money {
   if (amount < 0) stop("negative amount")
   @Money(structure(list(amount = amount, currency = currency), class = "Money"))
 }
-
-amount_of <- function(m: Money) -> double m$amount
-
-amount_of(list(amount = 1, currency = "EUR"))
 ```
 
 </TabItem>
 </Tabs>
 
-```text ry check typing
-type-mismatch
-
-  x expected `Money`, found `list{amount: double, currency: character}`. The value has the right shape, but `Money` is a nominal type, so only `@Money(...)` or `#: @new Money` creates one
-```
-
-A list with the right fields is still not a `Money`. Put `@Money(...)` in one constructor and
-nowhere else, and every `Money` in the program has passed its checks: `@Money(...)` checks the
-shape when ry analyzes the code, and `stop()` checks the values when it runs. At run time
-`@Money(x)` is just `x`.
-
-Scalars work the same way. With `type UserId = character` and `type Email = character`, passing an
-`Email` where a `UserId` is expected is an error, although both are strings at run time.
+The constructor checks the shape when ry analyzes the code, and `stop()` checks the values when it
+runs, so every `Money` in the program has passed both.
 
 ## Operators
 

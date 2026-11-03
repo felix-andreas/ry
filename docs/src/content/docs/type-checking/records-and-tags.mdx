@@ -249,73 +249,10 @@ are turned off.
 
 ## Structural or nominal
 
-Each of these types comes in two flavors, as [custom types](/type-checking/custom-types) explains:
-`alias` names a *structural* type, which any value of the same shape fits, and `type` declares a
-*nominal* one, which only its constructor `@Name(...)` creates. Choose nominal when values have the
-same shape but must not mix, such as Celsius and Fahrenheit, or a user ID and an order ID, or when
-every value should come from one constructor that checks it. The comment spellings are
-`#: @alias Point {...}` and `#: @type Celsius {...}`:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-type Celsius = Record{degrees: double}
-type Fahrenheit = Record{degrees: double}
-type Shape =
-  | :Circle(radius: double)
-  | :Square(side: double)
-
-boiling <- function() -> Celsius @Celsius(degrees = 100,)
-
-wrong: Fahrenheit <- boiling()
-bare: Shape <- :Circle(radius = 1)
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: @type Celsius {Record{degrees: double}}
-
-#: @type Fahrenheit {Record{degrees: double}}
-
-#: @type Shape {
-#:   | :Circle(radius: double)
-#:   | :Square(side: double)
-#: }
-
-#: fn() -> Celsius
-boiling <- function() {
-  #: @new Celsius
-  (degrees = 100,)
-}
-
-#: Fahrenheit
-wrong <- boiling()
-#: Shape
-bare <- :Circle(radius = 1)
-```
-
-</TabItem>
-</Tabs>
-
-```text
-type-mismatch
-
-  x expected `Fahrenheit`, found `Celsius`
-
-type-mismatch
-
-  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
-```
-
-The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
-one-field record, `@Pair(1L, "a")` a tuple, and `@Shape(:Circle(radius = 1))` a tag. Everything else
-works as it does for the structural form: `$` reads a field, `match` checks every case of a nominal
-union, a pattern binding keeps the nominal type, and a type can take parameters, as in
-`type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
-just `x`.
+Records, tuples and tag unions are *structural*: any value with the right shape fits, and `alias`
+only names a shape. `type` declares a *nominal* type instead, which keeps two types with the same
+shape apart and accepts only values its constructor `@Name(...)` creates.
+[Nominal types](/type-checking/custom-types) shows both with examples.
 
 ## Passing them to R
 

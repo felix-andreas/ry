@@ -1,7 +1,7 @@
 # ry for Zed
 
-Zed extension for [ry](https://github.com/felix-andreas/ry) — an R language server,
-type checker, and formatter written in Rust.
+Zed extension for [ry](https://github.com/felix-andreas/ry): a type checker and a fast runtime for
+R, written in Rust.
 
 Not yet published to Zed's extension registry. Install it manually as a dev extension.
 

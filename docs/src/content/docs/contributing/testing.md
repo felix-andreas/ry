@@ -557,7 +557,9 @@ type-mismatch
 ````
 
 A marked `text` block is the output of the nearest `r` block above it, or of every tab of the
-nearest tab group above it, and each tab must produce it on its own. The code runs in a throwaway
+nearest tab group above it, and each tab must produce it on its own. Inside a `<TabItem>`, after the
+tab's `r` block, it is the output of that tab alone, and a tab of the same group with no output
+block of its own must report no errors. The code runs in a throwaway
 project of one `ry.toml` and one file, `main.R` unless the output's snippet names another file, as
 `--[R/both.R:2:31]` does. A tab group that no output block follows must give the same findings in
 every tab, with typing on. An unmarked output block is not tested.

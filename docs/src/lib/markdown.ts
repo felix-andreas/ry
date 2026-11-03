@@ -9,7 +9,7 @@ import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkTableMarkdown } f
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
 
-const SUMMARY_FALLBACK = 'ry is a toolchain for R: a type checker, formatter, linter and runtime.';
+const SUMMARY_FALLBACK = 'A type checker and a fast runtime for R, written in Rust.';
 const OPTIONAL_PAGES_LABEL = 'Optional';
 
 export function markdownUrl(page: DocsPage, site: URL): string {

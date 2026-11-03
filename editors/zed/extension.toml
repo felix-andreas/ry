@@ -3,7 +3,7 @@ name = "ry"
 version = "0.4.0"
 schema_version = 1
 authors = ["Felix Andreas"]
-description = "An R language server and code formatter, written in Rust."
+description = "A type checker and a fast runtime for R, written in Rust."
 repository = "https://github.com/felix-andreas/ry"
 
 [language_servers.ry]

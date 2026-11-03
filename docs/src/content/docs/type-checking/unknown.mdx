@@ -17,6 +17,13 @@ The cost is that a clean run does not say how much was checked.
 An annotation gives an `Unknown` value a type, so every later use is checked against it:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+amount <- df$amount
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -143,7 +150,7 @@ Most gaps are silent, because a value ry cannot type becomes `Unknown` and its c
   Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
 - **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through
   `UseMethod()` return `Any`. Operator methods such as `+.Date` and methods called directly are
-  checked. [Custom types](/type-checking/custom-types#r6-and-s4-objects) shows how to check who
+  checked. [Nominal types](/type-checking/custom-types#r6-and-s4-objects) shows how to check who
   receives an object.
 - **Packages without a [stub](/type-checking/unknown#package-stubs).** Their names are `Unknown`, and attaching one
   switches off unresolved-name reports for the whole project.

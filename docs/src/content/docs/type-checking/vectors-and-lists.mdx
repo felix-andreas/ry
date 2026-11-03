@@ -26,6 +26,15 @@ A scalar is accepted where a vector is expected, but not the reverse, because a 
 length may not have exactly one element:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+label <- function(flag) if (flag) "yes" else "no"
+
+label(c(TRUE, FALSE))
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -33,6 +42,12 @@ length may not have exactly one element:
 label <- function(flag) if (flag) "yes" else "no"
 
 label(c(TRUE, FALSE))
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `logical`, found `logical[]`
 ```
 
 </TabItem>
@@ -44,14 +59,16 @@ label <- function(flag: logical) -> character if (flag) "yes" else "no"
 label(c(TRUE, FALSE))
 ```
 
-</TabItem>
-</Tabs>
-
 ```text ry check typing
 type-mismatch
 
   x expected `logical`, found `logical[]`
 ```
+
+</TabItem>
+</Tabs>
+
+Untyped, ry lets the call through, because nothing says `flag` must hold one value.
 
 A `double` accepts an `integer` or a `logical`, which R converts without loss. A number is never
 accepted where `character` is expected: R would convert it, but a silent number-to-string conversion
@@ -63,6 +80,16 @@ R uses one list type for four different jobs, and each job has its own mistakes,
 its own type. Braces mean a fixed shape (`list{...}`), and brackets mean any length (`list[...]`). At run time all four are the same R list, so your code does not change.
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+pair   <- list(1L, "ok")                  # positional:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # named fields: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # any length:   list[integer]
+counts <- list(apples = 3L)               # by key:       infers as list{apples: integer}
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -133,6 +160,16 @@ may pass instead. In the `fn(...)` form, brackets around a name such as `[label]
 argument:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+label_for <- function(id, label = NULL) {
+  if (is.null(label)) paste("item", id) else label
+}
+label_for(1L, label = 2)
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -141,6 +178,12 @@ label_for <- function(id, label = NULL) {
   if (is.null(label)) paste("item", id) else label
 }
 label_for(1L, label = 2)
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `character | NULL`, found `double`
 ```
 
 </TabItem>
@@ -153,14 +196,14 @@ label_for <- function(id: integer, label: character | NULL = NULL) -> character 
 label_for(1L, label = 2)
 ```
 
-</TabItem>
-</Tabs>
-
-```text
+```text ry check typing
 type-mismatch
 
   x expected `character | NULL`, found `double`
 ```
+
+</TabItem>
+</Tabs>
 
 ### Reading through a value that may be `NULL`
 
@@ -168,6 +211,15 @@ A field of a value that may be `NULL` may be `NULL` too, because R reads every f
 `NULL`. Returning such a field where an `integer` is declared is an error:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+retries <- function(config) {
+  config$retries
+}
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -175,6 +227,12 @@ A field of a value that may be `NULL` may be `NULL` too, because R reads every f
 retries <- function(config) {
   config$retries
 }
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `integer`, found `integer | NULL`
 ```
 
 </TabItem>
@@ -186,18 +244,28 @@ retries <- function(config: list{retries: integer} | NULL) -> integer {
 }
 ```
 
-</TabItem>
-</Tabs>
-
 ```text ry check typing
 type-mismatch
 
   x expected `integer`, found `integer | NULL`
 ```
 
+</TabItem>
+</Tabs>
+
 Check for `NULL` first, and the error goes away:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+retries <- function(config) {
+  if (is.null(config)) return(3L)
+  config$retries
+}
+```
+
+</TabItem>
 <TabItem label="Comments">
 
 ```r

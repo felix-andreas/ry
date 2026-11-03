@@ -23,7 +23,8 @@ unresolved
 It reads every `.R` file in the project, plus the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents.
 Your editor shows the same findings as you type ([Editors](/guides/editors)). This page covers what
 `ry check` finds with no configuration; type errors are opt-in and have
-[their own section](/type-checking/overview).
+[their own section](/type-checking/overview). Steps 1 and 2 of these docs work for code you run on
+GNU R and for code you run on ry's runtime alike, because checking runs nothing.
 
 ## Names
 

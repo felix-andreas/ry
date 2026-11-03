@@ -7,7 +7,8 @@
 //! the short version:
 //!
 //! - A marked `text` block is the output of the nearest `r` block above it, or of every tab of the
-//!   nearest `<Tabs>` group above it, each tab run on its own.
+//!   nearest `<Tabs>` group above it, each tab run on its own. Inside a `<TabItem>`, it is the
+//!   output of that tab alone, and a tab of the group without one must report no errors.
 //! - A marked `r` block holds its own expected output as `#>` lines after the code that prints it.
 //! - The words after `ry` name the command (`check` or `run`) and its options: `typing`,
 //!   `strict`, any other `[check]` key as `key=value`, `runtime=ry` or `runtime=gnu-r`, `exact`,
@@ -182,9 +183,21 @@ enum Expected {
     },
     /// The `#>` groups of a marked `r` block.
     Chunks(Vec<Chunk>),
-    /// A tab group that no output block follows: its tabs are two spellings of one program, so
-    /// they must give the same findings.
+    /// A tab group that no output block follows: its tabs are spellings of one program, so they
+    /// must give the same findings.
     SameAcrossTabs,
+    /// A tab with no output block of its own, in a group where another tab has one: the page
+    /// shows its code with no error under it, so ry must report none (warnings are free).
+    NoErrors,
+}
+
+/// A `<TabItem>` while its group is being read.
+struct PendingTab {
+    label: String,
+    /// The 1-based page line of the `<TabItem>`.
+    line: usize,
+    code: Option<String>,
+    has_output: bool,
 }
 
 struct Chunk {
@@ -224,7 +237,7 @@ fn collect_pages(directory: &Path, pages: &mut Vec<PathBuf>) {
 fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut examples = Vec::new();
-    let mut tabs: Option<Vec<(String, Option<String>)>> = None;
+    let mut tabs: Option<Vec<PendingTab>> = None;
     let mut source: Option<Vec<Variant>> = None;
     // Every `r` block or tab group so far, and whether the page checks its output. A `run` with
     // `continue` replays only the checked ones, so an illustration the test cannot run (one that
@@ -242,30 +255,44 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
             tabs = Some(Vec::new());
             tabs_line = index + 1;
         } else if trimmed.starts_with("</Tabs>") {
-            let variants: Vec<Variant> = tabs
-                .take()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(label, code)| {
-                    code.map(|code| Variant {
-                        label: Some(label),
-                        code,
-                        prelude: Vec::new(),
-                    })
-                })
-                .collect();
+            let items = tabs.take().unwrap_or_default();
+            let any_output = items.iter().any(|item| item.has_output);
+            let mut variants = Vec::new();
+            for item in items {
+                let Some(code) = item.code else { continue };
+                let variant = Variant {
+                    label: Some(item.label),
+                    code,
+                    prelude: Vec::new(),
+                };
+                if any_output && !item.has_output {
+                    examples.push(Example {
+                        page: page.to_owned(),
+                        line: item.line,
+                        config: typing_check(),
+                        variants: vec![variant.clone()],
+                        expected: Expected::NoErrors,
+                    });
+                }
+                variants.push(variant);
+            }
             if !variants.is_empty() {
                 flush_unpaired(page, &mut unpaired, &mut examples);
-                if variants.len() > 1 {
+                if variants.len() > 1 && !any_output {
                     unpaired = Some((tabs_line, variants.clone()));
                 }
-                history.push((variants.clone(), false));
+                history.push((variants.clone(), any_output));
                 source = Some(variants);
             }
         } else if let Some(rest) = trimmed.strip_prefix("<TabItem label=\"") {
             let label = rest.split('"').next().unwrap_or_default().to_owned();
             if let Some(items) = tabs.as_mut() {
-                items.push((label, None));
+                items.push(PendingTab {
+                    label,
+                    line: index + 1,
+                    code: None,
+                    has_output: false,
+                });
             }
         }
         let Some(fence) = open_fence(line) else {
@@ -297,22 +324,61 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
             indent: fence.indent,
         };
         match (marker, is_r, tabs.as_mut()) {
-            (Some(_), _, Some(_)) => {
+            (Some(_), true, Some(_)) => {
                 return Err(format!(
-                    "{location}: a marked block inside a tab group; put the output after `</Tabs>`"
+                    "{location}: a marked `r` block inside a tab group; mark an output block instead"
                 ));
+            }
+            (Some(config), false, Some(items)) => {
+                let Some(item) = items.last_mut() else {
+                    return Err(format!(
+                        "{location}: an output block outside any `<TabItem>`"
+                    ));
+                };
+                let Some(code) = item.code.clone() else {
+                    return Err(format!(
+                        "{location}: an output block before the `r` block of tab `{}`",
+                        item.label
+                    ));
+                };
+                if item.has_output {
+                    return Err(format!(
+                        "{location}: the tab `{}` holds a second output block",
+                        item.label
+                    ));
+                }
+                if config.tab.is_some() {
+                    return Err(format!(
+                        "{location}: `tab=` belongs on an output block after `</Tabs>`, not inside a tab"
+                    ));
+                }
+                item.has_output = true;
+                let variant = Variant {
+                    label: Some(item.label.clone()),
+                    code,
+                    prelude: Vec::new(),
+                };
+                examples.push(output_example(
+                    page,
+                    index + 1,
+                    config,
+                    vec![variant],
+                    &history,
+                    &body,
+                    range,
+                )?);
             }
             (None, true, Some(items)) => {
                 let Some(item) = items.last_mut() else {
                     return Err(format!("{location}: an `r` block outside any `<TabItem>`"));
                 };
-                if item.1.is_some() {
+                if item.code.is_some() {
                     return Err(format!(
                         "{location}: the tab `{}` holds a second `r` block",
-                        item.0
+                        item.label
                     ));
                 }
-                item.1 = Some(join_lines(&body));
+                item.code = Some(join_lines(&body));
             }
             (None, true, None) => {
                 flush_unpaired(page, &mut unpaired, &mut examples);
@@ -360,66 +426,15 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                     expected: Expected::Chunks(chunks),
                 });
             }
-            (Some(mut config), false, None) => {
+            (Some(config), false, None) => {
                 unpaired = None;
-                let Some(mut variants) = source.clone() else {
+                let Some(variants) = source.clone() else {
                     return Err(format!(
                         "{location}: no `r` block or tab group above this output block"
                     ));
                 };
-                if config.continues
-                    && matches!(config.command, CommandKind::Run(_))
-                    && variants.len() > 1
-                {
-                    return Err(format!(
-                        "{location}: a `run` with `continue` follows one `r` block, not a tab group"
-                    ));
-                }
                 if let Some(latest) = history.last_mut() {
                     latest.1 = true;
-                }
-                if config.continues {
-                    let replays_all = config.command == CommandKind::Check;
-                    let earlier = &history[..history.len().saturating_sub(1)];
-                    for variant in &mut variants {
-                        variant.prelude = earlier
-                            .iter()
-                            .filter(|(_, checked)| replays_all || *checked)
-                            .filter_map(|(group, _)| {
-                                group
-                                    .iter()
-                                    .find(|candidate| candidate.label == variant.label)
-                                    .or_else(|| group.first())
-                            })
-                            .map(|candidate| candidate.code.clone())
-                            .collect();
-                    }
-                }
-                if config.dput {
-                    return Err(format!("{location}: `dput` applies to `#>` output only"));
-                }
-                // A leading `$ ry run sales.R` line shows the reader the command; it names the
-                // file the code is written to, and it is not part of the output.
-                let (body, range) = match body.first().and_then(|line| line.strip_prefix("$ ")) {
-                    Some(command) => {
-                        if let Some(file) = command
-                            .split_whitespace()
-                            .last()
-                            .filter(|word| word.ends_with(".R"))
-                        {
-                            config.file = Some(file.to_owned());
-                        }
-                        let range = PageLines {
-                            start: range.start + 1,
-                            ..range
-                        };
-                        (&body[1..], range)
-                    }
-                    None => (&body[..], range),
-                };
-                let expected = join_lines(body);
-                if config.file.is_none() {
-                    config.file = snippet_path(&expected);
                 }
                 let variants = match config.tab.clone() {
                     Some(tab) => {
@@ -434,16 +449,16 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                     }
                     None => variants,
                 };
-                examples.push(Example {
-                    page: page.to_owned(),
-                    line: index + 1,
+                let earlier = &history[..history.len().saturating_sub(1)];
+                examples.push(output_example(
+                    page,
+                    index + 1,
                     config,
                     variants,
-                    expected: Expected::Block {
-                        text: expected,
-                        body: Some(range),
-                    },
-                });
+                    earlier,
+                    &body,
+                    range,
+                )?);
             }
             (None, false, _) => {}
         }
@@ -451,6 +466,77 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
     }
     flush_unpaired(page, &mut unpaired, &mut examples);
     Ok(examples)
+}
+
+/// Builds the example of an output block from the code it belongs to. `earlier` holds the `r`
+/// blocks and tab groups above that code, which `continue` runs first.
+fn output_example(
+    page: &str,
+    line: usize,
+    mut config: Config,
+    mut variants: Vec<Variant>,
+    earlier: &[(Vec<Variant>, bool)],
+    body: &[&str],
+    range: PageLines,
+) -> Result<Example, String> {
+    let location = format!("{page}:{line}");
+    if config.continues && matches!(config.command, CommandKind::Run(_)) && variants.len() > 1 {
+        return Err(format!(
+            "{location}: a `run` with `continue` follows one `r` block, not a tab group"
+        ));
+    }
+    if config.continues {
+        let replays_all = config.command == CommandKind::Check;
+        for variant in &mut variants {
+            variant.prelude = earlier
+                .iter()
+                .filter(|(_, checked)| replays_all || *checked)
+                .filter_map(|(group, _)| {
+                    group
+                        .iter()
+                        .find(|candidate| candidate.label == variant.label)
+                        .or_else(|| group.first())
+                })
+                .map(|candidate| candidate.code.clone())
+                .collect();
+        }
+    }
+    if config.dput {
+        return Err(format!("{location}: `dput` applies to `#>` output only"));
+    }
+    // A leading `$ ry run sales.R` line shows the reader the command; it names the file the code
+    // is written to, and it is not part of the output.
+    let (body, range) = match body.first().and_then(|line| line.strip_prefix("$ ")) {
+        Some(command) => {
+            if let Some(file) = command
+                .split_whitespace()
+                .last()
+                .filter(|word| word.ends_with(".R"))
+            {
+                config.file = Some(file.to_owned());
+            }
+            let range = PageLines {
+                start: range.start + 1,
+                ..range
+            };
+            (&body[1..], range)
+        }
+        None => (body, range),
+    };
+    let expected = join_lines(body);
+    if config.file.is_none() {
+        config.file = snippet_path(&expected);
+    }
+    Ok(Example {
+        page: page.to_owned(),
+        line,
+        config,
+        variants,
+        expected: Expected::Block {
+            text: expected,
+            body: Some(range),
+        },
+    })
 }
 
 fn flush_unpaired(
@@ -462,18 +548,23 @@ fn flush_unpaired(
         examples.push(Example {
             page: page.to_owned(),
             line,
-            config: Config {
-                command: CommandKind::Check,
-                check_keys: vec![("typing".to_owned(), "true".to_owned())],
-                exact: false,
-                continues: false,
-                dput: false,
-                tab: None,
-                file: None,
-            },
+            config: typing_check(),
             variants,
             expected: Expected::SameAcrossTabs,
         });
+    }
+}
+
+/// `ry check` with typing on, which checks a tab group that shows no output.
+fn typing_check() -> Config {
+    Config {
+        command: CommandKind::Check,
+        check_keys: vec![("typing".to_owned(), "true".to_owned())],
+        exact: false,
+        continues: false,
+        dput: false,
+        tab: None,
+        file: None,
     }
 }
 
@@ -1090,6 +1181,23 @@ fn judge(example: &Example, example_index: usize, plan: &Plan, outputs: &[String
                     None => outputs[plan.single[&(example_index, variant_index)]].clone(),
                 };
                 compare_block(&location, variant, &example.config, text, &actual, *body)
+            })
+            .collect(),
+        Expected::NoErrors => example
+            .variants
+            .iter()
+            .enumerate()
+            .filter_map(|(variant_index, variant)| {
+                let output = &outputs[plan.single[&(example_index, variant_index)]];
+                let clean = !output.lines().any(|line| line.trim_start().starts_with("x "));
+                (!clean).then(|| Verdict::Fail {
+                    message: format!(
+                        "{location}{}: the tab shows no output, but ry reports an error; give it an output block:\n{}",
+                        tab_suffix(variant),
+                        indent(output)
+                    ),
+                    blessing: None,
+                })
             })
             .collect(),
         Expected::SameAcrossTabs => {

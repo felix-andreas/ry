@@ -5,16 +5,43 @@ description: "Types written in the code itself, and how they live next to `#:` c
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
+Steps 1 and 2 work whether your code runs on GNU R or on ry's runtime. Step 3 switches to ry's
+runtime, which you start with `ry run`, and you gain two things:
+
+- **The inline type syntax**, which this page covers. Each type sits next to the name it belongs
+  to, and ry's runtime also checks it when the code runs.
+- **ry's own features**: [records and tagged unions](/type-checking/records-and-tags) with `match`,
+  [Arrays](/type-checking/arrays), [nominal types](/type-checking/custom-types),
+  [DataFrame](/guides/dataframes) and the [standard library](/reference/standard-library).
+
+GNU R cannot parse either of them. `ry R` still runs a file whose only ry syntax is inline
+annotations on GNU R, by erasing them first.
+
 A `#:` comment repeats every parameter name of the function below it, so renaming a parameter
 means editing two places. Inline annotations put each type next to the name it belongs to, which is
-shorter to write and to read, and on ry's runtime they are also checked when the code runs. The
-cost is that plain `Rscript` cannot run a file that has them, which is why this is a separate step.
-They are on by default; a project that must stay runnable by `Rscript` can
-[turn them off](#turning-inline-annotations-off).
+shorter to write and to read. They are on by default; a project that must stay runnable by
+`Rscript` can [turn them off](#turning-inline-annotations-off).
 
 You write a type right after a name, and a function's return type after its parameters:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+apply_discount <- function(price, rate = 0.2) {
+  price * (1 - rate)
+}
+
+apply_discount("100")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+```
+
+</TabItem>
 <TabItem label="Inline">
 
 ```r
@@ -23,6 +50,12 @@ apply_discount <- function(price: double, rate: double = 0.2) -> double {
 }
 
 apply_discount("100")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected `double`, found `character`
 ```
 
 </TabItem>
@@ -37,14 +70,14 @@ apply_discount <- function(price, rate = 0.2) {
 apply_discount("100")
 ```
 
-</TabItem>
-</Tabs>
-
 ```text ry check typing
 type-mismatch
 
   x expected `double`, found `character`
 ```
+
+</TabItem>
+</Tabs>
 
 Every typed page of this guide already shows this spelling in its Inline tab, and it shares one
 type language with `#:` comments, so this page covers only what changes when you switch. Deleting
@@ -53,7 +86,7 @@ front of `function`, the inline spelling of the `#: @pure` comment that
 [strict mode](/type-checking/strict-mode#package-files-only-define-things) reads.
 
 Definitions are spelled `type UserId = integer` and `alias Row = list{id: integer}`, and
-`@UserId(raw)` creates a value of a nominal type, as [custom types](/type-checking/custom-types)
+`@UserId(raw)` creates a value of a nominal type, as [nominal types](/type-checking/custom-types)
 shows. A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
 `id: @new UserId <- 5L`. `type` and `alias` are definitions only when a name follows them on the
 same line, so R code that uses them as ordinary names keeps working.

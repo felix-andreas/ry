@@ -116,21 +116,27 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
 
 ## The docs site
 
-Every typed example in the docs is a pair of tabs, `Inline` and `Comments`, inside a Starlight
-`<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. A page lists
-`Comments` first when it teaches the `#:` form (the step 2 pages) and `Inline` first otherwise. Pages
-with tabs are `.mdx`. Every annotation form has both spellings, type definitions included, so the
-Inline tab carries no `#:` line except to show the two spellings together.
+Every typed example in the docs is a group of tabs inside a Starlight
+`<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages: `Untyped`, the
+plain R a reader starts from, then `Comments` and `Inline`. `Untyped` comes first, followed by the
+form the page teaches: `Comments` on the step 2 pages and `Inline` otherwise. An example has no
+`Untyped` tab when its plain R would not be R, because it uses ry's own syntax (records, tags,
+`match`, Arrays, `DataFrame`, the standard library, nominal types), or when its subject is an
+annotation itself, such as a signature, a definition or `@pure`; that covers the reference pages.
+Pages with tabs are `.mdx`. Every annotation form has both spellings, type definitions included, so
+the Inline tab carries no `#:` line except to show the two spellings together.
 
 Every block of `ry` output on a page is a test: mark it as described in
 [Docs examples](/contributing/testing#docs-examples), and `just docs-test` runs each tab through the
-real binary and compares the output. A tab group with no output block after it must give the same
-findings in both tabs.
+real binary and compares the output. An output block after `</Tabs>` must hold for every tab, and a
+tab group with no output block must give the same findings in every tab. When the output differs
+between tabs, as it often does between `Untyped` and the typed tabs, each tab holds its own output
+block after its code, and a tab left without one must report no errors.
 
 Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
 `/type-checking/overview.md`), with the frontmatter, imports and components removed and each tab
-group turned into consecutive `Inline` and `Comments` subheadings. `/llms.txt` lists the pages with
-their descriptions in sidebar order, and `/llms-full.txt` concatenates them all. Each page's head
+group turned into one subheading per tab. `/llms.txt` lists the pages with their descriptions in
+sidebar order, and `/llms-full.txt` concatenates them all. Each page's head
 links its Markdown version with `<link rel="alternate" type="text/markdown">`, and the breadcrumb row
 has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three endpoints in
 `docs/src/pages/`, and `docs/src/routeData.ts`. A new MDX component must be handled in

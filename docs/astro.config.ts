@@ -47,6 +47,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'ry',
+			description: 'A type checker and a fast runtime for R, written in Rust.',
 			logo: {
 				src: './public/logo.svg',
 				replacesTitle: true,
@@ -74,9 +75,10 @@ export default defineConfig({
 						{ slug: 'installation' },
 					],
 				},
-				// The groups follow the migration story on the landing page and in why-ry.mdx: classic R
-				// first (steps 1 and 2), then what ry adds on top of R (steps 3 and 4). Each step keeps
-				// about three pages, so a reader sees the whole step at a glance.
+				// The groups follow the migration story on the landing page and in why-ry.mdx. Steps 1 and 2
+				// work on GNU R and on ry's runtime alike; steps 3 and 4 use what only ry's runtime has.
+				// Records come before nominal types, which build on them. Each step keeps about three
+				// pages, so a reader sees the whole step at a glance.
 				{
 					label: '1. Check the code you have',
 					items: [
@@ -94,17 +96,17 @@ export default defineConfig({
 					],
 				},
 				{
-					label: '3. Switch to inline types',
+					label: '3. Switch to the ry runtime',
 					items: [
 						{ slug: 'type-checking/inline-annotations' },
-						{ slug: 'type-checking/custom-types' },
+						{ slug: 'type-checking/records-and-tags' },
 						{ slug: 'type-checking/arrays' },
 					],
 				},
 				{
 					label: "4. Go fully typed",
 					items: [
-						{ slug: 'type-checking/records-and-tags' },
+						{ slug: 'type-checking/custom-types' },
 						{ slug: 'guides/dataframes' },
 						{ slug: 'type-checking/strict-mode' },
 					],

@@ -22,7 +22,7 @@ GNU R. [Benchmarks](/benchmarks) has the code and the method.
 </figure>
 
 Each step moves your code further right in the diagram, and you can stop after any of them. Steps 1
-and 2 keep plain R that GNU R runs, while steps 3 and 4 need ry.
+and 2 work on GNU R and on ry's runtime alike, while steps 3 and 4 need ry's runtime.
 
 ### 1. Check the code you have
 
@@ -58,9 +58,10 @@ type-mismatch
   x expected `double`, found `character`
 ```
 
-### 3. Switch to inline types
+### 3. Switch to the ry runtime
 
-Inline types are also checked at run time, for values whose type shows only then.
+ry's runtime adds the inline type syntax and features GNU R does not have, such as records, tagged
+unions and Arrays. Inline types are also checked at run time, for values whose type shows only then.
 
 ```r
 net_price <- function(price: double, rate: double) -> double {
@@ -97,7 +98,7 @@ strict
 - **Several signatures for one function**, because every call would become a search. Write
   `integer | character` instead.
 - **Inheritance**, because it makes inference slow and hard to predict.
-  [Custom types](/type-checking/custom-types) keep values apart without it.
+  [Nominal types](/type-checking/custom-types) keep values apart without it.
 
 S4 and R6 objects and data frame columns are not checked yet.
 [Limitations](/type-checking/unknown#limitations) lists the gaps.

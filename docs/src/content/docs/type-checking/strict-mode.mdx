@@ -50,10 +50,33 @@ returns the same type.
 An expression whose type ry could not determine is reported where it appears:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+total <- function(df) sum(df$amount)
+```
+
+```text ry check typing strict
+strict
+
+  x strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
+
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
+```
+
+</TabItem>
 <TabItem label="Inline">
 
 ```r
 total <- function(df: data.frame) -> double sum(df$amount)
+```
+
+```text ry check typing strict
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
 </TabItem>
@@ -64,16 +87,17 @@ total <- function(df: data.frame) -> double sum(df$amount)
 total <- function(df) sum(df$amount)
 ```
 
-</TabItem>
-</Tabs>
-
 ```text ry check typing strict
 strict
 
   x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
-ry reports it on `df$amount`, and again on the `sum()` call that receives it.
+</TabItem>
+</Tabs>
+
+ry reports it on `df$amount`, and again on the `sum()` call that receives it. Typing `df` as a
+`data.frame` does not help, because a `data.frame`'s columns are unknown.
 
 An unresolved name, normally a warning, becomes an error.
 
