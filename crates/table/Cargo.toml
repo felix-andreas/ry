@@ -3,7 +3,7 @@ name = "table"
 description = "ry's built-in typed table type, an engine over Polars"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 publish = false
 # `benches/allocator.rs` is a module the benchmarks share, not a benchmark.
 autobenches = false
@@ -30,10 +30,11 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-u8",
     "dtype-u16",
     "cum_agg",
+    "dtype-extension",
 ] }
 polars-arrow = { version = "0.55", default-features = false }
 # The kernels run on Polars' own thread pool, so `POLARS_MAX_THREADS` governs them too.
-polars-core = { version = "0.55", default-features = false }
+polars-core = { version = "0.55", default-features = false, features = ["dtype-extension"] }
 polars-buffer = { version = "0.55", default-features = false }
 rayon = "1.12"
 memmap2 = "0.9"
@@ -44,6 +45,9 @@ rustc-hash.workspace = true
 foldhash.workspace = true
 hashbrown.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [dev-dependencies]
 # The benchmarks run on the allocator and options `libR` gives the engine.

@@ -1,0 +1,128 @@
+{
+  "machine": "Intel(R) Xeon(R) Processor @ 2.80GHz, 4 cores, Linux 6.18.44-fc-v185",
+  "r": "Rscript (R) version 4.3.3 (2024-02-29)",
+  "repeat": 2,
+  "programs": [
+    {
+      "program": "array_dot",
+      "gnu_r": 0.278,
+      "ry": 0.043,
+      "ry_typed": 0.047,
+      "peak_mib": {
+        "gnu_r": 80.9,
+        "ry": 103.2,
+        "ry_typed": 124.1
+      }
+    },
+    {
+      "program": "array_filter",
+      "gnu_r": 0.246,
+      "ry": 0.043,
+      "ry_typed": 0.038,
+      "peak_mib": {
+        "gnu_r": 80.9,
+        "ry": 101.9,
+        "ry_typed": 122.8
+      }
+    },
+    {
+      "program": "array_map",
+      "gnu_r": 0.385,
+      "ry": 0.054,
+      "ry_typed": 0.067,
+      "peak_mib": {
+        "gnu_r": 93.7,
+        "ry": 123.1,
+        "ry_typed": 141.2
+      }
+    },
+    {
+      "program": "array_sum",
+      "gnu_r": 0.175,
+      "ry": 0.033,
+      "ry_typed": 0.033,
+      "peak_mib": {
+        "gnu_r": 80.9,
+        "ry": 102.0,
+        "ry_typed": 123.2
+      }
+    },
+    {
+      "program": "closures",
+      "gnu_r": 1.1,
+      "ry": 0.57,
+      "ry_typed": 0.607,
+      "peak_mib": {
+        "gnu_r": 98.6,
+        "ry": 144.9,
+        "ry_typed": 147.6
+      }
+    },
+    {
+      "program": "drawdown",
+      "gnu_r": 0.335,
+      "ry": 0.074,
+      "ry_typed": 0.079,
+      "peak_mib": {
+        "gnu_r": 73.2,
+        "ry": 133.4,
+        "ry_typed": 140.5
+      }
+    },
+    {
+      "program": "fib",
+      "gnu_r": 1.312,
+      "ry": 0.01,
+      "ry_typed": 0.01,
+      "peak_mib": {
+        "gnu_r": 53.8,
+        "ry": 42.8,
+        "ry_typed": 43.4
+      }
+    },
+    {
+      "program": "log_rank",
+      "gnu_r": 0.128,
+      "ry": 0.137,
+      "ry_typed": 0.136,
+      "peak_mib": {
+        "gnu_r": 107.3,
+        "ry": 56.1,
+        "ry_typed": 58.4
+      }
+    },
+    {
+      "program": "loop_sum",
+      "gnu_r": 0.312,
+      "ry": 0.069,
+      "ry_typed": 0.068,
+      "peak_mib": {
+        "gnu_r": 50.2,
+        "ry": 82.4,
+        "ry_typed": 105.7
+      }
+    },
+    {
+      "program": "vasicek",
+      "gnu_r": 0.055,
+      "ry": 0.04,
+      "ry_typed": 0.04,
+      "peak_mib": {
+        "gnu_r": 106.0,
+        "ry": 64.3,
+        "ry_typed": 69.5
+      }
+    },
+    {
+      "program": "vector_arith",
+      "gnu_r": 0.29,
+      "ry": 0.242,
+      "ry_typed": 0.249,
+      "peak_mib": {
+        "gnu_r": 109.0,
+        "ry": 157.1,
+        "ry_typed": 163.8
+      }
+    }
+  ]
+}

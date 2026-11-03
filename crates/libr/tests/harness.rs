@@ -4,6 +4,9 @@
 //!
 //! The runtime is one process-wide R session, so every test takes the session lock. Each test
 //! binary is its own process, which keeps libraries built with different headers apart.
+//!
+//! The harness is Unix-only: it loads `libR` with `RTLD_GLOBAL`, so packages resolve the C API
+//! from it the way they do under GNU R on Unix, and builds packages as shared objects.
 
 // Each test binary uses a different part of the harness, and the function table keeps the C
 // API's own names so it reads like the C it binds.

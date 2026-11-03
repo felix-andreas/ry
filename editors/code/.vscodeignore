@@ -5,9 +5,12 @@
 # allow what we need
 !README.md
 !LICENSE
+!THIRD_PARTY_NOTICES
 !language-configuration.json
 !r-annotation.tmLanguage.json
+!ry-type.tmLanguage.json
 !out/*.js
+# a platform extension bundles the `ry` binary, which carries its runtime inside it
 !bin/ry
 !bin/ry.exe
 !images/icon.png

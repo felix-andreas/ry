@@ -5,10 +5,31 @@ description: Release announcements and project news
 
 ## ry 0.4.0-beta, the first release that runs R
 
-*Not released yet: this entry is prepared for the beta.*
+*Released in November 2026 as a pre-release.*
 
 Version 0.4.0-beta adds ry's own R runtime beside the checker, plus the language features that only
 that runtime runs.
+
+### Highlights
+
+- **Your R code runs faster.** On the eleven programs on [Why ry](/why-ry), ry's runtime beats GNU
+  R on ten: 1.2 times faster on vectorized arithmetic, 5 to 7 times on loops over vectors, and 130
+  times on recursive `fib` (0.01 s against 1.31 s). `log_rank`, which spends its time in builtins,
+  runs at GNU R's speed. [Benchmarks](/benchmarks) has the code and the method.
+- **Types reach run time.** Inline annotations sit beside `#:` comments, and ry's runtime checks them
+  at function boundaries. [Strict mode](/type-checking/strict-mode) rejects untyped code, and
+  `ry check --annotate` writes the types it asks for.
+- **Records, tuples, tagged unions and `match`** model data with exhaustiveness checks, and typed
+  code that uses them compiles to machine code at its first call.
+- **One binary.** A release archive holds `ry` alone. The runtime is embedded in it and unpacked into
+  your cache directory the first time you run code.
+- **Package development is built in.** `ry load` loads your package lazily, `ry test` runs its tests
+  and `ry document` writes its documentation, each a drop-in for the devtools command.
+- **`DataFrame`** is a typed table that runs on the Polars engine, and the
+  [standard library](/reference/standard-library) (`Result`, `List`, `Str`, `Dict`, `Set` and more)
+  now covers Roc's builtins.
+
+### All changes
 
 - **`ry run script.R` runs R on ry's runtime**, and `ry R script.R` runs the same script on GNU R.
   ry's runtime still reads base R from your GNU R installation, so both need one.
@@ -21,8 +42,9 @@ that runtime runs.
   consoles reload what you edited before each command.
 - **`ry check --fix`** applies the safe fixes (`T` to `TRUE`, `=` to `<-`, a trailing comma), and
   `--unsafe-fixes` also applies spelling suggestions. The editor gets the same quick fixes plus a
-  fix-all action, a call hierarchy, an outline with sections, folding, selection ranges, semantic
-  highlighting and parameter-name hints.
+  fix-all action, refactorings (extract a variable or a function, inline a variable, and move types
+  between a `#:` comment and inline syntax), a call hierarchy, workspace symbol search, an outline
+  with sections, folding, selection ranges, semantic highlighting and parameter-name hints.
 - **More lints, including lintr's.** `equals-na`, `vector-logic`, `length-sequence`, `class-equals`
   and `length-test` are on by default, each with an unsafe fix. Eleven more ported from lintr, such
   as `scalar-in`, `order-subset`, `matrix-apply` and `nzchar`, are available when you turn them on,
@@ -34,7 +56,7 @@ that runtime runs.
   editor offers the same edit for one binding or a whole file
   ([Moving a file to strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode)).
 - **`ry fmt --range`** formats only the lines you name, the editor formats a selection or the line you
-  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/formatting#formatting-part-of-a-file)).
+  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/checking#formatting)).
 - **Faster recursion and more of base R.** A function that only does scalar arithmetic, such as
   recursive `fib`, compiles to frameless machine code (`fib(30)` takes 0.005 s against 0.9 s on GNU
   R), and sockets work, so `parallel`'s PSOCK clusters run.
@@ -53,13 +75,20 @@ that runtime runs.
 - **Faster loads.** `ry load` binds R6 class generators lazily and holds back S4 methods on other
   packages' generics, so a session that never touches them skips their setup
   ([package loading](/reference/package-loading)), and a strict `ry load` runs its check while the
-  runtime starts.
+  runtime starts and checks only the package's own files, not its tests and scripts.
 - **`ry test` runs your package's tests as `devtools::test()` does.** It loads the package lazily
   with `ry load`, runs the `tests/testthat` files with testthat's own reporters, and exits with `1`
-  when a test fails. With `--watch`, every save reloads only the changed definitions and runs the
-  test files the edit can reach first. On a 308,000-line benchmark package with 502 test files, the
-  first file's results arrive in about 2 s, against 62 s for `devtools::test()`
-  ([CLI](/reference/cli#test), [Running tests](/guides/loading-packages)).
+  when a test fails. With `--watch`, every save reloads only the changed definitions, rebuilds
+  compiled code after a `src/` edit, and runs the test files the edit can reach first. It learns of
+  saves from the operating system's file notifications, as the consoles now do. On a 308,000-line
+  benchmark package with 502 test files, the first file's results arrive in about 2 s, against 62 s
+  for `devtools::test()`
+  ([CLI](/reference/cli#test), [Running tests](/guides/running)).
+- **`ry document` writes documentation as `devtools::document()` does.** It runs roxygen2 against
+  the lazily loaded package, and its `man/*.Rd` files and `NAMESPACE` are byte for byte the same.
+  It caches each file's parsed blocks and runs roxygen2's slowest steps in linear time, so on a
+  benchmark package with 22,000 Rd files it takes about 2 minutes after an edit, against 21 for
+  devtools ([Writing documentation](/guides/running#commands)).
 - **`ry load` follows `devtools::load_all()` more closely.** `system.file()` maps `inst/`, testthat
   helpers are sourced, lazily defined functions keep their source references, a package that
   imports a reloaded one sees its new bindings, `Encoding: latin1` is honored, and a declared
@@ -69,7 +98,7 @@ that runtime runs.
   evaluated as GNU R evaluates them ([package loading](/reference/package-loading)).
 - **Help works on ry's runtime.** `?mean`, `help("mean")`, `help(package = "stats")` and
   `help.start()` print or serve R's help pages, HTML help included, as GNU R does
-  ([Console](/guides/console#help)).
+  ([Console](/guides/running#the-console)).
 - **The editor follows `$` fields and installed packages.** Go-to-definition, hover, references and
   rename resolve `x$name` through the values that built `x`: lists, data frames, records and R6
   classes, including `self$` and `private$`. Rename refuses a field it cannot trace completely.
@@ -87,12 +116,14 @@ that runtime runs.
   body, such as a return chosen by a flag default or a parameter read only through `substitute()`.
   Names injected into R6 and Reference Class methods (`self`, `private`, `.self`) resolve, a
   literal `source("file.R")` is followed, and `with`, `subset` and `transform` mask their column
-  arguments. With typing on, the corpus packages' `R/` sources report 61 errors, down from 98, and
-  about 22 of those are real package bugs. The generated benchmark packages report nothing.
-- **Graphics gain patterns and masks.** On `pdf()`, `svg()` and the bitmap devices, gradients, tiling
-  patterns, clipping paths, masks, compositing groups and even-odd fills work, and `postscript()`
-  refuses them as GNU R's device does. knitr and rmarkdown documents with plot chunks render on ry,
-  and raster interpolation, `saturate` and the padding of SVG tiling patterns match GNU R.
+  arguments. With typing on, the corpus packages' `R/` sources report 51 errors, down from 98, and
+  about 26 of those are real package bugs. The generated benchmark packages report nothing.
+- **Graphics draw as GNU R does.** A gallery of 149 figures (base graphics with `persp`, contours,
+  dendrograms and plotmath, grid, lattice, ggplot2 and PerformanceAnalytics charts) renders on every
+  device, and 146 of them match GNU R pixel for pixel on ragg. On `pdf()`, `svg()` and the bitmap
+  devices, gradients, tiling patterns, clipping paths, masks, compositing groups and even-odd fills
+  work, and `postscript()` refuses them as GNU R's device does. knitr and rmarkdown documents with
+  plot chunks render on ry.
 - **`DataFrame` checks column types and handles bigger data.** Arithmetic or comparison on a text
   column is a type error on the column reference. Reading a CSV no longer holds the parsed file
   next to its columns, so a 1e8-row group-by run fits in 15 GB. data.table's `dt[i]` runs on
@@ -109,20 +140,25 @@ that runtime runs.
   with the JIT off and 0.94 s for `Reduce` on GNU R.
 - **Faster everyday R on ry's runtime.** `switch` compiles to bytecode, a closure call makes one
   collection check for its whole frame, small objects are allocated by bumping a pointer, and
-  `x[[i]] <- v` on a plain local vector inside a function writes in place. `match`, `order`,
-  `sort`, `formatC`, `substr`, `split`, `cut` and two-way `table` run at or below GNU R's time at
-  1e7 rows.
+  `x[[i]] <- v` on a plain local vector inside a function writes in place, and S3 dispatch caches
+  its method lookups. Base R's kernels, such as `match`, `order`, `split`, `strsplit`, `table`,
+  `merge`, `aggregate` and `cumsum`, run at or below GNU R's time at 1e7 rows; `apply` over rows is
+  still about 1.4 times slower.
 - **The standard library is complete against Roc's builtins.** `Dict.with_capacity` and
   `Set.with_capacity` are new, and `reserve` now works on an empty `Dict` or `Set`
   ([standard library](/reference/standard-library)). `List.range` and `List.repeat` stop with an
   error past 2,147,483,647 elements.
-- **Lower memory, faster cold checks.** Large vectors are collected sooner, so peak memory at 1e6
-  rows is closer to GNU R's. The parser now builds ry's own flat syntax tree instead of rowan's, and
-  `ry check --no-cache` uses a cheaper one-shot path, so a cold check of the 300,000-line finance
-  benchmark takes about 1.1 s on 4 cores and peaks at about 370 MiB.
-- **More packages pass their own tests.** ry's runtime passes the tests of 140 of the 164 packages
-  that GNU R passes (85.4%), among them rlang, purrr, R6, Matrix, S7 and pkgload. The optimizers
-  and integrators behind `optim` and `integrate` (L-BFGS-B, UNCMIN, QUADPACK and the interval
+- **Lower memory, faster cold checks.** Large vectors are collected sooner, strings are interned in
+  a flat table, and `as.character()` of a long number vector is deferred as on GNU R, so peak memory
+  on string-heavy code is within 1.1 times GNU R's. `1:n`, `seq_len(n)` and `seq_along(x)` with
+  over a million elements are compact, so `seq_len(2^31 - 1)` no longer allocates 8 GB. `gc()`
+  reports real cell counts, and `gc.time()` and `gcinfo()` work. The parser now builds ry's own flat
+  syntax tree, and a cold check keeps one parse tree per worker, so `ry check --no-cache` on the
+  300,000-line benchmark code bases takes about 1.2 s on 4 cores and peaks under 300 MiB.
+- **More packages pass their own tests.** ry's runtime passes the tests of 155 of the 164 packages
+  that GNU R passes (94.5%), among them rlang, purrr, vctrs, R6, Matrix, S7, pkgload, shiny, readr
+  and git2r, and 35 of GNU R's own 66 `tests/*.R` scripts print exactly what they print on GNU R.
+  The optimizers and integrators behind `optim` and `integrate` (L-BFGS-B, UNCMIN, QUADPACK and the interval
   search) are now written from scratch and match GNU R's results.
   A session uses one temporary directory, removed when it exits.
 - **Linear algebra works on NixOS.** BLAS and LAPACK are also looked up in the directories GNU R's
@@ -132,10 +168,34 @@ that runtime runs.
   reloads, the debugger's message framing, CSV reading and rendered graphics files. The bugs they
   found are fixed, and an unclosed quote in a CSV file is now an error.
 
-Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
-aarch64), macOS (Apple silicon and Intel) and Windows (x86_64). The macOS and Windows runtimes have
-not been run on a real Mac or Windows machine yet (Windows only under Wine), so treat them as
-experimental.
+### Installing
+
+Each release has one archive per platform, for Linux (x86_64), macOS (Apple silicon) and Windows
+(x86_64): `ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz` and
+`ry-x86_64-pc-windows-gnullvm.zip`. Each holds the single `ry` binary, and each platform's VS Code
+extension bundles the same binary. The Linux binary is built on Ubuntu 22.04 and needs glibc 2.35 or
+newer. [Installation](/installation) has every other way to install ry.
+
+### Known limitations
+
+- **ry's runtime still needs GNU R**, version 4.3 or later built as a shared library, because it
+  reads base R's sources and the default packages from that installation. `ry check`, `ry fmt` and
+  `ry server` need no R.
+- **The macOS and Windows runtimes are experimental.** Before this release's smoke test they had not
+  run on a real Mac or Windows machine (Windows only under Wine). Linux is the tested platform.
+- **Peak memory is often higher than GNU R's.** On the benchmark programs, ry uses more memory on
+  eight of eleven, up to 1.8 times as much (`drawdown`, 133 MiB against 73 MiB).
+- **Not every package passes its tests yet**: 9 of the 164 packages that pass on GNU R still fail on
+  ry's runtime, and `apply` over rows is about 1.4 times slower than on GNU R.
+
+### Licence
+
+ry 0.3 was UPL-1.0 throughout. Parts of ry's runtime translate GNU R's own C code, so the `ry`
+binary and the crates behind the runtime are now GPL-2.0-or-later, like GNU R. The tooling crates
+(the parser, the checker, the formatter and the editor features) stay UPL-1.0, the C headers that
+packages compile against are LGPL-2.1-or-later as R's are, and the VS Code and Zed extensions are
+MIT. [Licensing](/reference/licensing) has the details, including why the binary as a whole is
+passed on under GPL-3.0-or-later.
 
 ## ry 0.3.0, a complete rewrite
 
@@ -147,7 +207,7 @@ engine, and a static type checker, the first one for R.
 - **The project is renamed from Roughly to ry.** The binary is `ry`, the configuration file is
   `ry.toml`, and a suppression comment reads `# ry: allow(...)`. The crate is published as `ry-lang`.
 - **R gets a static type checker**, new and experimental: Hindley-Milner inference with numeric
-  constraints and generics, guided by [`#:` annotation comments](/type-checking/annotations). Type
+  constraints and generics, guided by [`#:` annotation comments](/type-checking/overview#annotations). Type
   errors are opt-in through `[check] typing`, but hover, completion, signature help, and inlay hints
   use the inferred types either way.
 - **The R parser is hand-written.** It builds lossless syntax trees, recovers from broken input, and

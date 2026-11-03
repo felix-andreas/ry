@@ -459,6 +459,20 @@ SEXP rytest_missing_callable(void)
 
 /* Strings and encodings. */
 
+/* charIsASCII is public API in ry and in GNU R 4.5 and later; older GNU R headers have no public
+   test, so the build against them scans the bytes instead. */
+static int is_ascii(SEXP x)
+{
+#ifdef charIsASCII
+    return charIsASCII(x);
+#else
+    for (const unsigned char *p = (const unsigned char *) CHAR(x); *p; p++)
+        if (*p > 127)
+            return 0;
+    return 1;
+#endif
+}
+
 SEXP rytest_strings(void)
 {
     SEXP result = PROTECT(allocVector(STRSXP, 6));
@@ -466,7 +480,7 @@ SEXP rytest_strings(void)
     SEXP from_latin1 = mkCharCE(latin1, CE_LATIN1);
     SET_STRING_ELT(result, 0, mkCharCE(translateCharUTF8(from_latin1), CE_UTF8));
     SET_STRING_ELT(result, 1, mkChar(getCharCE(from_latin1) == CE_LATIN1 ? "latin1" : "other"));
-    SET_STRING_ELT(result, 2, mkChar(IS_ASCII(mkChar("plain")) ? "ascii" : "not ascii"));
+    SET_STRING_ELT(result, 2, mkChar(is_ascii(mkChar("plain")) ? "ascii" : "not ascii"));
     SET_STRING_ELT(result, 3, mkChar(mkChar("same") == mkCharCE("same", CE_UTF8) ? "interned" : "copied"));
     SET_STRING_ELT(result, 4, NA_STRING);
     SET_STRING_ELT(result, 5, mkCharLen("truncated", 5));
@@ -570,7 +584,7 @@ static R_hashtab_type maphash_table;
 static int maphash_visits;
 static int maphash_corrupt;
 
-static SEXP maphash_visit(SEXP key, SEXP value, void *data)
+static void maphash_visit(SEXP key, SEXP value, void *data)
 {
     (void) data;
     if (maphash_visits++ == 0) {
@@ -581,12 +595,11 @@ static SEXP maphash_visit(SEXP key, SEXP value, void *data)
         R_gc();
         for (int i = 0; i < 2000; i++)
             INTEGER(allocVector(INTSXP, 4))[0] = -777;
-        return R_NilValue;
+        return;
     }
     if (TYPEOF(key) != INTSXP || TYPEOF(value) != STRSXP ||
         strncmp(CHAR(STRING_ELT(value, 0)), "v", 1) != 0)
         maphash_corrupt++;
-    return R_NilValue;
 }
 
 /* The table is filled in one call and walked in another, because everything a call allocates

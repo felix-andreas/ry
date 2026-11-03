@@ -1,0 +1,64 @@
+---
+title: Getting started
+description: Type errors in plain R, a faster runtime, and tagged unions, with how to try them
+---
+
+import BenchmarkTable from '../../components/BenchmarkTable.astro';
+
+## Type checking
+
+`ry check` finds type errors in plain R before it runs, once `ry.toml` sets `typing = true` under
+`[check]`.
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+```text ry check typing
+type-mismatch
+  x expected a numeric value (`integer` or `double`), found `character`
+```
+
+## Speed
+
+Loops and recursion run several times faster on ry's runtime than on GNU R, and vectorized code runs
+about as fast.
+
+<BenchmarkTable programs={["fib", "drawdown", "vector_arith", "log_rank"]} />
+
+[All benchmarks](/benchmarks)
+
+## Tagged unions and `match`
+
+A `match` must handle every case of a tagged union.
+
+```r
+alias Payment =
+  | :Paid(amount: double)
+  | :Refunded(amount: double)
+  | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+    :Refunded(amount = a) => -a
+  }
+}
+```
+
+```text ry check typing
+non-exhaustive-match
+  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+## Try it
+
+```sh
+cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang
+ry check   # report mistakes
+ry fmt     # format every file
+```
+
+[Installation](/installation) · [Type checking](/type-checking/overview) ·
+[Records and tags](/type-checking/records-and-tags) · [ry at a glance](/ry) · [Why ry](/why-ry)

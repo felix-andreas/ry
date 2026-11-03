@@ -65,6 +65,9 @@ pub struct CheckConfig {
     pub inline_annotations: bool,
     /// S4, R6 and Reference Classes. Off, each class or method definition is an error.
     pub object_systems: bool,
+    /// Whether the standard library's names (`List.map`, `Result.ok`, ...) are in scope bare.
+    /// Off, they are reachable only qualified, as `std::List.map`.
+    pub prelude: bool,
     /// Gitignore-style patterns anchored at the config file's directory; files named
     /// explicitly on the command line are always checked.
     pub exclude: Vec<String>,
@@ -79,6 +82,7 @@ impl Default for CheckConfig {
             strict: false,
             inline_annotations: true,
             object_systems: true,
+            prelude: true,
             exclude: Vec::new(),
         }
     }

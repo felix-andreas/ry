@@ -118,7 +118,9 @@ struct LoadedPackage {
 /// first time someone asks what changed, because a one-off load never asks.
 enum Watch {
     Unstarted,
-    Watching(SourceWatcher),
+    /// Boxed because a watcher is large (macOS's FSEvents watcher especially) and most loaded
+    /// packages are never watched.
+    Watching(Box<SourceWatcher>),
     /// The operating system refused (a watch limit, a file system without notifications), so
     /// changes are found by comparing fingerprints.
     Unavailable,
@@ -277,16 +279,19 @@ pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
 ///
 /// Only a fresh load defers, and only when every S4 definition qualifies:
 ///
-/// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod` and
-///   `setValidity`, each with literal names, as [`S4Definition`] describes. Any other S4
-///   registration (`setRefClass`, or `setClassUnion`, which changes the classes it unites)
-///   keeps them all eager.
+/// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`,
+///   `setValidity` and `setClassUnion`, each with literal names, as [`S4Definition`]
+///   describes. Any other S4 registration, such as `setRefClass`, keeps them all eager.
+/// - Each class union unites classes held back with it, or only other packages' classes, as
+///   `setClassUnion("NumOrNull", c("numeric", "NULL"))` does. A union of the second kind is not
+///   held back but runs in place, because it changes what its members extend; a union of both
+///   kinds keeps them all eager.
 /// - Each method belongs to a generic the package defines, so nothing reaches it except
 ///   through that generic, or its signature names a class the package defines, so it applies
 ///   only to objects of that class. A method of the second kind on another package's generic,
-///   such as `show`, is listed in [`DeferredS4::foreign_generics`]: the backend must run the
-///   definitions before that generic dispatches or is looked up, and keeps them eager unless
-///   the generic is a standard generic that does not stand for a primitive.
+///   such as `show`, `length` or `as.list`, is listed in [`DeferredS4::foreign_methods`]:
+///   the backend must run the definitions before that method can be found, and keeps them
+///   eager when it cannot tell when that happens.
 /// - Each validity method is for a class the package defines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredS4 {
@@ -295,8 +300,8 @@ pub struct DeferredS4 {
     pub classes: Vec<String>,
     /// The generics the definitions create.
     pub generics: Vec<String>,
-    /// The generics of other packages the definitions add methods to.
-    pub foreign_generics: Vec<String>,
+    /// The definitions' methods for other packages' generics, in order.
+    pub foreign_methods: Vec<ForeignMethod>,
     /// Every namespace binding the definitions make.
     pub names: Vec<String>,
     /// A key for the S4 metadata the definitions produce, when running them depends on nothing
@@ -304,6 +309,15 @@ pub struct DeferredS4 {
     /// they bind themselves and functions in [`PURE_S4_READS`]. A backend may then save what
     /// they bind and restore it in a later process instead of running them.
     pub cache_key: Option<String>,
+}
+
+/// A held-back method for another package's generic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignMethod {
+    pub generic: String,
+    /// Each class with the argument name written beside it, if any, as in
+    /// [`S4Definition::Method`].
+    pub signature: Vec<(Option<String>, String)>,
 }
 
 /// The functions an S4 definition may call and still be cached: the methods package's
@@ -316,6 +330,7 @@ const PURE_S4_READS: &[&str] = &[
     "setMethod",
     "setReplaceMethod",
     "setValidity",
+    "setClassUnion",
     "representation",
     "signature",
     "prototype",
@@ -475,7 +490,9 @@ impl std::error::Error for LoadError {}
 
 /// The directory holding `DESCRIPTION`, at or above `path`.
 pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
-    let absolute = fs::canonicalize(path).map_err(|error| LoadError::Io(path.into(), error))?;
+    let absolute = fs::canonicalize(path)
+        .map(without_verbatim_prefix)
+        .map_err(|error| LoadError::Io(path.into(), error))?;
     let mut current = Some(absolute.as_path());
     while let Some(directory) = current {
         if directory.join("DESCRIPTION").is_file() {
@@ -484,6 +501,23 @@ pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
         current = directory.parent();
     }
     Err(LoadError::NotAPackage(absolute))
+}
+
+/// `path` without the `\\?\` prefix that `fs::canonicalize` puts on every Windows path. The root
+/// reaches R and the tools it starts, and R takes neither a verbatim path nor the forward
+/// slashes `file.path()` joins onto one. Only a drive or UNC path loses the prefix; any other
+/// verbatim path, such as a device path, comes back unchanged.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 impl Loader {
@@ -728,7 +762,9 @@ impl Loader {
                 Watch::Unstarted => {
                     // Edits made before the watch started are caught by the fingerprint below.
                     package.watch = SourceWatcher::new(&package.root)
-                        .map_or(Watch::Unavailable, Watch::Watching);
+                        .map_or(Watch::Unavailable, |watcher| {
+                            Watch::Watching(Box::new(watcher))
+                        });
                 }
                 Watch::Watching(watcher) => match watcher.take() {
                     Ok(edits) => {
@@ -768,7 +804,7 @@ impl Loader {
             .ok_or_else(|| WatchError::NotLoaded(root.to_path_buf()))?;
         if let Watch::Unstarted = package.watch {
             match SourceWatcher::new(root) {
-                Ok(watcher) => package.watch = Watch::Watching(watcher),
+                Ok(watcher) => package.watch = Watch::Watching(Box::new(watcher)),
                 Err(error) => {
                     package.watch = Watch::Unavailable;
                     return Err(WatchError::Notify(root.to_path_buf(), error.to_string()));
@@ -789,6 +825,13 @@ impl Loader {
     /// `changed`, through the names the definitions mention, `changed` included. A test that
     /// mentions none of them runs exactly the code it ran before a reload that changed only
     /// `changed`, so `ry test` reruns the tests that mention one first.
+    ///
+    /// A call of a generic reaches its methods through S3 dispatch rather than by name, so a
+    /// reached method also reaches its generic: the generic a `NAMESPACE` registration names,
+    /// and each generic its name can be read as, `as` and `as.data` as well as `as.data.frame`
+    /// for `as.data.frame.ledger`. Reading too many names only reruns more tests. The generic
+    /// may be one the package does not define, such as `print`, and is listed all the same,
+    /// because a test that calls it dispatches to the method.
     pub fn callers(&self, root: &Path, changed: &[String]) -> Vec<String> {
         let Some(index) = self
             .packages
@@ -807,9 +850,23 @@ impl Loader {
                 }
             }
         }
+        let mut generics_of: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+        for method in &index.namespace.s3_methods {
+            generics_of
+                .entry(&method.function)
+                .or_default()
+                .push(&method.generic);
+        }
         let mut reached: FxHashSet<&str> = changed.iter().map(String::as_str).collect();
         let mut queue: Vec<&str> = reached.iter().copied().collect();
         while let Some(name) = queue.pop() {
+            let registered = generics_of.get(name).map_or(&[][..], Vec::as_slice);
+            let by_name = name.match_indices('.').map(|(at, _)| &name[..at]);
+            for generic in registered.iter().copied().chain(by_name) {
+                if !generic.is_empty() && reached.insert(generic) {
+                    queue.push(generic);
+                }
+            }
             for &caller in mentioned_by.get(name).map_or(&[][..], Vec::as_slice) {
                 if reached.insert(caller) {
                     queue.push(caller);
@@ -1859,24 +1916,62 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     if definitions.is_empty() {
         return None;
     }
+    // A union changes what its members extend in the process-wide class cache, which every
+    // lookup of a member reads, so only a union of classes held back with it can wait. One of
+    // other packages' classes alone reads nothing held back and runs in place.
+    let mut held: FxHashSet<&str> = definitions
+        .iter()
+        .filter_map(|(_, _, _, definition)| match definition {
+            S4Definition::Class { class } => Some(class.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut kept = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        if let S4Definition::Union { class, members } = definition.3 {
+            let held_members = members
+                .iter()
+                .filter(|member| held.contains(member.as_str()))
+                .count();
+            if held_members == 0 {
+                continue;
+            }
+            if held_members < members.len() {
+                return None;
+            }
+            held.insert(class);
+        }
+        kept.push(definition);
+    }
+    let definitions = kept;
+    if definitions.is_empty() {
+        return None;
+    }
     let mut classes = Vec::new();
     let mut generics = Vec::new();
     for (_, _, _, definition) in &definitions {
         match definition {
-            S4Definition::Class { class } => classes.push(class.clone()),
+            S4Definition::Class { class } | S4Definition::Union { class, .. } => {
+                classes.push(class.clone())
+            }
             S4Definition::Generic { generic } => generics.push(generic.clone()),
             S4Definition::Method { .. } | S4Definition::Validity { .. } => {}
         }
     }
-    let mut foreign_generics = Vec::new();
+    let mut foreign_methods = Vec::new();
     let mut names = Vec::new();
     for (_, position, item, definition) in &definitions {
         let reaches_own = match definition {
-            S4Definition::Class { .. } | S4Definition::Generic { .. } => true,
+            S4Definition::Class { .. }
+            | S4Definition::Union { .. }
+            | S4Definition::Generic { .. } => true,
             S4Definition::Method { generic, .. } if generics.contains(generic) => true,
             S4Definition::Method { generic, signature } => {
-                foreign_generics.push(generic.clone());
-                signature.iter().any(|class| classes.contains(class))
+                foreign_methods.push(ForeignMethod {
+                    generic: generic.clone(),
+                    signature: signature.clone(),
+                });
+                signature.iter().any(|(_, class)| classes.contains(class))
             }
             S4Definition::Validity { class } => classes.contains(class),
         };
@@ -1922,13 +2017,11 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     );
     names.sort_unstable();
     names.dedup();
-    foreign_generics.sort_unstable();
-    foreign_generics.dedup();
     Some(DeferredS4 {
         run: definitions.iter().map(|(position, ..)| *position).collect(),
         classes,
         generics,
-        foreign_generics,
+        foreign_methods,
         names,
         cache_key,
     })
@@ -2103,6 +2196,21 @@ impl Plan {
             .filter_map(|code| code.name.clone())
             .chain(self.remove.iter().cloned())
             .collect();
+        names.sort();
+        names.dedup();
+        Some(names)
+    }
+
+    /// The names whose calls this plan may change, which [`Loader::callers`] starts from: the
+    /// touched names, and the method and generic of each S3 registration the plan adds or
+    /// drops, since a registration changes where a call of the generic dispatches without
+    /// rebinding anything. `None` when [`Plan::touched_names`] is.
+    pub fn changed_names(&self) -> Option<Vec<String>> {
+        let mut names = self.touched_names()?;
+        for method in self.s3_register.iter().chain(&self.s3_unregister) {
+            names.push(method.function.clone());
+            names.push(method.generic.clone());
+        }
         names.sort();
         names.dedup();
         Some(names)
@@ -2434,4 +2542,24 @@ pub fn is_build_product(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "o" | "so" | "dll" | "dylib"))
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::without_verbatim_prefix, std::path::PathBuf};
+
+    #[test]
+    fn verbatim_prefix_is_stripped_from_drive_and_unc_paths_only() {
+        let strip = |text: &str| without_verbatim_prefix(PathBuf::from(text));
+        assert_eq!(strip(r"\\?\C:\tmp\pkg"), PathBuf::from(r"C:\tmp\pkg"));
+        assert_eq!(
+            strip(r"\\?\UNC\server\share\pkg"),
+            PathBuf::from(r"\\server\share\pkg")
+        );
+        assert_eq!(
+            strip(r"\\?\GLOBALROOT\Device"),
+            PathBuf::from(r"\\?\GLOBALROOT\Device")
+        );
+        assert_eq!(strip("/home/user/pkg"), PathBuf::from("/home/user/pkg"));
+    }
 }

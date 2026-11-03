@@ -564,11 +564,25 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
     let root = package(&[
         ("DESCRIPTION", "Package: squares\nVersion: 1.0\n"),
-        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "NAMESPACE",
+            "exportPattern(\".\")\nexportMethods(as.list, toString)\n",
+        ),
         (
             "R/a.R",
             "Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
-             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n",
+             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n\
+             setMethod(\"length\", \"Sq\", function(x) 4L)\n\
+             setMethod(\"[\", \"Sq\", function(x, i, ...) x@side[i])\n\
+             setMethod(\"as.list\", \"Sq\", function(x, ...) list(side = x@side))\n\
+             setMethod(\"toString\", \"Sq\", function(x, ...) paste(\"Sq\", x@side))\n\
+             setMethod(\"initialize\", \"Sq\", function(.Object, ...) {\n\
+               .Object <- callNextMethod(.Object, ...)\n\
+               if (length(.Object@side) == 0) .Object@side <- 1\n\
+               .Object\n\
+             })\n\
+             setClassUnion(\"Shape\", \"Sq\")\n\
+             setClassUnion(\"NumOrNull\", c(\"numeric\", \"NULL\"))\n",
         ),
     ]);
     let saved = root.path().join("sq.rds");
@@ -589,17 +603,26 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         text
     };
     load("FALSE", &format!("saveRDS(Sq(side = 3), {saved:?})"));
-    // Each probe reaches the method first through a different door: a lookup of the generic,
-    // a dispatch on an object read back from disk, which needs no class lookup, and printing.
+    // Each probe reaches the definitions first through a different door: a lookup of a
+    // generic, dispatch on an object read back from disk (which needs no class lookup) through
+    // a standard generic, a primitive, or a function the methods made generic, printing, a
+    // union, and a new object whose initializer calls the default one.
+    let read = format!("x <- readRDS({saved:?}); cat('probe: ')");
     for probe in [
-        "cat('probe:', existsMethod('show', 'Sq'), '\\n')".to_owned(),
-        format!("x <- readRDS({saved:?}); cat('probe: '); show(x)"),
+        "cat('probe:', existsMethod('show', 'Sq'), existsMethod('length', 'Sq'), '\\n')".to_owned(),
+        format!("{read}; show(x)"),
+        format!("{read}; cat(length(x), x[1], '\\n')"),
+        format!("{read}; cat(x[1], '\\n')"),
+        format!("{read}; cat(unlist(as.list(x)), toString(x), '\\n')"),
         "cat('probe: '); print(Sq(side = 2))".to_owned(),
+        "cat('probe:', extends('numeric'), is(1, 'NumOrNull'), isVirtualClass('Shape'), '\\n')"
+            .to_owned(),
+        "cat('probe:', new('Sq')@side, length(Sq(side = 5)), '\\n')".to_owned(),
     ] {
         let lazy = load("TRUE", &probe);
         let eager = load("FALSE", &probe);
         assert!(
-            lazy.contains("2 S4 definitions held back until first use"),
+            lazy.contains("8 S4 definitions held back until first use"),
             "{lazy}"
         );
         let line = |text: &str| {
@@ -610,6 +633,56 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         };
         assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
     }
+}
+
+#[test]
+fn package_functions_used_or_made_generic_around_held_back_methods_load_as_eagerly() {
+    if !r_available() {
+        return;
+    }
+    // `as.list` is used at load time before its method is defined, and `describe` is the
+    // package's own function, which its method makes generic in place.
+    let root = package(&[
+        ("DESCRIPTION", "Package: listing\nVersion: 1.0\n"),
+        (
+            "NAMESPACE",
+            "exportPattern(\".\")\nexportMethods(as.list)\n",
+        ),
+        (
+            "R/a.R",
+            "LISTED <- as.list(c(a = 1))\n\
+             describe <- function(x) \"plain\"\n\
+             Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
+             setMethod(\"as.list\", \"Sq\", function(x, ...) list(side = x@side))\n\
+             setMethod(\"describe\", \"Sq\", function(x) \"square\")\n",
+        ),
+    ]);
+    let probe = "cat('probe:', names(LISTED), describe(1), describe(Sq(side = 1)), unlist(as.list(Sq(side = 2))), '\\n')";
+    let load = |lazy: &str| {
+        let reload = format!(
+            "options(ry.load.lazy_s4 = {lazy}); load_all({:?}, full = TRUE)",
+            root.path().display().to_string()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .args(["-e", &reload, "-e", probe])
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .output()
+            .expect("run ry load");
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let line = |text: &str| {
+        text.lines()
+            .find(|line| line.starts_with("probe:"))
+            .unwrap_or_else(|| panic!("no probe line in {text}"))
+            .to_owned()
+    };
+    let lazy = load("TRUE");
+    assert_eq!(line(&lazy), "probe: a plain square 2 ", "{lazy}");
+    assert_eq!(line(&lazy), line(&load("FALSE")));
 }
 
 #[test]
@@ -1308,6 +1381,16 @@ const ROXYGEN: &[(&str, &str)] = &[
         "#' Scale\n#' @inheritParams add\n#' @param factor How much.\n#' @importFrom stats median\n\
          #' @export\nscale_by <- function(x, factor) x * factor\n",
     ),
+    (
+        "R/family.R",
+        "#' Double\n#' @param x A number.\n#' @family arithmetic\n#' @export\n\
+         double_it <- function(x) x * 2\n",
+    ),
+    (
+        "R/half.R",
+        "#' Half\n#' @inheritParams double_it\n#' @family arithmetic\n#' @export\n\
+         halve <- function(x) x / 2\n",
+    ),
 ];
 
 /// Every file under `root` except `.git`, by relative path, with its bytes.
@@ -1333,16 +1416,28 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 /// `ry document` writes what `devtools::document()` writes, byte for byte, on a cold run and on
-/// a run after an edit, which reuses the blocks of the unchanged file.
+/// each run after an edit. The later edits change only topics that unchanged files read, through
+/// `@inheritParams` and `@family`, which the cached topics of those files must not hide.
 #[test]
 fn ry_document_matches_devtools_on_both_runtimes() {
     if !r_available() || !installed("roxygen2") || !installed("devtools") || !installed("R6") {
         return;
     }
-    let edit = |root: &Path| {
-        let path = root.join("R/scale.R");
+    let edits: [(&str, &str, &str); 4] = [
+        ("R/scale.R", "How much.", "How much to scale by."),
+        (
+            "R/add.R",
+            "#' @param x A number.",
+            "#' @param x A real number.",
+        ),
+        ("R/family.R", "@family arithmetic", "@family maths"),
+        ("R/family.R", "#' Double", "#' Double a number"),
+    ];
+    let edit = |root: &Path, (file, from, to): (&str, &str, &str)| {
+        let path = root.join(file);
         let text = fs::read_to_string(&path).expect("read");
-        fs::write(&path, text.replace("How much.", "How much to scale by.")).expect("write");
+        assert!(text.contains(from), "{file} lacks {from}");
+        fs::write(&path, text.replacen(from, to, 1)).expect("write");
     };
     let reference = package(ROXYGEN);
     let devtools = || {
@@ -1352,15 +1447,17 @@ fn ry_document_matches_devtools_on_both_runtimes() {
             .output()
             .expect("run devtools");
         assert!(output.status.success(), "{}", text(&output));
+        tree(reference.path())
     };
-    devtools();
-    let cold = tree(reference.path());
-    edit(reference.path());
-    devtools();
-    let edited = tree(reference.path());
+    let mut expected = vec![devtools()];
+    for step in edits {
+        edit(reference.path(), step);
+        expected.push(devtools());
+    }
     assert!(
-        cold.iter().any(|(path, _)| path == "man/add.Rd"),
-        "{cold:?}"
+        expected[0].iter().any(|(path, _)| path == "man/add.Rd"),
+        "{:?}",
+        expected[0]
     );
     for runtime in RUNTIMES {
         let root = package(ROXYGEN);
@@ -1375,13 +1472,19 @@ fn ry_document_matches_devtools_on_both_runtimes() {
             assert!(output.status.success(), "{runtime}: {}", text(&output));
         };
         document();
-        assert!(tree(root.path()) == cold, "{runtime}: the cold run differs");
-        edit(root.path());
-        document();
         assert!(
-            tree(root.path()) == edited,
-            "{runtime}: the run after an edit differs"
+            tree(root.path()) == expected[0],
+            "{runtime}: the cold run differs"
         );
+        for (index, step) in edits.into_iter().enumerate() {
+            edit(root.path(), step);
+            document();
+            assert!(
+                tree(root.path()) == expected[index + 1],
+                "{runtime}: the run after editing {} differs",
+                step.0
+            );
+        }
     }
 }
 

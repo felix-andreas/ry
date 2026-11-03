@@ -12,8 +12,8 @@ use {
         check_cache,
         cli::{
             analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
-            project_order, project_stub_paths, read_project_stubs, scan_data_files,
-            sniff_data_file,
+            is_package_source, project_order, project_stub_paths, read_project_stubs,
+            scan_data_files, sniff_data_file,
         },
         config::{
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
@@ -617,6 +617,7 @@ impl Worker {
         let _: AnalysisSettings = AnalysisSettings::builder(
             worker.config.check.inline_annotations,
             worker.config.check.strict,
+            worker.config.check.prelude,
         )
         .durability(Durability::MEDIUM)
         .new(&worker.db);
@@ -792,12 +793,7 @@ impl Worker {
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
                 .map(|entry| entry.path())
-                .filter(|path| {
-                    path.is_file()
-                        && path
-                            .extension()
-                            .is_some_and(|extension| extension == "R" || extension == "r")
-                })
+                .filter(|path| path.is_file() && is_package_source(path))
                 .collect();
             paths.sort();
             for path in paths {
@@ -1354,9 +1350,14 @@ impl Worker {
         let (file, text) = self.document(&item.uri)?;
         let offset = self.to_offset(&text, item.selection_range.start);
         let files = ProjectFiles::get(&self.db);
+        // Every item this server hands out sits at its function's own definition, so its name
+        // resolves back into the same file. One that resolves elsewhere is stale (the function
+        // moved since the answer), and both directions decline it: outgoing call ranges are
+        // relative to the item's document, and incoming calls would describe a different item.
         self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
             .ok()
             .flatten()
+            .filter(|resolved| resolved.file == file)
     }
 
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
@@ -1724,19 +1725,11 @@ impl Worker {
             .is_some_and(|installed| installed.is_generated(path))
     }
 
-    fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) {
-        let Some(path) = self.document_path(&params.text_document.uri) else {
-            return;
-        };
-        if !self.open_documents.contains(&path) {
-            // Config reloads run off the file watcher, not didSave.
-            return;
-        }
-        assert!(
-            self.files.contains_key(&path),
-            "open documents must be tracked"
-        );
-        // A package-visible save can move diagnostics in dependent files.
+    /// An edit republishes only the edited document, so a save is when every open document's
+    /// settled publish catches up with edits made elsewhere. That holds whatever was saved: a
+    /// NAMESPACE or stub buffer is open in the editor but is not an analyzed open document,
+    /// and the saved file's own content reaches analysis through the buffer or the watcher.
+    fn did_save(&mut self) {
         self.refresh_all_diagnostics();
     }
 
@@ -1832,6 +1825,7 @@ impl Worker {
                         config_changed |= config != self.config;
                         let inline_annotations = config.check.inline_annotations;
                         let strict = config.check.strict;
+                        let prelude = config.check.prelude;
                         self.config = config;
                         let settings = AnalysisSettings::get(&self.db);
                         if *settings.inline_annotations(&self.db) != inline_annotations {
@@ -1841,6 +1835,9 @@ impl Worker {
                         }
                         if *settings.strict(&self.db) != strict {
                             settings.set_strict(&mut self.db).to(strict);
+                        }
+                        if *settings.prelude(&self.db) != prelude {
+                            settings.set_prelude(&mut self.db).to(prelude);
                         }
                         self.report_config_warnings();
                         self.publish_config_diagnostics(None);
@@ -1854,9 +1851,7 @@ impl Worker {
                     }
                 }
             } else if self.is_package_path(&path)
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "R" || extension == "r")
+                && is_package_source(&path)
                 && !self.open_documents.contains(&path)
             {
                 match fs::read_to_string(&path) {
@@ -1936,7 +1931,7 @@ impl Worker {
                         lsp_types::Url::from_file_path(self.workspace_root.join("R"))
                             .unwrap_or_else(|_| self.document_uri(&self.workspace_root)),
                     ),
-                    pattern: "*.[rR]".to_owned(),
+                    pattern: "*.[rRsSq]".to_owned(),
                 }),
                 kind: None,
             },
@@ -2449,8 +2444,8 @@ impl LanguageServer for ServerState {
         self.notify(move |worker| worker.did_change(params))
     }
 
-    fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) -> Self::NotifyResult {
-        self.notify(move |worker| worker.did_save(params))
+    fn did_save(&mut self, _params: lsp_types::DidSaveTextDocumentParams) -> Self::NotifyResult {
+        self.notify(|worker| worker.did_save())
     }
 
     fn did_close(&mut self, params: lsp_types::DidCloseTextDocumentParams) -> Self::NotifyResult {
@@ -2955,7 +2950,7 @@ impl LanguageServer for ServerState {
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
             ]
             .iter()
-            .any(|kind| wants(kind));
+            .any(&wants);
             let actions = worker
                 .cancellable(|worker| {
                     let fixable = worker.fixable_diagnostics(file, &text);
@@ -3097,12 +3092,6 @@ impl LanguageServer for ServerState {
             let cursor_line_start = text[..usize::from(caret)]
                 .rfind('\n')
                 .map_or(0, |at| at + 1);
-            let line = match params.ch.as_str() {
-                "\n" if cursor_line_start == 0 => return Ok(None),
-                "\n" => cursor_line_start - 1,
-                _ => usize::from(caret),
-            };
-            let line = TextSize::try_from(line).unwrap_or_default();
             if params.ch != "\n" {
                 // A `}` finishes the construct it closes, so the selection
                 // runs from where that statement starts.
@@ -3121,7 +3110,7 @@ impl LanguageServer for ServerState {
                             })
                         })
                     })
-                    .map_or(line, |statement| statement.text_range().start());
+                    .map_or(caret, |statement| statement.text_range().start());
                 let edits = format::format_range(
                     &text,
                     worker.config.format,
@@ -3129,25 +3118,45 @@ impl LanguageServer for ServerState {
                 );
                 return Ok(worker.format_edits(&text, edits));
             }
-            // The editor has already indented the new line for the user to
-            // type on, and a blank line before a `}` is one the formatter
-            // deletes. Either edit would fight the user under the cursor, so
-            // a blank cursor line is laid out as if it were not there yet,
-            // and no edit may reach it. Offsets before it are the same in
+            // Formatting deletes blank lines at the end of the file and before
+            // a `}`, and collapses runs of them, so it would undo the Enter the
+            // user just pressed to open up space. A blank finished line
+            // therefore has nothing to lay out, and a finished line with code
+            // is laid out in a probe without the blank lines from the cursor
+            // on (the indented cursor line among them), with no edit allowed
+            // to reach the cursor's line. Offsets before it are the same in
             // both texts.
-            let cursor_line_end = text[cursor_line_start..]
-                .find('\n')
-                .map_or(text.len(), |at| cursor_line_start + at + 1);
-            let probe = match text[cursor_line_start..cursor_line_end].trim().is_empty() {
-                true => [&text[..cursor_line_start], &text[cursor_line_end..]].concat(),
-                false => text.clone(),
-            };
+            let is_blank = |line: &str| line.trim().is_empty();
+            let finished_line_start = text[..cursor_line_start.saturating_sub(1)]
+                .rfind('\n')
+                .map_or(0, |at| at + 1);
+            if cursor_line_start == 0 || is_blank(&text[finished_line_start..cursor_line_start]) {
+                return Ok(None);
+            }
+            let mut blank_run_end = cursor_line_start;
+            while blank_run_end < text.len() {
+                let line_end = text[blank_run_end..]
+                    .find('\n')
+                    .map_or(text.len(), |at| blank_run_end + at + 1);
+                if !is_blank(&text[blank_run_end..line_end]) {
+                    break;
+                }
+                blank_run_end = line_end;
+            }
+            let probe = [&text[..cursor_line_start], &text[blank_run_end..]].concat();
+            let finished_line_break = TextSize::try_from(cursor_line_start - 1).unwrap_or_default();
             let cursor_line_start = TextSize::try_from(cursor_line_start).unwrap_or_default();
-            let edits = format::format_range(&probe, worker.config.format, TextRange::empty(line))
-                .map(|mut edits| {
-                    edits.retain(|edit| edit.range.end() <= cursor_line_start);
-                    edits
+            let edits = format::format_range(
+                &probe,
+                worker.config.format,
+                TextRange::empty(finished_line_break),
+            )
+            .map(|mut edits| {
+                edits.retain(|edit| {
+                    edit.range.start() < cursor_line_start && edit.range.end() <= cursor_line_start
                 });
+                edits
+            });
             Ok(worker.format_edits(&text, edits))
         })
     }

@@ -175,19 +175,24 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dirname", 1, |call| unsafe {
-        // GNU R keeps an empty path empty and drops the slashes before the last component.
+        // GNU R's `R_dirname`: expand `~`, drop one trailing separator unless it is the whole
+        // path (its loop never shortens the string, so only one goes), then cut at the last
+        // separator along with the separators just before it.
         map_strings(call, |path| {
             if path.is_empty() {
                 return String::new();
             }
-            let trimmed = path.trim_end_matches('/');
+            let expanded = crate::connections::expand_path(path);
+            let trimmed = match expanded.strip_suffix('/') {
+                Some(rest) if !rest.is_empty() => rest,
+                _ => expanded.as_str(),
+            };
             match trimmed.rfind('/') {
-                Some(position) => match trimmed[..position].trim_end_matches('/') {
-                    "" => "/".to_owned(),
-                    parent => parent.to_owned(),
-                },
-                None if path.starts_with('/') => "/".to_owned(),
                 None => ".".to_owned(),
+                Some(position) => {
+                    let head = trimmed[..position].trim_end_matches('/');
+                    if head.is_empty() { "/" } else { head }.to_owned()
+                }
             }
         })
     }),
@@ -280,7 +285,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, character_unchanged),
+    builtin("enc2native", 1, do_enc2native),
     builtin("enc2utf8", 1, do_enc2utf8),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
@@ -340,7 +345,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindtextdomain", 2, |_| Ok(nil())),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, character_unchanged),
+    internal("enc2native", 1, do_enc2native),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -467,33 +472,25 @@ fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
         .iter()
         .filter_map(|name| std::env::var(name).ok())
-        .find(|candidate| writable_directory(candidate))
-        .unwrap_or_else(|| "/tmp".to_owned());
-    let template = std::ffi::CString::new(format!("{root}/RtmpXXXXXX"))
+        .find(|candidate| {
+            !candidate.is_empty() && crate::platform::writable_directory(candidate.as_ref())
+        })
+        .unwrap_or_else(|| {
+            // Windows has no `/tmp`; its own temporary directory comes from the same variables
+            // and then the user's profile.
+            if cfg!(windows) {
+                std::env::temp_dir().to_string_lossy().into_owned()
+            } else {
+                "/tmp".to_owned()
+            }
+        });
+    let separator = std::path::MAIN_SEPARATOR;
+    let path = crate::platform::make_temp_dir(&format!("{root}{separator}RtmpXXXXXX"))
         .map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
-    let mut bytes = template.into_bytes_with_nul();
-    // SAFETY: `bytes` is a NUL-terminated template that mkdtemp rewrites in place.
-    let created = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
-    if created.is_null() {
-        return Err("cannot create 'R_TempDir'".to_owned());
-    }
-    bytes.pop();
-    let path = String::from_utf8(bytes).map_err(|_| "cannot create 'R_TempDir'".to_owned())?;
     Ok(SessionTemp {
         path,
         owner: std::process::id(),
     })
-}
-
-fn writable_directory(path: &str) -> bool {
-    if path.is_empty() || !std::path::Path::new(path).is_dir() {
-        return false;
-    }
-    let Ok(path) = std::ffi::CString::new(path) else {
-        return false;
-    };
-    // SAFETY: `path` is NUL-terminated.
-    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// `tempdir(check)`: with `check`, a session directory something deleted is created again at
@@ -501,17 +498,11 @@ fn writable_directory(path: &str) -> bool {
 /// fresh name instead; keeping the name is safe only because the directory is created
 /// private and a directory that already exists must belong to this user.
 unsafe fn do_tempdir(call: &Call<'_>) -> R<Sexp> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = session_temp_dir().map_err(|message| call.error(message))?;
-    if values::as_logical_scalar(call.arg(0)) == 1 {
-        let usable = match std::fs::symlink_metadata(path) {
-            // SAFETY: geteuid has no preconditions.
-            Ok(metadata) => metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
-            Err(_) => std::fs::DirBuilder::new().mode(0o700).create(path).is_ok(),
-        };
-        if !usable {
-            return Err(call.error("cannot create 'R_TempDir'"));
-        }
+    if values::as_logical_scalar(call.arg(0)) == 1
+        && !crate::platform::ensure_private_dir(path.as_ref())
+    {
+        return Err(call.error("cannot create 'R_TempDir'"));
     }
     scalar_string(path)
 }
@@ -3331,14 +3322,25 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
     scalar_integer(status.code().unwrap_or(127))
 }
 
-/// `enc2utf8` and `enc2native`: every string ry holds is already UTF-8, so only the type check
-/// remains.
-unsafe fn character_unchanged(call: &Call<'_>) -> R<Sexp> {
+/// `enc2native`: the session's native encoding is UTF-8, so it translates latin1 strings to
+/// UTF-8 and leaves every other string, bytes included, as it is.
+unsafe fn do_enc2native(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if value.kind() != SexpType::String {
         return Err(call.error("argument is not a character vector"));
     }
-    Ok(value)
+    let count = length(value);
+    let latin1 = |index: usize| value.element(index).has_gp(heap::object::gp::LATIN1);
+    if !(0..count).any(latin1) {
+        return Ok(value);
+    }
+    let result = values::duplicate(value)?;
+    crate::heap().root(result);
+    for index in (0..count).filter(|&index| latin1(index)) {
+        let text = values::char_str(value.element(index));
+        values::set_elt(result, index, values::mkchar(&text)?);
+    }
+    Ok(result)
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {

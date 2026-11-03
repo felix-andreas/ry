@@ -854,9 +854,9 @@ pub fn package_scheme_exists_in(
         return true;
     }
     library.is_some_and(|library| {
-        library.schemes.contains_key(name)
-            || library.nominals.contains(name)
-            || library.known_exports.contains(name)
+        library.nominals.contains(name)
+            || ((library.schemes.contains_key(name) || library.known_exports.contains(name))
+                && !stubs::outside_prelude(db, library, name))
     })
 }
 
@@ -1166,6 +1166,13 @@ pub struct AnalysisSettings {
     /// strict file's checks record the undetermined origins strict mode reports, which in
     /// untyped code are about one per expression.
     pub strict: bool,
+    /// `[check] prelude`. Off, the standard library's names resolve only as `std::Name`.
+    pub prelude: bool,
+}
+
+/// Whether the standard library's names are in scope bare. Unset settings keep the prelude.
+pub fn prelude_enabled(db: &dyn Db) -> bool {
+    AnalysisSettings::try_get(db).is_none_or(|settings| *settings.prelude(db))
 }
 
 /// Read only where an inline annotation exists, so a project without any never
@@ -2086,9 +2093,11 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
     };
     naming
         .bindings
-        .values()
-        .filter(|binding| binding.kind == naming::BindingKind::TopLevel)
-        .map(|binding| binding.name)
+        .iter()
+        .filter(|(slot, binding)| {
+            binding.kind == naming::BindingKind::TopLevel || naming.extras().loop_bound_slots.contains(*slot)
+        })
+        .map(|(_, binding)| binding.name)
         .collect()
 }
 
@@ -2899,7 +2908,7 @@ fn unlisted_frame_binder<'db>(
             .get_or_init(|| FrameBinders::of(db, item))
             .binder(name, deferred);
     }
-    frame_binder(db, item, types::Name::new(db, &name), deferred)
+    frame_binder(db, item, types::Name::new(db, name), deferred)
 }
 
 /// Each symbol an item reads from its frame, with its immediate and deferred binders.
@@ -3163,7 +3172,17 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
-        self.library?.schemes.get(name)?.last().cloned()
+        self.bare_library_candidates(name)?.last().cloned()
+    }
+
+    /// The shipped declarations a bare `name` reaches, which leave out the standard library's
+    /// when `[check] prelude` is off.
+    fn bare_library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+        let library = self.library?;
+        if stubs::outside_prelude(self.db, library, name) {
+            return None;
+        }
+        library.schemes.get(name).map(Vec::as_slice)
     }
 
     fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
@@ -3223,6 +3242,9 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
 
     fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
+        if stubs::outside_prelude(self.db, library, name) {
+            return None;
+        }
         match library.schemes.get(name) {
             Some(candidates) => Some(candidates),
             None => library.known_exports.contains(name).then_some(&[]),
@@ -3230,7 +3252,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
-        let candidates = self.library?.schemes.get(name.as_str())?;
+        let candidates = self.bare_library_candidates(name.as_str())?;
         if candidates.len() < 2 {
             return None;
         }
@@ -3254,8 +3276,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         *has_untracked_arithmetic_class(self.db, self.file)
     }
 
-    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        self.library?.schemes.get(name)?.last().cloned()
+    fn defines_dollar_method(&self) -> bool {
+        *file_defines_dollar_method(self.db, self.file)
+            || ProjectFiles::try_get(self.db)
+                .is_some_and(|files| *project_defines_dollar_method(self.db, files))
     }
 }
 
@@ -3278,6 +3302,22 @@ fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Str
         }
     }
     classes
+}
+
+#[salsa::tracked]
+fn project_defines_dollar_method(db: &dyn Db, files: ProjectFiles) -> bool {
+    files.files(db).iter().any(|&file| {
+        *file.kind(db) == DocumentKind::Package && *file_defines_dollar_method(db, file)
+    })
+}
+
+#[salsa::tracked]
+fn file_defines_dollar_method(db: &dyn Db, file: SourceFile) -> bool {
+    file_definitions(db, file).iter().any(|(name, _)| {
+        name.as_str()
+            .strip_prefix("$.")
+            .is_some_and(|class| !class.is_empty())
+    })
 }
 
 #[salsa::tracked(returns(ref))]

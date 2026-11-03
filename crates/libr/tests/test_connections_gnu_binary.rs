@@ -3,6 +3,8 @@
 //! its own test binary because the package's routines share names with the ry-built copy.
 //! `RY_SKIP_GNU_R=1` skips it on a machine without R.
 
+#![cfg(unix)]
+
 mod connection_scenarios;
 mod harness;
 

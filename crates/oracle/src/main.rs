@@ -727,6 +727,21 @@ fn run_bench(
             summary.package, summary.gnu_r_wall_seconds, summary.ry_wall_seconds
         );
     }
+    println!("Time in the collector during the suite, as gc.time() reports it:");
+    for summary in &summaries {
+        let share = |gc: Option<f64>, suite: Option<f64>| match (gc, suite) {
+            (Some(gc), Some(suite)) if suite > 0.0 => {
+                format!("{gc:.2} s ({:.1}%)", gc / suite * 100.0)
+            }
+            _ => "-".to_string(),
+        };
+        println!(
+            "  {}: GNU R {}, ry {}",
+            summary.package,
+            share(summary.gnu_r_gc_seconds, summary.gnu_r_suite_seconds),
+            share(summary.ry_gc_seconds, summary.ry_suite_seconds)
+        );
+    }
     if let Some(path) = json {
         let text = match serde_json::to_string_pretty(&summaries) {
             Ok(text) => text,

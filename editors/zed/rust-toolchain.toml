@@ -1,0 +1,9 @@
+# Zed builds this extension with whatever toolchain rustup resolves here, and the repository's
+# nightly links its wasm32-wasip2 std against WASI 0.2.12, whose `wasi:cli/exit` imports
+# `exit-with-code`. Zed's wasmtime host does not provide that function yet, so the extension fails
+# to load. A stable toolchain imports only `exit`. Move this forward only after checking
+# `wasm-tools component wit extension.wasm` shows no `exit-with-code`.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+targets = ["wasm32-wasip2"]

@@ -24,10 +24,10 @@ use {
             native_symbol,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        parse, project_type_definitions, statement_annotations,
+        parse, prelude_enabled, project_type_definitions, statement_annotations,
         stubs::{
-            CONDITIONAL_NAMESPACES, StubLibrary, dormant_namespace_exports, namespace_exports,
-            namespace_known, stubs,
+            CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
+            namespace_exports, namespace_known, outside_prelude, stubs,
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
@@ -609,6 +609,19 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             let range = module.range(*expression) + offset;
             let display = display_name(name);
+            // Only a library name can be missing because the prelude is off, so the setting is
+            // read for no other name.
+            if namespace_exports(db, STANDARD_LIBRARY, name.as_str()) && !prelude_enabled(db) {
+                let qualified = format!("{STANDARD_LIBRARY}::{display}");
+                diagnostics.push(with_name_fix(
+                    Diagnostic::new(range, Severity::Warning, "unresolved", format!(
+                        "`{display}` is in ry's standard library, which `[check] prelude = false` \
+                         keeps out of scope. Write `{qualified}`."
+                    )),
+                    Some(&qualified),
+                ));
+                continue;
+            }
             let hint = suggestion
                 .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
@@ -824,9 +837,14 @@ fn classify_non_local_read(
     {
         return NonLocalRead::Resolvable;
     }
-    // A near-miss of a name the project itself binds (including the item's locals
-    // and parameters) is a typo, reported even under the blanket tolerance. It is
-    // checked before the stub corpus because it is the likelier intent.
+    // An attached package ry knows nothing about may export any name, including one a
+    // letter away from a project name (stringi's `stri_dup` beside stringr's `str_dup`),
+    // so the blanket tolerance wins over the near-miss heuristic.
+    if imports_every_name(db) {
+        return NonLocalRead::Tolerated;
+    }
+    // A near-miss of a name the project itself binds (including the item's locals and
+    // parameters) is checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
             project_typo_suggestion(db, files, Name::new(db, name), test_files.is_some())
@@ -840,9 +858,6 @@ fn classify_non_local_read(
                     .map(|binding| binding.name.as_str()),
             )
         });
-    if project_typo.is_none() && imports_every_name(db) {
-        return NonLocalRead::Tolerated;
-    }
     NonLocalRead::Unresolved {
         suggestion: project_typo
             .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
@@ -1701,10 +1716,11 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "Tuple",
 ];
 
+/// Each named definition with its name's range and its item's position in the file.
 #[salsa::tracked(returns(ref))]
-fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
+fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange, usize)> {
     let mut sites = Vec::new();
-    for &item in item_tree(db, file) {
+    for (index, &item) in item_tree(db, file).iter().enumerate() {
         if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
@@ -1714,7 +1730,7 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
         let Some(range) = item_name_range(db, item) else {
             continue;
         };
-        sites.push((name, range));
+        sites.push((name, range, index));
     }
     sites
 }
@@ -1728,8 +1744,9 @@ fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, 
         .clone()
 }
 
-/// Each site warns: per-site winner semantics make every earlier binding dead.
-/// Ranges are read only for files involved in a duplication.
+/// Each site warns: per-site winner semantics make every earlier binding dead, unless code
+/// that runs before the later binding reads the earlier value. Ranges are read only for files
+/// involved in a duplication.
 fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
@@ -1749,25 +1766,39 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     }
     let mut diagnostics = Vec::new();
     for name in own_duplicated {
-        let mut sites: Vec<(SourceFile, TextRange)> = Vec::new();
+        let mut sites: Vec<DefinitionSite> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
         for &site_file in &map[&name] {
             if seen_files.contains(&site_file) {
                 continue;
             }
             seen_files.push(site_file);
-            for (site_name, range) in top_level_name_sites(db, site_file) {
+            for (site_name, range, item_index) in top_level_name_sites(db, site_file) {
                 if *site_name == name {
-                    sites.push((site_file, *range));
+                    sites.push(DefinitionSite {
+                        file: site_file,
+                        range: *range,
+                        item_index: *item_index,
+                    });
                 }
             }
         }
-        for (index, &(site_file, range)) in sites.iter().enumerate() {
-            if site_file != file {
+        // `overwritten[i]`: the binding at site `i` is replaced before anything reads it.
+        let overwritten: Vec<bool> = sites
+            .windows(2)
+            .map(|pair| !earlier_value_read(db, name, pair[0], pair[1]))
+            .collect();
+        for (index, site) in sites.iter().enumerate() {
+            if site.file != file {
                 continue;
             }
-            if index > 0 {
-                let (earlier_file, earlier_range) = sites[index - 1];
+            let range = site.range;
+            if index > 0 && overwritten[index - 1] {
+                let DefinitionSite {
+                    file: earlier_file,
+                    range: earlier_range,
+                    ..
+                } = sites[index - 1];
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Warning,
@@ -1783,8 +1814,14 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     }],
                 });
             }
-            if index + 1 < sites.len() {
-                let (later_file, later_range) = sites[index + 1];
+            if let Some(later) = sites.get(index + 1)
+                && overwritten[index]
+            {
+                let DefinitionSite {
+                    file: later_file,
+                    range: later_range,
+                    ..
+                } = *later;
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Warning,
@@ -1803,6 +1840,100 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
         }
     }
     diagnostics
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DefinitionSite {
+    file: SourceFile,
+    range: TextRange,
+    item_index: usize,
+}
+
+/// Whether top-level code that runs between two definitions of `name`, the later one's own
+/// right-hand side included, reads the earlier value. Then both bindings are used: a script
+/// temporary reassigned after use (`tmp <- 1; first <- tmp * 2; tmp <- 5`), an update that
+/// reads the old value (`x <- c(x, 3)`), and a `setGeneric("f")` that turns the existing
+/// function into the generic's default method. Reads inside function bodies run later and see only
+/// the final binding, so they do not count. Files collated between the two are not scanned.
+fn earlier_value_read(
+    db: &dyn Db,
+    name: Symbol,
+    earlier: DefinitionSite,
+    later: DefinitionSite,
+) -> bool {
+    let earlier_items = item_tree(db, earlier.file);
+    let between: Vec<_> = if earlier.file == later.file {
+        earlier_items
+            .get(earlier.item_index + 1..=later.item_index)
+            .unwrap_or_default()
+            .to_vec()
+    } else {
+        let later_items = item_tree(db, later.file);
+        earlier_items
+            .get(earlier.item_index + 1..)
+            .unwrap_or_default()
+            .iter()
+            .chain(later_items.get(..=later.item_index).unwrap_or_default())
+            .copied()
+            .collect()
+    };
+    between.into_iter().any(|item| {
+        item_naming(db, item).as_ref().is_some_and(|naming| {
+            naming.non_locals.iter().any(|(expression, read)| {
+                *read == name && !naming.deferred_non_locals.contains(expression)
+            }) || naming.quiet_reads.iter().any(|(expression, read)| {
+                *read == name && !naming.deferred_quiet_reads.contains(expression)
+            })
+            // A statement that also writes the name, such as a loop doing
+            // `rownum <- rownum + 1`, reads the earlier value on the path before its own write.
+            || naming.maybe_undefined.iter().any(|expression| {
+                naming
+                    .resolutions
+                    .get(expression)
+                    .and_then(|slot| naming.bindings.get(slot))
+                    .is_some_and(|binding| {
+                        binding.kind == BindingKind::TopLevel && binding.name == name
+                    })
+            })
+        }) || generic_over_existing_function(db, item)
+    })
+}
+
+/// `setGeneric("f")` without a `def` builds the generic from the existing function `f`, and
+/// with one it makes `f` the default method unless `useAsDefault` names another.
+fn generic_over_existing_function(db: &dyn Db, item: crate::Item<'_>) -> bool {
+    let Some(module) = item_hir(db, item) else {
+        return false;
+    };
+    let Some(root) = module.root else {
+        return false;
+    };
+    let ExpressionKind::Call { callee, arguments } = module.kind(root) else {
+        return false;
+    };
+    let callee_name = match module.kind(*callee) {
+        ExpressionKind::NameRef(name) => Some(name.as_str()),
+        ExpressionKind::Namespace {
+            name: Some(name), ..
+        } => Some(name.as_str()),
+        _ => None,
+    };
+    if callee_name != Some("setGeneric") {
+        return false;
+    }
+    let arguments = &module[arguments];
+    let named = |wanted: &str| {
+        arguments
+            .iter()
+            .any(|argument| module.argument_name(argument).as_deref() == Some(wanted))
+    };
+    let has_def = named("def")
+        || arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .nth(1)
+            .is_some();
+    !(has_def && named("useAsDefault"))
 }
 
 #[salsa::tracked(returns(ref))]
@@ -1986,7 +2117,17 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         true => {
             let name = read.name.as_ref()?;
             if !read.internal && !namespace_exports(db, &read.package, name) {
-                Some(format!("`{name}` is not exported by `{}`.", read.package))
+                // `ry` is the other namespace ry ships, so `ry::List.map` is the likely slip.
+                let hint = if read.package == "ry" && namespace_exports(db, STANDARD_LIBRARY, name)
+                {
+                    format!(" It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`.")
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "`{name}` is not exported by `{}`.{hint}",
+                    read.package
+                ))
             } else {
                 None
             }
@@ -2179,7 +2320,8 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .schemes
             .keys()
             .chain(library.known_exports.iter())
-            .map(String::as_str),
+            .map(String::as_str)
+            .filter(|candidate| !outside_prelude(db, library, candidate)),
     )
 }
 
@@ -2586,7 +2728,8 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_)
                 | StrictOriginKind::RecursiveUnknown(_)
-                | StrictOriginKind::UntypedParameter(_) => None,
+                | StrictOriginKind::UntypedParameter(_)
+                | StrictOriginKind::UnknownColumns { .. } => None,
                 _ => assignment_targets.get(&origin.expression),
             };
             let message = if let Some(name) = assignment_target {
@@ -2607,6 +2750,18 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     ),
                     StrictOriginKind::RecursiveUnknown(name) => format!(
                         "strict mode: could not determine the full type of `{name}`, because it is defined recursively. Add a type annotation"
+                    ),
+                    StrictOriginKind::UnknownColumns {
+                        frame: Some(frame),
+                        column,
+                    } => format!(
+                        "strict mode: the columns of `{frame}` are unknown, so the column names and types this query uses are not checked. Give `{frame}` a type that lists its columns, as in `{frame}: DataFrame{{{column}: TYPE}}`"
+                    ),
+                    StrictOriginKind::UnknownColumns {
+                        frame: None,
+                        column,
+                    } => format!(
+                        "strict mode: the columns of this frame are unknown, so the column names and types this query uses are not checked. Annotate it with a type that lists its columns, as in `DataFrame{{{column}: TYPE}}`"
                     ),
                     StrictOriginKind::UntypedParameter(name) => format!(
                         "strict mode: parameter `{}` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",

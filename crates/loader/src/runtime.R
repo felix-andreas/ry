@@ -111,9 +111,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_source_helpers(state, helpers)
   }
   applied <- TRUE
-  # The names this load rebound or removed, which `ry test` reruns the tests of first. `NULL`
-  # when the load ran code, which may have changed anything.
-  state$changed <- if (plan$full) NULL else plan$touched
+  # The names this load rebound, removed or changed the S3 dispatch of, which `ry test` reruns
+  # the tests of first. `NULL` when the load ran code, which may have changed anything.
+  state$changed <- if (plan$full) NULL else plan$changed
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
@@ -456,8 +456,11 @@ View <- function(x, title) {
   if (!is.null(plan$data)) {
     .ry_load_data(state, plan$data)
   }
+  # Each S4 definition caches what it defines as it runs, so this only refreshes what an
+  # earlier load left behind. While definitions are held back it would read their placeholders
+  # and run them, so it waits for them: running them ends with the same call.
   if (isNamespaceLoaded("methods") && (plan$full || isTRUE(plan$registers_s4)) &&
-      .ry_has_s4_metadata(ns, state$s4_deferred$names)) {
+      is.null(state$s4_deferred) && .ry_has_s4_metadata(ns)) {
     methods::cacheMetaData(ns, TRUE, ns)
   }
   .ry_phase("S4 caches")
@@ -516,54 +519,94 @@ View <- function(x, title) {
 # a promise that runs them all, and so is looking up one of their classes or generics by name.
 .ry_defer_s4 <- function(state, deferred) {
   # A method for another package's generic is stored under that package's name, which only the
-  # generic itself knows.
-  # Their methods are found through the tables in the generic's own environment, which
-  # `getMethod()` and `existsMethod()` read without any lookup the interpreter sees, so each
-  # table becomes a promise that runs the definitions too.
-  tables <- list()
-  for (name in deferred$foreign_generics) {
+  # generic itself knows. Dispatch, `getMethod()` and `existsMethod()` find it under its label
+  # in the tables in the generic's own environment, which they read without any lookup the
+  # interpreter sees, so each label the held-back methods fill becomes a promise that runs
+  # them. Every other label stays as it is, so dispatch on other classes runs nothing.
+  # A method for a plain function such as `as.list` makes a generic of it in the namespace, so
+  # that name is a promise as well, and a primitive's methods take effect when it dispatches,
+  # which the interpreter runs the definitions before when an argument has one of their classes.
+  labels <- list()
+  generics <- deferred$generics
+  primitives <- character()
+  for (method in deferred$foreign_methods) {
+    name <- method$generic
     generic <- get(name, envir = state$ns, mode = "function")
-    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, attr(generic, "package")))
-    environment <- environment(generic)
-    for (table in intersect(c(".MTable", ".AllMTable"), names(environment))) {
-      tables[[length(tables) + 1L]] <- list(
-        environment = environment, name = table, value = get(table, envir = environment)
-      )
+    kind <- .ry_foreign_generic_kind(generic)
+    if (kind == "standard") {
+      label <- .ry_s4_label(generic, method$signature)
+      environment <- environment(generic)
+      for (table in intersect(c(".MTable", ".AllMTable"), names(environment))) {
+        table <- get(table, envir = environment)
+        held <- exists(label, envir = table, inherits = FALSE)
+        labels[[length(labels) + 1L]] <- list(
+          table = table, label = label, held = held,
+          value = if (held) get(label, envir = table, inherits = FALSE)
+        )
+      }
+    }
+    if (name %in% generics) {
+      next
+    }
+    package <- switch(kind,
+      standard = attr(generic, "package"),
+      primitive = "base",
+      implicit = methods::getPackageName(environment(generic))
+    )
+    deferred$names <- c(deferred$names, sprintf(".__T__%s:%s", name, package))
+    if (kind == "primitive") {
+      primitives <- c(primitives, name)
+    } else if (kind == "implicit") {
+      deferred$names <- c(deferred$names, name)
+    }
+    if (kind != "standard") {
+      generics <- c(generics, name)
     }
   }
+  deferred$names <- unique(deferred$names)
   state$s4_deferred <- deferred
-  state$s4_tables <- tables
-  for (table in tables) {
-    .ry_s4_table_placeholder(state, table)
+  state$s4_labels <- labels
+  for (label in labels) {
+    .ry_s4_label_placeholder(state, label)
   }
   force <- function() .ry_force_s4(state)
-  generics <- c(deferred$generics, deferred$foreign_generics)
-  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, force))
+  .Internal(ryLoaderDefer(state$root, deferred$run, deferred$classes, generics, primitives, force))
   for (name in deferred$names) {
     .ry_s4_placeholder(state, name)
   }
 }
 
-.ry_s4_table_placeholder <- function(state, table) {
-  delayedAssign(table$name, {
+# Another package's `setMethod()` on the same generic reads every label, so a force can come
+# during this load from a method placed after the statement now running, which has not run.
+.ry_s4_label_placeholder <- function(state, label) {
+  delayedAssign(label$label, {
     .ry_force_s4(state)
-    get(table$name, envir = table$environment, inherits = FALSE)
-  }, assign.env = table$environment)
+    get0(label$label, envir = label$table, inherits = FALSE)
+  }, assign.env = label$table)
 }
 
-# Puts back the method tables of other packages' generics that the held-back definitions
-# replaced with promises.
-.ry_restore_s4_tables <- function(state) {
-  for (table in state$s4_tables) {
-    assign(table$name, table$value, envir = table$environment)
+# Puts back what the method tables of other packages' generics held under the labels the
+# held-back definitions replaced with promises.
+.ry_restore_s4_labels <- function(state) {
+  for (label in state$s4_labels) {
+    if (label$held) {
+      assign(label$label, label$value, envir = label$table)
+    } else if (exists(label$label, envir = label$table, inherits = FALSE)) {
+      # Two held-back methods can share a label, as `"A"` and `c("A", "ANY")` do.
+      rm(list = label$label, envir = label$table)
+    }
   }
-  state$s4_tables <- NULL
+  state$s4_labels <- NULL
 }
 
+# A force during the load runs only the definitions before the statement now running, so a
+# name a later one binds is not there yet, and the statement sees what an eager load shows it
+# at that point: the imported or base function `setMethod()` will later make generic.
 .ry_s4_placeholder <- function(state, name) {
   delayedAssign(name, {
     .ry_force_s4(state)
-    get(name, envir = state$ns, inherits = FALSE)
+    bound <- exists(name, envir = state$ns, inherits = FALSE)
+    get(name, envir = if (bound) state$ns else parent.env(state$ns))
   }, assign.env = state$ns)
 }
 
@@ -575,7 +618,7 @@ View <- function(x, title) {
     return(invisible())
   }
   state$s4_deferred <- NULL
-  .ry_restore_s4_tables(state)
+  .ry_restore_s4_labels(state)
   ns <- state$ns
   held <- .Internal(ryLoaderDeferred(state$root))
   loading <- !is.null(state$s4_cursor)
@@ -707,7 +750,7 @@ View <- function(x, title) {
     return(invisible())
   }
   state$s4_deferred <- NULL
-  .ry_restore_s4_tables(state)
+  .ry_restore_s4_labels(state)
   .Internal(ryLoaderUndefer(state$root))
   rm(list = deferred$names[deferred$names %in% names(state$ns)], envir = state$ns)
 }
@@ -765,9 +808,8 @@ View <- function(x, title) {
   invisible()
 }
 
-.ry_has_s4_metadata <- function(ns, except = character()) {
+.ry_has_s4_metadata <- function(ns) {
   names <- names(ns)
-  names <- names[!(names %in% except)]
   any(startsWith(names, ".__C__")) || any(startsWith(names, ".__T__")) ||
     any(startsWith(names, ".__A__"))
 }

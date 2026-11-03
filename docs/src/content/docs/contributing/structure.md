@@ -199,7 +199,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
 - **`arith.rs`**, **`coerce.rs`**, **`subset.rs`**, **`strings.rs`**, **`sort.rs`**: base's
   vector internals: arithmetic and math, coercion, subsetting and assignment, strings and regular
   expressions, sorting and matching.
-- **`linalg.rs`**: BLAS and LAPACK (opened at runtime) and base's LINPACK routines.
+- **`linalg.rs`**: the matrix products (ry's own kernels, in reference BLAS's summation order), BLAS and LAPACK (opened at runtime), and base's LINPACK routines.
   **`distributions.rs`**: the probability distributions. **`random.rs`**: the random number
   generators.
 - **`connections.rs`**, **`serialize.rs`**, **`system.rs`**: the connection table (the `Rconn`
@@ -231,7 +231,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   answered on ry's engine when the result is guaranteed identical, and declined to data.table
   otherwise.
 - **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, typed by
-  `types/ry.Rtypes`.
+  `types/std.Rtypes`.
 - **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the
   coverage-guided targets.
 
@@ -338,5 +338,7 @@ and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble` is its
 that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level
 half of `R CMD INSTALL`, embedded and run on ry after the compile. `Platform::of_home` reads
 the home's `etc/Makeconf` to choose the Unix or Windows (Rtools) conventions; on Windows the
-front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` and `Rterm.exe`. The package
+front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` and `Rterm.exe`,
+and because Windows has no `bin/` scripts, the front end itself starts the R session behind
+`R CMD build`, `check`, `Rprof`, `Rdconv`, `Sweave` and `Stangle`, as GNU R's `Rcmd.exe` does. The package
 uses `crates/ry/build.rs` as its build script, for the Windows stack size and manifest.

@@ -175,7 +175,6 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-40..41 warning[unused] `x` is assigned but never used.
 63..64 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
 
 #---- while_body_read_sees_write_around_back_edge

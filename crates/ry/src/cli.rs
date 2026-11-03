@@ -302,7 +302,11 @@ pub fn migrate_data_table(
             .filter(|file| file.requested && fixes_apply(file))
         {
             let rewrites = data_table_rewrites(&analysis.db, file.file);
-            if rewrites.is_empty() {
+            let applied = rewrites
+                .iter()
+                .filter(|rewrite| rewrite.replacement.is_some())
+                .count();
+            if applied == 0 {
                 continue;
             }
             let original = fs::read_to_string(&file.path).map_err(|err| {
@@ -315,7 +319,7 @@ pub fn migrate_data_table(
                 continue;
             }
             let migrated = apply_data_table_rewrites(&original, &rewrites);
-            n_rewrites += rewrites.len();
+            n_rewrites += applied;
             n_files += 1;
             if write {
                 fs::write(&file.path, migrated).map_err(|err| {
@@ -1316,10 +1320,13 @@ fn install_environment(
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::HIGH)
         .new(db);
-    let _: AnalysisSettings =
-        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
-            .durability(Durability::HIGH)
-            .new(db);
+    let _: AnalysisSettings = AnalysisSettings::builder(
+        config.check.inline_annotations,
+        config.check.strict,
+        config.check.prelude,
+    )
+    .durability(Durability::HIGH)
+    .new(db);
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
@@ -1701,12 +1708,14 @@ pub(crate) fn collect_r_files(
         .filter_map(|entry| match entry {
             Ok(entry) => {
                 let path = entry.into_path();
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension == "R" || extension == "r" || is_literate_extension(extension)
-                    })
-                    .then_some(Ok(path))
+                (is_package_source(&path)
+                    || path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extension == "R" || extension == "r" || is_literate_extension(extension)
+                        }))
+                .then_some(Ok(path))
             }
             Err(err) => {
                 error(&err.to_string());
@@ -1714,6 +1723,29 @@ pub(crate) fn collect_r_files(
             }
         })
         .collect()
+}
+
+/// R CMD INSTALL sources every `.R`, `.r`, `.S`, `.s` and `.q` file directly in a package's `R/`
+/// directory, the one beside `DESCRIPTION`, and Hmisc, VGAM and boot keep code in the S-era
+/// extensions. Elsewhere, such as in `src/` or a vendored `src/R/`, a `.s` file is assembly, so
+/// only the package's `R/` widens the set.
+pub(crate) fn is_package_source(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let Some(directory) = path
+        .parent()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "R"))
+    else {
+        return false;
+    };
+    match extension {
+        "R" | "r" => true,
+        "S" | "s" | "q" => directory
+            .parent()
+            .is_some_and(|package| package.join("DESCRIPTION").is_file()),
+        _ => false,
+    }
 }
 
 /// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).
@@ -2966,23 +2998,19 @@ mod tests {
     /// Seeded edits to a small package, each followed by a cached run of the whole project or of
     /// `R/` alone. Invariants are on, so
     /// every run that reuses recorded findings is compared with a fresh run and panics on any
-    /// difference. `CACHE_SEED=<seed>` replays one sequence; `FUZZ_ITERS` sets how many run.
+    /// difference. Each sequence is one seed of `for_each_seed`, so `FUZZ_SEED` replays it and
+    /// `FUZZ_ITERS` sets how many run; `CACHE_SEED=<seed>` is the same as `FUZZ_SEED=<seed>`.
     #[test]
     fn cached_checks_match_fresh_checks_across_seeded_edits() {
         syntax::testing::enable_invariants();
-        let seeds: Vec<u64> = match env::var("CACHE_SEED")
+        if let Some(seed) = env::var("CACHE_SEED")
             .ok()
             .and_then(|seed| seed.parse().ok())
         {
-            Some(seed) => vec![seed],
-            None => (0..syntax::testing::fuzz_iterations(3) as u64).collect(),
-        };
-        for seed in seeds {
-            let outcome = std::panic::catch_unwind(|| simulate_cached_checks(seed, 24));
-            if outcome.is_err() {
-                panic!("check cache seed {seed} failed; replay with CACHE_SEED={seed}");
-            }
+            simulate_cached_checks(seed, 24);
+            return;
         }
+        syntax::testing::for_each_seed(3, |seed| simulate_cached_checks(seed, 24));
     }
 
     struct SimulatedFunction {

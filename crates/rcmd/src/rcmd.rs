@@ -12,7 +12,7 @@
 //!
 //! The R home is assembled by [`assemble`]. Base R's packages, `share/` and `etc/` files are
 //! linked from a GNU R installation, because ry reuses base R's R code rather than vendoring it
-//! (`decisions.md`, "runtime licensing"), while `include/`, `lib/libR.so`, `etc/Makeconf` and
+//! (`decisions.md`, "licensing"), while `include/`, `lib/libR.so`, `etc/Makeconf` and
 //! the `bin/` front ends are ry's own.
 
 use std::{
@@ -35,6 +35,7 @@ mod headers {
     include!(concat!(env!("OUT_DIR"), "/headers.rs"));
 }
 
+pub mod front_end;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -112,6 +113,7 @@ impl Platform {
         let variables = make_assignments(
             &fs::read_to_string(&path).map_err(io_error(&path))?,
             &home.display().to_string(),
+            &mut |path| fs::read_to_string(path).ok(),
         );
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
@@ -251,7 +253,9 @@ impl Toolchain {
     /// `LAPACK_LIBS` beside a set `BLAS_LIBS` is kept: GNU R then takes LAPACK from the BLAS,
     /// which packages link after `$(LAPACK_LIBS)` anyway.
     pub fn with_makeconf_libraries(self, text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string());
+        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+            fs::read_to_string(path).ok()
+        });
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
                 .trim()
@@ -272,7 +276,9 @@ impl Toolchain {
     /// against the file's own assignments and `R_HOME` against `gnu_r_home`, since ry's home
     /// does not hold GNU R's BLAS or LAPACK.
     pub fn from_makeconf(text: &str, gnu_r_home: &Path) -> Toolchain {
-        let variables = make_assignments(text, &gnu_r_home.display().to_string());
+        let variables = make_assignments(text, &gnu_r_home.display().to_string(), &mut |path| {
+            fs::read_to_string(path).ok()
+        });
         let get = |name: &str| {
             expand_make(variables.get(name).map_or("", String::as_str), &variables)
                 .trim()
@@ -308,7 +314,7 @@ pub struct HomeSources<'a> {
     pub include: &'a Path,
     /// ry's built `libR.so`, which holds the interpreter.
     pub libr: &'a Path,
-    /// The `ry-rcmd` binary that `bin/R` and `bin/Rscript` run.
+    /// The front end that `bin/R` and `bin/Rscript` run: `ry-rcmd`, or `ry` itself.
     pub rcmd: &'a Path,
     /// The GNU R installation (`R RHOME`) whose base packages, `share/` and `etc/` files the
     /// home links to.
@@ -369,7 +375,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
     write(
         &ry_package.join("DESCRIPTION"),
         "Package: ry\nVersion: 0.0.0\nPriority: base\nTitle: The ry Runtime and Standard Library\n\
-         Description: Built into ry's interpreter.\nLicense: UPL-1.0\n",
+         Description: Built into ry's interpreter.\nLicense: GPL (>= 2)\n",
     )?;
 
     let gnu = sources.gnu_r_home;
@@ -421,8 +427,13 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         }
     }
 
+    // The scripts run the front end through a link named `ry-rcmd`, which is how a multi-call
+    // `ry` knows to act as the front end (`front_end::invoked_as_front_end`).
+    let front_end = root.join("bin/exec/ry-rcmd");
+    fs::create_dir_all(root.join("bin/exec")).map_err(io_error(&root.join("bin/exec")))?;
+    link(sources.rcmd, &front_end)?;
+    let rcmd = format!("{}/bin/exec/ry-rcmd", home.display());
     let home = home.display();
-    let rcmd = sources.rcmd.display();
     let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
     // `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR` stay plain `NAME='value'` lines: the
@@ -514,6 +525,50 @@ exec "$cmd" $extra "$@"
     )
 }
 
+/// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
+/// ([`cached_home`]) from `libr`, a front end, and the base R of `gnu_r_home`. The front end is
+/// the `ry-rcmd` beside `libr` when there is one (a development build), and otherwise the
+/// running executable, which is `ry` (a release, whose runtime is extracted from `ry` itself) or
+/// a front end already.
+pub fn runtime_home(libr: &Path, gnu_r_home: &Path) -> Result<PathBuf> {
+    let beside = libr.with_file_name(if cfg!(windows) {
+        "ry-rcmd.exe"
+    } else {
+        "ry-rcmd"
+    });
+    let rcmd = if beside.is_file() {
+        beside
+    } else {
+        std::env::current_exe().map_err(io_error(Path::new("the running executable")))?
+    };
+    let cache = cache_directory()
+        .ok_or_else(|| {
+            Error::Package(
+                "ry's R home lives in a cache directory, and none of XDG_CACHE_HOME, LOCALAPPDATA \
+                 (on Windows) or HOME is set"
+                    .into(),
+            )
+        })?
+        .join("ry")
+        .join("home");
+    cached_home(&cache, libr, &rcmd, gnu_r_home)
+}
+
+/// The user's cache directory: `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, then
+/// `~/.cache`. ry's extracted runtime and its R homes both live here, so they must agree.
+pub fn cache_directory() -> Option<PathBuf> {
+    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    variable("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| variable("LOCALAPPDATA"))
+                .flatten()
+                .map(PathBuf::from)
+        })
+        .or_else(|| variable("HOME").map(|home| Path::new(&home).join(".cache")))
+}
+
 /// ry's R home for the runtime `libr` and the front end `rcmd`, assembled under `cache` the
 /// first time it is asked for, with ry's embedded headers and the base R of `gnu_r_home`.
 /// The home is named by everything it is built from, so a rebuilt `libR` or another GNU R gets
@@ -549,7 +604,7 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     let staging = cache.join(format!(
         ".{}-{}",
         home.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        staging_suffix()
     ));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
@@ -575,13 +630,15 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, gnu_r_home: &Path) ->
     )
     .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
     if let Err(error) = assembled {
-        // The assembly error is the one to report. A staging directory left behind is named by
-        // this process's id and removed first by the next assembly under that id.
+        // The assembly error is the one to report; a staging directory left behind wastes disk
+        // but is never mistaken for a home.
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The runtime a home was built for, so a home for a rebuilt `libR` replaces the old one.
-    let source = libr.display().to_string();
+    // The runtime and front end a home was built for, so a home for a rebuilt `libR` replaces
+    // the old one. Two copies of `ry` that share one extracted runtime keep a home each, since a
+    // home in use by the other copy must not be pruned.
+    let source = format!("{}\n{}", libr.display(), rcmd.display());
     write(&staging.join(".libr"), &source)?;
     match fs::rename(&staging, &home) {
         Ok(()) => {
@@ -625,7 +682,11 @@ fn assemble_windows_front_ends(root: &Path, sources: &HomeSources<'_>, gnu: &Pat
     ] {
         let path = root.join(front_end);
         remove_file_if_present(&path)?;
-        fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        // `ry.exe` carries the runtime when it is the front end, so a link saves its size six
+        // times over.
+        if fs::hard_link(sources.rcmd, &path).is_err() {
+            fs::copy(sources.rcmd, &path).map_err(io_error(&path))?;
+        }
     }
     for library in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
         let from = gnu.join("bin/x64").join(library);
@@ -808,7 +869,8 @@ impl BaseVersion {
         let (major, minor, patch) = (part(0), part(1), part(2));
         let revision = self.revision;
         format!(
-            "/* Generated by ry's R home assembly from the base package it runs, as R.version reports it. */\n\
+            "/* SPDX-License-Identifier: LGPL-2.1-or-later */\n\
+             /* Generated by ry's R home assembly from the base package it runs, as R.version reports it. */\n\
              #ifndef R_VERSION_H\n#define R_VERSION_H\n\n\
              #define R_Version(v, p, s) (((v) * 65536) + ((p) * 256) + (s))\n\
              #define R_VERSION R_Version({major}, {minor}, {patch})\n\
@@ -1205,7 +1267,10 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         }
                     }
                 }
-                let library = library.unwrap_or_else(|| home.join("library"));
+                let library = match library {
+                    Some(library) => library,
+                    None => default_library(home)?,
+                };
                 let mut output = String::new();
                 for package in packages {
                     let installed = install(home, &package, &library, &options)?;
@@ -1229,6 +1294,31 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
             "usage: R CMD INSTALL|SHLIB|config ... or R RHOME".into(),
         )),
     }
+}
+
+/// The library `R CMD INSTALL` installs into without `-l`: the first of `.libPaths()` in a
+/// session of the home's R, as for GNU R, so `R_LIBS`, `R_LIBS_USER` and the site library
+/// decide it in the same order.
+pub fn default_library(home: &Path) -> Result<PathBuf> {
+    let mut command = Command::new(home.join("bin").join("Rscript"));
+    command.args(["--no-echo", "--no-restore", "-e", "cat(.libPaths()[1L])"]);
+    let output = command
+        .output()
+        .map_err(|error| Error::Command(format!("{command:?}"), error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::Command(
+            format!("{command:?}"),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let library = String::from_utf8_lossy(&output.stdout);
+    let library = library.trim();
+    if library.is_empty() {
+        return Err(Error::Package(
+            "the R session reported no library to install into".into(),
+        ));
+    }
+    Ok(PathBuf::from(library))
 }
 
 /// `R CMD config VAR`: the value `etc/Makeconf` gives the variable.
@@ -1413,6 +1503,16 @@ pub fn install(
 }
 
 /// The FNV-1a hash of `bytes`, which names a cached home the same way in every build of ry.
+/// A name part unique to this process and moment, for staging files and directories that are
+/// renamed into place. The process id alone is not enough: containers sharing a cache volume
+/// often run with the same process id.
+pub fn staging_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos());
+    format!("{}-{nanos:09}", std::process::id())
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
@@ -2139,6 +2239,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(expand_make("$(B)", &variables), "x y ");
         assert_eq!(expand_make("$(LOOP) $$ $(R_HOME)", &variables), " $ /r");
@@ -2149,6 +2250,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "STD = 17\nCXX17 = clang++\nPADDED = 17 # the blank before # stays\n",
             "/My R",
+            &mut |_| None,
         );
         assert_eq!(expand_make("$(CXX$(STD))", &variables), "clang++");
         assert_eq!(expand_make("$(CXX$(PADDED))", &variables), "");
@@ -2167,6 +2269,7 @@ SHLIB_OPENMP_CFLAGS =
             "A = x # c\nB = $(A)y\nS := $(B) $$Q\nB = changed\nT := $(S)\nT += $(B)\n\
              U += u\nU := $(U)v\nR_HOME = ignored\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(
             expand_make("[$(S)] [$(T)] [$(U)]", &variables),
@@ -2182,6 +2285,7 @@ SHLIB_OPENMP_CFLAGS =
         let variables = make_assignments(
             "A := x\nA += $(NONE)\nB = $$ \\\n    \\\n   \nB := $B17\nC := x$$$\n",
             "/r",
+            &mut |_| None,
         );
         assert_eq!(
             expand_make("[$(A)] [$(B)] [$(C)]", &variables),
@@ -2193,7 +2297,10 @@ SHLIB_OPENMP_CFLAGS =
     /// its length rather than exponential.
     #[test]
     fn make_expansion_of_a_repeated_self_reference_ends() {
-        let variables = make_assignments("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "/r");
+        let variables =
+            make_assignments("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "/r", &mut |_| {
+                None
+            });
         assert_eq!(expand_make("$(A)", &variables), "");
     }
 
@@ -2201,10 +2308,10 @@ SHLIB_OPENMP_CFLAGS =
     /// variables, and `X` is one letter, so `$X` refers to it.
     const MAKE_NAMES: [&str; 5] = ["RA", "RB", "RC", "RAB", "X"];
 
-    /// Generates makefiles from a seed, runs each through GNU make with `$(info ...)` lines
-    /// that print every variable, and requires `make_assignments` and `expand_make` to
-    /// print the same. A makefile make rejects (a recursive variable) is skipped, but ry
-    /// must still expand it without hanging.
+    /// Generates makefiles from a seed, each with up to two included files, runs each through
+    /// GNU make with `$(info ...)` lines that print every variable, and requires
+    /// `make_assignments` and `expand_make` to print the same. A makefile make rejects (a
+    /// recursive variable) is skipped, but ry must still expand it without hanging.
     #[test]
     fn make_expansion_agrees_with_gnu_make() {
         if Command::new("make").arg("--version").output().is_err() {
@@ -2216,8 +2323,24 @@ SHLIB_OPENMP_CFLAGS =
         let mut total = 0usize;
         syntax::testing::for_each_seed(300, |seed| {
             let mut random = SplitMix64(seed);
-            let makefile = random_makefile(&mut random);
-            let variables = make_assignments(&makefile, home);
+            // `b.mk` includes nothing, so the includes never form a cycle.
+            let parts = [
+                ("a.mk", random_makefile(&mut random, &["b.mk"])),
+                ("b.mk", random_makefile(&mut random, &[])),
+            ];
+            let makefile = random_makefile(&mut random, &["a.mk", "b.mk"]);
+            let directory =
+                std::env::temp_dir().join(format!("ry-rcmd-make-{}-{seed}", std::process::id()));
+            fs::create_dir_all(&directory).expect("create the makefile directory");
+            for (name, text) in &parts {
+                fs::write(directory.join(name), text).expect("write an included makefile");
+            }
+            let variables = make_assignments(&makefile, home, &mut |path| {
+                parts
+                    .iter()
+                    .find(|(name, _)| *name == path)
+                    .map(|(_, text)| text.clone())
+            });
             let ours: String = MAKE_NAMES
                 .iter()
                 .chain(&["R_HOME", "UNSET"])
@@ -2228,11 +2351,17 @@ SHLIB_OPENMP_CFLAGS =
                 .collect();
             total += 1;
             let names = MAKE_NAMES.iter().chain(&["R_HOME", "UNSET"]).copied();
-            let Some(theirs) = gnu_make_info(&makefile, home, names) else {
+            let theirs = gnu_make_info(&makefile, &directory, home, names);
+            fs::remove_dir_all(&directory).expect("remove the makefile directory");
+            let Some(theirs) = theirs else {
                 return;
             };
             compared += 1;
-            assert_eq!(ours, theirs, "makefile:\n{makefile}");
+            let shown: String = parts
+                .iter()
+                .map(|(name, text)| format!("{name}:\n{text}"))
+                .collect();
+            assert_eq!(ours, theirs, "makefile:\n{makefile}{shown}");
         });
         assert!(
             compared * 2 >= total,
@@ -2255,23 +2384,58 @@ SHLIB_OPENMP_CFLAGS =
             eprintln!("skipping: GNU R is not installed");
             return;
         };
-        // R names the included `vars.mk` by `R_SHARE_DIR`, which only R CMD sets, and ry
-        // does not follow includes.
-        let text: String = fs::read_to_string(&path)
-            .expect("Makeconf is readable")
-            .lines()
-            .filter(|line| !line.starts_with("include "))
-            .map(|line| format!("{line}\n"))
-            .collect();
+        // R CMD sets `R_SHARE_DIR`, by which `Makeconf` names the `vars.mk` it includes.
+        let Some(share) = Command::new("Rscript")
+            .args(["-e", "cat(R.home('share'))"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        else {
+            eprintln!("skipping: Rscript is not installed or failed");
+            return;
+        };
+        let text = format!(
+            "R_SHARE_DIR = {share}\n{}",
+            fs::read_to_string(&path).expect("Makeconf is readable")
+        );
         let home = "/r h";
-        let variables = make_assignments(&text, home);
+        let variables = make_assignments(&text, home, &mut |path| fs::read_to_string(path).ok());
+        assert!(
+            variables.contains_key("R_PKGS_BASE"),
+            "the included vars.mk was not read"
+        );
         let ours: String = variables
             .iter()
             .map(|(name, value)| format!("{name}=[{}]\n", expand_make(value, &variables)))
             .collect();
-        let theirs = gnu_make_info(&text, home, variables.keys().map(String::as_str))
-            .expect("make reads GNU R's Makeconf");
+        let theirs = gnu_make_info(
+            &text,
+            &std::env::temp_dir(),
+            home,
+            variables.keys().map(String::as_str),
+        )
+        .expect("make reads GNU R's Makeconf");
         assert_eq!(ours, theirs);
+    }
+
+    /// An `=` in the comment after an `include` does not turn the line into an assignment.
+    #[test]
+    fn an_include_with_an_assignment_in_its_comment_still_includes() {
+        let text = "include a.mk # sets A=1\n";
+        let variables = make_assignments(text, "/r", &mut |name| {
+            (name == "a.mk").then(|| "A = 1\n".to_owned())
+        });
+        assert_eq!(expand_make("$(A)", &variables), "1");
+    }
+
+    /// A file that includes itself ends at the depth bound instead of recursing forever.
+    #[test]
+    fn a_makefile_that_includes_itself_ends() {
+        let text = "A += x\ninclude self.mk\n";
+        let variables = make_assignments(text, "/r", &mut |_| Some(text.to_owned()));
+        let expanded = expand_make("$(A)", &variables);
+        assert_eq!(expanded.split_whitespace().count(), 33);
     }
 
     /// Arbitrary text never panics the parser or the expander, and expansion ends.
@@ -2286,7 +2450,7 @@ SHLIB_OPENMP_CFLAGS =
             let text: String = (0..random.below(80))
                 .map(|_| alphabet[random.below(alphabet.len())])
                 .collect();
-            let variables = make_assignments(&text, "/r");
+            let variables = make_assignments(&text, "/r", &mut |_| None);
             for value in variables.values().chain([&text]) {
                 expand_make(value, &variables);
             }
@@ -2295,13 +2459,28 @@ SHLIB_OPENMP_CFLAGS =
 
     use syntax::testing::SplitMix64;
 
-    fn random_makefile(random: &mut SplitMix64) -> String {
+    /// A makefile of assignments, comments and blank lines, and lines including the files
+    /// named in `includes` (which must exist, except through `-include` and `sinclude`).
+    fn random_makefile(random: &mut SplitMix64, includes: &[&str]) -> String {
         let operators = ["=", ":=", "::=", "+=", "?="];
         let mut makefile = String::new();
         for _ in 0..1 + random.below(8) {
-            match random.below(12) {
+            match random.below(14) {
                 0 => makefile.push_str("# a comment \\\n  continued\n"),
                 1 => makefile.push('\n'),
+                2 | 3 if !includes.is_empty() => {
+                    let name = includes[random.below(includes.len())];
+                    let line = match random.below(5) {
+                        0 => format!("include {name}"),
+                        1 => format!("-include {name} missing.mk"),
+                        2 => format!("sinclude $(UNSET){name} # a comment"),
+                        // A reference to a variable whose text may name the file.
+                        3 => format!("  include $(UNSET) {name}"),
+                        _ => format!("include {name}\\\n  {name}"),
+                    };
+                    makefile.push_str(&line);
+                    makefile.push('\n');
+                }
                 _ => {
                     let name = MAKE_NAMES[random.below(MAKE_NAMES.len())];
                     let operator = operators[random.below(operators.len())];
@@ -2356,6 +2535,7 @@ SHLIB_OPENMP_CFLAGS =
     /// the makefile.
     fn gnu_make_info<'a>(
         makefile: &str,
+        directory: &Path,
         home: &str,
         names: impl Iterator<Item = &'a str>,
     ) -> Option<String> {
@@ -2365,6 +2545,7 @@ SHLIB_OPENMP_CFLAGS =
             .collect();
         let mut child = Command::new("make")
             .args(["-s", "--no-print-directory", "-f", "-"])
+            .current_dir(directory)
             .arg(format!("R_HOME={home}"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())

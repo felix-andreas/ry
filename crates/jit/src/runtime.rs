@@ -91,12 +91,27 @@ pub mod outcome {
     pub const LOAD_INVALIDATED: i32 = 4;
 }
 
-/// A compiled body. Owned by an external pointer in the code's `TIER1` constant, whose
-/// protected weak reference, keyed on the enclosure, keeps every object the machine code embeds
-/// alive while the enclosure lives.
+/// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
+/// every object the machine code embeds alive: through a weak reference keyed on the enclosure
+/// for code tied to its enclosure, or directly for portable code.
 pub struct Compiled {
     pub entry: unsafe extern "C" fn(*mut Activation) -> *mut Header,
+    /// The enclosure the code was compiled for.
     pub enclosure: Sexp,
+    /// Whether the code runs for any enclosure its lookups resolve the same way from. It does
+    /// when every function it speculates on is bound in a long-lived environment (the global
+    /// environment, the search path or a namespace), so nothing it embeds dies with an
+    /// enclosure. A closure made afresh by each call of its parent (`vapply(x, function(v) ...)`)
+    /// or each R6 object's copy of a method then shares one compilation.
+    pub portable: bool,
+    /// For portable code, a weak reference keyed on the enclosure whose lookups the epoch and
+    /// stamps were last proven for; `NULL` otherwise. A weak reference rather than the
+    /// enclosure's address, because a dead enclosure's address can come back as a new one whose
+    /// lookups nobody checked.
+    pub checked: Cell<Sexp>,
+    /// Which speculations start from the enclosure, so that portable code resolves them from
+    /// each activation's own.
+    pub rooted: Box<[bool]>,
     /// Tier 0's register count; the slot root cells follow.
     pub registers: usize,
     pub slots: Vec<Sexp>,
@@ -108,6 +123,40 @@ pub struct Compiled {
     pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
+    /// Each deoptimization point's write-back, indexed by the number compiled code passes to
+    /// [`jit_deopt_exit`].
+    pub exits: Box<[Exit]>,
+}
+
+/// What one deoptimization point writes back before tier 0 resumes at `pc`.
+///
+/// Each point only stores its raw values into a scratch area, one 8-byte cell each in the order
+/// below, and jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
+/// Boxing and flushing in a cold block per point would make those blocks most of a function's
+/// code and most of its compile time.
+pub struct Exit {
+    pub pc: usize,
+    pub why: i32,
+    /// Registers held unboxed, with their [`representation`]: one cell for the value, and a
+    /// second for the integer flag of a [`representation::NUM`].
+    pub registers: Box<[(u32, i32)]>,
+    /// Slots that may be dirty: one cell for the status, then the value cells as for a
+    /// register, none for a [`representation::BOXED`] slot.
+    pub slots: Box<[(u32, i32)]>,
+}
+
+impl Exit {
+    /// The scratch cells this exit uses.
+    pub fn cells(&self) -> usize {
+        let value = |kind: i32| match kind {
+            representation::NUM => 2,
+            representation::BOXED => 0,
+            _ => 1,
+        };
+        let registers: usize = self.registers.iter().map(|&(_, kind)| value(kind)).sum();
+        let slots: usize = self.slots.iter().map(|&(_, kind)| 1 + value(kind)).sum();
+        registers + slots
+    }
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -115,11 +164,14 @@ pub struct Compiled {
 /// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
-/// before the name was watched.
+/// before the name was watched. Portable code running for an enclosure other than the checked
+/// one always walks, and leaves the epoch and stamps to the checked enclosure.
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    if !thorough {
+    let enclosure = frame.enclosure();
+    let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
+    if !thorough && checked {
         if epoch == compiled.epoch.get() {
             return true;
         }
@@ -135,25 +187,35 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
             return true;
         }
     }
-    for (speculation, stamp) in compiled.speculations.iter().zip(&compiled.stamps) {
+    for ((speculation, stamp), &rooted) in compiled
+        .speculations
+        .iter()
+        .zip(&compiled.stamps)
+        .zip(&compiled.rooted)
+    {
         // The body's own lookups start past its frame, because the compiler cannot see the
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
-        if speculation.env == compiled.enclosure
+        if rooted
             && heap
                 .frame_cell(frame, speculation.symbol)
                 .is_some_and(|cell| may_be_function(cell.cdr()))
         {
             return false;
         }
-        match resolve_function(speculation.symbol, speculation.env) {
+        let start = if rooted { enclosure } else { speculation.env };
+        match resolve_function(speculation.symbol, start) {
             Some(found)
                 if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }
-        stamp.set(heap.lookup_stamp(speculation.symbol));
+        if checked {
+            stamp.set(heap.lookup_stamp(speculation.symbol));
+        }
     }
-    compiled.epoch.set(epoch);
+    if checked {
+        compiled.epoch.set(epoch);
+    }
     true
 }
 
@@ -186,8 +248,17 @@ pub fn compiles(state: i32) -> i32 {
 }
 
 pub fn cold_refusals(state: i32) -> i32 {
-    state / COLD_REFUSAL
+    (state / COLD_REFUSAL) & 0xff
 }
+
+/// A tier state flag: the body's compiled code would hand most of its instructions to tier 0,
+/// so calls no longer compile it and only a hot loop in it does.
+pub const LOOPS_ONLY: i32 = 1 << 16;
+
+/// The entry count of a body that calls must not compile. Counting up from here never reaches
+/// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
+/// recording type feedback for them unless the body has a loop that may still compile.
+pub const NEVER_HOT: i32 = i32::MIN;
 
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.
@@ -201,9 +272,18 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.add_global_root(tier1);
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
-    counters[profile::ENTRIES] = 0;
+    let state = counters[profile::TIER_STATE];
+    // Halfway to the threshold, tier 0 keeps recording type feedback, so the activation that
+    // just deoptimized records the type that broke the speculation and the recompile sees it.
+    // A body that compiles only for its loop records through its loop anyway, and its calls
+    // must never ask the tier again, so it keeps the entry count that stops them asking.
+    counters[profile::ENTRIES] = if state >= 0 && state & LOOPS_ONLY != 0 {
+        NEVER_HOT
+    } else {
+        bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2)
+    };
     counters[profile::BACK_EDGES] = 0;
-    if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
+    if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
     }
 }
@@ -492,6 +572,70 @@ pub mod representation {
     pub const INTEGER: i32 = 1;
     pub const DOUBLE: i32 = 2;
     pub const LOGICAL: i32 = 3;
+    /// A [`crate::analysis::Ty::Num`]: a double and a flag saying it holds an integer. Only
+    /// deoptimization exits use it.
+    pub const NUM: i32 = 4;
+}
+
+/// Boxes the registers and flushes the dirty slots that exit `exit` lists, reading their raw
+/// values from `scratch`, then deoptimizes like [`jit_deopt`].
+pub unsafe extern "C" fn jit_deopt_exit(
+    activation: *mut Activation,
+    scratch: *const i64,
+    exit: i64,
+) -> *mut Header {
+    unsafe {
+        let Some(exit) = compiled(&*activation).exits.get(exit as usize) else {
+            panic!("compiled code named a deoptimization exit it does not have");
+        };
+        let mut cell = scratch;
+        let mut next = || {
+            let current = cell;
+            cell = cell.add(1);
+            current
+        };
+        for &(register, kind) in &exit.registers {
+            let value = next();
+            let boxed = match kind {
+                representation::INTEGER => jit_box_integer(activation, value.cast::<i32>().read()),
+                representation::LOGICAL => jit_box_logical(activation, value.cast::<i32>().read()),
+                representation::DOUBLE => jit_box_double(activation, value.cast::<f64>().read()),
+                _ => jit_box_num(
+                    activation,
+                    value.cast::<f64>().read(),
+                    next().cast::<i32>().read(),
+                ),
+            };
+            // The window roots each box before the next allocation can collect. Boxing never
+            // returns null: a failure parks its error and returns `NULL`.
+            if let Some(boxed) = Sexp::from_raw(boxed) {
+                *(*activation).registers.add(register as usize) = boxed;
+            }
+        }
+        for &(slot, kind) in &exit.slots {
+            let status = next().cast::<i32>().read();
+            let (kind, bits) = match kind {
+                representation::BOXED => (kind, 0),
+                representation::DOUBLE => (kind, next().read()),
+                representation::NUM => {
+                    let double = next().cast::<f64>().read();
+                    if next().cast::<i32>().read() == 0 {
+                        (representation::DOUBLE, double.to_bits() as i64)
+                    } else if double.is_nan() {
+                        (representation::INTEGER, i64::from(NA_INTEGER))
+                    } else {
+                        (representation::INTEGER, i64::from(double as i32))
+                    }
+                }
+                _ => (kind, i64::from(next().cast::<i32>().read())),
+            };
+            if i64::from(status) == crate::analysis::status::RUNTIME_DIRTY {
+                // A failure parks its error, which the deoptimization below then raises.
+                jit_flush(activation, i64::from(slot), kind, bits);
+            }
+        }
+        jit_deopt(activation, exit.pc as i64, exit.why)
+    }
 }
 
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
@@ -540,8 +684,11 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
-            if std::env::var_os("RY_JIT_LOG").is_some() {
-                eprintln!("jit: deopt at pc {pc} (reason {why})");
+            if crate::logging() {
+                eprintln!(
+                    "jit: deopt at pc {pc} (reason {why}) in {}",
+                    crate::describe(machine.code)
+                );
             }
             if why == reason::SPECULATION && activation.pending.is_none() {
                 invalidate(machine.code);
@@ -815,6 +962,76 @@ pub unsafe extern "C" fn jit_list_prefix(activation: *mut Activation, dst: i64, 
             match shortened {
                 Ok(shorter) => {
                     *cell = shorter;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
+/// Puts the keys vector of the dictionary (`dict` nonzero) or set `object` in register `keys`,
+/// and a dictionary's values list in register `stored`, and returns its length. Returns -1,
+/// handing the traversal to tier 0, when `object` is not one, or when it has keys and their
+/// vector is not of type `key` (a negative `key` accepts any type).
+pub unsafe extern "C" fn jit_collection_parts(
+    activation: *mut Activation,
+    object: i64,
+    dict: i32,
+    key: i32,
+    keys: i64,
+    stored: i64,
+) -> i64 {
+    unsafe {
+        checked(activation, -1, |activation| {
+            let Some(object) = Sexp::from_raw(object as *mut Header) else {
+                return -1;
+            };
+            let kind = if dict != 0 {
+                NativeKind::Dict
+            } else {
+                NativeKind::Set
+            };
+            match scoped(|| standard_library::collection_parts(object, kind)) {
+                Ok(Some((vector, values, count))) => {
+                    if count > 0 && key >= 0 && vector.kind() as i32 != key {
+                        return -1;
+                    }
+                    *activation.registers.add(keys as usize) = vector;
+                    *activation.registers.add(stored as usize) = values;
+                    count as i64
+                }
+                Ok(None) => -1,
+                Err(unwind) => {
+                    park(activation, unwind);
+                    -1
+                }
+            }
+        })
+    }
+}
+
+/// Puts what `List.find_first` and its kin answer in register `dst`: the element of the list
+/// in register `list` at 0-based `position`, or its position when `index` is nonzero, or
+/// `:Err(:NotFound)` for a negative `position`. Returns 0 when building it fails, with the
+/// error parked.
+pub unsafe extern "C" fn jit_found(
+    activation: *mut Activation,
+    dst: i64,
+    list: i64,
+    position: i64,
+    index: i32,
+) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let list = *activation.registers.add(list as usize);
+            let position = usize::try_from(position).ok();
+            match scoped(|| standard_library::found(list, position, index != 0)) {
+                Ok(answer) => {
+                    *activation.registers.add(dst as usize) = answer;
                     1
                 }
                 Err(unwind) => {

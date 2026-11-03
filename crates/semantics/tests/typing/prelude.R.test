@@ -1,0 +1,52 @@
+#==== prelude_on
+#---- qualified_names_reach_the_library
+doubled <- std::List.map(list(1L, 2L), function(x) x * 2L)
+n <- std::List.len(doubled)
+#++++
+doubled: list[integer]
+n: integer
+
+#---- ry_package_does_not_export_the_library
+n <- ry::List.len(list(1L))
+#++++
+n: Unknown
+5..17 warning[unresolved] `List.len` is not exported by `ry`. It is in ry's standard library: write `std::List.len`.
+
+#==== prelude_off
+#---- qualified_names_type_as_the_library
+# [check] prelude = false
+doubled <- std::List.map(list(1L, 2L), function(x) x * 2L)
+n <- std::List.len(doubled)
+#++++
+doubled: list[integer]
+n: integer
+
+#---- qualified_overloads_select_per_call
+# [check] prelude = false
+a <- std::List.map([1, 2], function(x) x * 2)
+d <- std::Dict.insert(std::Dict.empty(), "a", 1L)
+#++++
+a: Array<double>
+d: Dict<character, integer>
+
+#---- library_types_stay_in_scope
+# [check] prelude = false
+#: fn(d: Dict<character, integer>) -> Result<integer, character>
+f <- function(d) :Ok(1L)
+#++++
+f: fn(d: Dict<character, integer>) -> Result<integer, character>
+
+#---- bare_name_is_unresolved
+# [check] prelude = false
+doubled <- List.map(list(1L, 2L), function(x) x * 2L)
+#++++
+doubled: Unknown
+37..45 warning[unresolved] `List.map` is in ry's standard library, which `[check] prelude = false` keeps out of scope. Write `std::List.map`.
+
+#---- project_definition_of_a_library_name_is_its_own
+# [check] prelude = false
+List.len <- function(x) 0L
+n <- List.len(list(1L))
+#++++
+List.len: <T> fn([x]: T) -> integer
+n: integer

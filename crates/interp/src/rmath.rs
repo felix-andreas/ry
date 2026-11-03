@@ -1,15 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/nmath/toms708.c (bratio and its helpers, grat_r)
+//     Based on the C translation of ACM TOMS 708 (Didonato and Morris, 1992), with
+//     changes by The R Core Team; the file carries no copyright line of its own
+//
+// GNU R: src/nmath/pnorm.c (pnorm_both)
+//     Copyright (C) 2000-2020 The R Core Team
+//     Copyright (C) 2003 The R Foundation
+//     Copyright (C) 1998 Ross Ihaka
+//
+// GNU R: src/nmath/qnorm.c (qnorm)
+//     Copyright (C) 2000--2023 The R Core Team
+//     Copyright (C) 1998 Ross Ihaka
+//     based on AS 241 (C) 1988 Royal Statistical Society
+//
+// GNU R: src/nmath/ptukey.c (wprob, ptukey)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000--2007 The R Core Team
+//
+// GNU R: src/nmath/qtukey.c (qinv, qtukey)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000--2005 The R Core Team
+//     based in part on AS70 (C) 1974 Royal Statistical Society
+//
+// GNU R: src/nmath/pnt.c (pnt)
+//     Copyright (C) 1998-2015 The R Core Team
+//     based on AS243 (C) 1989 Royal Statistical Society
+//
+// GNU R: src/nmath/pt.c (pt)
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 2000-2007 The R Core Team
+//
+// GNU R: src/nmath/qt.c (qt)
+//     Copyright (C) 2000-2022 The R Core Team
+//     Copyright (C) 2003-2022 The R Foundation
+//     Copyright (C) 1998 Ross Ihaka
+//
+// GNU R: src/nmath/qbeta.c (qbeta_start)
+//     Copyright (C) 1998--2022 The R Core Team
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     based on code (C) 1979 and later Royal Statistical Society
+//
+// GNU R: src/nmath/chebyshev.c (chebyshev_eval)
+//     Copyright (C) 1998 Ross Ihaka
+//
+// GNU R: src/nmath/gamma.c (gammafn)
+//     Copyright (C) 2000-2018 The R Core Team
+//     Copyright (C) 2002-2018 The R Foundation
+//     Copyright (C) 1998 Ross Ihaka
+//
+// GNU R: src/nmath/lgamma.c (lgammafn_sign)
+//     Copyright (C) 2000-2020 The R Core Team
+//     Copyright (C) 1998 Ross Ihaka
+//
+// GNU R: src/nmath/pgamma.c (log1pmx, logspace_sub)
+//     Copyright (C) 2006-2019 The R Core Team
+//     Copyright (C) 2005-6 Morten Welinder <terra@gnome.org>
+//     Copyright (C) 2005-10 The R Foundation
+//
+// GNU R: src/nmath/cospi.c (cospi_, sinpi_, tanpi_)
+//     Copyright (C) 2013-2022 The R Core Team
+//
+// GNU R: src/nmath/stirlerr.c (stirlerr)
+//     Copyright (C) 2000-2021 The R Core Team
+//     partly based on Catherine Loader's work,
+//     (C) 1999-2000 Lucent Technologies, Bell Laboratories
+//
+// GNU R: src/nmath/bd0.c (bd0)
+//     Copyright (C) 2000-2022 The R Core Team
+//
+// GNU R: src/nmath/dbinom.c (dbinom_raw)
+//     Copyright (C) 2000-2020 The R Core Team
+//     Copyright (C) 2008 The R Foundation
+//     partly based on Catherine Loader's work,
+//     (C) 1999-2000 Lucent Technologies, Bell Laboratories
+//
+// GNU R: src/nmath/dpois.c (dpois_raw)
+//     Copyright (C) 2000-2021 The R Core Team
+//     partly based on Catherine Loader's work,
+//     (C) 1999-2000 Lucent Technologies, Bell Laboratories
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! R's mathematical library, the API `Rmath.h` declares: densities, distribution functions,
 //! quantiles and random variates for R's distributions, and the special functions they rest on.
 //!
 //! Results must agree with GNU R's to the last few bits, because R code compares them exactly
-//! and packages' own tests record them. That pins the algorithms, so every function here follows
-//! the published method GNU R's nmath library uses (Cody's rational approximations for the normal
-//! distribution, Wichura's AS 241 for its quantile, Didonato and Morris's TOMS 708 for the
-//! incomplete beta ratio, Loader's saddle point for binomial and Poisson densities, the Ahrens,
-//! Dieter, Kachitvichyanukul, Schmeiser and Cheng generators for random variates) and the same
-//! order of uniform draws, written independently from the papers. Where a published series
-//! needs constants, they are the mathematically defined values (Chebyshev coefficients, zeta
-//! values, Gauss-Legendre nodes), so they match any faithful implementation of the method.
+//! and packages' own tests record them. So the core routines are translations of GNU R's own
+//! nmath code (the files named above), including R Core's extensions to the published
+//! algorithms: Cody's rational approximations for the normal distribution, Wichura's AS 241 for
+//! its quantile with R's asymptotic tail, Didonato and Morris's TOMS 708 for the incomplete
+//! beta ratio with R's `log_p` additions, and Copenhaver and Holland's AS 190 for the
+//! studentized range. Other functions follow the published method GNU R's nmath library uses
+//! (Loader's saddle point for binomial and Poisson densities) in GNU R's order of operations.
 //!
 //! The conventions are R's: `lower` selects P[X <= x] over P[X > x], `log` gives and takes
 //! probabilities on the log scale, invalid parameters give `NaN` without a warning (R reports

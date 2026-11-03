@@ -307,21 +307,21 @@ pub unsafe extern "C" fn R_maphash(table_value: Hashtab, function: Sexp) -> Sexp
 
 unsafe extern "C" {
     fn ry_maphash_call(
-        function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void) -> Sexp,
+        function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void),
         key: Sexp,
         value: Sexp,
         data: *mut c_void,
         status: *mut c_int,
-    ) -> Sexp;
+    );
 }
 
 /// `R_maphashC(h, FUN, data)`: calls the C function `FUN(key, value, data)` for each entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_maphashC(
     table_value: Hashtab,
-    function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void) -> Sexp,
+    function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void),
     data: *mut c_void,
-) -> Sexp {
+) {
     enter(|| {
         let cell = table(table_value)?;
         for (key, value) in entries(cell) {
@@ -331,7 +331,7 @@ pub unsafe extern "C" fn R_maphashC(
                 status
             })?;
         }
-        Ok(runtime().nil())
+        Ok(())
     })
 }
 

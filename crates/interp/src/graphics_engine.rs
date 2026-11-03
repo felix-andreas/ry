@@ -1,3 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/main/xspline.c (xspline_points)
+//     Source code from Xfig 3.2.4, modified for R
+//     Copyright (c) 1985-1988 by Supoj Sutanthavibul
+//     Parts Copyright (c) 1989-2002 by Brian V. Smith
+//     Parts Copyright (c) 1991 by Paul King
+//     Parts Copyright (c) 1992 by James Tough
+//     Parts Copyright (c) 1998 by Georg Stemmer
+//     Parts Copyright (c) 1995 by C. Blanc and C. Schlick
+//
+// The Xfig code carries this notice:
+//
+//     Any party obtaining a copy of these files is granted, free of charge, a full and
+//     unrestricted irrevocable, world-wide, paid up, royalty-free, nonexclusive right and
+//     license to deal in this software and documentation files (the "Software"), including
+//     without limitation the rights to use, copy, modify, merge, publish and/or distribute
+//     copies of the Software, and to permit persons who receive copies from any such party to
+//     do so, with the only requirement being that this copyright notice remain intact.
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! R's graphics engine: the device table, the graphics systems registered with every device,
 //! and the drawing calls that sit between a system (base graphics, grid) and a device.
 //!
@@ -28,6 +58,7 @@ use {
         cell::RefCell,
         ffi::{CString, c_char, c_int, c_uint, c_void},
         ptr::{self, null_mut},
+        sync::atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -306,6 +337,9 @@ pub struct EngineDevice {
     /// its argument pairlist.
     ops: Vec<Sexp>,
     args: Vec<Sexp>,
+    /// Stamped from [`DISPLAY_LIST_STAMPS`] whenever the display list changes, so a reader can
+    /// tell a drawing it has not seen, even on a device that took a closed one's slot.
+    stamp: u64,
 }
 
 struct Engine {
@@ -537,6 +571,7 @@ pub unsafe fn create_device(dev: *mut DevDesc) -> R<*mut GEDevDesc> {
         synced_ask: c_int::from(ask),
         ops: Vec::new(),
         args: Vec::new(),
+        stamp: next_stamp(),
     });
     let dd = Box::into_raw(device);
     sync_ask(dd.cast());
@@ -2673,7 +2708,13 @@ pub unsafe fn symbol(
                 }
                 _ => {}
             }
-            polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            // GNU R starts pch 23 at its bottom vertex and the others at their left one, and
+            // the starting vertex moves where an antialiased outline closes.
+            if pch == 23 {
+                polygon(&[x, x + xc, x, x - xc], &[y - yc, y, y + yc, y], gc, dd)
+            } else {
+                polygon(&[x - xc, x, x + xc, x], &[y, y + yc, y, y - yc], gc, dd)
+            }
         }
         7 => {
             let (xc, yc) = half(SYMBOL_RADIUS);
@@ -2847,14 +2888,31 @@ pub unsafe fn init_display_list(dd: *mut GEDevDesc) -> R<()> {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     Ok(())
 }
 
-/// `GErecordGraphicOperation`.
+/// `GErecordGraphicOperation`: a no-op while the display list is off, which it is from the start
+/// on a file device such as `png()` or `pdf()` until `dev.control("enable")`.
 pub unsafe fn record_operation(op: Sexp, args: Sexp, dd: *mut GEDevDesc) {
+    if (*dd).display_list_on == 0 {
+        return;
+    }
     let device = engine_device(dd);
     (*device).ops.push(op);
     (*device).args.push(args);
+    (*device).stamp = next_stamp();
+}
+
+/// A stamp that differs from every earlier one whenever `dd`'s display list changed.
+pub unsafe fn display_list_stamp(dd: *mut GEDevDesc) -> u64 {
+    (*engine_device(dd)).stamp
+}
+
+static DISPLAY_LIST_STAMPS: AtomicU64 = AtomicU64::new(1);
+
+fn next_stamp() -> u64 {
+    DISPLAY_LIST_STAMPS.fetch_add(1, Ordering::Relaxed)
 }
 
 pub unsafe fn display_list_is_empty(dd: *mut GEDevDesc) -> bool {
@@ -2878,6 +2936,7 @@ unsafe fn set_display_list(dd: *mut GEDevDesc, list: Sexp) {
     let device = engine_device(dd);
     (*device).ops.clear();
     (*device).args.clear();
+    (*device).stamp = next_stamp();
     let mut cell = list;
     while cell.kind() == SexpType::Pairlist {
         let entry = cell.car();
@@ -2959,6 +3018,7 @@ pub unsafe fn copy_display_list(from: usize) -> R<()> {
     let device = engine_device(dd);
     (*device).ops = ops;
     (*device).args = args;
+    (*device).stamp = next_stamp();
     notify_systems(source, Event::CopyState, nil())?;
     play_display_list(dd)?;
     if (*dd).display_list_on == 0 {

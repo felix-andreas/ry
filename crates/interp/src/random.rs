@@ -1,3 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/nmath/snorm.c (kinderman_ramage)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000-2022 The R Core Team
+//
+// GNU R: src/nmath/sexp.c (next_exponential)
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2000-2002 the R Core Team
+//
+// GNU R: src/main/RNG.c (the uniform generators, MT19937)
+//     Copyright (C) 1997--2021 The R Core Team
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     The Mersenne-Twister part is
+//     Copyright (C) 1997, 1999 Makoto Matsumoto and Takuji Nishimura
+//
+// GNU R: src/main/random.c (walker_sample)
+//     Copyright (C) 1997--2022 The R Core Team
+//     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 2003--2018 The R Foundation
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! Random numbers: GNU R's uniform generators, its normal and exponential deviates, `set.seed`,
 //! `RNGkind` and `sample`, reproducing GNU R's streams bit for bit.
 //!

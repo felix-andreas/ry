@@ -1,6 +1,7 @@
 [package]
 name = "syntax"
 edition = "2024"
+license = "UPL-1.0"
 version.workspace = true
 publish = false
 

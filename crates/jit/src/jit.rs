@@ -33,6 +33,7 @@ use {
         cell::{Cell, RefCell},
         ffi::c_void,
         panic::resume_unwind,
+        sync::OnceLock,
         time::Instant,
     },
 };
@@ -134,21 +135,30 @@ unsafe fn fully_typed(machine: &Machine<'_>) -> bool {
 /// counting against it, so it then tiers up like any other body once it is hot.
 unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
     unsafe {
-        let result = compile(machine, true);
+        let result = compile(machine, true, Trigger::FirstCall);
         let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
         match result {
             Ok(compiled) => {
+                if logging() {
+                    eprintln!("jit: the compile above ran at the first call");
+                }
                 counters[profile::TIER_STATE] = 1;
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
-                if std::env::var_os("RY_JIT_LOG").is_some() {
+                if logging() {
                     eprintln!(
                         "jit: not compiling {} at its first call: {reason}",
                         describe(machine.code)
                     );
                 }
-                if reason != analysis::COLD && reason != analysis::NOTHING_NATIVE {
+                // The plan had no profile yet, so a verdict on how much would run natively is not
+                // final: only a refusal that no profile can change stops the body for good.
+                if reason != analysis::COLD
+                    && reason != analysis::NOTHING_NATIVE
+                    && reason != analysis::MOSTLY_TIER0
+                    && reason != analysis::BRIEF
+                {
                     counters[profile::TIER_STATE] = -1;
                 }
                 None
@@ -177,8 +187,34 @@ unsafe fn compiled_for<'a>(
 ) -> Option<&'a Compiled> {
     unsafe {
         let constants = machine.code.cdr();
+        // A body that compiled only for its loop would spend each call handing its instructions
+        // back to tier 0, so calls keep running in tier 0 and only the loop enters compiled code.
+        let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
+        if !in_loop && state >= 0 && state & runtime::LOOPS_ONLY != 0 {
+            return None;
+        }
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
+            let address = tier1.external_address() as *const Compiled;
+            if !address.is_null() && (*address).portable {
+                let compiled = &*address;
+                let enclosure = machine.env.enclosure();
+                if compiled.checked.get().weak_key() != enclosure {
+                    // The epoch and stamps were proven for another enclosure's lookups, so the
+                    // next run walks every speculation from this one before trusting them.
+                    let heap = heap();
+                    let weak = heap
+                        .alloc_weak_ref(enclosure, values::nil(), values::nil(), 0, false)
+                        .ok()?;
+                    heap.set_element(tier1.external_protected(), 0, weak);
+                    compiled.checked.set(weak);
+                    compiled.epoch.set(u64::MAX);
+                    for stamp in &compiled.stamps {
+                        stamp.set(u64::MAX);
+                    }
+                }
+                return Some(compiled);
+            }
             if tier1.external_protected().weak_key() != values::nil() {
                 let compiled = &*(tier1.external_address() as *const Compiled);
                 // Closures made by one `function` expression share their body but not their
@@ -205,7 +241,12 @@ unsafe fn compiled_for<'a>(
             return None;
         }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
-        let result = compile(machine, patient);
+        let trigger = if in_loop {
+            Trigger::HotLoop
+        } else {
+            Trigger::HotEntry
+        };
+        let result = compile(machine, patient, trigger);
         // Compiling reads the profile too, so the counters are borrowed again afterwards.
         let counters = values::ints_mut(constants.element(PROFILE));
         match result {
@@ -214,10 +255,13 @@ unsafe fn compiled_for<'a>(
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
-                if std::env::var_os("RY_JIT_LOG").is_some() {
+                if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
-                if reason == analysis::COLD {
+                if reason == analysis::MOSTLY_TIER0 {
+                    counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
+                    counters[profile::ENTRIES] = runtime::NEVER_HOT;
+                } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
@@ -232,7 +276,15 @@ unsafe fn compiled_for<'a>(
     }
 }
 
-unsafe fn describe(code: Sexp) -> String {
+/// Whether `RY_JIT_LOG` asks for compile, refusal and deoptimization lines. Read once, because
+/// unwinds through compiled frames deoptimize often enough that an environment lookup each time
+/// shows up in test suites.
+pub(crate) fn logging() -> bool {
+    static LOGGING: OnceLock<bool> = OnceLock::new();
+    *LOGGING.get_or_init(|| std::env::var_os("RY_JIT_LOG").is_some())
+}
+
+pub(crate) unsafe fn describe(code: Sexp) -> String {
     unsafe {
         let source = code.cdr().element(bytecode::SOURCE);
         interp::deparse::deparse_one_line(source)
@@ -242,16 +294,32 @@ unsafe fn describe(code: Sexp) -> String {
     }
 }
 
-unsafe fn compile<'a>(machine: &Machine<'_>, patient: bool) -> Result<&'a Compiled, Refusal> {
+/// What asked for a compilation, which decides how much the compiled code must save to pay
+/// for itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// A fully typed closure's first call, before anything shows the body is hot.
+    FirstCall,
+    /// The body was entered [`ENTRY_THRESHOLD`] times.
+    HotEntry,
+    /// A loop in the body took [`BACK_EDGE_THRESHOLD`] backward jumps and is running now.
+    HotLoop,
+}
+
+unsafe fn compile<'a>(
+    machine: &Machine<'_>,
+    patient: bool,
+    trigger: Trigger,
+) -> Result<&'a Compiled, Refusal> {
     ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
-            let compiled = compile_in(&arena, machine, patient);
+            let compiled = compile_in(&arena, machine, patient, trigger);
             arena.reset();
             compiled
         }
         // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
         // that ever changes.
-        Err(_) => compile_in(&Bump::new(), machine, patient),
+        Err(_) => compile_in(&Bump::new(), machine, patient, trigger),
     })
 }
 
@@ -259,6 +327,7 @@ unsafe fn compile_in<'a>(
     arena: &Bump,
     machine: &Machine<'_>,
     patient: bool,
+    trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
@@ -273,12 +342,20 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
-        if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
-            return Err(Refusal(analysis::NOTHING_NATIVE));
+        if MODE.with(Cell::get) != Mode::Force {
+            if !plan.runs_natively() {
+                return Err(Refusal(analysis::NOTHING_NATIVE));
+            }
+            if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions() {
+                return Err(Refusal(analysis::MOSTLY_TIER0));
+            }
+            if trigger == Trigger::FirstCall && !plan.may_run_long() {
+                return Err(Refusal(analysis::BRIEF));
+            }
         }
-        let entry = codegen::compile(&plan, machine.code)?;
+        let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
-        if std::env::var_os("RY_JIT_LOG").is_some() {
+        if logging() {
             // The instructions left to tier 0 are where compiled code is slow.
             // A builtin call lists its argument types, which say why it was not an intrinsic.
             let steps: Vec<String> = plan
@@ -302,12 +379,14 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {} speculations; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations; {} native, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
                 plan.speculations.len(),
+                plan.native_actions(),
+                plan.loop_headers.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
                 } else {
@@ -320,9 +399,25 @@ unsafe fn compile_in<'a>(
             .iter()
             .map(|&block| plan.insts[plan.blocks[block].start].pc)
             .collect();
+        let rooted: Box<[bool]> = plan
+            .speculations
+            .iter()
+            .map(|speculation| speculation.env == enclosure)
+            .collect();
+        let portable = plan
+            .speculations
+            .iter()
+            .zip(&rooted)
+            .all(|(speculation, &rooted)| {
+                (rooted || long_lived(speculation.env))
+                    && owner(speculation).is_some_and(|env| long_lived(env))
+            });
         let compiled = Box::new(Compiled {
             entry,
             enclosure,
+            portable,
+            checked: Cell::new(values::nil()),
+            rooted,
             registers: plan.registers,
             slots: plan.slots.to_vec(),
             loops: plan.loops,
@@ -336,12 +431,16 @@ unsafe fn compile_in<'a>(
                 .map(|_| Cell::new(u64::MAX))
                 .collect(),
             osr,
+            exits,
         });
         // Everything the machine code and the speculations point to stays reachable from the
         // external pointer while the enclosure lives, so the collector never frees an object
         // compiled code embeds. They hang off a weak reference keyed on the enclosure, because
         // the body outlives any one closure: R6 gives every object's methods the same body, and a
         // strong reference would keep the first object compiled for alive with its finalizer.
+        // Portable code embeds nothing that dies with the enclosure, so it holds its objects
+        // directly; element 0 is the weak reference `checked` names, set here to the compiling
+        // enclosure.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
@@ -357,18 +456,67 @@ unsafe fn compile_in<'a>(
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
-            let weak = heap
-                .alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
-                .map_err(|_| error("the JIT could not allocate its code object"))?;
+            let weak = if compiled.portable {
+                heap.alloc_weak_ref(enclosure, values::nil(), values::nil(), 0, false)
+            } else {
+                heap.alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
+            }
+            .map_err(|_| error("the JIT could not allocate its code object"))?;
             heap.root(weak);
+            let held = if compiled.portable {
+                heap.set_element(protected, 0, weak);
+                compiled.checked.set(weak);
+                protected
+            } else {
+                weak
+            };
             let address = Box::into_raw(compiled) as *mut c_void;
-            heap.alloc_external_ptr(address, values::nil(), weak)
+            heap.alloc_external_ptr(address, values::nil(), held)
                 .map_err(|_| error("the JIT could not allocate its code object"))
         })();
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
         Ok(&*(pointer.external_address() as *const Compiled))
+    }
+}
+
+/// Whether `env` lives as long as the session normally does: the global and base environments,
+/// a namespace, a namespace's imports, or an environment on the search path.
+unsafe fn long_lived(env: Sexp) -> bool {
+    unsafe {
+        let known = heap().known();
+        if env == known.global_env
+            || env == known.base_env
+            || env.enclosure() == known.base_namespace
+            || interp::envir::is_namespace(env)
+        {
+            return true;
+        }
+        let mut search = known.global_env.enclosure();
+        while search != known.empty_env {
+            if search == env {
+                return true;
+            }
+            search = search.enclosure();
+        }
+        false
+    }
+}
+
+/// The environment whose frame holds the binding a speculation found.
+unsafe fn owner(speculation: &analysis::Speculation) -> Option<Sexp> {
+    unsafe {
+        let heap = heap();
+        let empty = heap.known().empty_env;
+        let mut env = speculation.env;
+        while env != empty {
+            if heap.frame_cell(env, speculation.symbol) == Some(speculation.cell) {
+                return Some(env);
+            }
+            env = env.enclosure();
+        }
+        None
     }
 }
 

@@ -349,7 +349,7 @@ fn a_deep_reexport_chain_resolves_fully() {
 #[test]
 fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     let mut db = ProbeDatabase::default();
-    let settings = AnalysisSettings::new(&db, true, true);
+    let settings = AnalysisSettings::new(&db, true, true, true);
     let files = db.project(&[
         "typed <- function(x: integer) -> integer x\n",
         "untyped <- function(x) x + 1L\n",
@@ -361,6 +361,24 @@ fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     settings.set_inline_annotations(&mut db).to(false);
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["typed"]);
+}
+
+#[test]
+fn turning_the_prelude_off_rechecks_only_items_that_use_the_library() {
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let settings = AnalysisSettings::new(&db, true, true, true);
+    let files = db.project(&[
+        "lengths <- function(x) List.len(x)\n",
+        "plain <- function(x) length(x)\n",
+        "qualified <- function(x) std::List.len(x)\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    settings.set_prelude(&mut db).to(false);
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["lengths"]);
 }
 
 #[test]
@@ -715,6 +733,8 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         "library(data.table)\n",
         "prices <- fread(\"prices.csv\")\n",
         "trades <- fread(\"trades.csv\")\n",
+        "frame <- DataFrame.read_csv(\"prices.csv\")\n",
+        "quotes <- DataFrame.read_csv(\"trades.csv\")\n",
     ]);
     let attached = attached_union(&db, files.iter().copied());
     PackageMetadata::new(
@@ -745,7 +765,7 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         .set_layouts(&mut db)
         .to(layouts("id,price,ticker\n1,2.5,a\n"));
     settle(&db, &files);
-    assert_eq!(db.checked_since(), ["prices"]);
+    assert_eq!(db.checked_since(), ["frame", "prices"]);
     let scheme = global_scheme(&db, definition(&db, "prices"));
     assert_eq!(
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
@@ -968,4 +988,29 @@ fn a_reference_class_edit_rechecks_only_methods_whose_member_answers_change() {
     );
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["Sheet", "Workbook"]);
+}
+
+#[test]
+fn an_edit_that_keeps_the_dollar_methods_rechecks_no_dollar_reader() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "helper <- function() 1L\n`$.vs` <- function(x, name) name\n",
+        "weights <- function() c(1L, 2L)$weight\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(
+        files[0],
+        "helper <- function() 2L\n`$.vs` <- function(x, name) name\n".to_owned(),
+    );
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["helper"]);
+
+    db.edit(files[0], "helper <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    assert!(
+        db.checked_since().contains(&"weights".to_owned()),
+        "removing the last `$` method rechecks a reader of `$` on an atomic vector"
+    );
 }

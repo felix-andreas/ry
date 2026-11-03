@@ -9,14 +9,12 @@
 use {
     crate::{
         Error, Result,
+        factor::{self, Levels},
         kernel::{gather_values, pack_rows},
     },
-    foldhash::fast::FixedState,
-    hashbrown::HashTable,
     polars::prelude::{
-        BooleanChunked, CategoricalMapping, DataType, Float64Chunked, FrozenCategories,
-        Int32Chunked, IntoSeries, NewChunkedArray, PlSmallStr, PolarsError, Series, StringChunked,
-        UInt32Chunked,
+        BooleanChunked, DataType, Float64Chunked, Int32Chunked, IntoSeries, NewChunkedArray,
+        PlSmallStr, Series, StringChunked,
     },
     polars_arrow::{
         array::{Array, PrimitiveArray, Utf8ViewArray},
@@ -24,11 +22,8 @@ use {
         datatypes::ArrowDataType,
     },
     polars_buffer::{Buffer, SharedStorage},
-    rayon::{current_num_threads, join, prelude::*},
-    std::{
-        hash::BuildHasher,
-        sync::atomic::{AtomicU32, Ordering},
-    },
+    rayon::prelude::*,
+    std::sync::Arc,
 };
 
 /// R's `NA_integer_`, which is also `NA` for a logical vector.
@@ -110,24 +105,26 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
                 .into_series()
         }
         RVector::Factor { codes, levels } => {
-            let dtype = enum_dtype(&levels)?;
-            let mut strings = Vec::with_capacity(codes.len());
-            for code in &codes {
-                strings.push(match *code {
-                    NA_INTEGER => None,
-                    code => Some(
-                        levels
-                            .get((code - 1) as usize)
-                            .ok_or_else(|| {
-                                Error::Query(format!("factor code {code} has no level"))
-                            })?
-                            .as_str(),
-                    ),
-                });
+            let table = Levels::from_labels(levels.iter().map(String::as_str));
+            if table.len() != levels.len() {
+                return Err(Error::Query(format!("the factor `{name}` repeats a level")));
             }
-            StringChunked::from_iter_options(name, strings.into_iter())
-                .into_series()
-                .cast(&dtype)?
+            let count = levels.len() as i32;
+            if let Some(code) = codes
+                .iter()
+                .find(|code| **code != NA_INTEGER && !(1..=count).contains(*code))
+            {
+                return Err(Error::Query(format!("factor code {code} has no level")));
+            }
+            let valid = validity(&codes, |code| *code != NA_INTEGER);
+            let codes = codes
+                .par_iter()
+                .map(|code| match *code {
+                    NA_INTEGER => 0,
+                    code => (code - 1) as u32,
+                })
+                .collect();
+            factor::from_codes(name, Arc::new(table), codes, valid)
         }
     })
 }
@@ -221,15 +218,17 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 .map(|value| value.map(str::to_string))
                 .collect(),
         ),
-        dtype @ DataType::Enum(..) => {
-            let levels = factor_levels(dtype).unwrap_or_default();
+        dtype if let Some(levels) = factor::levels(dtype) => {
             let physical = series.to_physical_repr().cast(&DataType::Int32)?;
             let codes = physical
                 .i32()?
                 .iter()
                 .map(|code| code.map_or(NA_INTEGER, |code| code + 1))
                 .collect();
-            RVector::Factor { codes, levels }
+            RVector::Factor {
+                codes,
+                levels: levels.iter().map(str::to_string).collect(),
+            }
         }
         other => {
             return Err(Error::UnsupportedType {
@@ -238,193 +237,6 @@ pub fn to_r(series: &Series) -> Result<RVector> {
             });
         }
     })
-}
-
-/// A factor column's levels in order, read from its `Enum` dtype.
-pub fn factor_levels(dtype: &DataType) -> Option<Vec<String>> {
-    match dtype {
-        DataType::Enum(categories, _) => Some(
-            categories
-                .categories()
-                .values_iter()
-                .map(str::to_string)
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
-/// The `Enum` dtype whose categories are `levels`, in order, which is how a factor's level order
-/// survives in Arrow.
-pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
-    Ok(DataType::from_frozen_categories(FrozenCategories::new(
-        levels.iter().map(String::as_str),
-    )?))
-}
-
-/// A string column as a factor with its distinct values as levels, sorted in byte order, which is
-/// what `factor(x)` gives in R's C locale.
-///
-/// A column can hold millions of distinct strings, and then every random access into one big hash
-/// table misses the cache. So the rows are hashed in parallel and split by hash into partitions,
-/// each partition numbers its own distinct strings in a table small enough to stay warm, and no
-/// string is copied. Polars' own string-to-`Enum` cast would intern every distinct string twice
-/// and look every row up again.
-pub fn string_to_factor(series: &Series) -> Result<Series> {
-    let strings = series.cast(&DataType::String)?.rechunk();
-    let chunked = strings.str()?;
-    let empty = Utf8ViewArray::new_empty(ArrowDataType::Utf8View);
-    let array = chunked.downcast_iter().next().unwrap_or(&empty);
-    let rows = array.len();
-    let valid = |row: usize| {
-        array
-            .validity()
-            .is_none_or(|validity| validity.get_bit(row))
-    };
-    let partitions = (current_num_threads() * 4).next_power_of_two().min(128);
-    let state = FixedState::default();
-    let (hashes, partition_of): (Vec<u64>, Vec<u8>) = (0..rows)
-        .into_par_iter()
-        .map(|row| {
-            if !valid(row) {
-                return (0, u8::MAX);
-            }
-            let hash = state.hash_one(array.value(row));
-            // hashbrown tags an entry with the hash's top seven bits and finds its bucket with the
-            // low bits, so the partition comes from bits that neither uses: taken from the top,
-            // every string in a partition would share most of its tag.
-            (hash, ((hash >> 40) as usize & (partitions - 1)) as u8)
-        })
-        .unzip();
-    // Each partition owns the rows whose strings hash into it, so the code of a row is written by
-    // exactly one partition.
-    let local_codes: Vec<AtomicU32> = (0..rows).map(|_| AtomicU32::new(0)).collect();
-    let locals: Vec<Vec<&str>> = (0..partitions as u8)
-        .into_par_iter()
-        .map(|partition| {
-            let mut table: HashTable<u32> = HashTable::new();
-            let mut distinct: Vec<&str> = Vec::new();
-            for (row, _) in partition_of
-                .iter()
-                .enumerate()
-                .filter(|(_, owner)| **owner == partition)
-            {
-                let value = array.value(row);
-                let hash = hashes[row];
-                let code = match table.find(hash, |index| distinct[*index as usize] == value) {
-                    Some(index) => *index,
-                    None => {
-                        let index = distinct.len() as u32;
-                        distinct.push(value);
-                        table.insert_unique(hash, index, |index| {
-                            state.hash_one(distinct[*index as usize])
-                        });
-                        index
-                    }
-                };
-                local_codes[row].store(code, Ordering::Relaxed);
-            }
-            distinct
-        })
-        .collect();
-    let offsets: Vec<u32> = locals
-        .iter()
-        .scan(0u32, |offset, local| {
-            let start = *offset;
-            *offset += local.len() as u32;
-            Some(start)
-        })
-        .collect();
-    let distinct: Vec<&str> = locals.into_iter().flatten().collect();
-    let codes: Vec<u32> = (0..rows)
-        .into_par_iter()
-        .map(|row| match partition_of[row] {
-            // A missing row's code is masked by the validity bitmap, so any level stands in for
-            // it.
-            u8::MAX => 0,
-            partition => offsets[partition as usize] + local_codes[row].load(Ordering::Relaxed),
-        })
-        .collect();
-    drop(local_codes);
-    factor_from_codes(
-        series.name().clone(),
-        &distinct,
-        codes,
-        array.validity().cloned(),
-    )
-}
-
-/// The factor of a `Categorical` column given as its `mapping` and its rows' `codes`, which are
-/// renumbered into level order in place.
-pub fn categorical_codes_to_factor(
-    name: PlSmallStr,
-    mapping: &CategoricalMapping,
-    codes: Vec<u32>,
-    validity: Option<Bitmap>,
-) -> Result<Series> {
-    let distinct = (0..mapping.num_cats_upper_bound())
-        .map(|code| {
-            mapping.cat_to_str(code as u32).ok_or_else(|| {
-                Error::Polars(PolarsError::ComputeError(
-                    format!("category {code} of `{name}` has no string").into(),
-                ))
-            })
-        })
-        .collect::<Result<Vec<&str>>>()?;
-    factor_from_codes(name, &distinct, codes, validity)
-}
-
-/// The factor whose levels are `distinct` sorted in byte order, where `codes[row]` is the
-/// position of the row's string in `distinct` (anything for a row `validity` marks missing), and
-/// is renumbered into level order in place. The
-/// strings sort by a 16-byte prefix key, falling back to the whole string only on a tie, and
-/// Polars builds its categories while the codes are renumbered into level order.
-fn factor_from_codes(
-    name: PlSmallStr,
-    distinct: &[&str],
-    mut codes: Vec<u32>,
-    validity: Option<Bitmap>,
-) -> Result<Series> {
-    let mut order: Vec<(u128, u32)> = distinct
-        .par_iter()
-        .enumerate()
-        .map(|(index, value)| (prefix_key(value), index as u32))
-        .collect();
-    order.par_sort_unstable_by(|(a_key, a), (b_key, b)| {
-        a_key
-            .cmp(b_key)
-            .then_with(|| distinct[*a as usize].cmp(distinct[*b as usize]))
-    });
-    let mut rank = vec![0u32; distinct.len()];
-    for (position, (_, index)) in order.iter().enumerate() {
-        rank[*index as usize] = position as u32;
-    }
-    let (categories, ()) = join(
-        || FrozenCategories::new(order.iter().map(|(_, index)| distinct[*index as usize])),
-        || {
-            codes
-                .par_iter_mut()
-                .for_each(|code| *code = rank.get(*code as usize).copied().unwrap_or(0));
-        },
-    );
-    let dtype = DataType::from_frozen_categories(categories?);
-    let physical = UInt32Chunked::with_chunk(
-        name,
-        PrimitiveArray::new(ArrowDataType::UInt32, codes.into(), validity),
-    )
-    .into_series()
-    .cast(&dtype.to_physical())?;
-    // SAFETY: every code is the position of its string among the dtype's categories.
-    Ok(unsafe { physical.from_physical_unchecked(&dtype) }?)
-}
-
-/// The first 16 bytes of `value`, big-endian and padded with zeros, so comparing keys orders
-/// strings as comparing their bytes does, up to a tie between strings that share those bytes.
-fn prefix_key(value: &str) -> u128 {
-    let mut bytes = [0u8; 16];
-    let prefix = &value.as_bytes()[..value.len().min(16)];
-    bytes[..prefix.len()].copy_from_slice(prefix);
-    u128::from_be_bytes(bytes)
 }
 
 fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {

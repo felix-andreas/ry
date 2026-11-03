@@ -5,6 +5,8 @@
 //! checks that the recording is current. A bounded property pass checks the sorting, interval
 //! and decomposition routines against reference implementations.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {
@@ -15,7 +17,7 @@ use {
         process::Command,
         sync::OnceLock,
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 struct Case {
@@ -499,8 +501,8 @@ fn fuzz_sorting_matches_reference_sorts() {
     let qsort_int_indexed: QsortIntIndexed = symbol(&r, "R_qsort_int_I");
     let rpsort: PartialReal = symbol(&r, "Rf_rPsort");
     let ipsort: PartialInt = symbol(&r, "Rf_iPsort");
-    let mut rng = SplitMix64(0x5eed_5047);
-    for _ in 0..fuzz_iterations(300) {
+    for_each_seed(300, |seed| {
+        let mut rng = SplitMix64(0x5eed_5047 ^ seed);
         let count = rng.below(70);
         let values: Vec<f64> = (0..count).map(|_| real(&mut rng, true)).collect();
         let mut reference = values.clone();
@@ -616,15 +618,15 @@ fn fuzz_sorting_matches_reference_sorts() {
             unsafe { ipsort(partial.as_mut_ptr(), count as c_int, k as c_int) };
             assert_eq!(partial[k], reference_integers[k]);
         }
-    }
+    });
 }
 
 #[test]
 fn fuzz_find_interval_matches_a_linear_scan() {
     let r = r();
     let find: FindInterval2 = symbol(&r, "findInterval2");
-    let mut rng = SplitMix64(0x01a7_e0a1);
-    for _ in 0..fuzz_iterations(500) {
+    for_each_seed(500, |seed| {
+        let mut rng = SplitMix64(0x01a7_e0a1 ^ seed);
         let count = rng.below(12);
         let mut knots: Vec<f64> = (0..count).map(|_| real(&mut rng, false)).collect();
         knots.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
@@ -647,7 +649,7 @@ fn fuzz_find_interval_matches_a_linear_scan() {
         };
         if count == 0 {
             assert_eq!(index, 0);
-            continue;
+            return;
         }
         let below = knots
             .iter()
@@ -674,7 +676,7 @@ fn fuzz_find_interval_matches_a_linear_scan() {
             0
         };
         assert_eq!(flag, expected_flag);
-    }
+    });
 }
 
 #[test]
@@ -682,10 +684,10 @@ fn fuzz_decompositions_reconstruct_their_input() {
     let r = r();
     let dqrls: Dqrls = symbol(&r, "dqrls_");
     let dsvdc: Dsvdc = symbol(&r, "dsvdc_");
-    let mut rng = SplitMix64(0xdec0_0005);
     let uniform =
         |rng: &mut SplitMix64| (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
-    for _ in 0..fuzz_iterations(200) {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(0xdec0_0005 ^ seed);
         let n = 1 + rng.below(8);
         let p = 1 + rng.below(6);
         let x: Vec<f64> = (0..n * p).map(|_| uniform(&mut rng)).collect();
@@ -768,5 +770,5 @@ fn fuzz_decompositions_reconstruct_their_input() {
                 );
             }
         }
-    }
+    });
 }

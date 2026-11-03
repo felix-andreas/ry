@@ -91,7 +91,7 @@ const FILES: usize = 3;
 
 fn random_statement(entropy: &mut impl Entropy) -> String {
     let number = entropy.below(100);
-    match entropy.below(13) {
+    match entropy.below(14) {
         0..=2 => format!(
             "{} <- function(x) {}(x) + {number}",
             pick(entropy, "f", 5),
@@ -129,6 +129,11 @@ fn random_statement(entropy: &mut impl Entropy) -> String {
             "{} <- function(x, ...) {}(x) + {number}",
             method_binding(entropy),
             pick(entropy, "f", 5)
+        ),
+        12 => format!(
+            "{} <- function(x) {}(x)",
+            pick(entropy, "f", 5),
+            ["print", "format", "summary"][entropy.below(3)]
         ),
         _ => format!(
             "setMethod(\"g{}\", \"C{}\", function(x) {number})",
@@ -308,7 +313,7 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
         "the incrementally derived index differs from a fresh one"
     );
     let names_before: BTreeSet<String> = reloaded.bindings.keys().cloned().collect();
-    let model_before = reloaded.bindings.clone();
+    let model_before = reloaded.clone();
     apply(&mut reloaded, &plan, &new_index, &new_texts);
     apply_namespace(&mut reloaded, &plan);
     let mut fresh = fresh_load(&new_index, &new_texts);
@@ -349,13 +354,12 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
     );
 
     // `ry test --watch` runs first the tests that mention a caller of a touched name, so a
-    // name whose reachable code changed must be a caller. S3 dispatch reaches methods no test
-    // mentions, which this leaves out.
-    if let Some(touched) = plan.touched_names() {
+    // name whose reachable code changed, by name or through S3 dispatch, must be a caller.
+    if let Some(touched) = plan.changed_names() {
         loader.commit(root);
         let callers = loader.callers(root, &touched);
-        for name in model_before.keys().chain(fresh.bindings.keys()) {
-            if reachable(&model_before, name) != reachable(&fresh.bindings, name) {
+        for name in model_before.bindings.keys().chain(fresh.bindings.keys()) {
+            if reachable(&model_before, name) != reachable(&fresh, name) {
                 assert!(
                     callers.contains(name),
                     "`{name}` reaches changed code, but the callers of {touched:?} are {callers:?}\n---- before:\n{before:#?}\n---- after:\n{after:#?}"
@@ -366,11 +370,11 @@ pub fn check_reload(loaders: &mut ReloadLoaders, before: &Package, after: &Packa
 }
 
 /// The bindings a call of `name` can reach through the names their values mention, each with
-/// its value, and every mentioned name that is not bound.
-fn reachable<'a>(
-    bindings: &'a FxHashMap<String, String>,
-    name: &'a str,
-) -> BTreeMap<&'a str, Option<&'a str>> {
+/// its value, and every mentioned name that is not bound. A mention of a generic reaches its
+/// methods as S3 dispatch does: each method registered for it, and each binding named after it
+/// and a class.
+fn reachable<'a>(model: &'a Model, name: &'a str) -> BTreeMap<&'a str, Option<&'a str>> {
+    let bindings = &model.bindings;
     let mut reached = BTreeMap::new();
     let mut queue = vec![name];
     while let Some(name) = queue.pop() {
@@ -379,6 +383,18 @@ fn reachable<'a>(
         }
         let value = bindings.get(name).map(String::as_str);
         reached.insert(name, value);
+        queue.extend(
+            model
+                .s3
+                .iter()
+                .filter(|((generic, _), _)| generic == name)
+                .map(|(_, (function, _))| function.as_str()),
+        );
+        queue.extend(bindings.keys().map(String::as_str).filter(|binding| {
+            binding
+                .strip_prefix(name)
+                .is_some_and(|class| class.len() > 1 && class.starts_with('.'))
+        }));
         for mention in value
             .unwrap_or("")
             .split(|character: char| {

@@ -65,6 +65,11 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "{ f(1))\n",
         "#: fn(x: \nx <- 1\n",
         "",
+        // A complete construct that breaks one of ry's own rules is an error to report now.
+        "(1L, y = 2)\n",
+        "(a = 1, a = 2)\n",
+        "[x = 1]\n",
+        ":Some()\n",
     ];
     for text in unfinished {
         assert!(syntax::input_is_unfinished(text), "unfinished: {text:?}");

@@ -1,9 +1,10 @@
 [package]
 name = "zed_ry"
-# Tracks extension.toml (the version Zed publishes), not the CLI release: this
-# extension ships no binary, it only locates one.
-version = "0.2.0"
+# Equals extension.toml's version (the one Zed publishes); `just bump-version` sets both to the
+# release version without its `-beta` suffix.
+version = "0.4.0"
 edition = "2024"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]

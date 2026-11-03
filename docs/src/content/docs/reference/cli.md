@@ -4,17 +4,23 @@ description: Every ry command and flag, the exit codes, and the JSON output
 ---
 
 ```sh
-ry check [PATHS]   # report problems
-ry fmt [PATHS]     # format files in place
-ry run [FILE]      # run an R script on ry's runtime; without one, open ry's console
-ry R [FILE]        # the same on GNU R
-ry load [PATH]     # load an R package from source, run code against it, and exit
-ry test [PATH]     # run a package's testthat tests against the loaded package
-ry document [PATH] # write a package's Rd files and NAMESPACE with roxygen2
-ry server          # the language server, over stdio; your editor starts it
+ry check [PATHS]               # report problems
+ry fmt [PATHS]                 # format files in place
+ry migrate data-table [PATHS]  # rewrite data.table code as DataFrame code
+ry run [FILE]                  # run an R script on ry's runtime; without one, open ry's console
+ry R [FILE]                    # the same on GNU R
+ry load [PATH]                 # load an R package from source, run code against it, and exit
+ry test [PATH]                 # run a package's testthat tests against the loaded package
+ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
+ry build [PATH]                # build a package's source tarball
+ry install [PATH]              # build and install a package
+ry debug-adapter               # a debugger for editors, over stdio
+ry server                      # the language server, over stdio; your editor starts it
+ry debug COMMAND               # developer aids for working on ry itself
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, and `document` need R. They use
+`format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`,
+`build`, `install` and `debug-adapter` need R. They use
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
 built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
 own runtime needs that installation too, because it still reads base R's R code and the default
@@ -32,10 +38,12 @@ ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling
 ry check --annotate            # write inferred types as annotations, then report what remains
 ```
 
-Naming a file limits what is reported, not what is analyzed: ry always reads the whole
+Naming a file limits what is reported, not what the check sees: ry reads the whole
 [project](/reference/configuration#which-file-applies) the file belongs to, so a name defined in
-another file resolves however you spell the paths. The exception is a file matched by `exclude`,
-which is analyzed only when you name it.
+another file resolves however you spell the paths. When every path you name is in the package's
+`R/`, as in `ry check R`, the tests and scripts are left out, because they add nothing to the
+package and cannot change its findings. A file matched by `exclude` is analyzed only when you name
+it.
 
 `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. Findings go to
 stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
@@ -68,7 +76,7 @@ whose type inference cannot write down, such as one involving `Unknown`, is skip
 
 `ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
 reuses them for every file whose findings cannot have changed. On a 300,000-line package, a repeat
-check of an unchanged project takes about 0.1 s instead of 1.5 s. After an edit inside a function
+check of an unchanged project takes about 0.1 s instead of 1.2 s. After an edit inside a function
 body, only the edited file and the files whose check read it are checked again, which takes about
 0.45 s. Any other change checks every file again: an edit outside a function body (a new top-level
 name, a changed signature, a class definition), an added or removed file, a different `ry.toml`,
@@ -98,6 +106,7 @@ ry fmt           # rewrite files in place
 ry fmt --check   # name the files that would change, and exit 1 if any would
 ry fmt --diff    # show the changes without writing them, and exit 1 if any
 ry fmt --range 3-8 R/report.R   # format only lines 3 to 8 of one file
+ry fmt --verbose # also print how many bytes were formatted, and how fast
 ```
 
 `--range` takes `LINE`, `START-END`, or `LINE:COLUMN-LINE:COLUMN`, counting from 1. It formats the
@@ -157,8 +166,8 @@ and stops it at its ends instead. knitr and rmarkdown documents with plot chunks
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
-guide](/guides/console) describes what its completion knows. Started inside an R package, either
-console [loads it](/guides/loading-packages) and reloads what changed before each command, and
+guide](/guides/running) describes what its completion knows. Started inside an R package, either
+console [loads it](/guides/running) and reloads what changed before each command, and
 `--no-load` turns that off. `--keybindings` and `--no-load` apply
 only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
 checked under its own name before the console opens, and a strict-mode refusal exits 1.
@@ -167,12 +176,12 @@ With standard input piped (`echo '1 + 1' | ry run`), the console skips the edito
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
 like `R --no-echo`, except that it keeps going after an error.
 
-`ry repl` still works. It is the earlier name of `ry R`'s console, and it keeps its `-f FILE`, which
-is `ry R -i FILE`.
+`ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),
+and it keeps its `-f FILE`, which is `ry R -i FILE`.
 
 ## load and server
 
-`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
+`ry load` [loads the package](/guides/running) at `PATH` (default: the one containing the
 current directory) on ry's runtime, then runs each `-e EXPR` and the `-f FILE` script, and exits
 like `ry run`. `ry load --r-entry` prints the R code that gives a plain R session the same
 `load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in the scripts
@@ -202,15 +211,50 @@ reporter's, and the command exits with `1` when a test fails or errors.
 `ry document` loads the package at `PATH` the way `ry load` does and runs roxygen2 against the
 loaded namespace, as `devtools::document()` does, writing the same `man/*.Rd` files and `NAMESPACE`
 byte for byte. roxygen2 must be installed. `--roclet NAME` (repeatable) runs only the named
-roclets, such as `rd` or `namespace`; by default the package's own roxygen options decide.
+roclets, such as `rd` or `namespace`. Without it, the package's own roxygen options decide, and a
+package that sets none gets `collate`, `namespace` and `rd`.
 
-Two things make it faster than roxygen2 alone, without changing what it writes. The parsed
-documentation blocks of each file are cached in ry's cache directory, so a run
-parses again only the files whose content changed, and the steps of roxygen2 that take time
-quadratic in the number of topics (collecting them, ordering them for `@inherit`, and finding
-them by name) run in linear time. A cached block keeps the markdown links it
-resolved when it was parsed, so after you install or remove a package a link points at, edit the
-file or delete the cache.
+Three things make it faster than roxygen2 alone, without changing what it writes. The parsed
+documentation blocks of each file are cached in ry's cache directory, so a run parses again only
+the files whose content changed. The finished Rd text of every topic is cached too, so after an
+edit only the topics that can have changed are rebuilt: those with a block in an edited file, those
+that inherit from them (`@inheritParams` and the other `@inherit` tags) or share a `@family` with
+them, and, every time, the package topic and any topic built from a block ry cannot track. A block
+is tracked only when it documents a function defined right below it under a name without a dot (a
+dotted name may become an S3 method when another file adds a generic) and uses none of the tags
+that read other files or the namespace: `@eval`, `@evalRd`, `@evalNamespace`, `@template`,
+`@templateVar`, `@example`, `@includeRmd`, `@describeIn`, `@method`, `@exportS3Method` and
+`@R6method`. Every other topic is written from the cache. Finally, the steps of roxygen2 that
+take time quadratic in the number of topics (collecting them, ordering them for `@inherit`, and
+finding them by name) run in linear time.
+
+The caches keep two things roxygen2 would recompute: the markdown links a block resolved against
+installed packages, and documentation inherited from another package. After you install or remove
+a package a link or an `@inherit` points at, edit the file or delete the cache, which lives in
+`~/.cache/ry/roxygen/` (or under `$XDG_CACHE_HOME`).
+
+## build and install
+
+```sh
+ry build                  # write ../<package>_<version>.tar.gz
+ry build -o dist          # write it into dist/ instead
+ry install                # install into the first library on .libPaths()
+ry install -l ~/rlib      # install into ~/rlib
+```
+
+`ry build` writes the source tarball of the package at `PATH` (default: the one containing the
+current directory), as `devtools::build()` does: it runs `R CMD build --no-resave-data
+--no-manual`, rebuilds the vignettes unless you pass `--no-vignettes`, and prints the tarball's path
+on stdout. The tarball goes beside the package directory unless `-o DIR` names another.
+
+`ry install` installs the package as `devtools::install()` does: it builds a tarball without
+rebuilding the vignettes in a temporary directory, installs it with `R CMD INSTALL`, and deletes the
+tarball. `-l DIR` names the library, which is created if it does not exist. The package's dependencies must
+already be installed.
+
+Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home, so compiled code is
+built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
+instead.
 
 ## debug-adapter
 
@@ -230,13 +274,13 @@ aids for working on ry itself.
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run`, `R` or `load` hit an error in the script or the package, `test` saw a test fail,
-  strict mode refused a script, or the server stopped after an analysis panic. A script that calls
-  `q(status = n)` exits with `n`.
+  `--diff` found a file to change, `run`, `R` or `load` hit an error in the script or the package,
+  `test` saw a test fail, `document` hit an error in roxygen2, strict mode refused a script, or the
+  server stopped after an analysis panic. A script that calls `q(status = n)` exits with `n`.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
-  not exist, a file, script or stub it cannot read, an invalid `exclude` pattern, for `load` and `test` a path
-  inside no package, or, for `run`, `R`, `load`, and `test`, no usable R or no ry runtime library. A `2` overrides a `1`, so a broken
-  setup never looks like ordinary findings.
+  not exist, a file, script or stub it cannot read, an invalid `exclude` pattern, for `load`, `test`
+  and `document` a path inside no package, or, for the commands that need R, no usable R or no ry
+  runtime library. A `2` overrides a `1`, so a broken setup never looks like ordinary findings.
 
 A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not
 a `2`.

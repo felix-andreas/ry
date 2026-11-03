@@ -5,6 +5,8 @@
 //! on ry. With `RY_SOURCE_PACKAGES` set to a directory of source tarballs, every one is
 //! installed that way and the outcome is reported in `target/tmp/source-packages.tsv`.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

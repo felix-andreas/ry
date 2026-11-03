@@ -25,10 +25,6 @@ case "$archive" in
 esac
 ry="$scratch/install/ry"
 [ -x "$ry.exe" ] && ry="$ry.exe"
-runtime=""
-for library in libR.so libR.dylib R.dll; do
-	[ -e "$scratch/install/$library" ] && runtime=$library
-done
 
 # ry.exe and GNU R on Windows read Windows paths, not Git Bash's /tmp/... spelling.
 native_path() {
@@ -36,6 +32,15 @@ native_path() {
 }
 
 if version=$("$ry" --version); then pass "ry --version: $version"; else fail "ry --version"; fi
+
+# The runtime and the R front end are built into `ry`, which extracts the runtime on first use.
+contents=$(cd "$scratch/install" && LC_ALL=C ls | tr '\n' ' ')
+case "$contents" in
+"LICENSE THIRD_PARTY_NOTICES ry " | "LICENSE THIRD_PARTY_NOTICES ry.exe ") pass "the archive holds ry alone" ;;
+*) fail "the archive holds more than ry: $contents" ;;
+esac
+XDG_CACHE_HOME=$(native_path "$scratch/cache")
+export XDG_CACHE_HOME
 
 cd "$scratch/project"
 printf 'f <- function(rate) {\n  rate * ratee\n}\n' >bug.R
@@ -89,23 +94,18 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 		export R_HOME
 	fi
 	printf 'cat(sum(1:10), "\\n")\n' >sum.R
-	if [ -n "$runtime" ]; then
-		output=$("$ry" run sum.R 2>&1 | tr -d '\r') || true
-		if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output"; fi
-		# A matrix product goes through BLAS and solve() through LAPACK, which on Windows are the
-		# R installation's Rblas.dll and Rlapack.dll bound to ry's R.dll.
-		printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
-		output=$("$ry" run linalg.R 2>&1 | tr -d '\r') || true
-		if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
-		# `ry load` compiles a package's src/ with the ry-rcmd it finds beside the runtime.
-		if [ -x "$scratch/install/ry-rcmd" ] || [ -x "$scratch/install/ry-rcmd.exe" ]; then
-			pass "the archive carries ry-rcmd beside the runtime"
-		else
-			fail "the archive carries no ry-rcmd beside the runtime"
-		fi
+	output=$("$ry" run sum.R 2>&1 | tr -d '\r') || true
+	if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output"; fi
+	if ls "$scratch/cache/ry/runtime/"*/*R.* >/dev/null 2>&1; then
+		pass "ry extracted its runtime into the cache"
 	else
-		echo "skip  ry run (this archive carries no runtime)"
+		fail "ry extracted no runtime into $scratch/cache/ry/runtime"
 	fi
+	# A matrix product runs in ry's own kernels, and solve() goes through LAPACK and the BLAS it
+	# calls, which on Windows are the R installation's Rlapack.dll and Rblas.dll bound to ry's R.dll.
+	printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
+	output=$("$ry" run linalg.R 2>&1 | tr -d '\r') || true
+	if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
 	output=$("$ry" R sum.R 2>&1 | tr -d '\r') || true
 	if [ "$output" = "55 " ]; then pass "ry R on GNU R"; else fail "ry R: $output"; fi
 
@@ -113,7 +113,7 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 	# from source on Linux), must load under ry's runtime and call its C routines there. On macOS this is
 	# what proves ry rebinds the package's libR reference to its own runtime. It downloads from
 	# CRAN, so it runs only when asked.
-	if [ -n "${RY_SMOKE_PACKAGES:-}" ] && [ -n "$runtime" ]; then
+	if [ -n "${RY_SMOKE_PACKAGES:-}" ]; then
 		mkdir -p "$scratch/library"
 		library=$(native_path "$scratch/library")
 		Rscript -e "install.packages('jsonlite', lib = '$library', repos = 'https://cloud.r-project.org', quiet = TRUE)" >/dev/null 2>&1 || true
@@ -123,6 +123,27 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 			pass "ry run loads a compiled package GNU R installed"
 		else
 			fail "ry run with jsonlite: $output"
+		fi
+		# `ry install` compiles C code through the R front end that `ry` itself answers.
+		mkdir -p "$scratch/twice/R" "$scratch/twice/src"
+		printf 'Package: twice\nVersion: 1.0\nTitle: Twice\nDescription: Doubles.\nLicense: MIT\n' >"$scratch/twice/DESCRIPTION"
+		printf 'useDynLib(twice, .registration = TRUE)\nexport(twice)\n' >"$scratch/twice/NAMESPACE"
+		printf 'twice <- function(x) .Call(C_twice, as.numeric(x))\n' >"$scratch/twice/R/twice.R"
+		cat >"$scratch/twice/src/twice.c" <<'EOF'
+#include <R.h>
+#include <Rinternals.h>
+#include <R_ext/Rdynload.h>
+static SEXP twice(SEXP x) { return Rf_ScalarReal(2 * REAL(x)[0]); }
+static const R_CallMethodDef calls[] = {{"C_twice", (DL_FUNC) &twice, 1}, {NULL, NULL, 0}};
+void R_init_twice(DllInfo *info) { R_registerRoutines(info, NULL, calls, NULL, NULL); R_useDynamicSymbols(info, FALSE); }
+EOF
+		output=$("$ry" install "$(native_path "$scratch/twice")" -l "$library" 2>&1) && status=0 || status=$?
+		printf 'library(twice, lib.loc = "%s")\ncat(twice(21), "\\n")\n' "$library" >twice.R
+		run=$("$ry" run twice.R 2>&1 | tr -d '\r') || true
+		if [ "$status" -eq 0 ] && [ "$run" = "42 " ]; then
+			pass "ry install builds a compiled package for ry's runtime"
+		else
+			fail "ry install (exit $status): $output; ry run: $run"
 		fi
 	fi
 else

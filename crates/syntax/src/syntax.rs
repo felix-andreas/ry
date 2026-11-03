@@ -17,7 +17,7 @@ use std::{borrow::Cow, sync::Arc};
 pub use {
     kind::SyntaxKind,
     lexer::{Token, is_syntactic_name, lex},
-    parser::parse,
+    parser::{infix_binding_power, parse},
     text_size::{TextLen, TextRange, TextSize},
     tree::{
         ChildrenRef, Direction, ElementRef, NodeOrToken, NodeRef, Preorder, PreorderWithTokens,
@@ -36,10 +36,22 @@ pub struct SyntaxError {
     /// Caused by the input ending too early: an opener it never closes, or a construct the end
     /// of the input cuts off. A console reads more input instead of reporting it.
     pub incomplete: bool,
-    /// The token the parser stood on when it found the error, or `None` at the end of the
-    /// input. R's own parser reports this token ("unexpected symbol"), not the construct the
-    /// message names.
-    pub found: Option<TextRange>,
+    /// What R's own parser reports for this error in place of the message.
+    pub unexpected: Unexpected,
+}
+
+/// What R's own parser stops on when it meets a syntax error. R names that token ("unexpected
+/// symbol"), not the construct ry's message describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unexpected {
+    /// The token the parser stood on when it found the error.
+    Token(TextRange),
+    /// The end of the input.
+    EndOfInput,
+    /// Nothing: the error breaks one of ry's own rules for a construct that parsed in full,
+    /// such as a tuple item with a name, so R's grammar has no report for it and ry's message
+    /// is the only one.
+    Nothing,
 }
 
 impl SyntaxError {
@@ -49,7 +61,7 @@ impl SyntaxError {
             range,
             in_annotation: false,
             incomplete: false,
-            found: None,
+            unexpected: Unexpected::EndOfInput,
         }
     }
 }

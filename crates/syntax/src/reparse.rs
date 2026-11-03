@@ -4,7 +4,7 @@
 
 use {
     crate::{
-        NodeOrToken, Parse, SyntaxElement,
+        NodeOrToken, Parse, SyntaxElement, Unexpected,
         kind::SyntaxKind::{self, *},
         lexer::lex,
         parse,
@@ -63,12 +63,16 @@ pub fn try_splice(
     }
 
     // An unterminated string in the prefix ends at its line break only because no closing quote
-    // follows it; a quote anywhere after it would extend it across the edit.
-    if old
-        .errors()
-        .iter()
-        .any(|error| error.range.start() < prefix_len && error.message.starts_with("unterminated"))
-    {
+    // follows it; a quote anywhere after it would extend it across the edit. An unclosed
+    // delimiter in the prefix is the same: recovery ended its group early, and a closer the edit
+    // adds anywhere after it would close it there instead. A `[[` closed by a single `]`
+    // reports its missing closer without the word "unclosed", so the closer phrase counts too.
+    if old.errors().iter().any(|error| {
+        error.range.start() < prefix_len
+            && (error.message.starts_with("unterminated")
+                || error.message.starts_with("unclosed")
+                || error.message.contains("to close"))
+    }) {
         return None;
     }
     let middle_text = &new_text[usize::from(prefix_len)..new_suffix_start];
@@ -144,7 +148,7 @@ pub fn try_splice(
         if error.range.end() <= prefix_len {
             // The token the parser stood on can lie past the error, in the replaced region,
             // where a reparse might stand on a different one.
-            if error.found.is_some_and(|found| found.end() > prefix_len) {
+            if matches!(error.unexpected, Unexpected::Token(found) if found.end() > prefix_len) {
                 return None;
             }
             errors.push(error.clone());
@@ -153,7 +157,9 @@ pub fn try_splice(
             // it belongs to the replaced region, whose parse re-derives it.
             let mut rebased = error.clone();
             rebased.range = shift(error.range, delta);
-            rebased.found = error.found.map(|found| shift(found, delta));
+            if let Unexpected::Token(found) = &mut rebased.unexpected {
+                *found = shift(*found, delta);
+            }
             errors.push(rebased);
         }
     }
@@ -161,7 +167,9 @@ pub fn try_splice(
     for error in middle.errors() {
         let mut rebased = error.clone();
         rebased.range = shift(error.range, prefix);
-        rebased.found = error.found.map(|found| shift(found, prefix));
+        if let Unexpected::Token(found) = &mut rebased.unexpected {
+            *found = shift(*found, prefix);
+        }
         errors.push(rebased);
     }
 

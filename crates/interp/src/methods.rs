@@ -58,6 +58,9 @@ pub struct DeferredDefinitions {
     pub key: String,
     pub classes: FxHashSet<Box<[u8]>>,
     pub generics: FxHashSet<Box<[u8]>>,
+    /// Primitives the definitions add methods to, which dispatch on an object of one of
+    /// `classes` only once they have run.
+    pub primitives: FxHashSet<Box<[u8]>>,
     /// A closure of no arguments.
     pub force: Sexp,
 }
@@ -750,19 +753,29 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(generic)
 }
 
-enum Lookup {
+/// What a lookup that may need deferred definitions is after, by name.
+pub(crate) enum Lookup<'a> {
+    /// A class missing from the class cache.
     Class,
     Generic,
+    /// A primitive about to dispatch on S4 objects of these classes.
+    Primitive(&'a [&'a [u8]]),
 }
 
-/// Runs the deferred definitions that define the class or generic `name`, if any, and reports
-/// whether it ran some. They are unregistered first, so a lookup they make themselves finds
-/// nothing deferred.
-unsafe fn force_deferred(name: &[u8], lookup: Lookup) -> R<bool> {
+/// Runs the deferred definitions that the lookup of `name` needs, if any, and reports whether
+/// it ran some. They are unregistered first, so a lookup they make themselves finds nothing
+/// deferred.
+pub(crate) unsafe fn force_deferred(name: &[u8], lookup: Lookup<'_>) -> R<bool> {
     let deferred = &mut interp().globals.deferred_definitions;
     let Some(position) = deferred.iter().position(|definitions| match lookup {
         Lookup::Class => definitions.classes.contains(name),
         Lookup::Generic => definitions.generics.contains(name),
+        Lookup::Primitive(classes) => {
+            definitions.primitives.contains(name)
+                && classes
+                    .iter()
+                    .any(|class| definitions.classes.contains(*class))
+        }
     }) else {
         return Ok(false);
     };

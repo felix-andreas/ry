@@ -151,6 +151,10 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
             plan.touched_names().map_or(RValue::Null, RValue::Character),
         ),
         (
+            "changed".into(),
+            plan.changed_names().map_or(RValue::Null, RValue::Character),
+        ),
+        (
             "keeps_names".into(),
             RValue::Logical(plan.keeps_names && plan.touched_names().is_some()),
         ),
@@ -175,8 +179,36 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                     ("classes".into(), strings(&deferred.classes)),
                     ("generics".into(), strings(&deferred.generics)),
                     (
-                        "foreign_generics".into(),
-                        strings(&deferred.foreign_generics),
+                        "foreign_methods".into(),
+                        RValue::Vector(
+                            deferred
+                                .foreign_methods
+                                .iter()
+                                .map(|method| {
+                                    RValue::List(vec![
+                                        (
+                                            "generic".into(),
+                                            RValue::Character(vec![method.generic.clone()]),
+                                        ),
+                                        (
+                                            "signature".into(),
+                                            RValue::List(
+                                                method
+                                                    .signature
+                                                    .iter()
+                                                    .map(|(argument, class)| {
+                                                        (
+                                                            argument.clone().unwrap_or_default(),
+                                                            RValue::Character(vec![class.clone()]),
+                                                        )
+                                                    })
+                                                    .collect(),
+                                            ),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        ),
                     ),
                     (
                         "cache_key".into(),

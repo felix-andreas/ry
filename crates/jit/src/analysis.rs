@@ -558,38 +558,150 @@ pub enum Argument {
 
 /// A callback-taking library function compiled code runs as a loop of its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Traversal {
-    /// `List.walk(list, state, f)`: the state after `f(state, x)` for each element in turn.
-    Walk,
-    /// `List.map(list, f)`.
+pub struct Traversal {
+    pub fold: Fold,
+    pub source: Source,
+    /// Visits the elements from the last to the first.
+    pub backwards: bool,
+    /// Also passes the callback each element's 1-based position, as its last argument.
+    pub indexed: bool,
+    /// Starts at the position the argument after the collection gives (`List.walk_from`).
+    pub from: bool,
+}
+
+/// What a [`Traversal`] makes of the callback's answers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    /// The state after `f(state, ...)` for each element in turn. With `until`, `f` answers
+    /// `:Continue(state)` or `:Break(state)`, and a break ends the walk.
+    Walk { until: bool },
+    /// `List.map`: a list of the answers.
     Map,
-    /// `List.keep_if(list, predicate)` and, when false, `List.drop_if`.
+    /// `List.keep_if` and, when false, `List.drop_if`.
     Filter(bool),
-    /// `List.any(list, predicate)`: stops at the first element that passes.
+    /// `List.any`: stops at the first element that passes.
     Any,
-    /// `List.all(list, predicate)`: stops at the first element that fails.
+    /// `List.all`: stops at the first element that fails.
     All,
-    /// `List.count_if(list, predicate)`.
+    /// `List.count_if`.
     CountIf,
+    /// `List.find_first` and its kin: `:Ok` of the first element that passes, or of its
+    /// position when `index`, and `:Err(:NotFound)` when none does.
+    Find { index: bool },
+}
+
+/// What a [`Traversal`] walks over.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// A plain list, each element one argument.
+    List,
+    /// A dictionary, each entry two arguments: the key, then the value.
+    Dict,
+    /// A set, each key one argument.
+    Set,
 }
 
 impl Traversal {
     fn of(name: &str) -> Option<Traversal> {
-        Some(match name {
-            "List.walk" => Traversal::Walk,
-            "List.map" => Traversal::Map,
-            "List.keep_if" => Traversal::Filter(true),
-            "List.drop_if" => Traversal::Filter(false),
-            "List.any" => Traversal::Any,
-            "List.all" => Traversal::All,
-            "List.count_if" => Traversal::CountIf,
+        let (source, function) = name.split_once('.')?;
+        let source = match source {
+            "List" => Source::List,
+            "Dict" => Source::Dict,
+            "Set" => Source::Set,
             _ => return None,
-        })
+        };
+        let plain = Traversal {
+            fold: Fold::Walk { until: false },
+            source,
+            backwards: false,
+            indexed: false,
+            from: false,
+        };
+        let until = Fold::Walk { until: true };
+        let traversal = match (source, function) {
+            (_, "walk") => plain,
+            (_, "walk_until") => Traversal {
+                fold: until,
+                ..plain
+            },
+            (Source::List, "walk_backwards") => Traversal {
+                backwards: true,
+                ..plain
+            },
+            (Source::List, "walk_backwards_until") => Traversal {
+                fold: until,
+                backwards: true,
+                ..plain
+            },
+            (Source::List, "walk_with_index") => Traversal {
+                indexed: true,
+                ..plain
+            },
+            (Source::List, "walk_with_index_until") => Traversal {
+                fold: until,
+                indexed: true,
+                ..plain
+            },
+            (Source::List, "walk_from") => Traversal {
+                from: true,
+                ..plain
+            },
+            (Source::List, "walk_from_until") => Traversal {
+                fold: until,
+                from: true,
+                ..plain
+            },
+            (Source::List, "map") => Traversal {
+                fold: Fold::Map,
+                ..plain
+            },
+            (Source::List, "map_with_index") => Traversal {
+                fold: Fold::Map,
+                indexed: true,
+                ..plain
+            },
+            (Source::List, "keep_if") => Traversal {
+                fold: Fold::Filter(true),
+                ..plain
+            },
+            (Source::List, "drop_if") => Traversal {
+                fold: Fold::Filter(false),
+                ..plain
+            },
+            (Source::List, "any") => Traversal {
+                fold: Fold::Any,
+                ..plain
+            },
+            (Source::List, "all") => Traversal {
+                fold: Fold::All,
+                ..plain
+            },
+            (Source::List, "count_if") => Traversal {
+                fold: Fold::CountIf,
+                ..plain
+            },
+            (Source::List, "find_first" | "find_last" | "find_first_index" | "find_last_index") => {
+                Traversal {
+                    fold: Fold::Find {
+                        index: function.ends_with("_index"),
+                    },
+                    backwards: function.starts_with("find_last"),
+                    ..plain
+                }
+            }
+            _ => return None,
+        };
+        Some(traversal)
     }
 
     /// Whether the callback is a predicate, whose answer must be `TRUE` or `FALSE`.
     pub fn is_predicate(self) -> bool {
-        !matches!(self, Traversal::Walk | Traversal::Map)
+        !matches!(self.fold, Fold::Walk { .. } | Fold::Map)
+    }
+
+    /// How many arguments the callback takes for each element, before any position.
+    fn items(self) -> usize {
+        if self.source == Source::Dict { 2 } else { 1 }
     }
 }
 
@@ -638,25 +750,45 @@ pub enum Action<'a> {
     Inline {
         steps: &'a [(Action<'a>, StateId)],
     },
-    /// A library traversal whose callback was inlined: compiled code loops over the plain list
-    /// in `list` itself, unboxing each element into `element` and running `steps`, which leave
+    /// A library traversal whose callback was inlined: compiled code loops over the collection
+    /// itself, unboxing each element's arguments into `items` and running `steps`, which leave
     /// the callback's value in `result`. `prelude` loads the variables the callback reads once,
     /// before the loop. Like an inlined call, none of the steps has an effect, so any check that
     /// fails hands the whole call back to tier 0, which runs it from the start.
     Traverse {
         traversal: Traversal,
-        list: usize,
-        /// For [`Traversal::Walk`], the register of the initial state and the temporary the
-        /// callback reads the state from.
+        collection: usize,
+        /// For [`Traversal::from`], the register of the position to start at and its type.
+        start: Option<(usize, Ty)>,
+        /// For a walk, the register of the initial state and the temporary the callback reads
+        /// the state from.
         accumulator: Option<(usize, usize)>,
         /// For a callback named by a variable, its register and the closure the loop inlines,
         /// which the loop checks the register still holds.
         expected: Option<(usize, Sexp)>,
-        element: (usize, Ty),
+        /// The temporaries the callback reads each element's arguments from, unboxed to their
+        /// types: the element, or a dictionary entry's key and value. `None` for an argument
+        /// the callback never reads.
+        items: [Option<(usize, Ty)>; 2],
+        /// For [`Traversal::indexed`], the temporary holding the element's position.
+        index: Option<usize>,
+        /// For a dictionary or set, the temporaries the loop keeps its keys and values in.
+        parts: Option<(usize, usize)>,
         prelude: &'a [(Action<'a>, StateId)],
         steps: &'a [(Action<'a>, StateId)],
         result: (usize, Ty),
+        /// For a `walk_until`, the logical register that is true when the callback breaks.
+        broke: Option<usize>,
         dst: usize,
+    },
+    /// The unboxed `then` where the logical `condition` is true and `otherwise` where it is
+    /// false. An `NA` condition hands the instruction to tier 0, which raises `if`'s error.
+    Select {
+        dst: usize,
+        condition: usize,
+        then: usize,
+        otherwise: usize,
+        ty: Ty,
     },
     /// Loads a slot without forcing a promise, handing the instruction to tier 0 when the
     /// variable is not a plain value. Only inlined calls use it.
@@ -689,12 +821,13 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
-    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
-    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
+    /// vectors as objects), and puts its unboxed value in `dst`. When the function fails, tier 0
+    /// runs the call instead.
     NativeCall {
         steps: &'a [(Action<'a>, StateId)],
         native: &'static Native,
-        args: &'a [usize],
+        args: &'a [Argument],
         dst: usize,
     },
     /// Runs the instruction in tier 0, then refines its destination register.
@@ -846,6 +979,19 @@ pub struct Plan<'a> {
     pub loop_headers: List<'a, usize>,
 }
 
+/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
+/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
+/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
+/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
+/// hot, because there the compiled loop control and the native instructions repeat.
+pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
+/// The refusal for compiling a fully typed closure at its first call when the call cannot run
+/// long: the body has no loop and calls no closure or native function directly, so the
+/// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
+/// times such a call, so the body waits until it is hot like any other.
+pub const BRIEF: &str = "the first call would end before compiling paid for itself";
+
 impl Plan<'_> {
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
@@ -929,6 +1075,9 @@ impl Lowering<'_> {
     }
 }
 
+/// The register of a callback argument inlined code must not read.
+const UNUSED: usize = usize::MAX;
+
 /// Why a body is not compiled.
 #[derive(Debug)]
 pub struct Refusal(pub &'static str);
@@ -948,23 +1097,46 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty()
-            || self.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    Action::Inline { .. }
-                        | Action::Traverse { .. }
-                        | Action::Call { .. }
-                        | Action::NativeCall { .. }
-                        | Action::Arithmetic { .. }
-                        | Action::Comparison { .. }
-                        | Action::Intrinsic { .. }
-                        | Action::SubAssign { .. }
-                        | Action::LogicLeft { .. }
-                        | Action::LogicRight { .. }
-                )
-            })
+        !self.loop_headers.is_empty() || self.native_actions() > 0
     }
+
+    /// Whether one activation of the body can run long: it has a loop, or it calls a closure
+    /// or native function directly, which may be the body itself.
+    pub fn may_run_long(&self) -> bool {
+        !self.loop_headers.is_empty()
+            || self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
+    }
+
+    /// How many actions compiled code does itself, and how many it hands to tier 0.
+    pub fn native_actions(&self) -> usize {
+        self.actions.iter().filter(|action| native(action)).count()
+    }
+
+    pub fn tier0_actions(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|action| matches!(action, Action::Step { .. }))
+            .count()
+    }
+}
+
+fn native(action: &Action<'_>) -> bool {
+    matches!(
+        action,
+        Action::Inline { .. }
+            | Action::Traverse { .. }
+            | Action::Call { .. }
+            | Action::NativeCall { .. }
+            | Action::Arithmetic { .. }
+            | Action::Comparison { .. }
+            | Action::Intrinsic { .. }
+            | Action::SubAssign { .. }
+            | Action::LogicLeft { .. }
+            | Action::LogicRight { .. }
+    )
 }
 
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
@@ -2270,7 +2442,7 @@ impl<'a> Builder<'a> {
     /// Compiles a call of a callback-taking library function into a loop when its callback is
     /// a closure whose body inlines, given each element as an unboxed scalar of the type the
     /// closure's own feedback (or its signature) says its arguments have been. The library
-    /// function checks its arguments in the same order, so a list that is not plain or an
+    /// function checks its arguments in the same order, so a collection that is not plain or an
     /// element of another type only hands the call back to tier 0.
     unsafe fn traverse(
         &mut self,
@@ -2280,13 +2452,28 @@ impl<'a> Builder<'a> {
         args: &[usize],
         dst: usize,
     ) -> Option<Action<'a>> {
-        let (list, initial, callback) = match (traversal, args) {
-            (Traversal::Walk, &[list, initial, callback]) => (list, Some(initial), callback),
-            (Traversal::Walk, _) => return None,
-            (_, &[list, callback]) => (list, None, callback),
-            _ => return None,
+        let walks = matches!(traversal.fold, Fold::Walk { .. });
+        if args.len() != 2 + usize::from(walks) + usize::from(traversal.from) {
+            return None;
+        }
+        let collection = args[0];
+        let callback = args[args.len() - 1];
+        let initial = walks.then(|| args[args.len() - 2]);
+        let start = match traversal.from {
+            true => {
+                let ty = state.registers[args[1]];
+                if !matches!(ty, Ty::Int | Ty::Dbl) {
+                    return None;
+                }
+                Some((args[1], ty))
+            }
+            false => None,
         };
-        if !matches!(state.registers[list], Ty::List | Ty::Boxed) {
+        let plain = match traversal.source {
+            Source::List => matches!(state.registers[collection], Ty::List | Ty::Boxed),
+            Source::Dict | Source::Set => state.registers[collection] == Ty::Boxed,
+        };
+        if !plain {
             return None;
         }
         let mut expected = None;
@@ -2323,7 +2510,8 @@ impl<'a> Builder<'a> {
             Ok(_) => return None,
         };
         let parameters = values::pairlist_items(formals);
-        if parameters.len() != args.len() - 1
+        let arity = usize::from(walks) + traversal.items() + usize::from(traversal.indexed);
+        if parameters.len() != arity
             || parameters
                 .iter()
                 .any(|(symbol, _)| *symbol == values::symbols().dots)
@@ -2331,10 +2519,6 @@ impl<'a> Builder<'a> {
             return None;
         }
         let hints = formal_hints(self.arena, code, formals)?;
-        let element_ty = *hints.last()?;
-        if !element_ty.is_unboxed() {
-            return None;
-        }
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -2353,27 +2537,76 @@ impl<'a> Builder<'a> {
             lowering.scope.push((parameters[0].0, register));
             accumulator = Some((initial, register));
         }
-        let element = lowering.temporary()?;
-        lowering.state.registers[element] = element_ty;
-        lowering
-            .scope
-            .push((parameters[parameters.len() - 1].0, element));
+        // An element argument the callback has never read an unboxed value from is one the
+        // inlined body must not read at all: binding it to no register makes every read of it
+        // refuse, rather than letting the name fall through to a variable of this frame.
+        let mut items = [None; 2];
+        for (item, at) in items.iter_mut().zip(usize::from(walks)..) {
+            if at >= usize::from(walks) + traversal.items() {
+                break;
+            }
+            let ty = hints[at];
+            let register = match ty.is_unboxed() {
+                true => {
+                    let register = lowering.temporary()?;
+                    lowering.state.registers[register] = ty;
+                    *item = Some((register, ty));
+                    register
+                }
+                false => UNUSED,
+            };
+            lowering.scope.push((parameters[at].0, register));
+        }
+        let index = match traversal.indexed {
+            true => {
+                let register = lowering.temporary()?;
+                lowering.state.registers[register] = Ty::Int;
+                lowering.scope.push((parameters[arity - 1].0, register));
+                Some(register)
+            }
+            false => None,
+        };
+        let parts = match traversal.source {
+            Source::List => None,
+            Source::Dict | Source::Set => {
+                let keys = lowering.temporary()?;
+                let values = lowering.temporary()?;
+                lowering.state.registers[keys] = Ty::Boxed;
+                lowering.state.registers[values] = Ty::Boxed;
+                Some((keys, values))
+            }
+        };
         let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
             .scope
             .iter()
-            .map(|&(_, register)| lowering.state.registers[register].storage())
+            .map(|&(_, register)| {
+                lowering
+                    .state
+                    .registers
+                    .get(register)
+                    .and_then(|ty| ty.storage())
+            })
             .collect();
-        let result = self.lower_expression(&mut lowering, body, 0)?;
+        let (result, broke) = match traversal.fold {
+            Fold::Walk { until: true } => {
+                let (broke, value) = self.lower_step(&mut lowering, body, 0)?;
+                (value, Some(broke))
+            }
+            _ => (self.lower_expression(&mut lowering, body, 0)?, None),
+        };
         let result_ty = lowering.state.registers[result];
-        let returned = result_ty.storage();
+        let returned = match broke {
+            Some(_) => None,
+            None => result_ty.storage(),
+        };
         if !annotations::admits_inline(formals, body, &arguments, returned) {
             return None;
         }
-        let fits = match traversal {
-            Traversal::Walk => {
+        let fits = match traversal.fold {
+            Fold::Walk { .. } => {
                 accumulator.is_some_and(|(initial, _)| state.registers[initial] == result_ty)
             }
-            Traversal::Map => result_ty.is_unboxed(),
+            Fold::Map => result_ty.is_unboxed(),
             _ => result_ty == Ty::Lgl,
         };
         if !fits {
@@ -2393,11 +2626,12 @@ impl<'a> Builder<'a> {
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
         }
-        after.registers[dst] = match traversal {
-            Traversal::Walk => result_ty,
-            Traversal::Map | Traversal::Filter(_) => Ty::List,
-            Traversal::Any | Traversal::All => Ty::Lgl,
-            Traversal::CountIf => Ty::Int,
+        after.registers[dst] = match traversal.fold {
+            Fold::Walk { .. } => result_ty,
+            Fold::Map | Fold::Filter(_) => Ty::List,
+            Fold::Any | Fold::All => Ty::Lgl,
+            Fold::CountIf => Ty::Int,
+            Fold::Find { .. } => Ty::Boxed,
         };
         after.visible = Some(true);
         *state = after;
@@ -2406,15 +2640,115 @@ impl<'a> Builder<'a> {
         self.speculations.extend(speculation);
         Some(Action::Traverse {
             traversal,
-            list,
+            collection,
+            start,
             accumulator,
             expected,
-            element: (element, element_ty),
+            items,
+            index,
+            parts,
             prelude: prelude.leak(),
             steps: steps.leak(),
             result: (result, result_ty),
+            broke,
             dst,
         })
+    }
+
+    /// Lowers the body of a `walk_until` callback, whose answer is `:Continue(state)` or
+    /// `:Break(state)`, into a logical register that is true for a break and the register of
+    /// the state. A body is a tag, or an `if` whose branches are bodies.
+    unsafe fn lower_step(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        expression: Sexp,
+        depth: usize,
+    ) -> Option<(usize, usize)> {
+        if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+            return None;
+        }
+        let head = expression.car();
+        if lowering.scope.iter().any(|(symbol, _)| *symbol == head) {
+            return None;
+        }
+        let args: SmallVec<[(Sexp, Sexp); 4]> = values::pairlist_items(expression.cdr())
+            .into_iter()
+            .collect();
+        if args.iter().any(|(tag, value)| {
+            *tag != values::nil()
+                || *value == values::missing_arg()
+                || *value == values::symbols().dots
+        }) {
+            return None;
+        }
+        let function = self.resolve_head(lowering, head)?;
+        let name = base_builtin(function, head)?;
+        match (name.as_str(), args.as_slice()) {
+            ("(" | "{", [(_, inner)]) => self.lower_step(lowering, *inner, depth),
+            ("if", [(_, condition), (_, then), (_, otherwise)]) => {
+                let condition = self.lower_expression(lowering, *condition, depth)?;
+                if lowering.state.registers[condition] != Ty::Lgl {
+                    return None;
+                }
+                let (then_broke, then_value) = self.lower_step(lowering, *then, depth)?;
+                let (else_broke, else_value) = self.lower_step(lowering, *otherwise, depth)?;
+                let broke = self.select(lowering, condition, then_broke, else_broke)?;
+                let value = self.select(lowering, condition, then_value, else_value)?;
+                Some((broke, value))
+            }
+            (".ry_tag", [(_, tag), (_, payload)]) => {
+                if tag.kind() != SexpType::String || values::length(*tag) != 1 {
+                    return None;
+                }
+                let known = interp::heap().known();
+                let flag = match &*values::char_str(values::string_elt(*tag, 0)) {
+                    "Break" => known.true_value,
+                    "Continue" => known.false_value,
+                    _ => return None,
+                };
+                let broke = lowering.temporary()?;
+                self.push_step(
+                    lowering,
+                    Action::Constant {
+                        dst: broke,
+                        value: flag,
+                        ty: Ty::Lgl,
+                    },
+                );
+                lowering.state.registers[broke] = Ty::Lgl;
+                let value = self.lower_expression(lowering, *payload, depth)?;
+                Some((broke, value))
+            }
+            _ => None,
+        }
+    }
+
+    /// The value of `then` where the logical `condition` is true and of `otherwise` where it is
+    /// false, both already computed; an `NA` condition hands the call back to tier 0.
+    unsafe fn select(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        condition: usize,
+        then: usize,
+        otherwise: usize,
+    ) -> Option<usize> {
+        let ty = lowering.state.registers[then];
+        if !ty.is_unboxed() || lowering.state.registers[otherwise] != ty {
+            return None;
+        }
+        let dst = lowering.temporary()?;
+        self.push_step(
+            lowering,
+            Action::Select {
+                dst,
+                condition,
+                then,
+                otherwise,
+                ty,
+            },
+        );
+        lowering.state.registers[dst] = ty;
+        Some(dst)
     }
 
     /// Calls `function` directly when every argument is a scalar computed without effects or a
@@ -2462,32 +2796,33 @@ impl<'a> Builder<'a> {
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
         }
-        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+        // A native function takes scalars unboxed and plain vectors as their objects.
+        let types: Option<SmallVec<[Ty; 4]>> = args
             .iter()
-            .map(|argument| match *argument {
-                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
-                _ => None,
+            .map(|argument| {
+                let ty = match *argument {
+                    Argument::Unboxed { ty, .. } => ty,
+                    Argument::Slot(slot) => after.slots[slot].ty,
+                };
+                (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
             .collect();
-        if let Some(unboxed) = unboxed {
-            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
-            if let Some(native) = native::native_for(function, &types) {
-                // The native function reads nothing of this frame, so the variables stay as
-                // they are.
-                after.visible = Some(true);
-                after.registers[dst.0] = native.result;
-                *state = after;
-                self.speculations
-                    .extend(native.speculations.iter().cloned());
-                let mut registers = List::new_in(self.arena);
-                registers.extend(unboxed.iter().map(|&(register, _)| register));
-                return Some(Action::NativeCall {
-                    steps: lowering.steps.leak(),
-                    native,
-                    args: registers.leak(),
-                    dst: dst.0,
-                });
-            }
+        if let Some(types) = types
+            && let Some(native) = native::native_for(function, &types)
+        {
+            // The native function reads nothing of this frame, so the variables stay as they
+            // are.
+            after.visible = Some(true);
+            after.registers[dst.0] = native.result;
+            *state = after;
+            self.speculations
+                .extend(native.speculations.iter().cloned());
+            return Some(Action::NativeCall {
+                steps: lowering.steps.leak(),
+                native,
+                args: args.leak(),
+                dst: dst.0,
+            });
         }
         if !self.frame_safe(function) {
             return None;
@@ -2614,7 +2949,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .find(|(symbol, _)| *symbol == expression)
                 {
-                    return Some(register);
+                    return (register != UNUSED).then_some(register);
                 }
                 if lowering.closed.is_some() {
                     return None;
@@ -2691,6 +3026,9 @@ impl<'a> Builder<'a> {
                     .collect();
                 match (name.as_str(), registers.as_slice()) {
                     ("(" | "{", [inner]) => Some(*inner),
+                    ("if", [condition, then, otherwise]) if types[0] == Ty::Lgl => {
+                        self.select(lowering, *condition, *then, *otherwise)
+                    }
                     (operator, [left, right])
                         if let Some(&(arith, _)) =
                             ARITHS.iter().find(|(_, symbol)| *symbol == operator) =>

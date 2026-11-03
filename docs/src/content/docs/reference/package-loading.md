@@ -3,7 +3,7 @@ title: Package loading
 description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
 ---
 
-[`ry load`](/guides/loading-packages), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
+[`ry load`](/guides/running), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
 This page is the exact behavior.
 
 ## A load
@@ -49,8 +49,8 @@ This page is the exact behavior.
   of both branches: an import on either one resolves the names it brings in.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
   and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against
-  ry's own headers and `libR`, with the `ry-rcmd` that sits beside ry's runtime; GNU R and
-  pkgbuild are not involved. The R home this needs is created once per build of ry in ry's cache
+  ry's own headers and `libR`, with ry's own `R CMD` front end; GNU R and pkgbuild are not
+  involved. The R home this needs is created once per build of ry in ry's cache
   directory (`~/.cache/ry/home` on Linux). On GNU R, `src/` is compiled with
   [pkgbuild](https://pkgbuild.r-lib.org), as `load_all()` does.
 - **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
@@ -101,16 +101,21 @@ A load holds them back only when all of these hold, and otherwise runs every one
 
 - Every S4 registration in the package is `setClass()` (alone or as `Gen <- setClass(...)`),
   `setGeneric()` with a function literal as its definition, `setMethod()` or `setReplaceMethod()` with
-  a literal signature, or `setValidity()`. Any other one, such as `setRefClass()` or
-  `setClassUnion()`, keeps them all in place.
+  a literal signature, `setValidity()`, or `setClassUnion()` with literal members. Any other one, such
+  as `setRefClass()`, keeps them all in place.
 - Every method is for a generic the package itself defines, or its signature names one of the
   package's own classes, as `setMethod("show", "Quantity", ...)` does. A method of the second kind
-  must be for a standard generic that already exists, such as `show`, and the held-back definitions
-  then also run the first time that generic dispatches or is looked up. A method for a primitive
-  such as `length`, for a group generic such as `Arith`, or for a function that is not yet generic
-  keeps them in place, because those do not dispatch through `standardGeneric()`, where ry runs
-  held-back definitions. Every validity method
-  must be for one of the package's own classes.
+  may be for a generic function such as `show` or `initialize`, for a primitive such as `length` or
+  `[`, or for a function that is not yet generic, such as `as.list`, which the method turns into a
+  generic in the namespace. The held-back definitions then also run the first time that generic is looked up or
+  dispatches, the first time the primitive dispatches on an S4 object, or the first time code reads
+  the function's name in the namespace. A method for a group generic such as `Arith` keeps them in
+  place, because its members dispatch to it without a lookup ry can see. Every validity method must
+  be for one of the package's own classes.
+- Every class union unites only the package's own held-back classes, or only other packages'
+  classes. A union of the second kind, such as `setClassUnion("NumOrNull", c("numeric", "NULL"))`,
+  is not held back but runs in place, because it changes what `numeric` and `NULL` extend for every
+  later lookup of them. A union of both kinds keeps every definition in place.
 - Every name the definitions read is written once, by a statement placed before them, so running them
   later reads the same values.
 - Every name the definitions bind is written by them alone.

@@ -11,8 +11,8 @@
 
 use {
     crate::{
-        Code, Loader, NamespaceConditions, Source, cache_directory, find_package_root,
-        package_cache_path, parse_namespace_conditions,
+        Code, Loader, NamespaceConditions, Source, find_package_root, package_cache_path,
+        parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
     },
     heap::object::{Sexp, SexpType},
@@ -48,7 +48,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderRun", 3, do_run).invisible(),
     internal("ryLoaderForce", 2, do_force),
     internal("ryLoaderAwaitVerdict", 0, do_await_verdict).invisible(),
-    internal("ryLoaderDefer", 5, do_defer).invisible(),
+    internal("ryLoaderDefer", 6, do_defer).invisible(),
     internal("ryLoaderDeferred", 1, do_deferred),
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
@@ -419,9 +419,9 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `.Internal(ryLoaderDefer(root, positions, classes, generics, force))`: holds back the
-/// pending plan's statements at `positions` (1-based, in `run`) and registers `force` to run
-/// when a lookup needs one of `classes` or `generics`.
+/// `.Internal(ryLoaderDefer(root, positions, classes, generics, primitives, force))`:
+/// holds back the pending plan's statements at `positions` (1-based, in `run`) and registers
+/// `force` to run as [`DeferredDefinitions`] describes for the other arguments.
 unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let positions = call.arg(1);
@@ -430,7 +430,12 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
             .map(|index| Box::from(argument.element(index).bytes()))
             .collect()
     };
-    let (classes, generics, force) = (names(call.arg(2)), names(call.arg(3)), call.arg(4));
+    let (classes, generics, primitives, force) = (
+        names(call.arg(2)),
+        names(call.arg(3)),
+        names(call.arg(4)),
+        call.arg(5),
+    );
     if force.kind() != SexpType::Closure {
         return Err(error(
             "ryLoaderDefer needs a function to run the definitions",
@@ -474,6 +479,7 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
         key: root,
         classes,
         generics,
+        primitives,
         force,
     });
     Ok(nil())
@@ -529,31 +535,13 @@ unsafe fn do_compile(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// ry's R home for this runtime, assembled in the user's cache on first use (`rcmd::cached_home`)
-/// from this `libR`, the `ry-rcmd` front end beside it, and the base R the session runs.
+/// ry's R home for this runtime (`rcmd::runtime_home`), with the base R the session runs.
 fn ry_home() -> Result<PathBuf, String> {
     let libr = interp::platform::library_path(do_compile as *const c_void)
         .map(PathBuf::from)
         .ok_or("cannot tell which file ry's runtime was loaded from")?;
-    let rcmd = libr.with_file_name(if cfg!(windows) {
-        "ry-rcmd.exe"
-    } else {
-        "ry-rcmd"
-    });
-    if !rcmd.is_file() {
-        return Err(format!(
-            "compiling src/ needs ry's R front end {}, which is missing",
-            rcmd.display()
-        ));
-    }
-    let cache = cache_directory()
-        .ok_or(
-            "compiling src/ needs a cache directory, and neither XDG_CACHE_HOME nor HOME is set",
-        )?
-        .join("ry")
-        .join("home");
     let gnu_r_home = PathBuf::from(interp::system::r_home());
-    rcmd::cached_home(&cache, &libr, &rcmd, &gnu_r_home).map_err(|failure| failure.to_string())
+    rcmd::runtime_home(&libr, &gnu_r_home).map_err(|failure| failure.to_string())
 }
 
 /// `.Internal(ryLoaderDeferred(root))`: `list(position, path, line)` of the statements held

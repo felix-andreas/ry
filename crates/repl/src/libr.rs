@@ -466,8 +466,12 @@ impl RApi {
 
     /// Evaluates in the global environment outside the main loop. Call only between
     /// [`Self::initialize`] and [`Self::run_main_loop`]; errors are R's to report.
+    ///
+    /// The statements are ry's own, and they embed R sources that a CRLF checkout gives CRLF
+    /// line endings. GNU R's parser rejects a carriage return, including in the text a
+    /// statement hands to `parse(text = )`, so every line ending becomes a line feed first.
     pub fn eval(&self, statement: &str) {
-        let Ok(text) = CString::new(statement) else {
+        let Ok(text) = CString::new(statement.replace("\r\n", "\n")) else {
             return;
         };
         unsafe { (self.parse_eval_string)(text.as_ptr(), *self.global_env) };
@@ -626,7 +630,7 @@ unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
 /// `R_HOME` when set, else what `R RHOME` prints, else the platform's usual installations
 /// (`interp/src/gnu_r_home.rs`), which matter where `R` is rarely on the `PATH`: Windows, and
 /// an editor started from the macOS Dock.
-fn discover_r_home() -> Result<PathBuf, ReplError> {
+pub fn discover_r_home() -> Result<PathBuf, ReplError> {
     if let Ok(home) = env::var("R_HOME")
         && !home.is_empty()
     {

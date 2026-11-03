@@ -1,6 +1,7 @@
 [package]
 name = "loader"
 edition = "2024"
+license = "GPL-2.0-or-later"
 version.workspace = true
 publish = false
 
@@ -19,11 +20,10 @@ heap = { path = "../heap", optional = true }
 interp = { path = "../interp", optional = true }
 rcmd = { path = "../rcmd", optional = true }
 rustc-hash.workspace = true
-notify = { version = "8", default-features = false }
+notify = "8"
 salsa.workspace = true
 semantics = { path = "../semantics" }
 serde = { workspace = true, features = ["derive", "rc"] }
-serde_json.workspace = true
 syntax = { path = "../syntax" }
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 

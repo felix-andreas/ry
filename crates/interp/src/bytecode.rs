@@ -392,8 +392,11 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
 /// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
 /// constant, whose evaluation needs nothing of the code that made it. `break`, `next` and
 /// `return` act on the activation that evaluates them, which for a promise is not the one that
-/// made it, and a loop or a function definition is left out so that promise code never runs a
-/// back edge or carries a body of its own.
+/// made it, and a loop is left out so that promise code never runs a back edge. A function
+/// definition nested in a larger argument is left out too, but one that is the whole argument
+/// (`vapply(x, function(v) ...)`) compiles: its [`Op::Closure`] then gives every closure the
+/// argument makes one shared compiled body, where closures the AST evaluator makes would each
+/// compile their own, and so would each tier up on their own.
 unsafe fn compiles_as_promise(expression: Sexp) -> bool {
     unsafe fn free_of_control(expression: Sexp, depth: u32) -> bool {
         match expression.kind() {
@@ -417,7 +420,9 @@ unsafe fn compiles_as_promise(expression: Sexp) -> bool {
             _ => true,
         }
     }
-    expression.kind() == SexpType::Language && free_of_control(expression, LOOP_SEARCH_DEPTH)
+    expression.kind() == SexpType::Language
+        && (expression.car() == symbols().function
+            || free_of_control(expression, LOOP_SEARCH_DEPTH))
 }
 
 /// A body is worth compiling when it does more than evaluate one constant or symbol.
@@ -2703,7 +2708,7 @@ pub unsafe fn loop_count(code: Sexp) -> usize {
 }
 
 /// Runs a compiled promise's code in `env`, the frame it was compiled for. Promise code has no
-/// loops (`compiles_as_promise` rejects them) and no closure of its own, so this skips the entry
+/// loops (`compiles_as_promise` rejects them) and runs for no closure, so this skips the entry
 /// profile, the loop states and the optimizing tier that `run` sets up for a function body.
 pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
@@ -2895,8 +2900,8 @@ struct Decoded<'a> {
     constants: Sexp,
     cache: LookupCache,
     registers: *mut Sexp,
-    /// The type feedback bytes, one per code word, or null when no optimizing tier is installed
-    /// to read them.
+    /// The type feedback bytes, one per code word, or null while nothing will read them: no
+    /// optimizing tier is installed, or the code is not yet warm (see [`warm`]).
     feedback: *mut i32,
 }
 
@@ -2904,8 +2909,10 @@ impl Decoded<'_> {
     unsafe fn of(machine: &Machine<'_>) -> Self {
         let constants = machine.code.cdr();
         let feedback = match interp().bytecode.tier {
-            Some(_) => values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr(),
-            None => std::ptr::null_mut(),
+            Some(tier) if warm(constants, &tier) => {
+                values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+            }
+            _ => std::ptr::null_mut(),
         };
         Decoded {
             code: values::ints(machine.code.car()),
@@ -2922,6 +2929,21 @@ impl Decoded<'_> {
             *self.feedback.add(pc) |= i32::from(value_kind(value));
         }
     }
+}
+
+/// Whether tier 0 records type feedback for this code: always for a body with a loop, and for
+/// any other once it has optimized code or is halfway to the entry threshold. Recording costs a
+/// type test and a store per value, and most bodies never get near a threshold, so recording
+/// from the first entry made every call of cold package code slower with the optimizing tier
+/// installed than without it. Half a threshold of activations still sees every type a compile
+/// would specialize on. A loop is different: it can turn hot inside a body's only activation,
+/// and compiling it needs the types of the instructions that ran before it, once.
+unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
+    if constants.element(TIER1) != nil() || length(constants.element(LOOPS)) > 0 {
+        return true;
+    }
+    let profile = values::ints(constants.element(PROFILE));
+    profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
 }
 
 /// Runs one instruction. `Some(value)` means the body returned.

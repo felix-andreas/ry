@@ -1,4 +1,12 @@
 /*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2025-2026 Felix Andreas. This header is part of ry. It is free software: you
+ * can redistribute it and/or modify it under the terms of the GNU Lesser General Public License
+ * as published by the Free Software Foundation, either version 2.1 of the License, or (at your
+ * option) any later version. See LICENSE at the root of ry's repository.
+ */
+/*
  * ry's declaration of R's C API, source-compatible with R 4.6 for the names ry implements.
  * SEXP is opaque, as it is in GNU R since 4.2.0: every accessor is a function exported by libR.
  */
@@ -714,7 +722,7 @@ int R_remhash(R_hashtab_type h, SEXP key);
 int R_numhash(R_hashtab_type h);
 int R_typhash(R_hashtab_type h);
 SEXP R_maphash(R_hashtab_type h, SEXP FUN);
-SEXP R_maphashC(R_hashtab_type h, SEXP (*FUN)(SEXP, SEXP, void *), void *data);
+void R_maphashC(R_hashtab_type h, void (*FUN)(SEXP, SEXP, void *), void *data);
 void R_clrhash(R_hashtab_type h);
 
 /* Names R 4.6 dropped from the API that GNU R 4.3's headers still declared. Package sources

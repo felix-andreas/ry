@@ -1,0 +1,33 @@
+---
+title: Benchmarks
+description: The same programs run untyped on GNU R, untyped on ry, and typed in strict mode on ry, with the code of each
+---
+
+import BenchmarkMachine from '../../components/BenchmarkMachine.astro';
+import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
+import BenchmarkTable from '../../components/BenchmarkTable.astro';
+
+Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
+[strict mode](/type-checking/strict-mode) on ry. All three compute the same result.
+
+<BenchmarkTable />
+
+Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types do not
+make code faster yet, and ry usually peaks higher in memory than GNU R.
+
+## The programs
+
+Each program exists in `tools/bench/why/` as plain R and typed.
+
+<BenchmarkPrograms />
+
+## How it was measured
+
+Each program times its own work with the harness above, so startup and the static check are left
+out. The harness runs once to warm up, then three times, and keeps the fastest run.
+
+`just bench-why --write` runs every program twice per engine, alternating engines, and stores the
+fastest time and the largest memory peak in `tools/bench/why/results.json`, which every table on
+this site reads.
+
+<BenchmarkMachine />

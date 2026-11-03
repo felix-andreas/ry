@@ -1,10 +1,12 @@
 //! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules,
-//! modeled on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
-//! live in the docs (`contributing/design/standard-library.md`, `reference/standard-library.mdx`).
+//! modeled on Roc's builtins. `types/std.Rtypes` declares their types and documents them, and the
+//! design and user contract live in the docs (`contributing/design/standard-library.md`,
+//! `reference/standard-library.mdx`, and the generated `reference/std/` pages).
 //!
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any
 //! definition a program or package makes of the same name comes first. Session startup moves them
-//! into the `ry` namespace beside the frame functions (`frame::attach_package`).
+//! into the `std` namespace and attaches it as `package:std` unless the prelude is off
+//! (`frame::attach_package`).
 //! Every function is written for ry's own values, so each accepts a record, tuple or tag.
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as
@@ -21,12 +23,12 @@ use {
     crate::{
         annotations::Entry,
         arrays,
-        builtins::{Arg, BuiltinDef, Call, builtin},
-        eval,
+        builtins::{Arg, BuiltinDef, BuiltinFn, Call, builtin},
+        conditions, eval,
         long_double::{self, LongDouble},
         records, scope,
         sort::{IdenticalFlags, identical},
-        unwind::{R, error},
+        unwind::{self, R, Unwind, error},
         values::{
             self, char_str, length, list_vector, missing_arg, nil, scalar_bool, scalar_integer,
             scalar_real, scalar_string,
@@ -158,7 +160,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.is_empty", list_is_empty),
     library("List.get", list_get),
     library("List.set", list_set).reusing_first_argument(),
-    library("List.update", list_update),
+    library("List.update", list_update).reusing_first_argument(),
     library("List.append", list_append).reusing_first_argument(),
     library("List.prepend", list_prepend),
     library("List.concat", list_concat).reusing_first_argument(),
@@ -348,7 +350,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.contains", dict_contains),
     library("Dict.insert", dict_insert).reusing_first_argument(),
     library("Dict.remove", dict_remove),
-    library("Dict.update", dict_update),
+    library("Dict.update", dict_update).reusing_first_argument(),
     library("Dict.keys", dict_keys),
     library("Dict.values", dict_values),
     library("Dict.walk", dict_walk),
@@ -554,17 +556,31 @@ unsafe fn missing_scalar(value: Sexp) -> Option<&'static str> {
 /// The elements of an R list. A list's names are not part of the library's model, so they are
 /// dropped.
 unsafe fn list_elements(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Vec<Sexp>> {
-    if value.is_array() {
-        return (0..length(value))
-            .map(|index| scope(|| arrays::item(value, index)))
-            .collect();
-    }
-    if value.kind() != SexpType::List {
+    let count = list_count(call, parameter, value)?;
+    list_slice(value, 0, count)
+}
+
+/// The length of a list argument, refusing anything that is not a list. A function that reads
+/// a few items checks its argument with this instead of [`list_elements`], so its cost does not
+/// grow with the list.
+unsafe fn list_count(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
+    if !value.is_array() && value.kind() != SexpType::List {
         return Err(wrong(call, parameter, "a list", value));
     }
-    Ok((0..length(value))
-        .map(|index| value.element(index))
-        .collect())
+    Ok(length(value))
+}
+
+/// Item `index` of a list argument [`list_count`] accepted.
+unsafe fn list_item(value: Sexp, index: usize) -> R<Sexp> {
+    if value.is_array() {
+        return scope(|| arrays::item(value, index));
+    }
+    Ok(value.element(index))
+}
+
+/// Items `from..to` of a list argument [`list_count`] accepted.
+unsafe fn list_slice(value: Sexp, from: usize, to: usize) -> R<Vec<Sexp>> {
+    (from..to).map(|index| list_item(value, index)).collect()
 }
 
 /// A collection the library returns: an Array when the collection the call works on (`like`)
@@ -592,38 +608,46 @@ unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback>
 }
 
 /// A function the library calls back, checked once per library call. A closure whose formals
-/// have no `...` binds its arguments by position, which skips argument matching on every item.
+/// have no `...` binds its arguments by position, which skips argument matching on every item,
+/// and a library function that runs no R code (a [`is_leaf`] builtin, such as `Str.trim`) is
+/// called directly.
 #[derive(Clone, Copy)]
 struct Callback {
     function: Sexp,
     /// The number of formals, for a closure without `...`.
     formals: Option<usize>,
+    /// The Rust function of a leaf library builtin.
+    leaf: Option<BuiltinFn>,
 }
 
 impl Callback {
     unsafe fn new(function: Sexp) -> R<Callback> {
+        let mut callback = Callback {
+            function,
+            formals: None,
+            leaf: None,
+        };
+        if function.kind() == SexpType::Builtin {
+            let definition = eval::builtin_def(function)?;
+            if is_leaf(definition.name) {
+                callback.leaf = Some(definition.function);
+            }
+            return Ok(callback);
+        }
         if function.kind() != SexpType::Closure {
-            return Ok(Callback {
-                function,
-                formals: None,
-            });
+            return Ok(callback);
         }
         let mut count = 0;
         let mut formal = function.car();
         while formal.kind() == SexpType::Pairlist {
             if formal.tag() == values::symbols().dots {
-                return Ok(Callback {
-                    function,
-                    formals: None,
-                });
+                return Ok(callback);
             }
             count += 1;
             formal = formal.cdr();
         }
-        Ok(Callback {
-            function,
-            formals: Some(count),
-        })
+        callback.formals = Some(count);
+        Ok(callback)
     }
 }
 
@@ -639,6 +663,9 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
+    if let Some(leaf) = callback.leaf {
+        return call_leaf(call, callback.function, leaf, &arguments);
+    }
     match callback.formals {
         Some(formals) if formals == arguments.len() => {
             let function = callback.function;
@@ -655,6 +682,34 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
             crate::moves::calling_back(callback.function)?;
             eval::apply(nil(), callback.function, &arguments, call.env)
         }
+    }
+}
+
+/// Calls a leaf library builtin without building the call `eval::apply` would build for it.
+/// The leaf reports its errors against `function` itself, which stands in for the call until
+/// an error needs the real one, `(f)(value)` as `eval::apply` builds it, so the condition is the
+/// same either way.
+unsafe fn call_leaf(
+    call: &Call<'_>,
+    function: Sexp,
+    leaf: BuiltinFn,
+    arguments: &[Arg],
+) -> R<Sexp> {
+    let context = Call {
+        call: function,
+        op: function,
+        args: arguments,
+        env: call.env,
+        reusable: None,
+    };
+    match scope(|| leaf(&context)).and_then(|value| unwind::raise_parked().map(|()| value)) {
+        Err(Unwind::Error(mut failure)) => {
+            if failure.call == function {
+                failure.call = eval::build_call(function, arguments)?;
+            }
+            Err(conditions::signal_error(failure))
+        }
+        result => result,
     }
 }
 
@@ -1008,16 +1063,12 @@ unsafe fn list_to_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_len(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    // Counting needs no items, and making one per position of a long Array is the slow part.
-    if !list.is_array() && list.kind() != SexpType::List {
-        return Err(wrong(call, "list", "a list", list));
-    }
-    scalar_integer(length(list) as i32)
+    scalar_integer(list_count(call, "list", list)? as i32)
 }
 
 unsafe fn list_is_empty(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    scalar_bool(list_elements(call, "list", list)?.is_empty())
+    scalar_bool(list_count(call, "list", list)? == 0)
 }
 
 /// A 1-based position as a 0-based index into `count` elements, if it is in range.
@@ -1028,10 +1079,10 @@ fn position(index: i64, count: usize) -> Option<usize> {
 
 unsafe fn list_get(call: &Call<'_>) -> R<Sexp> {
     let [list, index] = arguments(call, ["list", "index"])?;
-    let items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let index = whole(call, "index", index)?;
-    match position(index, items.len()) {
-        Some(at) => ok(items[at]),
+    match position(index, count) {
+        Some(at) => ok(list_item(list, at)?),
         None => err("OutOfBounds"),
     }
 }
@@ -1056,12 +1107,29 @@ unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     let [list, index, f] = arguments(call, ["list", "index", "f"])?;
-    let mut items = list_elements(call, "list", list)?;
+    let count = list_count(call, "list", list)?;
     let index = whole(call, "index", index)?;
     let f = function(call, "f", f)?;
-    if let Some(at) = position(index, items.len()) {
-        items[at] = invoke(call, f, &[items[at]])?;
+    let Some(at) = position(index, count) else {
+        return sequence(call, list, &list_slice(list, 0, count)?);
+    };
+    // The call holds a reference while the callback runs, the way an R closure's argument does,
+    // so a callback that assigns into the list with `<<-` copies it instead of changing the
+    // value being updated.
+    let current = list_item(list, at)?;
+    list.increment_refcount();
+    let value = invoke(call, f, &[current]);
+    list.decrement_refcount();
+    let value = value?;
+    // Ownership is checked after the callback, which may have stored the list somewhere. A
+    // callback that returns the list itself must not store it inside itself.
+    if value != list && owned_list(call, list) {
+        crate::moves::replacing(list, at, list.element(at));
+        crate::heap().set_element(list, at, value);
+        return Ok(list);
     }
+    let mut items = list_slice(list, 0, count)?;
+    items[at] = value;
     sequence(call, list, &items)
 }
 
@@ -1536,6 +1604,37 @@ unsafe fn list_all(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_contains(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
+    // A number is compared by value, which is what `identical` decides for a plain number that
+    // is not `NaN`, without boxing an Array's items or walking `identical` per element.
+    let plain = |item: Sexp| {
+        length(item) == 1 && item.attrib() == nil() && !item.is_altrep() && !item.is_array()
+    };
+    if plain(value) {
+        match value.kind() {
+            SexpType::Real if !values::as_real_scalar(value).is_nan() => {
+                let wanted = values::as_real_scalar(value);
+                if list.is_array() && list.kind() == SexpType::Real {
+                    return scalar_bool(values::reals(list).contains(&wanted));
+                }
+                if list.kind() == SexpType::List && !list.is_array() {
+                    let count = list_count(call, "list", list)?;
+                    let flags = IdenticalFlags::default();
+                    return scalar_bool((0..count).any(|index| {
+                        let item = list.element(index);
+                        if item.kind() == SexpType::Real && plain(item) {
+                            values::as_real_scalar(item) == wanted
+                        } else {
+                            identical(item, value, &flags)
+                        }
+                    }));
+                }
+            }
+            SexpType::Integer if list.is_array() && list.kind() == SexpType::Integer => {
+                return scalar_bool(values::ints(list).contains(&values::as_integer_scalar(value)));
+            }
+            _ => {}
+        }
+    }
     let items = list_elements(call, "list", list)?;
     let flags = IdenticalFlags::default();
     scalar_bool(items.iter().any(|&item| identical(item, value, &flags)))
@@ -1569,6 +1668,31 @@ unsafe fn found_index(call: &Call<'_>, from_end: bool) -> R<Sexp> {
     }
 }
 
+/// What `List.find_first` and its kin answer for the element of `list` at `position`, or for
+/// none: `:Ok` of the element, or of its 1-based position when `index`, else `:Err(:NotFound)`.
+/// Compiled loops that find the position themselves build their answer here.
+pub unsafe fn found(list: Sexp, position: Option<usize>, index: bool) -> R<Sexp> {
+    match position {
+        Some(at) if index => ok(scalar_integer(at as i32 + 1)?),
+        Some(at) => ok(list.element(at)),
+        None => err("NotFound"),
+    }
+}
+
+/// The keys vector, the values list (`NULL` for a set) and the length of a dictionary or set
+/// of `kind`, or `None` for any other value. Compiled loops walk the two vectors directly.
+pub unsafe fn collection_parts(object: Sexp, kind: NativeKind) -> R<Option<(Sexp, Sexp, usize)>> {
+    if object.kind() != SexpType::Record || records::native_kind(object) != kind {
+        return Ok(None);
+    }
+    let keys = records::slot_value(object, 0)?;
+    let stored = match kind {
+        NativeKind::Dict => records::slot_value(object, 1)?,
+        _ => nil(),
+    };
+    Ok(Some((keys, stored, length(keys))))
+}
+
 unsafe fn list_find_first(call: &Call<'_>) -> R<Sexp> {
     found_element(call, false)
 }
@@ -1587,46 +1711,46 @@ unsafe fn list_find_last_index(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_first(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    match list_elements(call, "list", list)?.first() {
-        Some(&item) => ok(item),
-        None => err("ListWasEmpty"),
+    match list_count(call, "list", list)? {
+        0 => err("ListWasEmpty"),
+        _ => ok(list_item(list, 0)?),
     }
 }
 
 unsafe fn list_last(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    match list_elements(call, "list", list)?.last() {
-        Some(&item) => ok(item),
-        None => err("ListWasEmpty"),
+    match list_count(call, "list", list)? {
+        0 => err("ListWasEmpty"),
+        count => ok(list_item(list, count - 1)?),
     }
 }
 
-/// The list and a count of elements, clamped to its length.
-unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, Vec<Sexp>, usize)> {
+/// The list, its length, and a count of elements clamped to that length.
+unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, usize, usize)> {
     let [list, taken] = arguments(call, ["list", "count"])?;
-    let items = list_elements(call, "list", list)?;
-    let taken = count(call, "count", taken)?.min(items.len());
-    Ok((list, items, taken))
+    let total = list_count(call, "list", list)?;
+    let taken = count(call, "count", taken)?.min(total);
+    Ok((list, total, taken))
 }
 
 unsafe fn list_take_first(call: &Call<'_>) -> R<Sexp> {
-    let (list, items, taken) = list_and_count(call)?;
-    sequence(call, list, &items[..taken])
+    let (list, _, taken) = list_and_count(call)?;
+    sequence(call, list, &list_slice(list, 0, taken)?)
 }
 
 unsafe fn list_take_last(call: &Call<'_>) -> R<Sexp> {
-    let (list, items, taken) = list_and_count(call)?;
-    sequence(call, list, &items[items.len() - taken..])
+    let (list, total, taken) = list_and_count(call)?;
+    sequence(call, list, &list_slice(list, total - taken, total)?)
 }
 
 unsafe fn list_drop_first(call: &Call<'_>) -> R<Sexp> {
-    let (list, items, dropped) = list_and_count(call)?;
-    sequence(call, list, &items[dropped..])
+    let (list, total, dropped) = list_and_count(call)?;
+    sequence(call, list, &list_slice(list, dropped, total)?)
 }
 
 unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
-    let (list, items, dropped) = list_and_count(call)?;
-    sequence(call, list, &items[..items.len() - dropped])
+    let (list, total, dropped) = list_and_count(call)?;
+    sequence(call, list, &list_slice(list, 0, total - dropped)?)
 }
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
@@ -1649,16 +1773,17 @@ unsafe fn start_position(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usi
 
 unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let [list, start, taken] = arguments(call, ["list", "start", "count"])?;
-    let items = list_elements(call, "list", list)?;
+    let total = list_count(call, "list", list)?;
     let start = start_position(call, "start", start)?;
     let taken = count(call, "count", taken)?;
-    let from = start.min(items.len());
-    let to = from.saturating_add(taken).min(items.len());
-    sequence(call, list, &items[from..to])
+    let from = start.min(total);
+    let to = from.saturating_add(taken).min(total);
+    sequence(call, list, &list_slice(list, from, to)?)
 }
 
 unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
-    let (list, items, before) = list_and_count(call)?;
+    let (list, total, before) = list_and_count(call)?;
+    let items = list_slice(list, 0, total)?;
     let first = sequence(call, list, &items[..before])?;
     let others = sequence(call, list, &items[before..])?;
     record(&[("before", first), ("others", others)])
@@ -1894,6 +2019,22 @@ unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    if list.is_array() && list.kind() == SexpType::Real {
+        // An Array holds no `NA`, so every comparison is defined.
+        let mut items = values::reals(list).iter().copied();
+        let Some(first) = items.next() else {
+            return err("ListWasEmpty");
+        };
+        let best = items.fold(first, |best, item| {
+            if item.partial_cmp(&best) == Some(wanted) {
+                item
+            } else {
+                best
+            }
+        });
+        return ok(scalar_real(best)?);
+    }
     let numbers = list_numbers(call)?;
     let Some(mut best) = numbers.first().copied() else {
         return err("ListWasEmpty");
@@ -1916,15 +2057,15 @@ unsafe fn list_max(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn affix(call: &Call<'_>, parameter: &str, at_start: bool) -> R<Sexp> {
     let [list, part] = arguments(call, ["list", parameter])?;
-    let items = list_elements(call, "list", list)?;
+    let total = list_count(call, "list", list)?;
     let part = list_elements(call, parameter, part)?;
-    if part.len() > items.len() {
+    if part.len() > total {
         return scalar_bool(false);
     }
     let window = if at_start {
-        &items[..part.len()]
+        list_slice(list, 0, part.len())?
     } else {
-        &items[items.len() - part.len()..]
+        list_slice(list, total - part.len(), total)?
     };
     let flags = IdenticalFlags::default();
     scalar_bool(
@@ -2162,18 +2303,18 @@ unsafe fn list_release_excess_capacity(call: &Call<'_>) -> R<Sexp> {
 
 // Str.
 
-unsafe fn one_string(call: &Call<'_>) -> R<String> {
+unsafe fn one_string<'a>(call: &Call<'_>) -> R<std::borrow::Cow<'a, str>> {
     let [string] = arguments(call, ["string"])?;
-    Ok(text(call, "string", string)?.into_owned())
+    text(call, "string", string)
 }
 
 /// The string and one more string argument named `other`.
-unsafe fn two_strings(call: &Call<'_>, other: &str) -> R<(String, String)> {
+unsafe fn two_strings<'a>(
+    call: &Call<'_>,
+    other: &str,
+) -> R<(std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>)> {
     let [string, second] = arguments(call, ["string", other])?;
-    Ok((
-        text(call, "string", string)?.into_owned(),
-        text(call, other, second)?.into_owned(),
-    ))
+    Ok((text(call, "string", string)?, text(call, other, second)?))
 }
 
 unsafe fn str_is_empty(call: &Call<'_>) -> R<Sexp> {
@@ -2200,9 +2341,9 @@ unsafe fn str_join_with(call: &Call<'_>) -> R<Sexp> {
 unsafe fn str_split_on(call: &Call<'_>) -> R<Sexp> {
     let (string, separator) = two_strings(call, "separator")?;
     let pieces: Vec<&str> = if separator.is_empty() {
-        vec![string.as_str()]
+        vec![&*string]
     } else {
-        string.split(separator.as_str()).collect()
+        string.split(&*separator).collect()
     };
     let mut items = Vec::with_capacity(pieces.len());
     for piece in pieces {
@@ -2220,17 +2361,17 @@ unsafe fn str_repeat(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_starts_with(call: &Call<'_>) -> R<Sexp> {
     let (string, prefix) = two_strings(call, "prefix")?;
-    scalar_bool(string.starts_with(&prefix))
+    scalar_bool(string.starts_with(&*prefix))
 }
 
 unsafe fn str_ends_with(call: &Call<'_>) -> R<Sexp> {
     let (string, suffix) = two_strings(call, "suffix")?;
-    scalar_bool(string.ends_with(&suffix))
+    scalar_bool(string.ends_with(&*suffix))
 }
 
 unsafe fn str_contains(call: &Call<'_>) -> R<Sexp> {
     let (string, part) = two_strings(call, "part")?;
-    scalar_bool(string.contains(&part))
+    scalar_bool(string.contains(&*part))
 }
 
 unsafe fn str_trim(call: &Call<'_>) -> R<Sexp> {
@@ -2247,12 +2388,12 @@ unsafe fn str_trim_end(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_drop_prefix(call: &Call<'_>) -> R<Sexp> {
     let (string, prefix) = two_strings(call, "prefix")?;
-    scalar_string(string.strip_prefix(&prefix).unwrap_or(&string))
+    scalar_string(string.strip_prefix(&*prefix).unwrap_or(&string))
 }
 
 unsafe fn str_drop_suffix(call: &Call<'_>) -> R<Sexp> {
     let (string, suffix) = two_strings(call, "suffix")?;
-    scalar_string(string.strip_suffix(&suffix).unwrap_or(&string))
+    scalar_string(string.strip_suffix(&*suffix).unwrap_or(&string))
 }
 
 unsafe fn str_with_prefix(call: &Call<'_>) -> R<Sexp> {
@@ -2305,9 +2446,9 @@ unsafe fn str_replace_last(call: &Call<'_>) -> R<Sexp> {
 unsafe fn split_once(call: &Call<'_>, last: bool) -> R<Sexp> {
     let (string, separator) = two_strings(call, "separator")?;
     let found = if last {
-        string.rfind(&separator)
+        string.rfind(&*separator)
     } else {
-        string.find(&separator)
+        string.find(&*separator)
     };
     match found {
         Some(at) => {
@@ -4165,8 +4306,33 @@ unsafe fn dict_remove(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn dict_update(call: &Call<'_>) -> R<Sexp> {
     let [object, key_argument, f] = arguments(call, ["dict", "key", "f"])?;
-    let mut collection = Collection::read(dict(call, object)?)?;
+    let object = dict(call, object)?;
     let (key, kind) = key_of(call, "key", key_argument)?;
+    if owned_collection(call, object) && keys_hold(object, kind) {
+        let f = function(call, "f", f)?;
+        let found = lookup(call, object, key, kind)?;
+        let current = match found {
+            Some(position) => ok(records::slot_value(object, 1)?.element(position))?,
+            None => err("Missing")?,
+        };
+        let next = invoke(call, f, &[current])?;
+        let (is_ok, value) = returned_result(call, "f", next)?;
+        // Ownership is checked again after the callback, which may have stored the dictionary.
+        if is_ok && owned_collection(call, object) {
+            insert_in_place(object, key, value)?;
+            return Ok(object);
+        }
+        if !is_ok && found.is_none() {
+            return Ok(object);
+        }
+        let mut collection = Collection::read(object)?;
+        match (is_ok, found) {
+            (true, _) => collection.insert(call, key, kind, value)?,
+            (false, removed) => collection.retain(|position| Ok(Some(position) != removed))?,
+        }
+        return collection.write();
+    }
+    let mut collection = Collection::read(object)?;
     joined_key_kind(call, NativeKind::Dict, collection.key_kind, kind)?;
     let f = function(call, "f", f)?;
     let found = collection.find(key);
@@ -4607,7 +4773,7 @@ unsafe fn set_reserve(call: &Call<'_>) -> R<Sexp> {
     reserve_collection(call, object, spare)
 }
 
-/// The names the library binds, for the test that keeps them equal to `types/ry.Rtypes`.
+/// The names the library binds, for the test that keeps them equal to `types/std.Rtypes`.
 pub fn names() -> impl Iterator<Item = &'static str> {
     BUILTINS
         .iter()

@@ -488,6 +488,10 @@ or a top-level flag that `assign()` fills in later. Passing such a variable as a
 testing it as a condition, is not reported. A parameter whose type is `NULL` and the literal
 `NULL` stay checked, so `report(NULL)` against a `character[]` parameter is an error.
 
+A local whose every visible write is a bare `NA`, and that a closure fills with `<<-`, is the same
+placeholder spelled as a missing value, as in knitr's `pattern.end <- NA` before a nested function
+assigns the pattern. Its reads are not checked either.
+
 ### `Any` and `Unknown`
 
 `Any` and `Unknown` are both compatible with every type, in both directions. They differ in where
@@ -714,7 +718,7 @@ the nominal identity.
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
 `factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
-`@type NAME` (see [stubs](/type-checking/stubs)). For these types:
+`@type NAME` (see [stubs](/type-checking/unknown#package-stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
   commonly support access that depends on values.
@@ -1222,8 +1226,10 @@ An unannotated `function(...)` expression gets its type from the definition itse
 #### A return chosen by a flag
 
 A body that ends in `if (flag) a else b`, where `flag` is a formal with a literal `TRUE` or `FALSE`
-default that the body never reassigns and no `return()` leaves early, returns the union of both
-branches, as any `if` does. A call that leaves the flag out, or passes a literal, selects one branch,
+default that the body never reassigns, returns the union of both branches, as any `if` does. A
+branch may also end in `return(value)`, and the flag may instead guard an earlier
+`if (flag) return(value)` with no `else`, whose return is then the true branch and the rest of the
+body the false one, provided those `return()` calls are the body's only early returns. A call that leaves the flag out, or passes a literal, selects one branch,
 so it returns that branch's type alone:
 
 ```r
@@ -1598,6 +1604,7 @@ members.
 - `(integer | double) + integer` is `integer | double`.
 - `(integer | double) > 0L` is `logical`.
 - `(integer | character) + 1L` is a type error, because the `character` member is not numeric.
+
 - `(integer | NULL) + 1L` is `integer`. R's arithmetic and comparison give an empty vector for a
   `NULL` operand rather than failing, so a `NULL` member is accepted and contributes nothing to the
   result, and `(character | NULL) == "a"` is `logical`. A class member dispatches its declared
@@ -1606,6 +1613,12 @@ members.
 - `rec$a` on `list{a: integer} | list{a: character}` is `integer | character`. A member that lacks
   the field changes the result, as [indexing](#indexing) describes.
 - A `for` loop over `integer[] | character[]` binds its variable as `integer | character`.
+
+Two arithmetic exceptions keep correlated paths from being reported. A list-shaped member (a list,
+record, or tuple without an arithmetic method) beside a numeric member is skipped, because a test
+elsewhere in the body usually rules that path out, as in mgcv's `offset` that is a number or a
+`list` of terms. A list or `NULL` operand beside an `Unknown` or `Any` operand is not reported
+either, because the other operand may be a class whose method accepts it, as ggplot2's `+` does.
 
 #### Conditions
 
@@ -1648,11 +1661,16 @@ record the same for a named vector, where R instead fails at run time.
 `$name` behaves like `[["name"]]` on lists, on records, and on opaque nominals, and a backtick-quoted
 name follows the same rule. `$` does not work on atomic vectors, because R rejects it on every atomic
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
-`integer | NULL`.
+`integer`: R stops with "subscript out of bounds" when the name is absent from an atomic vector,
+where a list would give `NULL`.
 
 On a nominal whose class declares a `$` method, in a stub or in the project (`$.request` for
 `@type request`), `x$name` types as that method's result instead, because R dispatches the read to
 the method before it looks at the representation. The same holds for `[.class` and `[[.class`.
+
+When the package's `R/` files, or the file being checked, define any `$` method at all, `$` on an
+atomic vector is `Unknown` rather than an error, because a classed atomic vector (an igraph vertex sequence, say) can carry that method under
+a class the checker does not track.
 
 Every element of `NULL` is `NULL` in R, so `NULL$name`, `NULL[["name"]]`, and `NULL[1]` are `NULL`.
 A list that may be absent is therefore read directly: on `list{retries: integer} | NULL`,
@@ -1677,7 +1695,8 @@ fields.
 
 - A scalar-like `T` returns `T`.
 - An array-like `T[]` returns `T`.
-- A map-like `T[named]` returns `T | NULL` for a name index.
+- A map-like `T[named]` returns `T` for a name index too, because R stops with "subscript out of
+  bounds" on an absent name rather than returning `NULL`.
 
 #### `[[` on lists
 
@@ -1931,6 +1950,12 @@ may be `double`, so `1:TRUE` is `integer[]` and `1:n` on `n` of type `integer | 
 `double[]`. A whole-number `double` literal such as `1` or `10`
 counts as `integer` here, matching what R does at run time, so `1:10` is `integer[]` and `1.5:3L` is
 `double[]`.
+
+R rejects a `NULL` endpoint, and so does the checker, except for an endpoint read through a `$`
+field of a value the body computed (`b$off[i]`, with `b` returned by a call). Such a field is
+typically filled under a flag, as in mgcv's `off`, and read only by callers that set the flag, so
+its `NULL` member is dropped. A local, a value indexed directly, and a field of a parameter keep
+their `NULL`, so `cfg$off:3L` on a parameter `cfg: list{off: integer | NULL}` is reported.
 
 Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
 rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and
@@ -2381,13 +2406,17 @@ type along each edge of the `if`. Inside each branch, the variable keeps the ref
 write replaces it, and the refinements merge back at the join exactly as branch writes do. A
 branch the guard does not refine holds the value from before the test, so `if (!is.null(x)) ...` on
 an untyped `x` leaves `x` untyped after the `if`, not `NULL`. With `x`
-a local variable or parameter, the recognized guards are:
+a local variable or parameter, or an assignment to a local written inside the test
+(`is.integer(limit <- check_limit(limit))`, which narrows `limit`), the recognized guards are:
 
 - `is.null(x)` makes `x` a `NULL` in the true branch, and removes `NULL` from its union in the false
   branch.
 - `is.character(x)`, `is.logical(x)`, `is.integer(x)`, `is.double(x)`, `is.function(x)`, and
   `is.list(x)` keep only the members of that family in the true branch, and remove them in the false
-  branch. `is.numeric(x)` does the same for the `integer` and `double` family.
+  branch. `is.numeric(x)` does the same for the `integer` and `double` family, and `isTRUE(x)` and
+  `isFALSE(x)` narrow like `is.logical(x)`. That is deliberately loose in the false branch, which
+  also drops the logical member: code like car's `if (isFALSE(fit)) 0 else fit$m` returns `FALSE`
+  only to signal failure, so the other branch reads the non-logical members.
 - `is.null(x$field)` removes from `x`'s union, in the false branch, each member that cannot carry
   the field: `NULL`, the empty `list()` placeholder, and a record with no field the name partially
   matches. The true branch keeps every member, because the field itself may hold `NULL`. So
@@ -2651,9 +2680,16 @@ That selection cannot be modelled statically, but the call is still checked in f
 
 The source is evaluated once, before the first iteration, and the loop does not change its type. The
 loop variable is re-initialized from the source on every iteration, so an assignment to it in the
-body does not carry over into the next iteration. After the loop, R keeps the variable's last value.
-A read of it there is `Unknown` and is not reported, inside a function or at the top level of a
-file, and not even in strict mode. Typing it as the element type is a known gap.
+body does not carry over into the next iteration.
+
+After the loop, R keeps the variable's last value, or sets it to `NULL` when the source was empty.
+A read there is therefore the element type joined with `NULL`, and with the variable's type at the
+end of the body when the body assigns it. A write that a `break` or `next` cuts off from the end of
+the body is not counted, which is a known gap, and so is a nested loop that reuses the name. A `from:to` range always has at least one element, so after
+`for (i in 1:n) {}` the variable `i` is `integer`, while after `for (value in x) {}` with
+`x: double[]` it is `double | NULL`. A loop at the top level of a file leaves its variable bound
+like a top-level assignment, so a later statement or item reads the same type. When the item also
+binds the name in another way, the name exports as `Unknown`.
 
 ### `while`
 
@@ -2808,7 +2844,7 @@ scoping.
 
 - A namespace is *known* when stubs declare it. The shipped standard-library packages are known, and
   so is any namespace a project stub file declares: `stubs/dplyr.Rtypes` declares the namespace
-  `dplyr` (see [stubs](/type-checking/stubs)).
+  `dplyr` (see [stubs](/type-checking/unknown#package-stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
@@ -2895,9 +2931,14 @@ Manifests follow the way R exposes each namespace:
 - A conditional namespace's manifest activates together with its stubs (see
   [conditional stub namespaces](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat)).
   While the namespace is inactive, its names stay unknown, bare and qualified alike.
-- A read satisfied only by an import still counts as a use for the unused check. A bare read of such
-  a name is not a strict-mode origin, which is a known gap; a qualified `pkg::name` read with no
-  known type is.
+- A read satisfied only by an import still counts as a use for the unused check. A read with no
+  known type, bare or qualified, is a strict-mode origin, whether it is a call or a value read such
+  as `template <- glue`. A bare `base` name read as a value, such as `c` in `lapply(xs, c)`, is
+  the exception: it is `Unknown` and not reported, because those names are intrinsics whose calls
+  are typed specially.
+- An arithmetic, comparison or logical operator read as a value, such as `` `+` `` in
+  ``Reduce(`+`, xs)``, is `fn(e1: Any, [e2]: Any) -> Any`, because its result depends on the
+  operands' classes.
 
 ### Replacement-form assignment
 
@@ -3295,7 +3336,7 @@ expression built from `col("x")`:
 | `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
 | `DataFrame.join_asof(df, other, on, by)` | as a left join on the `by` columns and then `on` |
 | `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
-| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
+| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)); with `strings_as_factors = TRUE`, text columns are `factor` |
 
 Every `LazyFrame.` verb types like its `DataFrame.` namesake and returns a `LazyFrame`.
 
@@ -3359,7 +3400,11 @@ type-mismatch
 The engine compares an `integer` with a string by formatting the number, as R does, so that
 comparison runs, but it is still an error here: a schema that puts text against a number almost
 always means the wrong column. The rules check only operands of known type, so an expression over
-a frame whose columns are unknown is never an error.
+a frame whose columns are unknown is never an error. In strict mode, a verb that names a column of
+such a frame, with a string or `col("x")`, is an error on the verb's subject. A chain is
+reported once, at its first step that names a column: a later step is not reported again, while a
+step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
+hides a report.
 
 #### data.table queries
 
@@ -3657,7 +3702,8 @@ cheap <- prices[prce < 10]           # warning: the frame `prices` has no column
 `select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
 path, a file the project does not have, and any other argument that changes the columns (such as
 `colClasses` or `skip`) give a `data.table` with unknown columns. `DataFrame.read_csv` and
-`LazyFrame.scan_csv` sniff their file the same way.
+`LazyFrame.scan_csv` sniff their file the same way and give a `DataFrame` or `LazyFrame`, and
+`read_csv`'s `strings_as_factors` must be a literal `TRUE` or `FALSE` for the columns to be known.
 
 The other functions follow data.table's rules:
 
@@ -3744,7 +3790,8 @@ out of the parts decided at run time from a value's class attribute:
   [replacement-form assignment](#replacement-form-assignment) of its base variable.
 - `R6Class(...)`, `$new(...)`, and R6 fields and methods are not modeled and are `Unknown`; `self`,
   `private`, and `super` are covered under [names bound at run time](#names-bound-at-run-time).
-  Strict mode does not report R6 values yet, because `R6Class` is known only from an export list.
+  In strict mode, an R6 value is an origin where it is first bound, as in
+  `account <- Account$new()`.
 
 ### Declaring a checked type for your own classes
 
@@ -3811,7 +3858,7 @@ exception, because the fallback marks a call the declarations could not describe
 
 Strict mode also reports each read that the
 [attached-package tolerance](#package-imports-namespace-and-description) silenced, and points at the
-[stub](/type-checking/stubs) that would make it checkable. Without that, a clean run after
+[stub](/type-checking/unknown#package-stubs) that would make it checkable. Without that, a clean run after
 `library(unknownpkg)` would look the same as a run that checked nothing.
 
 ### Unresolved references escalate to errors

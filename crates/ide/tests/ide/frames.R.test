@@ -32,7 +32,8 @@ hover-definition: installed . from base, stats, utils, methods, graphics, grDevi
 definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
 references: none
 rename: none
-signature: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (128+): .BY, .GRP, .I, .N, .NGRP, .SD, ...elt, ...length
@@ -78,7 +79,8 @@ hover 67..72: tax: double[]
 definition: none
 references: none
 rename: none
-signature: none
+signature: fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
+parameters: [...: Any] | [recursive]: logical | [use.names]: logical
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 action: Rewrite `:=` with `DataFrame.with_columns`
@@ -172,3 +174,250 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (2): amount, team
 hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- a_query_list_shows_the_list_signature
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(total = sum(amount), n = .N$0), by = team]
+#++++
+hover 102..104: .N: integer
+hover-definition: installed .N from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed .N from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[], n: integer[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[], n: integer[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..117 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum(), n = Expr.len())"
+completion (3): .NGRP, .NotYetImplemented, .NotYetUsed
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[], n: integer[]}
+
+#---- a_query_list_argument_name
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(to$0tal = sum(amount)), by = team]
+#++++
+hover 77..82: total: double
+definition 77..82
+references: 77..82*
+rename: 1 edit(s)
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..109 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum())"
+completion (12): totals, toBibtex, toeplitz, toeplitz2, toLatex, tolower, topenv, topo.colors
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[]}
+
+#---- a_query_list_callee
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, $0.(total = sum(amount)), by = team]
+#++++
+hover 67..109: DataFrame{team: character[], total: double[]}
+hover-definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed . from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: fn(...: Any) -> list[Any]
+parameters: [...: Any]
+action: Add inferred type annotation for `totals`
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
+  edit 63..63 -> ": DataFrame{team: character[], total: double[]}"
+action: Rewrite the query with DataFrame verbs
+  edit 67..109 -> "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum())"
+completion (128+): c, sum, DataFrame, amount, team, sales, totals, by
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @63: DataFrame{team: character[], total: double[]}
+
+#---- a_bare_dot_call_outside_a_query_is_not_a_list
+f <- function(x) .(x$0)
+#++++
+hover 19..20: x: T
+hover-definition: local 14..15
+definition 14..15
+references: 14..15*, 19..20
+rename: 2 edit(s)
+signature: none
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
+
+#==== typed_schemas
+#---- col_completes_the_columns_of_a_read_csv
+#~~~~ data/sales.csv
+region,units,price
+eu,3,1.5
+us,5,2
+#~~~~ main.R
+sales <- DataFrame.read_csv("data/sales.csv")
+kept <- sales |> DataFrame.filter(col("$0") > 1L)
+#++++
+hover 84..86: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[], price: double[]}"
+completion (3): price, region, units
+hint @5: DataFrame{region: character[], units: integer[], price: double[]}
+
+#---- col_hovers_a_column_after_with_columns_in_a_chain
+#~~~~ data/sales.csv
+region,units,price
+eu,3,1.5
+us,5,2
+#~~~~ main.R
+top <- DataFrame.read_csv("data/sales.csv") |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.select(col("reve$0nue"))
+#++++
+hover 178..187: revenue: double[]
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotation for `top`
+  edit 3..3 -> ": DataFrame{revenue: double[]}"
+action: Add inferred type annotations for the whole file
+  edit 3..3 -> ": DataFrame{revenue: double[]}"
+completion (1): revenue
+hint @3: DataFrame{revenue: double[]}
+
+#---- col_completes_inside_agg_after_group_by
+#~~~~ data/sales.csv
+region,units,price
+eu,3,1.5
+us,5,2
+#~~~~ main.R
+totals <- DataFrame.read_csv("data/sales.csv") |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("$0") |> Expr.sum())
+#++++
+hover 110..112: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+completion (3): price, region, units
+
+#---- col_completes_the_suffixed_columns_after_a_join
+#~~~~ data/sales.csv
+region,units,price
+eu,3,1.5
+#~~~~ data/regions.csv
+region,price,zone
+eu,9.5,north
+#~~~~ main.R
+sales <- DataFrame.read_csv("data/sales.csv")
+regions <- DataFrame.read_csv("data/regions.csv")
+joined <- DataFrame.join(sales, regions, on = "region") |>
+  DataFrame.select(col("pri$0"))
+#++++
+hover 178..183: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{region: character[], units: integer[], price: double[]}"
+  edit 53..53 -> ": DataFrame{region: character[], price: double[], zone: character[]}"
+completion (2): price, price_right
+hint @5: DataFrame{region: character[], units: integer[], price: double[]}
+hint @53: DataFrame{region: character[], price: double[], zone: character[]}
+hint @121df =
+hint @128other =
+
+#---- col_hovers_a_factor_column
+#~~~~ data/sales.csv
+region,units
+eu,3
+#~~~~ main.R
+sales <- DataFrame.read_csv("data/sales.csv", strings_as_factors = TRUE)
+kept <- sales |> DataFrame.filter(col("reg$0ion") == "eu")
+#++++
+hover 111..119: region: factor
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotation for `kept`
+  edit 77..77 -> ": DataFrame{region: factor, units: integer[]}"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": DataFrame{region: factor, units: integer[]}"
+  edit 77..77 -> ": DataFrame{region: factor, units: integer[]}"
+completion (1): region
+hint @5: DataFrame{region: factor, units: integer[]}
+hint @77: DataFrame{region: factor, units: integer[]}
+
+#---- col_completes_the_columns_of_an_annotated_read
+#: DataFrame{region: character[], units: integer[]}
+sales <- DataFrame.read_csv("elsewhere.csv")
+kept <- sales |> DataFrame.filter(col("u$0") > 1L)
+#++++
+hover 135..138: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+completion (1): units
+
+#---- col_completes_the_columns_of_a_named_frame_type
+type Sales = DataFrame{region: character[], units: integer[]}
+busy <- function(sales: Sales) -> DataFrame sales |> DataFrame.filter(col("u$0") > 1L)
+#++++
+hover 136..139: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+completion (1): units
+
+#---- col_completes_the_columns_of_a_lazy_scan
+#~~~~ data/sales.csv
+region,units
+eu,3
+#~~~~ main.R
+plan <- LazyFrame.scan_csv("data/sales.csv") |>
+  LazyFrame.filter(col("$0") > 1L)
+#++++
+hover 71..73: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+completion (2): region, units

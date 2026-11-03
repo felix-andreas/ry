@@ -3,7 +3,7 @@ name = "rcmd"
 description = "ry's R home and R CMD front end: package installation, SHLIB builds and R CMD config"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "UPL-1.0"
 publish = false
 build = "../ry/build.rs"
 

@@ -1,0 +1,2195 @@
+# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules.
+#
+# This file is the single source of truth for the library's signatures and documentation. The
+# checker reads the declarations, hover and completion show the `#'` lines above each one, and
+# `just docs-std` generates the API pages under `docs/src/content/docs/reference/std/` from it.
+# A `#'` block directly above a `# Module` heading documents the module. An example is a fenced
+# `r` block; `dput` after `r` means its `#>` lines are the `dput()` of the value.
+#
+# The functions run only on ry's runtime, which binds them in the `std` namespace
+# (`crates/interp/src/standard_library.rs`). Conventions shared by every module:
+# - A collection is an R list (`list[T]`); `List.from_vector` converts an atomic vector. Every
+#   `List` function that takes a collection also takes an Array, declared first, and then returns
+#   an Array. A type parameter for a callback's result items carries the `item` constraint.
+# - A position is a 1-based `integer`.
+# - A function that can fail returns a `Result` whose error is a descriptive tag.
+# - Equality is `identical()`.
+
+@alias Result<T, E> {:Ok(T) | :Err(E)}
+@type Dict<K, V>
+@type Set<T>
+
+#' A result is `:Ok(value)` or `:Err(error)`, typed `Result<T, E>`. The alias is built in, so every
+#' annotation can use it.
+# Result
+
+#' Whether the result is `:Ok`.
+#'
+#' ```r dput
+#' Result.is_ok(:Ok(1L))
+#' #> TRUE
+#' ```
+Result.is_ok : <T, E> fn(result: Result<T, E>) -> logical
+
+#' Whether the result is `:Err`.
+#'
+#' ```r dput
+#' Result.is_err(:Ok(1L))
+#' #> FALSE
+#' ```
+Result.is_err : <T, E> fn(result: Result<T, E>) -> logical
+
+#' The `:Ok` value, or `default` for an `:Err`.
+#'
+#' ```r dput
+#' Result.with_default(:Err(:Missing), 0L)
+#' #> 0L
+#' ```
+Result.with_default : <T, E> fn(result: Result<T, E>, default: T) -> T
+
+#' Applies `f` to an `:Ok` value and leaves an `:Err` alone.
+#'
+#' ```r dput
+#' Result.map(:Ok(2L), function(x) x * 10L)
+#' #> :Ok(20L)
+#' ```
+Result.map : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> B) -> Result<B, E>
+
+#' Applies `f` to an `:Err` value and leaves an `:Ok` alone.
+#'
+#' ```r dput
+#' Result.map_err(:Err("disk full"), function(e) :IoError(e))
+#' #> :Err(:IoError("disk full"))
+#' ```
+Result.map_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> B) -> Result<T, B>
+
+#' Applies `on_ok` to an `:Ok` value or `on_err` to an `:Err` value.
+#'
+#' ```r dput
+#' Result.map_both(:Err(404L), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
+#' #> :Err("HTTP 404")
+#' ```
+Result.map_both : <A, B, C, D> fn(result: Result<A, B>, on_ok: fn(A) -> C, on_err: fn(B) -> D) -> Result<C, D>
+
+#' Combines two `:Ok` values with `f`, or returns the first `:Err`.
+#'
+#' ```r dput
+#' Result.map2(Str.to_integer("6"), Str.to_integer("7"), function(a, b) a * b)
+#' #> :Ok(42L)
+#' ```
+Result.map2 : <A, B, C, E, F> fn(first: Result<A, E>, second: Result<B, F>, f: fn(A, B) -> C) -> Result<C, E | F>
+
+#' Chains a step that can fail: `f` gets the `:Ok` value and returns the next result. The error type
+#' of the chain joins both, so a step can fail with a reason of its own.
+#'
+#' ```r dput
+#' Result.and_then(Str.to_integer("-3"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+#' #> :Err(:NotPositive)
+#' ```
+Result.and_then : <A, B, E, F> fn(result: Result<A, E>, f: fn(A) -> Result<B, F>) -> Result<B, E | F>
+
+#' Recovers from an `:Err`: `f` gets the error and returns the next result.
+#'
+#' ```r dput
+#' Result.on_err(Str.to_integer("x"), function(e) :Ok(0L))
+#' #> :Ok(0L)
+#' ```
+Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> Result<T, B>
+
+#' Functions over R lists, typed `list[T]`, and over [Arrays](/type-checking/arrays/). Each function
+#' also takes an `Array<T>` as its collection (the `list`, `first` or `lists` argument) and then
+#' returns an Array where it would return a list, so `List.map([1, 2, 3], \(x) x * 2)` is the
+#' `Array<double>` `[2, 4, 6]`. An item argument does not count, so `List.append(list([1]), [2])` is
+#' the list `list([1], [2])`, and `List.single` and `List.repeat` always return lists. A function
+#' whose result items come from a callback, such as `List.map`, requires them to be Array items (the
+#' [`item` constraint](/reference/type-system/#constraints)), so `List.map([1, 2], \(x) list(x))` is
+#' a type error.
+# List
+
+#' The elements of an atomic vector as a list.
+#'
+#' ```r dput
+#' List.from_vector(c(3L, 1L, 2L))
+#' #> list(3L, 1L, 2L)
+#' ```
+List.from_vector : <T> fn(vector: T[]) -> list[T]
+
+#' The elements of a list as an atomic vector; every element must be a scalar of one type.
+#'
+#' ```r dput
+#' List.to_vector(list(3L, 1L, 2L))
+#' #> c(3L, 1L, 2L)
+#' ```
+List.to_vector : <T> fn(list: list[T]) -> T[]
+
+#' The number of elements.
+#'
+#' ```r dput
+#' List.len(list("a", "b"))
+#' #> 2L
+#' ```
+List.len : <T> fn(list: Array<T>) -> integer
+List.len : <T> fn(list: list[T]) -> integer
+
+#' Whether the list has no elements.
+#'
+#' ```r dput
+#' List.is_empty(list())
+#' #> TRUE
+#' ```
+List.is_empty : <T> fn(list: Array<T>) -> logical
+List.is_empty : <T> fn(list: list[T]) -> logical
+
+#' The element at a 1-based position, or `:Err(:OutOfBounds)`.
+#'
+#' ```r dput
+#' List.get(list("a", "b"), 3L)
+#' #> :Err(:OutOfBounds)
+#' ```
+List.get : <T> fn(list: Array<T>, index: integer) -> Result<T, :OutOfBounds>
+List.get : <T> fn(list: list[T], index: integer) -> Result<T, :OutOfBounds>
+
+#' Replaces the element at a position; a position out of range leaves the list unchanged.
+#'
+#' ```r dput
+#' List.set(list("a", "b"), 2L, "z")
+#' #> list("a", "z")
+#' ```
+List.set : <T> fn(list: Array<T>, index: integer, value: T) -> Array<T>
+List.set : <T> fn(list: list[T], index: integer, value: T) -> list[T]
+
+#' Replaces the element at a position with `f` of it.
+#'
+#' ```r dput
+#' List.update(list(1L, 2L), 1L, function(x) x + 10L)
+#' #> list(11L, 2L)
+#' ```
+List.update : <T> fn(list: Array<T>, index: integer, f: fn(T) -> T) -> Array<T>
+List.update : <T> fn(list: list[T], index: integer, f: fn(T) -> T) -> list[T]
+
+#' Adds an element at the end.
+#'
+#' ```r dput
+#' List.append(list(1L, 2L), 3L)
+#' #> list(1L, 2L, 3L)
+#' ```
+List.append : <T> fn(list: Array<T>, value: T) -> Array<T>
+List.append : <T> fn(list: list[T], value: T) -> list[T]
+
+#' Adds an element at the start.
+#'
+#' ```r dput
+#' List.prepend(list(1L, 2L), 0L)
+#' #> list(0L, 1L, 2L)
+#' ```
+List.prepend : <T> fn(list: Array<T>, value: T) -> Array<T>
+List.prepend : <T> fn(list: list[T], value: T) -> list[T]
+
+#' The elements of `first` followed by those of `second`.
+#'
+#' ```r dput
+#' List.concat(list(1L), list(2L, 3L))
+#' #> list(1L, 2L, 3L)
+#' ```
+List.concat : <T> fn(first: Array<T>, second: Array<T>) -> Array<T>
+List.concat : <T> fn(first: list[T], second: list[T]) -> list[T]
+
+#' A list of one element.
+#'
+#' ```r dput
+#' List.single("only")
+#' #> list("only")
+#' ```
+List.single : <T> fn(value: T) -> list[T]
+
+#' A list of `count` copies of `value`.
+#'
+#' ```r dput
+#' List.repeat("x", 3L)
+#' #> list("x", "x", "x")
+#' ```
+List.repeat : <T> fn(value: T, count: integer) -> list[T]
+
+#' The integers from `start` up to and including `end`, or an empty list when `end` is smaller.
+#' Unlike R's `:`, it never counts down.
+#'
+#' Both `List.range` and `List.repeat` stop with an error when the list would hold more than
+#' 2,147,483,647 elements, the longest vector an R integer index reaches.
+#'
+#' ```r dput
+#' List.range(2L, 5L)
+#' #> list(2L, 3L, 4L, 5L)
+#' List.range(3L, 1L)
+#' #> list()
+#' ```
+List.range : fn(start: integer, end: integer) -> list[integer]
+
+#' The elements in reverse order.
+#'
+#' ```r dput
+#' List.reverse(list(1L, 2L, 3L))
+#' #> list(3L, 2L, 1L)
+#' ```
+List.reverse : <T> fn(list: Array<T>) -> Array<T>
+List.reverse : <T> fn(list: list[T]) -> list[T]
+
+#' Concatenates a list of lists.
+#'
+#' ```r dput
+#' List.join(list(list(1L), list(), list(2L, 3L)))
+#' #> list(1L, 2L, 3L)
+#' ```
+List.join : <T> fn(lists: Array<Array<T>>) -> Array<T>
+List.join : <T> fn(lists: list[list[T]]) -> list[T]
+
+#' Applies `f` to every element.
+#'
+#' ```r dput
+#' List.map(list(1L, 2L, 3L), function(x) x * 2L)
+#' #> list(2L, 4L, 6L)
+#' ```
+List.map : <A, B: item> fn(list: Array<A>, f: fn(A) -> B) -> Array<B>
+List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
+
+#' Applies `f` to every element and its 1-based position.
+#'
+#' ```r dput
+#' List.map_with_index(list("a", "b"), function(x, i) Str.concat(x, Num.to_str(i)))
+#' #> list("a1", "b2")
+#' ```
+List.map_with_index : <A, B: item> fn(list: Array<A>, f: fn(A, integer) -> B) -> Array<B>
+List.map_with_index : <A, B> fn(list: list[A], f: fn(A, integer) -> B) -> list[B]
+
+#' Applies `f` to the elements of two lists pairwise, stopping at the shorter one.
+#'
+#' ```r dput
+#' List.map2(list(1L, 2L, 3L), list(10L, 20L), function(a, b) a + b)
+#' #> list(11L, 22L)
+#' ```
+List.map2 : <A, B, C: item> fn(first: Array<A>, second: Array<B>, f: fn(A, B) -> C) -> Array<C>
+List.map2 : <A, B, C> fn(first: list[A], second: list[B], f: fn(A, B) -> C) -> list[C]
+
+#' Applies `f` to the elements at each position of three lists, up to the shortest one.
+#'
+#' ```r dput
+#' List.map3(list(1L, 2L), list(10L, 20L), list(100L, 200L), function(a, b, c) a + b + c)
+#' #> list(111L, 222L)
+#' ```
+List.map3 : <A, B, C, D: item> fn(first: Array<A>, second: Array<B>, third: Array<C>, f: fn(A, B, C) -> D) -> Array<D>
+List.map3 : <A, B, C, D> fn(first: list[A], second: list[B], third: list[C], f: fn(A, B, C) -> D) -> list[D]
+
+#' Applies `f` to the elements at each position of four lists, up to the shortest one.
+#'
+#' ```r dput
+#' List.map4(list(1L), list(2L), list(3L), list(4L), function(a, b, c, d) a * b * c * d)
+#' #> list(24L)
+#' ```
+List.map4 : <A, B, C, D, E: item> fn(first: Array<A>, second: Array<B>, third: Array<C>, fourth: Array<D>, f: fn(A, B, C, D) -> E) -> Array<E>
+List.map4 : <A, B, C, D, E> fn(first: list[A], second: list[B], third: list[C], fourth: list[D], f: fn(A, B, C, D) -> E) -> list[E]
+
+#' Applies `f`, which returns a list, to every element and concatenates the results.
+#'
+#' ```r dput
+#' List.join_map(list(1L, 2L), function(x) list(x, x))
+#' #> list(1L, 1L, 2L, 2L)
+#' ```
+List.join_map : <A, B> fn(list: Array<A>, f: fn(A) -> Array<B>) -> Array<B>
+List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
+
+#' The elements for which `predicate` is `TRUE`.
+#'
+#' ```r dput
+#' List.keep_if(list(1L, 5L, 2L), function(x) x > 1L)
+#' #> list(5L, 2L)
+#' ```
+List.keep_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
+List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+
+#' The elements for which `predicate` returns `:Ok(TRUE)`, or the first `:Err` it returns.
+#'
+#' ```r dput
+#' List.keep_if_try(list("1", "20", "3"), function(s) Result.map(Str.to_integer(s), function(n) n > 2L))
+#' #> :Ok(list("20", "3"))
+#' List.keep_if_try(list("1", "x"), function(s) Result.map(Str.to_integer(s), function(n) n > 2L))
+#' #> :Err(:InvalidNumStr)
+#' ```
+List.keep_if_try : <T, E> fn(list: Array<T>, predicate: fn(T) -> Result<logical, E>) -> Result<Array<T>, E>
+List.keep_if_try : <T, E> fn(list: list[T], predicate: fn(T) -> Result<logical, E>) -> Result<list[T], E>
+
+#' The elements for which `predicate` is `FALSE`.
+#'
+#' ```r dput
+#' List.drop_if(list(1L, 5L, 2L), function(x) x > 1L)
+#' #> list(1L)
+#' ```
+List.drop_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
+List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+
+#' Applies `f` to every element and keeps the `:Ok` values.
+#'
+#' ```r dput
+#' List.keep_oks(list("1", "x", "3"), Str.to_integer)
+#' #> list(1L, 3L)
+#' ```
+List.keep_oks : <A, B: item, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<B>
+List.keep_oks : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[B]
+
+#' Applies `f` to every element and keeps the `:Err` values.
+#'
+#' ```r dput
+#' List.keep_errs(list("1", "x"), Str.to_integer)
+#' #> list(:InvalidNumStr)
+#' ```
+List.keep_errs : <A, B, E: item> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<E>
+List.keep_errs : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[E]
+
+#' Applies `f` to every element and stops at the first `:Err`.
+#'
+#' ```r dput
+#' List.map_try(list("1", "2"), Str.to_integer)
+#' #> :Ok(list(1L, 2L))
+#' ```
+List.map_try : <A, B: item, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Result<Array<B>, E>
+List.map_try : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> Result<list[B], E>
+
+#' Folds from the first element: `f` gets the state and an element and returns the next state.
+#'
+#' ```r dput
+#' List.walk(list(1L, 2L, 3L), 0L, function(total, x) total + x)
+#' #> 6L
+#' ```
+List.walk : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> S) -> S
+List.walk : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+
+#' Folds from the last element.
+#'
+#' ```r dput
+#' List.walk_backwards(list("a", "b", "c"), "", function(text, x) Str.concat(text, x))
+#' #> "cba"
+#' ```
+List.walk_backwards : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> S) -> S
+List.walk_backwards : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+
+#' Folds until `f` returns `:Break(state)`; `:Continue(state)` goes on.
+#'
+#' ```r dput
+#' List.walk_until(list(1L, 2L, 3L, 4L), 0L, function(total, x) if (total >= 3L) :Break(total) else :Continue(total + x))
+#' #> 3L
+#' ```
+List.walk_until : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+List.walk_until : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+
+#' Folds the list from the last element until `f` returns `:Break(state)`.
+#'
+#' ```r dput
+#' List.walk_backwards_until(list(1L, 5L, 2L, 3L), 0L, function(total, x) if (x > 4L) :Break(total) else :Continue(total + x))
+#' #> 5L
+#' ```
+List.walk_backwards_until : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+List.walk_backwards_until : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+
+#' Folds the list, passing `f` each element's 1-based position too.
+#'
+#' ```r dput
+#' List.walk_with_index(list(10L, 20L, 30L), 0L, function(total, x, i) total + x * i)
+#' #> 140L
+#' ```
+List.walk_with_index : <T, S> fn(list: Array<T>, state: S, f: fn(S, T, integer) -> S) -> S
+List.walk_with_index : <T, S> fn(list: list[T], state: S, f: fn(S, T, integer) -> S) -> S
+
+#' Folds the list with positions until `f` returns `:Break(state)`.
+#'
+#' ```r dput
+#' List.walk_with_index_until(list("a", "b", "c"), "", function(seen, x, i) if (i > 2L) :Break(seen) else :Continue(Str.concat(seen, x)))
+#' #> "ab"
+#' ```
+List.walk_with_index_until : <T, S> fn(list: Array<T>, state: S, f: fn(S, T, integer) -> :Continue(S) | :Break(S)) -> S
+List.walk_with_index_until : <T, S> fn(list: list[T], state: S, f: fn(S, T, integer) -> :Continue(S) | :Break(S)) -> S
+
+#' Folds the list from a 1-based position onwards.
+#'
+#' ```r dput
+#' List.walk_from(list(1L, 2L, 3L, 4L), 3L, 0L, function(total, x) total + x)
+#' #> 7L
+#' ```
+List.walk_from : <T, S> fn(list: Array<T>, index: integer, state: S, f: fn(S, T) -> S) -> S
+List.walk_from : <T, S> fn(list: list[T], index: integer, state: S, f: fn(S, T) -> S) -> S
+
+#' Folds the list from a position until `f` returns `:Break(state)`.
+#'
+#' ```r dput
+#' List.walk_from_until(list(1L, 2L, 3L, 4L), 2L, 0L, function(total, x) if (total >= 5L) :Break(total) else :Continue(total + x))
+#' #> 5L
+#' ```
+List.walk_from_until : <T, S> fn(list: Array<T>, index: integer, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+List.walk_from_until : <T, S> fn(list: list[T], index: integer, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+
+#' Folds the list while `f` returns `:Ok(state)`, stopping at the first `:Err`.
+#'
+#' ```r dput
+#' List.walk_try(list("1", "2", "x"), 0L, function(total, s) Result.map(Str.to_integer(s), function(n) total + n))
+#' #> :Err(:InvalidNumStr)
+#' ```
+List.walk_try : <T, S, E> fn(list: Array<T>, state: S, f: fn(S, T) -> Result<S, E>) -> Result<S, E>
+List.walk_try : <T, S, E> fn(list: list[T], state: S, f: fn(S, T) -> Result<S, E>) -> Result<S, E>
+
+#' Calls `f` on each element for its effect, and returns `NULL` invisibly.
+#'
+#' ```r
+#' List.for_each(list("a", "b"), function(x) cat(x, "\n"))
+#' #> a
+#' #> b
+#' ```
+List.for_each : <T> fn(list: Array<T>, f: fn(T) -> Any) -> NULL
+List.for_each : <T> fn(list: list[T], f: fn(T) -> Any) -> NULL
+
+#' Calls `f` on each element, stopping at the first `:Err`.
+#'
+#' ```r dput
+#' List.for_each_try(list(1L, -2L, 3L), function(x) if (x < 0L) :Err(:Negative(x)) else :Ok(NULL))
+#' #> :Err(:Negative(-2L))
+#' ```
+List.for_each_try : <T, E> fn(list: Array<T>, f: fn(T) -> Result<Any, E>) -> Result<NULL, E>
+List.for_each_try : <T, E> fn(list: list[T], f: fn(T) -> Result<Any, E>) -> Result<NULL, E>
+
+#' Whether `predicate` is `TRUE` for some element.
+#'
+#' ```r dput
+#' List.any(list(1L, 5L), function(x) x > 4L)
+#' #> TRUE
+#' ```
+List.any : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> logical
+List.any : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+
+#' Whether `predicate` is `TRUE` for every element; `TRUE` for an empty list.
+#'
+#' ```r dput
+#' List.all(list(1L, 5L), function(x) x > 4L)
+#' #> FALSE
+#' ```
+List.all : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> logical
+List.all : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+
+#' Whether some element is `identical()` to `value`.
+#'
+#' ```r dput
+#' List.contains(list("a", "b"), "b")
+#' #> TRUE
+#' ```
+List.contains : <T> fn(list: Array<T>, value: T) -> logical
+List.contains : <T> fn(list: list[T], value: T) -> logical
+
+#' The number of elements for which `predicate` is `TRUE`.
+#'
+#' ```r dput
+#' List.count_if(list(1L, 5L, 7L), function(x) x > 4L)
+#' #> 2L
+#' ```
+List.count_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> integer
+List.count_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> integer
+
+#' The first element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
+#'
+#' ```r dput
+#' List.find_first(list(1L, 5L, 7L), function(x) x > 4L)
+#' #> :Ok(5L)
+#' ```
+List.find_first : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_first : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+
+#' The last element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
+#'
+#' ```r dput
+#' List.find_last(list(1L, 5L, 7L), function(x) x > 4L)
+#' #> :Ok(7L)
+#' ```
+List.find_last : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_last : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+
+#' The position of the first match, or `:Err(:NotFound)`.
+#'
+#' ```r dput
+#' List.find_first_index(list(1L, 5L, 7L), function(x) x > 4L)
+#' #> :Ok(2L)
+#' ```
+List.find_first_index : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.find_first_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+
+#' The position of the last match, or `:Err(:NotFound)`.
+#'
+#' ```r dput
+#' List.find_last_index(list(1L, 5L, 7L), function(x) x > 9L)
+#' #> :Err(:NotFound)
+#' ```
+List.find_last_index : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.find_last_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+
+#' The first element, or `:Err(:ListWasEmpty)`.
+#'
+#' ```r dput
+#' List.first(list("a", "b"))
+#' #> :Ok("a")
+#' ```
+List.first : <T> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
+List.first : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+
+#' The last element, or `:Err(:ListWasEmpty)`.
+#'
+#' ```r dput
+#' List.last(list())
+#' #> :Err(:ListWasEmpty)
+#' ```
+List.last : <T> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
+List.last : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+
+#' The first `count` elements, or all of them if there are fewer.
+#'
+#' ```r dput
+#' List.take_first(list(1L, 2L, 3L), 2L)
+#' #> list(1L, 2L)
+#' ```
+List.take_first : <T> fn(list: Array<T>, count: integer) -> Array<T>
+List.take_first : <T> fn(list: list[T], count: integer) -> list[T]
+
+#' The last `count` elements.
+#'
+#' ```r dput
+#' List.take_last(list(1L, 2L, 3L), 2L)
+#' #> list(2L, 3L)
+#' ```
+List.take_last : <T> fn(list: Array<T>, count: integer) -> Array<T>
+List.take_last : <T> fn(list: list[T], count: integer) -> list[T]
+
+#' Everything but the first `count` elements.
+#'
+#' ```r dput
+#' List.drop_first(list(1L, 2L, 3L), 2L)
+#' #> list(3L)
+#' ```
+List.drop_first : <T> fn(list: Array<T>, count: integer) -> Array<T>
+List.drop_first : <T> fn(list: list[T], count: integer) -> list[T]
+
+#' Everything but the last `count` elements.
+#'
+#' ```r dput
+#' List.drop_last(list(1L, 2L, 3L), 2L)
+#' #> list(1L)
+#' ```
+List.drop_last : <T> fn(list: Array<T>, count: integer) -> Array<T>
+List.drop_last : <T> fn(list: list[T], count: integer) -> list[T]
+
+#' Removes the element at a position.
+#'
+#' ```r dput
+#' List.drop_at(list("a", "b", "c"), 2L)
+#' #> list("a", "c")
+#' ```
+List.drop_at : <T> fn(list: Array<T>, index: integer) -> Array<T>
+List.drop_at : <T> fn(list: list[T], index: integer) -> list[T]
+
+#' `count` elements starting at position `start`.
+#'
+#' ```r dput
+#' List.sublist(list(1L, 2L, 3L, 4L), 2L, 2L)
+#' #> list(2L, 3L)
+#' ```
+List.sublist : <T> fn(list: Array<T>, start: integer, count: integer) -> Array<T>
+List.sublist : <T> fn(list: list[T], start: integer, count: integer) -> list[T]
+
+#' The first `count` elements as `before` and the rest as `others`.
+#'
+#' ```r dput
+#' List.split_at(list(1L, 2L, 3L), 1L)
+#' #> (before = list(1L), others = list(2L, 3L))
+#' ```
+List.split_at : <T> fn(list: Array<T>, count: integer) -> Record{before: Array<T>, others: Array<T>}
+List.split_at : <T> fn(list: list[T], count: integer) -> Record{before: list[T], others: list[T]}
+
+#' Splits the list around the first element identical to `delimiter`.
+#'
+#' ```r dput
+#' List.split_first(list("a", "-", "b", "-", "c"), "-")
+#' #> :Ok((after = list("b", "-", "c"), before = list("a")))
+#' ```
+List.split_first : <T> fn(list: Array<T>, delimiter: T) -> Result<Record{before: Array<T>, after: Array<T>}, :NotFound>
+List.split_first : <T> fn(list: list[T], delimiter: T) -> Result<Record{before: list[T], after: list[T]}, :NotFound>
+
+#' Splits the list around the last element identical to `delimiter`.
+#'
+#' ```r dput
+#' List.split_last(list("a", "-", "b", "-", "c"), "-")
+#' #> :Ok((after = list("c"), before = list("a", "-", "b")))
+#' ```
+List.split_last : <T> fn(list: Array<T>, delimiter: T) -> Result<Record{before: Array<T>, after: Array<T>}, :NotFound>
+List.split_last : <T> fn(list: list[T], delimiter: T) -> Result<Record{before: list[T], after: list[T]}, :NotFound>
+
+#' The runs of elements between elements identical to `delimiter`.
+#'
+#' ```r dput
+#' List.split_on(list(1L, 0L, 2L, 3L, 0L, 4L), 0L)
+#' #> list(list(1L), list(2L, 3L), list(4L))
+#' ```
+List.split_on : <T> fn(list: Array<T>, delimiter: T) -> Array<Array<T>>
+List.split_on : <T> fn(list: list[T], delimiter: T) -> list[list[T]]
+
+#' The runs of elements between occurrences of the sublist `delimiter`.
+#'
+#' ```r dput
+#' List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))
+#' #> list(list(1L), list(2L, 0L, 3L))
+#' ```
+List.split_on_list : <T> fn(list: Array<T>, delimiter: Array<T>) -> Array<Array<T>>
+List.split_on_list : <T> fn(list: list[T], delimiter: list[T]) -> list[list[T]]
+
+#' Groups of `size` elements; the last group may be shorter.
+#'
+#' ```r dput
+#' List.chunks_of(list(1L, 2L, 3L), 2L)
+#' #> list(list(1L, 2L), list(3L))
+#' ```
+List.chunks_of : <T> fn(list: Array<T>, size: integer) -> Array<Array<T>>
+List.chunks_of : <T> fn(list: list[T], size: integer) -> list[list[T]]
+
+#' Puts `separator` between every two elements.
+#'
+#' ```r dput
+#' List.intersperse(list("a", "b", "c"), "-")
+#' #> list("a", "-", "b", "-", "c")
+#' ```
+List.intersperse : <T> fn(list: Array<T>, separator: T) -> Array<T>
+List.intersperse : <T> fn(list: list[T], separator: T) -> list[T]
+
+#' A stable sort by `compare`, which returns `:LT`, `:EQ` or `:GT`.
+#'
+#' ```r dput
+#' List.sort_with(list(3L, 1L, 2L), Num.compare)
+#' #> list(1L, 2L, 3L)
+#' ```
+List.sort_with : <T> fn(list: Array<T>, compare: fn(T, T) -> :LT | :EQ | :GT) -> Array<T>
+List.sort_with : <T> fn(list: list[T], compare: fn(T, T) -> :LT | :EQ | :GT) -> list[T]
+
+#' Sorts numbers from smallest to largest.
+#'
+#' ```r dput
+#' List.sort_asc(list(3L, 1L, 2L))
+#' #> list(1L, 2L, 3L)
+#' ```
+List.sort_asc : <T: scalar numeric> fn(list: Array<T>) -> Array<T>
+List.sort_asc : <T: scalar numeric> fn(list: list[T]) -> list[T]
+
+#' Sorts numbers from largest to smallest.
+#'
+#' ```r dput
+#' List.sort_desc(list(1.5, 3, 2))
+#' #> list(3, 2, 1.5)
+#' ```
+List.sort_desc : <T: scalar numeric> fn(list: Array<T>) -> Array<T>
+List.sort_desc : <T: scalar numeric> fn(list: list[T]) -> list[T]
+
+#' Exchanges the elements at two positions; an out-of-range position leaves the list unchanged.
+#'
+#' ```r dput
+#' List.swap(list("a", "b", "c"), 1L, 3L)
+#' #> list("c", "b", "a")
+#' ```
+List.swap : <T> fn(list: Array<T>, first: integer, second: integer) -> Array<T>
+List.swap : <T> fn(list: list[T], first: integer, second: integer) -> list[T]
+
+#' Replaces the element at a position, returning the new list and the element it replaced.
+#'
+#' ```r dput
+#' List.replace(list("a", "b"), 2L, "z")
+#' #> (list = list("a", "z"), value = "b")
+#' ```
+List.replace : <T> fn(list: Array<T>, index: integer, value: T) -> Record{list: Array<T>, value: T}
+List.replace : <T> fn(list: list[T], index: integer, value: T) -> Record{list: list[T], value: T}
+
+#' Adds an `:Ok` value at the end; an `:Err` leaves the list unchanged.
+#'
+#' ```r dput
+#' List.append_if_ok(list(1L), Str.to_integer("2"))
+#' #> list(1L, 2L)
+#' ```
+List.append_if_ok : <T, E> fn(list: Array<T>, result: Result<T, E>) -> Array<T>
+List.append_if_ok : <T, E> fn(list: list[T], result: Result<T, E>) -> list[T]
+
+#' Adds an `:Ok` value at the start; an `:Err` leaves the list unchanged.
+#'
+#' ```r dput
+#' List.prepend_if_ok(list(1L), Str.to_integer("x"))
+#' #> list(1L)
+#' ```
+List.prepend_if_ok : <T, E> fn(list: Array<T>, result: Result<T, E>) -> Array<T>
+List.prepend_if_ok : <T, E> fn(list: list[T], result: Result<T, E>) -> list[T]
+
+#' Appends the UTF-8 bytes of a string to a list of bytes.
+#'
+#' ```r dput
+#' List.concat_utf8(list(104L), "i")
+#' #> list(104L, 105L)
+#' ```
+List.concat_utf8 : fn(list: Array<integer>, string: character) -> Array<integer>
+List.concat_utf8 : fn(list: list[integer], string: character) -> list[integer]
+
+#' An empty list with room for `capacity` elements, so appending that many never copies.
+#'
+#' ```r dput
+#' List.len(List.with_capacity(1000L))
+#' #> 0L
+#' ```
+List.with_capacity : <T> fn(capacity: integer) -> list[T]
+
+#' The list with room for `spare` more elements.
+#'
+#' ```r dput
+#' List.reserve(list(1L, 2L), 100L)
+#' #> list(1L, 2L)
+#' ```
+List.reserve : <T> fn(list: Array<T>, spare: integer) -> Array<T>
+List.reserve : <T> fn(list: list[T], spare: integer) -> list[T]
+
+#' The list with no room beyond its elements, which gives back what `List.reserve` or
+#' `List.with_capacity` set aside.
+#'
+#' ```r dput
+#' List.release_excess_capacity(List.reserve(list(1L, 2L), 100L))
+#' #> list(1L, 2L)
+#' ```
+List.release_excess_capacity : <T> fn(list: Array<T>) -> Array<T>
+List.release_excess_capacity : <T> fn(list: list[T]) -> list[T]
+
+#' The sum of the elements; `0L` for an empty list. An `integer` sum that overflows is an error, so
+#' sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead. A `double` sum is
+#' accumulated like R's `sum()`, with more precision than a plain left-to-right fold, so
+#' `List.sum(xs)` and `sum(xs)` give the same number.
+#'
+#' ```r dput
+#' List.sum(list(1L, 2L, 3L))
+#' #> 6L
+#' ```
+List.sum : <T: scalar numeric> fn(list: Array<T>) -> T
+List.sum : <T: scalar numeric> fn(list: list[T]) -> T
+
+#' The product of the elements; `1L` for an empty list. An `integer` product that overflows is an
+#' error, as for `List.sum`.
+#'
+#' ```r dput
+#' List.product(list(2, 2.5))
+#' #> 5
+#' ```
+List.product : <T: scalar numeric> fn(list: Array<T>) -> T
+List.product : <T: scalar numeric> fn(list: list[T]) -> T
+
+#' The smallest element, or `:Err(:ListWasEmpty)`.
+#'
+#' ```r dput
+#' List.min(list(3L, 1L, 2L))
+#' #> :Ok(1L)
+#' ```
+List.min : <T: scalar numeric> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
+List.min : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+
+#' The largest element, or `:Err(:ListWasEmpty)`.
+#'
+#' ```r dput
+#' List.max(list())
+#' #> :Err(:ListWasEmpty)
+#' ```
+List.max : <T: scalar numeric> fn(list: Array<T>) -> Result<T, :ListWasEmpty>
+List.max : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+
+#' Whether the list begins with the elements of `prefix`.
+#'
+#' ```r dput
+#' List.starts_with(list(1L, 2L, 3L), list(1L, 2L))
+#' #> TRUE
+#' ```
+List.starts_with : <T> fn(list: Array<T>, prefix: Array<T>) -> logical
+List.starts_with : <T> fn(list: list[T], prefix: list[T]) -> logical
+
+#' Whether the list ends with the elements of `suffix`.
+#'
+#' ```r dput
+#' List.ends_with(list(1L, 2L, 3L), list(2L))
+#' #> FALSE
+#' ```
+List.ends_with : <T> fn(list: Array<T>, suffix: Array<T>) -> logical
+List.ends_with : <T> fn(list: list[T], suffix: list[T]) -> logical
+
+#' Functions over single strings. Patterns and separators are matched literally, never as regular
+#' expressions.
+# Str
+
+#' Whether the string is `""`.
+#'
+#' ```r dput
+#' Str.is_empty("")
+#' #> TRUE
+#' ```
+Str.is_empty : fn(string: character) -> logical
+
+#' `first` followed by `second`.
+#'
+#' ```r dput
+#' Str.concat("snake", "_case")
+#' #> "snake_case"
+#' ```
+Str.concat : fn(first: character, second: character) -> character
+
+#' Joins a list of strings with `separator` between them.
+#'
+#' ```r dput
+#' Str.join_with(list("a", "b", "c"), ", ")
+#' #> "a, b, c"
+#' ```
+Str.join_with : fn(strings: list[character], separator: character) -> character
+
+#' Splits at every occurrence of `separator`.
+#'
+#' ```r dput
+#' Str.split_on("a,b,,c", ",")
+#' #> list("a", "b", "", "c")
+#' ```
+Str.split_on : fn(string: character, separator: character) -> list[character]
+
+#' `count` copies of the string.
+#'
+#' ```r dput
+#' Str.repeat("ab", 3L)
+#' #> "ababab"
+#' ```
+Str.repeat : fn(string: character, count: integer) -> character
+
+#' Whether the string begins with `prefix`.
+#'
+#' ```r dput
+#' Str.starts_with("report.csv", "report")
+#' #> TRUE
+#' ```
+Str.starts_with : fn(string: character, prefix: character) -> logical
+
+#' Whether the string ends with `suffix`.
+#'
+#' ```r dput
+#' Str.ends_with("report.csv", ".R")
+#' #> FALSE
+#' ```
+Str.ends_with : fn(string: character, suffix: character) -> logical
+
+#' Whether `part` occurs in the string, matched literally.
+#'
+#' ```r dput
+#' Str.contains("a.b", ".")
+#' #> TRUE
+#' ```
+Str.contains : fn(string: character, part: character) -> logical
+
+#' Removes leading and trailing whitespace.
+#'
+#' ```r dput
+#' Str.trim("  hi  ")
+#' #> "hi"
+#' ```
+Str.trim : fn(string: character) -> character
+
+#' Removes leading whitespace.
+#'
+#' ```r dput
+#' Str.trim_start("  hi  ")
+#' #> "hi  "
+#' ```
+Str.trim_start : fn(string: character) -> character
+
+#' Removes trailing whitespace.
+#'
+#' ```r dput
+#' Str.trim_end("  hi  ")
+#' #> "  hi"
+#' ```
+Str.trim_end : fn(string: character) -> character
+
+#' Removes `prefix` if the string begins with it.
+#'
+#' ```r dput
+#' Str.drop_prefix("v1.2", "v")
+#' #> "1.2"
+#' ```
+Str.drop_prefix : fn(string: character, prefix: character) -> character
+
+#' Removes `suffix` if the string ends with it.
+#'
+#' ```r dput
+#' Str.drop_suffix("data.csv", ".csv")
+#' #> "data"
+#' ```
+Str.drop_suffix : fn(string: character, suffix: character) -> character
+
+#' Puts `prefix` in front of the string.
+#'
+#' ```r dput
+#' Str.with_prefix("world", "hello ")
+#' #> "hello world"
+#' ```
+Str.with_prefix : fn(string: character, prefix: character) -> character
+
+#' Replaces every occurrence of `pattern`, matched literally.
+#'
+#' ```r dput
+#' Str.replace_each("a.b.c", ".", "-")
+#' #> "a-b-c"
+#' ```
+Str.replace_each : fn(string: character, pattern: character, replacement: character) -> character
+
+#' Replaces the first occurrence of `pattern`.
+#'
+#' ```r dput
+#' Str.replace_first("a.b.c", ".", "-")
+#' #> "a-b.c"
+#' ```
+Str.replace_first : fn(string: character, pattern: character, replacement: character) -> character
+
+#' Replaces the last occurrence of `pattern`.
+#'
+#' ```r dput
+#' Str.replace_last("a.b.c", ".", "-")
+#' #> "a.b-c"
+#' ```
+Str.replace_last : fn(string: character, pattern: character, replacement: character) -> character
+
+#' Splits at the first `separator` into `before` and `after`, or `:Err(:NotFound)`.
+#'
+#' ```r dput
+#' Str.split_first("key=value=more", "=")
+#' #> :Ok((after = "value=more", before = "key"))
+#' ```
+Str.split_first : fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+
+#' Splits at the last `separator`.
+#'
+#' ```r dput
+#' Str.split_last("key=value=more", "=")
+#' #> :Ok((after = "more", before = "key=value"))
+#' ```
+Str.split_last : fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+
+#' The number of bytes in the string's UTF-8 encoding.
+#'
+#' ```r dput
+#' Str.count_utf8_bytes("hé")
+#' #> 3L
+#' ```
+Str.count_utf8_bytes : fn(string: character) -> integer
+
+#' The bytes of the string's UTF-8 encoding.
+#'
+#' ```r dput
+#' Str.to_utf8("hé")
+#' #> list(104L, 195L, 169L)
+#' ```
+Str.to_utf8 : fn(string: character) -> list[integer]
+
+#' The string a list of bytes encodes, or `:Err(:BadUtf8)`.
+#'
+#' ```r dput
+#' Str.from_utf8(list(104L, 105L))
+#' #> :Ok("hi")
+#' ```
+Str.from_utf8 : fn(bytes: list[integer]) -> Result<character, :BadUtf8>
+
+#' Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD.
+#'
+#' ```r dput
+#' Str.from_utf8_lossy(list(104L, 255L, 105L))
+#' #> "h�i"
+#' ```
+Str.from_utf8_lossy : fn(bytes: list[integer]) -> character
+
+#' Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`.
+#'
+#' ```r dput
+#' Str.to_integer("4.2")
+#' #> :Err(:InvalidNumStr)
+#' ```
+Str.to_integer : fn(string: character) -> Result<integer, :InvalidNumStr>
+
+#' Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers.
+#'
+#' ```r dput
+#' Str.to_double("4.5e1")
+#' #> :Ok(45)
+#' ```
+Str.to_double : fn(string: character) -> Result<double, :InvalidNumStr>
+
+#' Lowercases the ASCII letters and leaves every other character alone.
+#'
+#' ```r dput
+#' Str.with_ascii_lowercased("Straße ABC")
+#' #> "straße abc"
+#' ```
+Str.with_ascii_lowercased : fn(string: character) -> character
+
+#' Uppercases the ASCII letters.
+#'
+#' ```r dput
+#' Str.with_ascii_uppercased("straße abc")
+#' #> "STRAßE ABC"
+#' ```
+Str.with_ascii_uppercased : fn(string: character) -> character
+
+#' Whether two strings are equal when ASCII case is ignored.
+#'
+#' ```r dput
+#' Str.caseless_ascii_equals("Content-Type", "content-type")
+#' #> TRUE
+#' ```
+Str.caseless_ascii_equals : fn(first: character, second: character) -> logical
+
+#' Folds the string's UTF-8 bytes: `f(state, byte)` gives the next state.
+#'
+#' ```r dput
+#' Str.walk_utf8("abc", 0L, function(total, byte) total + byte)
+#' #> 294L
+#' ```
+Str.walk_utf8 : <S> fn(string: character, state: S, f: fn(S, integer) -> S) -> S
+
+#' Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
+#'
+#' ```r dput
+#' Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
+#' #> list(97L, 196L)
+#' ```
+Str.walk_utf8_with_index : <S> fn(string: character, state: S, f: fn(S, integer, integer) -> S) -> S
+
+#' The string's UTF-16 code units, each an integer from 0 to 65535. A character outside the Basic
+#' Multilingual Plane takes two units, a surrogate pair.
+#'
+#' ```r dput
+#' Str.to_utf16("h\U0001F600")
+#' #> list(104L, 55357L, 56832L)
+#' ```
+Str.to_utf16 : fn(string: character) -> list[integer]
+
+#' Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate or a zero unit, which
+#' an R string cannot hold. A number outside 0 to 65535 is an error.
+#'
+#' ```r dput
+#' Str.from_utf16(list(104L, 55357L))
+#' #> :Err(:BadUtf16)
+#' ```
+Str.from_utf16 : fn(units: list[integer]) -> Result<character, :BadUtf16>
+
+#' Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
+#'
+#' ```r dput
+#' Str.from_utf16_lossy(list(104L, 105L))
+#' #> "hi"
+#' ```
+Str.from_utf16_lossy : fn(units: list[integer]) -> character
+
+#' The string's Unicode code points, one per character.
+#'
+#' ```r dput
+#' Str.to_utf32("h\u00e9")
+#' #> list(104L, 233L)
+#' ```
+Str.to_utf32 : fn(string: character) -> list[integer]
+
+#' Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that is not one (a
+#' surrogate, a negative number, or one above 1114111) and for zero.
+#'
+#' ```r dput
+#' Str.from_utf32(list(55296L))
+#' #> :Err(:BadUtf32)
+#' ```
+Str.from_utf32 : fn(code_points: list[integer]) -> Result<character, :BadUtf32>
+
+#' Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
+#'
+#' ```r dput
+#' Str.from_utf32_lossy(list(82L, 121L))
+#' #> "Ry"
+#' ```
+Str.from_utf32_lossy : fn(code_points: list[integer]) -> character
+
+#' Functions over single numbers, `integer` or `double`, and eight constants (`Num.pi`, `Num.tau`,
+#' `Num.e`, `Num.infinity` and the integer and double limits). A checked operation returns the
+#' failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin
+#' (`Num.add` beside `Num.add_checked`) stops with an error in that case. A `NaN` result, such as
+#' `Inf - Inf` or `Num.sin(Inf)`, is `:Err(:Undefined)` from a checked operation and an error from
+#' any other. The bit operations take integers as 32-bit two's complement.
+# Num
+
+#' The number as text, with up to 15 significant digits.
+#'
+#' ```r dput
+#' Num.to_str(1 / 3)
+#' #> "0.333333333333333"
+#' ```
+Num.to_str : <T: scalar numeric> fn(number: T) -> character
+
+#' `:LT`, `:EQ` or `:GT`, comparing `first` with `second`.
+#'
+#' ```r dput
+#' Num.compare(2L, 1L)
+#' #> :GT
+#' ```
+Num.compare : <T: scalar numeric> fn(first: T, second: T) -> :LT | :EQ | :GT
+
+#' The smaller number.
+#'
+#' ```r dput
+#' Num.min(2L, 1L)
+#' #> 1L
+#' ```
+Num.min : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The larger number.
+#'
+#' ```r dput
+#' Num.max(2.5, 1)
+#' #> 2.5
+#' ```
+Num.max : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' Whether `first < second`.
+#'
+#' ```r dput
+#' Num.is_lt(1L, 2L)
+#' #> TRUE
+#' ```
+Num.is_lt : <T: scalar numeric> fn(first: T, second: T) -> logical
+
+#' Whether `first > second`.
+#'
+#' ```r dput
+#' Num.is_gt(1L, 2L)
+#' #> FALSE
+#' ```
+Num.is_gt : <T: scalar numeric> fn(first: T, second: T) -> logical
+
+#' Whether `first <= second`.
+#'
+#' ```r dput
+#' Num.is_lte(2, 2L)
+#' #> TRUE
+#' ```
+Num.is_lte : <T: scalar numeric> fn(first: T, second: T) -> logical
+
+#' Whether `first >= second`.
+#'
+#' ```r dput
+#' Num.is_gte(1.5, 2)
+#' #> FALSE
+#' ```
+Num.is_gte : <T: scalar numeric> fn(first: T, second: T) -> logical
+
+#' Whether two numbers are equal within a relative tolerance `rtol` (default `1e-5`) or an absolute
+#' tolerance `atol` (default `1e-8`).
+#'
+#' ```r dput
+#' Num.is_approx_eq(0.1 + 0.2, 0.3)
+#' #> TRUE
+#' ```
+Num.is_approx_eq : <T: scalar numeric> fn(first: T, second: T, [rtol]: double, [atol]: double) -> logical
+
+#' Whether the number is zero.
+#'
+#' ```r dput
+#' Num.is_zero(-0)
+#' #> TRUE
+#' ```
+Num.is_zero : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether the number is greater than zero.
+#'
+#' ```r dput
+#' Num.is_positive(0L)
+#' #> FALSE
+#' ```
+Num.is_positive : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether the number is less than zero.
+#'
+#' ```r dput
+#' Num.is_negative(-1)
+#' #> TRUE
+#' ```
+Num.is_negative : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether the number is a whole, even number.
+#'
+#' ```r dput
+#' Num.is_even(4L)
+#' #> TRUE
+#' ```
+Num.is_even : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether the number is a whole, odd number.
+#'
+#' ```r dput
+#' Num.is_odd(-3L)
+#' #> TRUE
+#' ```
+Num.is_odd : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether `first` is a whole multiple of `second`. Only zero is a multiple of zero.
+#'
+#' ```r dput
+#' Num.is_multiple_of(12L, 4L)
+#' #> TRUE
+#' ```
+Num.is_multiple_of : <T: scalar numeric> fn(first: T, second: T) -> logical
+
+#' Whether the number is neither infinite nor `NaN`.
+#'
+#' ```r dput
+#' Num.is_finite(1 / 0)
+#' #> FALSE
+#' ```
+Num.is_finite : <T: scalar numeric> fn(number: T) -> logical
+
+#' Whether the number is `Inf` or `-Inf`.
+#'
+#' ```r dput
+#' Num.is_infinite(-1 / 0)
+#' #> TRUE
+#' ```
+Num.is_infinite : <T: scalar numeric> fn(number: T) -> logical
+
+#' The absolute value.
+#'
+#' ```r dput
+#' Num.abs(-3L)
+#' #> 3L
+#' ```
+Num.abs : <T: scalar numeric> fn(number: T) -> T
+
+#' The absolute difference of two numbers. An integer result that overflows is an error.
+#'
+#' ```r dput
+#' Num.abs_diff(3L, 10L)
+#' #> 7L
+#' ```
+Num.abs_diff : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The number with its sign flipped.
+#'
+#' ```r dput
+#' Num.neg(2.5)
+#' #> -2.5
+#' ```
+Num.neg : <T: scalar numeric> fn(number: T) -> T
+
+#' Rounds up to a whole number, keeping the number type.
+#'
+#' ```r dput
+#' Num.ceiling(1.2)
+#' #> 2
+#' ```
+Num.ceiling : <T: scalar numeric> fn(number: T) -> T
+
+#' Rounds down to a whole number, keeping the number type.
+#'
+#' ```r dput
+#' Num.floor(-1.2)
+#' #> -2
+#' ```
+Num.floor : <T: scalar numeric> fn(number: T) -> T
+
+#' Rounds to the nearest whole number, halves away from zero, keeping the number type.
+#'
+#' ```r dput
+#' Num.round(2.5)
+#' #> 3
+#' ```
+Num.round : <T: scalar numeric> fn(number: T) -> T
+
+#' `base` raised to `exponent`. A result that is not a real number, as for `Num.pow(-1, 0.5)`, is an
+#' error.
+#'
+#' ```r dput
+#' Num.pow(2L, 10L)
+#' #> 1024
+#' ```
+Num.pow : <T: scalar numeric> fn(base: T, exponent: T) -> double
+
+#' The sine of an angle in radians. An infinite angle is an error, because its sine is undefined;
+#' the same holds for `Num.cos` and `Num.tan`.
+#'
+#' ```r dput
+#' Num.sin(0)
+#' #> 0
+#' ```
+Num.sin : <T: scalar numeric> fn(number: T) -> double
+
+#' The cosine of an angle in radians.
+#'
+#' ```r dput
+#' Num.cos(0)
+#' #> 1
+#' ```
+Num.cos : <T: scalar numeric> fn(number: T) -> double
+
+#' The tangent of an angle in radians.
+#'
+#' ```r dput
+#' Num.tan(0)
+#' #> 0
+#' ```
+Num.tan : <T: scalar numeric> fn(number: T) -> double
+
+#' The arctangent, in radians.
+#'
+#' ```r dput
+#' Num.atan(1) * 4
+#' #> 3.14159265358979
+#' ```
+Num.atan : <T: scalar numeric> fn(number: T) -> double
+
+#' The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
+#'
+#' ```r dput
+#' Num.add_checked(.Machine$integer.max, 1L)
+#' #> :Err(:Overflow)
+#' ```
+Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+
+#' The difference, or `:Err(:Overflow)`.
+#'
+#' ```r dput
+#' Num.sub_checked(10L, 3L)
+#' #> :Ok(7L)
+#' ```
+Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+
+#' The product, or `:Err(:Overflow)`; a finite double that would become infinite overflows too.
+#'
+#' ```r dput
+#' Num.mul_checked(1e308, 10)
+#' #> :Err(:Overflow)
+#' ```
+Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
+
+#' Adds two numbers, clamping an integer result to the largest or smallest integer.
+#'
+#' ```r dput
+#' Num.add_saturated(2147483647L, 1L)
+#' #> 2147483647L
+#' ```
+Num.add_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' Subtracts `second` from `first`, clamping an integer result.
+#'
+#' ```r dput
+#' Num.sub_saturated(-2147483647L, 1L)
+#' #> -2147483647L
+#' ```
+Num.sub_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' Multiplies two numbers, clamping an integer result.
+#'
+#' ```r dput
+#' Num.mul_saturated(100000L, 100000L)
+#' #> 2147483647L
+#' ```
+Num.mul_saturated : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The quotient as a double, or `:Err(:DivByZero)`.
+#'
+#' ```r dput
+#' Num.div_checked(7L, 2L)
+#' #> :Ok(3.5)
+#' ```
+Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero | :Undefined>
+
+#' The quotient rounded toward zero, or `:Err(:DivByZero)`; `Inf` divided by `Inf` is
+#' `:Err(:Undefined)`.
+#'
+#' ```r dput
+#' Num.div_trunc_checked(-7L, 2L)
+#' #> :Ok(-3L)
+#' Num.div_trunc_checked(Inf, Inf)
+#' #> :Err(:Undefined)
+#' ```
+Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+
+#' Divides and rounds up, or `:Err(:DivByZero)`.
+#'
+#' ```r dput
+#' Num.div_ceil_checked(7L, 2L)
+#' #> :Ok(4L)
+#' ```
+Num.div_ceil_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+
+#' The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
+#'
+#' ```r dput
+#' Num.rem_checked(-7L, 2L)
+#' #> :Ok(-1L)
+#' ```
+Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+
+#' The square root, or `:Err(:SqrtOfNegative)`.
+#'
+#' ```r dput
+#' Num.sqrt_checked(-1)
+#' #> :Err(:SqrtOfNegative)
+#' ```
+Num.sqrt_checked : <T: scalar numeric> fn(number: T) -> Result<double, :SqrtOfNegative>
+
+#' The natural logarithm, or `:Err(:LogNeedsPositive)`.
+#'
+#' ```r dput
+#' Num.log_checked(exp(2))
+#' #> :Ok(2)
+#' ```
+Num.log_checked : <T: scalar numeric> fn(number: T) -> Result<double, :LogNeedsPositive>
+
+#' The number as a double.
+#'
+#' ```r dput
+#' Num.to_double(3L)
+#' #> 3
+#' ```
+Num.to_double : <T: scalar numeric> fn(number: T) -> double
+
+#' The number truncated toward zero as an integer, or `:Err(:OutOfBounds)` when it does not fit.
+#'
+#' ```r dput
+#' Num.to_integer_checked(-3.7)
+#' #> :Ok(-3L)
+#' ```
+Num.to_integer_checked : <T: scalar numeric> fn(number: T) -> Result<integer, :OutOfBounds>
+
+#' The number truncated toward zero as an integer. A number that does not fit an integer is an
+#' error; `Num.to_integer_checked` returns `:Err(:OutOfBounds)` instead.
+#'
+#' ```r dput
+#' Num.to_integer(-3.7)
+#' #> -3L
+#' ```
+Num.to_integer : <T: scalar numeric> fn(number: T) -> integer
+
+#' The sum. An `integer` sum that overflows stops with an error, so use `Num.add_checked` when
+#' overflow is possible. Unlike `+`, it can be passed by name.
+#'
+#' ```r dput
+#' List.walk(list(1L, 2L, 3L), 0L, Num.add)
+#' #> 6L
+#' ```
+Num.add : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' `second` subtracted from `first`. An `integer` result that overflows is an error, and so is a
+#' `NaN` result such as `Inf - Inf`.
+#'
+#' ```r dput
+#' Num.sub(10L, 4L)
+#' #> 6L
+#' ```
+Num.sub : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The product. An `integer` product that overflows is an error.
+#'
+#' ```r dput
+#' Num.mul(6L, 7L)
+#' #> 42L
+#' ```
+Num.mul : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The quotient as a double. A zero divisor is an error; `Num.div_checked` returns
+#' `:Err(:DivByZero)` instead.
+#'
+#' ```r dput
+#' Num.div(7L, 2L)
+#' #> 3.5
+#' ```
+Num.div : <T: scalar numeric> fn(first: T, second: T) -> double
+
+#' The quotient rounded toward zero. A zero divisor is an error.
+#'
+#' ```r dput
+#' Num.div_trunc(-7L, 2L)
+#' #> -3L
+#' ```
+Num.div_trunc : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The quotient rounded up. A zero divisor is an error.
+#'
+#' ```r dput
+#' Num.div_ceil(7L, 2L)
+#' #> 4L
+#' ```
+Num.div_ceil : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' The remainder of the truncated division, with the sign of `first`. A zero divisor is an error.
+#'
+#' ```r dput
+#' Num.rem(-7L, 2L)
+#' #> -1L
+#' ```
+Num.rem : <T: scalar numeric> fn(first: T, second: T) -> T
+
+#' `base` raised to a non-negative `exponent`, as an integer. A result that overflows is an error;
+#' `Num.pow` returns a double instead.
+#'
+#' ```r dput
+#' Num.pow_int(3L, 4L)
+#' #> 81L
+#' ```
+Num.pow_int : fn(base: integer, exponent: integer) -> integer
+
+#' The square root. A negative number is an error; `Num.sqrt_checked` returns
+#' `:Err(:SqrtOfNegative)` instead.
+#'
+#' ```r dput
+#' Num.sqrt(16L)
+#' #> 4
+#' ```
+Num.sqrt : <T: scalar numeric> fn(number: T) -> double
+
+#' The natural logarithm. A number that is not positive is an error; `Num.log_checked` returns
+#' `:Err(:LogNeedsPositive)` instead.
+#'
+#' ```r dput
+#' Num.log(Num.e)
+#' #> 1
+#' ```
+Num.log : <T: scalar numeric> fn(number: T) -> double
+
+#' The arcsine in radians. A number outside -1 to 1 is an error.
+#'
+#' ```r dput
+#' Num.asin(1)
+#' #> 1.5707963267949
+#' ```
+Num.asin : <T: scalar numeric> fn(number: T) -> double
+
+#' The arccosine in radians. A number outside -1 to 1 is an error.
+#'
+#' ```r dput
+#' Num.acos(1)
+#' #> 0
+#' ```
+Num.acos : <T: scalar numeric> fn(number: T) -> double
+
+#' Whether the number is `NaN`. It is the one library function that accepts `NaN`; `NA` is still an
+#' error.
+#'
+#' ```r dput
+#' Num.is_nan(0 / 0)
+#' #> TRUE
+#' ```
+Num.is_nan : <T: scalar numeric> fn(number: T) -> logical
+
+#' The bits set in both integers, in 32-bit two's complement.
+#'
+#' ```r dput
+#' Num.bitwise_and(12L, 10L)
+#' #> 8L
+#' ```
+Num.bitwise_and : fn(first: integer, second: integer) -> integer
+
+#' The bits set in either integer.
+#'
+#' ```r dput
+#' Num.bitwise_or(12L, 10L)
+#' #> 14L
+#' ```
+Num.bitwise_or : fn(first: integer, second: integer) -> integer
+
+#' The bits set in exactly one of the integers. A result whose bit pattern is -2147483648 is an
+#' error, because R uses that value for `NA`; the same holds for every bit operation.
+#'
+#' ```r dput
+#' Num.bitwise_xor(12L, 10L)
+#' #> 6L
+#' ```
+Num.bitwise_xor : fn(first: integer, second: integer) -> integer
+
+#' The integer with every bit flipped, which is `-number - 1`.
+#'
+#' ```r dput
+#' Num.bitwise_not(5L)
+#' #> -6L
+#' ```
+Num.bitwise_not : fn(number: integer) -> integer
+
+#' Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
+#'
+#' ```r dput
+#' Num.shift_left_by(1L, 4L)
+#' #> 16L
+#' ```
+Num.shift_left_by : fn(number: integer, bits: integer) -> integer
+
+#' Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative.
+#'
+#' ```r dput
+#' Num.shift_right_by(-16L, 2L)
+#' #> -4L
+#' ```
+Num.shift_right_by : fn(number: integer, bits: integer) -> integer
+
+#' Shifts the bits right by `bits`, filling with zeros.
+#'
+#' ```r dput
+#' Num.shift_right_zf_by(-16L, 28L)
+#' #> 15L
+#' ```
+Num.shift_right_zf_by : fn(number: integer, bits: integer) -> integer
+
+#' The number of set bits.
+#'
+#' ```r dput
+#' Num.count_one_bits(255L)
+#' #> 8L
+#' ```
+Num.count_one_bits : fn(number: integer) -> integer
+
+#' The number of zero bits above the highest set bit, 32 for zero.
+#'
+#' ```r dput
+#' Num.count_leading_zero_bits(1L)
+#' #> 31L
+#' ```
+Num.count_leading_zero_bits : fn(number: integer) -> integer
+
+#' The number of zero bits below the lowest set bit, 32 for zero.
+#'
+#' ```r dput
+#' Num.count_trailing_zero_bits(8L)
+#' #> 3L
+#' ```
+Num.count_trailing_zero_bits : fn(number: integer) -> integer
+
+#' The ratio of a circle's circumference to its diameter. It is a value, not a function.
+#'
+#' ```r dput
+#' Num.pi
+#' #> 3.14159265358979
+#' ```
+Num.pi : double
+
+#' The ratio of a circle's circumference to its radius, `2 * Num.pi`.
+#'
+#' ```r dput
+#' Num.tau
+#' #> 6.28318530717959
+#' ```
+Num.tau : double
+
+#' Euler's number, the base of the natural logarithm.
+#'
+#' ```r dput
+#' Num.e
+#' #> 2.71828182845905
+#' ```
+Num.e : double
+
+#' The largest integer, `2147483647L`. It is a value, not a function.
+#'
+#' ```r dput
+#' Num.max_integer
+#' #> 2147483647L
+#' ```
+Num.max_integer : integer
+
+#' The smallest integer, `-2147483647L`. R stores `NA` in the one value below it, so that value is
+#' not an integer here.
+#'
+#' ```r dput
+#' Num.min_integer
+#' #> -2147483647L
+#' ```
+Num.min_integer : integer
+
+#' The largest finite double.
+#'
+#' ```r dput
+#' Num.max_double
+#' #> 1.79769313486232e+308
+#' ```
+Num.max_double : double
+
+#' The most negative finite double, the negation of `Num.max_double`.
+#'
+#' ```r dput
+#' Num.min_double
+#' #> -1.79769313486232e+308
+#' ```
+Num.min_double : double
+
+#' Positive infinity, R's `Inf`.
+#'
+#' ```r dput
+#' c(Num.infinity, -Num.infinity)
+#' #> c(Inf, -Inf)
+#' ```
+Num.infinity : double
+
+#' Booleans are R's `TRUE` and `FALSE`, never `NA`. R's operators already cover most of this module;
+#' its functions exist so that a boolean step can be passed by name, as in `List.walk(flags,
+#' Bool.true, Bool.and)`, and so that code written against Roc's names reads the same.
+# Bool
+
+#' `TRUE`, as Roc spells it. It is a value, not a function.
+#'
+#' ```r dput
+#' Bool.true
+#' #> TRUE
+#' ```
+Bool.true : logical
+
+#' `FALSE`.
+#'
+#' ```r dput
+#' Bool.false
+#' #> FALSE
+#' ```
+Bool.false : logical
+
+#' Whether both are `TRUE`. Both arguments are evaluated, unlike with `&&`.
+#'
+#' ```r dput
+#' Bool.and(TRUE, FALSE)
+#' #> FALSE
+#' ```
+Bool.and : fn(first: logical, second: logical) -> logical
+
+#' Whether either is `TRUE`. Both arguments are evaluated, unlike with `||`.
+#'
+#' ```r dput
+#' Bool.or(TRUE, FALSE)
+#' #> TRUE
+#' ```
+Bool.or : fn(first: logical, second: logical) -> logical
+
+#' The opposite value.
+#'
+#' ```r dput
+#' List.keep_if(list(1L, 2L, 3L), function(x) Bool.not(Num.is_even(x)))
+#' #> list(1L, 3L)
+#' ```
+Bool.not : fn(value: logical) -> logical
+
+#' Whether two values are equal by `identical()`, the library's equality. An integer and a double
+#' are never identical, so `Bool.is_eq(1L, 1)` is `FALSE`, and a dictionary or set compares without
+#' regard to order.
+#'
+#' ```r dput
+#' Bool.is_eq(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 1L)))
+#' #> TRUE
+#' ```
+Bool.is_eq : <T> fn(first: T, second: T) -> logical
+
+#' Whether two values differ by `identical()`.
+#'
+#' ```r dput
+#' Bool.is_not_eq(list(1L), list(2L))
+#' #> TRUE
+#' ```
+Bool.is_not_eq : <T> fn(first: T, second: T) -> logical
+
+#' A dictionary maps keys to values, typed `Dict<K, V>`. See [Dictionaries and
+#' sets](/reference/standard-library/#dictionaries-and-sets) for the rules on keys.
+# Dict
+
+#' A dictionary with no entries.
+#'
+#' ```r dput
+#' Dict.empty()
+#' #> Dict.empty()
+#' ```
+Dict.empty : <K: key, V> fn() -> Dict<K, V>
+
+#' An empty dictionary with room for `capacity` entries, so inserting that many never grows it. The
+#' room is rounded up to a power of two.
+#'
+#' ```r dput
+#' Dict.capacity(Dict.insert(Dict.with_capacity(64L), "a", 1L))
+#' #> 64L
+#' ```
+Dict.with_capacity : <K: key, V> fn(capacity: integer) -> Dict<K, V>
+
+#' A dictionary with one entry.
+#'
+#' ```r dput
+#' Dict.single("a", 1)
+#' #> Dict.from_list(list(("a", 1)))
+#' ```
+Dict.single : <K: key, V> fn(key: K, value: V) -> Dict<K, V>
+
+#' A dictionary from `(key, value)` tuples; a later tuple replaces an earlier one with the same key.
+#'
+#' ```r dput
+#' Dict.from_list(list(("a", 1), ("b", 2), ("a", 3)))
+#' #> Dict.from_list(list(("a", 3), ("b", 2)))
+#' ```
+Dict.from_list : <K: key, V> fn(pairs: list[Tuple{K, V}]) -> Dict<K, V>
+
+#' The entries as `(key, value)` tuples, in insertion order.
+#'
+#' ```r dput
+#' Dict.to_list(Dict.from_list(list(("a", 1), ("b", 2))))
+#' #> list(("a", 1), ("b", 2))
+#' ```
+Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> list[Tuple{K, V}]
+
+#' The number of entries.
+#'
+#' ```r dput
+#' Dict.len(Dict.single("a", 1))
+#' #> 1L
+#' ```
+Dict.len : <K: key, V> fn(dict: Dict<K, V>) -> integer
+
+#' Whether the dictionary has no entries.
+#'
+#' ```r dput
+#' Dict.is_empty(Dict.empty())
+#' #> TRUE
+#' ```
+Dict.is_empty : <K: key, V> fn(dict: Dict<K, V>) -> logical
+
+#' The value for `key`, or `:Err(:KeyNotFound)`.
+#'
+#' ```r dput
+#' Dict.get(Dict.single("a", 1), "a")
+#' #> :Ok(1)
+#' ```
+Dict.get : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
+
+#' Whether the dictionary has an entry for `key`.
+#'
+#' ```r dput
+#' Dict.contains(Dict.single("a", 1), "b")
+#' #> FALSE
+#' ```
+Dict.contains : <K: key, V> fn(dict: Dict<K, V>, key: K) -> logical
+
+#' Adds an entry, or replaces the value of an existing key in place.
+#'
+#' ```r dput
+#' Dict.insert(Dict.single("a", 1), "b", 2)
+#' #> Dict.from_list(list(("a", 1), ("b", 2)))
+#' ```
+Dict.insert : <K: key, V> fn(dict: Dict<K, V>, key: K, value: V) -> Dict<K, V>
+
+#' Removes the entry for `key`, if there is one.
+#'
+#' ```r dput
+#' Dict.remove(Dict.from_list(list(("a", 1), ("b", 2))), "a")
+#' #> Dict.from_list(list(("b", 2)))
+#' ```
+Dict.remove : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
+
+#' Sets the entry for `key` from `f`, which gets `:Ok(value)` or `:Err(:Missing)` and returns
+#' either; `:Err` removes the entry.
+#'
+#' ```r dput
+#' Dict.update(Dict.single("hits", 1L), "hits", function(r) :Ok(Result.with_default(r, 0L) + 1L))
+#' #> Dict.from_list(list(("hits", 2L)))
+#' ```
+Dict.update : <K: key, V> fn(dict: Dict<K, V>, key: K, f: fn(Result<V, :Missing>) -> Result<V, :Missing>) -> Dict<K, V>
+
+#' The keys, in insertion order.
+#'
+#' ```r dput
+#' Dict.keys(Dict.from_list(list(("a", 1), ("b", 2))))
+#' #> list("a", "b")
+#' ```
+Dict.keys : <K: key, V> fn(dict: Dict<K, V>) -> list[K]
+
+#' The values, in insertion order.
+#'
+#' ```r dput
+#' Dict.values(Dict.from_list(list(("a", 1), ("b", 2))))
+#' #> list(1, 2)
+#' ```
+Dict.values : <K: key, V> fn(dict: Dict<K, V>) -> list[V]
+
+#' Folds over the entries: `f` gets the state, a key and its value.
+#'
+#' ```r dput
+#' Dict.walk(Dict.from_list(list(("a", 1), ("b", 2))), 0, function(total, k, v) total + v)
+#' #> 3
+#' ```
+Dict.walk : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -> S
+
+#' Folds the entries until `f` returns `:Break(state)`.
+#'
+#' ```r dput
+#' Dict.walk_until(Dict.from_list(list(("a", 1L), ("b", 5L), ("c", 2L))), 0L, function(total, k, v) if (v > 4L) :Break(total) else :Continue(total + v))
+#' #> 1L
+#' ```
+Dict.walk_until : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> :Continue(S) | :Break(S)) -> S
+
+#' Replaces every value with `f` of its key and value.
+#'
+#' ```r dput
+#' Dict.map(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v * 10)
+#' #> Dict.from_list(list(("a", 10), ("b", 20)))
+#' ```
+Dict.map : <K: key, A, B> fn(dict: Dict<K, A>, f: fn(K, A) -> B) -> Dict<K, B>
+
+#' Unions the dictionaries `f` returns for each entry; a later entry's value wins.
+#'
+#' ```r dput
+#' Dict.join_map(Dict.from_list(list(("a", 1L), ("b", 2L))), function(k, v) Dict.single(v, k))
+#' #> Dict.from_list(list((1L, "a"), (2L, "b")))
+#' ```
+Dict.join_map : <K: key, V, X: key, Y> fn(dict: Dict<K, V>, f: fn(K, V) -> Dict<X, Y>) -> Dict<X, Y>
+
+#' The entries for which `predicate` of the key and value is `TRUE`.
+#'
+#' ```r dput
+#' Dict.keep_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
+#' #> Dict.from_list(list(("b", 2)))
+#' ```
+Dict.keep_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+
+#' The entries for which `predicate` is `FALSE`.
+#'
+#' ```r dput
+#' Dict.drop_if(Dict.from_list(list(("a", 1), ("b", 2))), function(k, v) v > 1)
+#' #> Dict.from_list(list(("a", 1)))
+#' ```
+Dict.drop_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+
+#' The entries of both; where a key is in both, `second`'s value wins.
+#'
+#' ```r dput
+#' Dict.insert_all(Dict.single("a", 1), Dict.from_list(list(("a", 5), ("b", 2))))
+#' #> Dict.from_list(list(("a", 5), ("b", 2)))
+#' ```
+Dict.insert_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+
+#' The entries of `first` whose key and value are both in `second`.
+#'
+#' ```r dput
+#' Dict.keep_shared(Dict.from_list(list(("a", 1), ("b", 2))), Dict.from_list(list(("a", 1), ("b", 0))))
+#' #> Dict.from_list(list(("a", 1)))
+#' ```
+Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+
+#' The entries of `first` whose key is not in `second`.
+#'
+#' ```r dput
+#' Dict.remove_all(Dict.from_list(list(("a", 1), ("b", 2))), Dict.single("a", 0))
+#' #> Dict.from_list(list(("b", 2)))
+#' ```
+Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+
+#' The dictionary with room for `spare` more entries.
+#'
+#' ```r dput
+#' Dict.reserve(Dict.single("a", 1L), 1000L)
+#' #> Dict.from_list(list(("a", 1L)))
+#' ```
+Dict.reserve : <K: key, V> fn(dict: Dict<K, V>, spare: integer) -> Dict<K, V>
+
+#' How many entries the dictionary holds before its storage must grow.
+#'
+#' ```r dput
+#' Dict.capacity(Dict.reserve(Dict.single("a", 1L), 9L))
+#' #> 10L
+#' ```
+Dict.capacity : <K: key, V> fn(dict: Dict<K, V>) -> integer
+
+#' The dictionary with no room beyond its entries. An empty dictionary keeps its smallest index,
+#' which has room for 4.
+#'
+#' ```r dput
+#' Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1L), 9L)))
+#' #> 1L
+#' ```
+Dict.release_excess_capacity : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
+
+#' An empty dictionary of the same type.
+#'
+#' ```r dput
+#' Dict.clear(Dict.single("a", 1L))
+#' #> Dict.empty()
+#' ```
+Dict.clear : <K: key, V> fn(dict: Dict<K, V>) -> Dict<K, V>
+
+#' A set of distinct keys, typed `Set<T>`.
+# Set
+
+#' A set with no elements.
+#'
+#' ```r dput
+#' Set.empty()
+#' #> Set.empty()
+#' ```
+Set.empty : <T: key> fn() -> Set<T>
+
+#' An empty set with room for `capacity` elements, so inserting that many never grows it. The room
+#' is rounded up to a power of two.
+#'
+#' ```r dput
+#' Set.capacity(Set.insert(Set.with_capacity(64L), "a"))
+#' #> 64L
+#' ```
+Set.with_capacity : <T: key> fn(capacity: integer) -> Set<T>
+
+#' A set with one element.
+#'
+#' ```r dput
+#' Set.single("a")
+#' #> Set.from_list(list("a"))
+#' ```
+Set.single : <T: key> fn(element: T) -> Set<T>
+
+#' A set of the list's elements, without duplicates, in first-seen order.
+#'
+#' ```r dput
+#' Set.from_list(list(2L, 1L, 2L))
+#' #> Set.from_list(list(2L, 1L))
+#' ```
+Set.from_list : <T: key> fn(list: list[T]) -> Set<T>
+
+#' The elements, in insertion order.
+#'
+#' ```r dput
+#' Set.to_list(Set.from_list(list("b", "a")))
+#' #> list("b", "a")
+#' ```
+Set.to_list : <T: key> fn(set: Set<T>) -> list[T]
+
+#' The number of elements.
+#'
+#' ```r dput
+#' Set.len(Set.from_list(list(1L, 1L, 2L)))
+#' #> 2L
+#' ```
+Set.len : <T: key> fn(set: Set<T>) -> integer
+
+#' Whether the set has no elements.
+#'
+#' ```r dput
+#' Set.is_empty(Set.empty())
+#' #> TRUE
+#' ```
+Set.is_empty : <T: key> fn(set: Set<T>) -> logical
+
+#' Whether `element` is in the set.
+#'
+#' ```r dput
+#' Set.contains(Set.from_list(list(1L, 2L)), 2L)
+#' #> TRUE
+#' ```
+Set.contains : <T: key> fn(set: Set<T>, element: T) -> logical
+
+#' Adds an element.
+#'
+#' ```r dput
+#' Set.insert(Set.single(1L), 2L)
+#' #> Set.from_list(list(1L, 2L))
+#' ```
+Set.insert : <T: key> fn(set: Set<T>, element: T) -> Set<T>
+
+#' Removes an element, if it is there.
+#'
+#' ```r dput
+#' Set.remove(Set.from_list(list(1L, 2L)), 1L)
+#' #> Set.from_list(list(2L))
+#' ```
+Set.remove : <T: key> fn(set: Set<T>, element: T) -> Set<T>
+
+#' The elements of either set.
+#'
+#' ```r dput
+#' Set.union(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
+#' #> Set.from_list(list(1L, 2L, 3L))
+#' ```
+Set.union : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+
+#' The elements of both sets.
+#'
+#' ```r dput
+#' Set.intersection(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
+#' #> Set.from_list(list(2L))
+#' ```
+Set.intersection : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+
+#' The elements of `first` that are not in `second`.
+#'
+#' ```r dput
+#' Set.difference(Set.from_list(list(1L, 2L)), Set.from_list(list(2L, 3L)))
+#' #> Set.from_list(list(1L))
+#' ```
+Set.difference : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+
+#' Folds over the elements.
+#'
+#' ```r dput
+#' Set.walk(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) total + x)
+#' #> 6L
+#' ```
+Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
+
+#' Folds the elements until `f` returns `:Break(state)`.
+#'
+#' ```r dput
+#' Set.walk_until(Set.from_list(list(1L, 2L, 3L)), 0L, function(total, x) if (x > 2L) :Break(total) else :Continue(total + x))
+#' #> 3L
+#' ```
+Set.walk_until : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+
+#' The set of `f` of every element.
+#'
+#' ```r dput
+#' Set.map(Set.from_list(list(1L, 2L, 3L)), function(x) x %% 2L)
+#' #> Set.from_list(list(1L, 0L))
+#' ```
+Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
+
+#' Unions the sets `f` returns for each element.
+#'
+#' ```r dput
+#' Set.join_map(Set.from_list(list(1L, 2L)), function(x) Set.from_list(list(x, x * 10L)))
+#' #> Set.from_list(list(1L, 10L, 2L, 20L))
+#' ```
+Set.join_map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> Set<B>) -> Set<B>
+
+#' The elements for which `predicate` is `TRUE`.
+#'
+#' ```r dput
+#' Set.keep_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
+#' #> Set.from_list(list(2L, 3L))
+#' ```
+Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+
+#' The elements for which `predicate` is `FALSE`.
+#'
+#' ```r dput
+#' Set.drop_if(Set.from_list(list(1L, 2L, 3L)), function(x) x > 1L)
+#' #> Set.from_list(list(1L))
+#' ```
+Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+
+#' The set with room for `spare` more elements.
+#'
+#' ```r dput
+#' Set.reserve(Set.single("a"), 1000L)
+#' #> Set.from_list(list("a"))
+#' ```
+Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
+
+#' How many elements the set holds before its storage must grow.
+#'
+#' ```r dput
+#' Set.capacity(Set.reserve(Set.single("a"), 9L))
+#' #> 10L
+#' ```
+Set.capacity : <T: key> fn(set: Set<T>) -> integer
+
+#' The set with no room beyond its elements. An empty set keeps its smallest index, which has room
+#' for 4.
+#'
+#' ```r dput
+#' Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9L)))
+#' #> 1L
+#' ```
+Set.release_excess_capacity : <T: key> fn(set: Set<T>) -> Set<T>

@@ -566,7 +566,16 @@ fn boolean_shorthand_lint(
             },
             _ => false,
         };
-        if is_target {
+        // `quote(F)` makes the symbol `F` itself, which no Boolean can stand in for.
+        let quoted_symbol = parent.kind() == SyntaxKind::ARGUMENT
+            && parent
+                .parent()
+                .and_then(|arguments| arguments.parent())
+                .is_some_and(|call| {
+                    call.kind() == SyntaxKind::CALL_EXPR
+                        && matches!(bare_callee(&call).as_deref(), Some("quote" | "bquote"))
+                });
+        if is_target || quoted_symbol {
             return;
         }
     }
@@ -950,6 +959,17 @@ fn trailing_comma_lint(
     let Some((comma, removal)) = last_comma else {
         return;
     };
+    // An empty argument is deliberate in `alist(x = , )`, which declares a formal without a
+    // default, and in `xts(,)`, which passes nothing in every position.
+    let all_empty = !argument_list.children().any(|child| {
+        child.kind() == SyntaxKind::ARGUMENT && !significant_text(&child).trim().is_empty()
+    });
+    let declares_formals = argument_list
+        .parent()
+        .is_some_and(|call| bare_callee(&call).as_deref() == Some("alist"));
+    if all_empty || declares_formals {
+        return;
+    }
     // R reads the comma as an empty argument, which only fails when the callee evaluates it
     // (`c(1, )`); a closure that leaves it unforced runs fine, so the comma is a style finding,
     // not a certain run-time error.
@@ -1041,7 +1061,9 @@ fn comparison_lints(
             .flatten()
             .map(|(_, argument)| (argument, significant_text(other)))
     };
-    if let Some((argument, class)) = class_call(lhs, rhs).or_else(|| class_call(rhs, lhs)) {
+    if let Some((argument, class)) = class_call(lhs, rhs).or_else(|| class_call(rhs, lhs))
+        && !handles_several_classes(comparison)
+    {
         push_lint(
             diagnostics,
             config.class_equals,
@@ -1059,6 +1081,44 @@ fn comparison_lints(
             )),
         );
     }
+}
+
+/// A class comparison that `any()`, `all()` or `which()` reduces, or that a
+/// `length(class(x)) == 1 &&` guard reaches only for a single class, is right for an object
+/// with several classes.
+fn handles_several_classes(comparison: &SyntaxNode) -> bool {
+    let mut node = comparison.clone();
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            SyntaxKind::PAREN_EXPR => node = parent,
+            SyntaxKind::ARGUMENT => {
+                return parent
+                    .parent()
+                    .and_then(|arguments| arguments.parent())
+                    .is_some_and(|call| {
+                        matches!(bare_callee(&call).as_deref(), Some("any" | "all" | "which"))
+                    });
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let guarded = BinaryExpr::cast(parent.clone())
+                    .and_then(|binary| binary.operator())
+                    .is_some_and(|operator| operator.kind() == SyntaxKind::AMP2)
+                    && parent.first_child().is_some_and(|guard| {
+                        guard != node
+                            && significant_text(&guard)
+                                .split_whitespace()
+                                .collect::<String>()
+                                .contains("length(class(")
+                    });
+                if guarded {
+                    return true;
+                }
+                node = parent;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// `1:length(x)` is `c(1, 0)` for an empty `x`, so a loop over it runs twice instead of never.

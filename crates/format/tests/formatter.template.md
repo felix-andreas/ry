@@ -506,7 +506,7 @@ Formatting a selection (`ry fmt --range`, or an editor's "Format Selection") lay
 
 Selected lines keep the indentation step the file already uses, read from the statements the formatter places (the commonest step wins), so tidying part of a file indented by four spaces or tabs does not move those lines out of line with their neighbours. Formatting the whole file is what re-indents it to `indent-width`. A `# fmt: off` region or `# fmt: skip` exemption inside the selection is respected, and a file that does not parse refuses exactly as whole-file formatting does.
 
-On-type formatting is the same operation on one line: a line break lays out the line it finished (never the new line under the cursor), and `}` lays out the construct it closes.
+On-type formatting is the same operation on one line: a line break lays out the line it finished, and `}` lays out the construct it closes. Formatting the file or a selection drops blank lines at the end of the file and before a `}`, and keeps at most one blank line in a row, but a typed line break never removes or adds a line break around the cursor. Pressing Enter at the end of a file, between statements, or before a `}` therefore always gives you the new line. When the finished line is itself blank, there is nothing to lay out, and the line break makes no edit.
 
 ## Format Suppression
 

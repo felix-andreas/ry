@@ -1,0 +1,40 @@
+---
+// The measured benchmark from tools/bench/why/results.json, as a CPU tab and a Memory tab. The tabs
+// share a sync key, so the reader's choice holds on every page. `programs` picks and orders rows.
+import { TabItem, Tabs } from '@astrojs/starlight/components';
+import { benchmarkRows, benchmarkViews } from '../lib/benchmarks';
+
+interface Props {
+	programs?: string[];
+}
+
+const rows = benchmarkRows(Astro.props.programs);
+---
+
+<Tabs syncKey="benchmark-metric">
+	{
+		benchmarkViews.map((view) => (
+			<TabItem label={view.label}>
+				<table>
+					<thead>
+						<tr>
+							{view.columns.map((column, index) => (
+								<th style={index > 0 ? 'text-align: right' : undefined}>{column}</th>
+							))}
+						</tr>
+					</thead>
+					<tbody>
+						{rows.map((row) => (
+							<tr>
+								{view.cells(row).map((cell, index) => (
+									<td style={index > 0 ? 'text-align: right' : undefined}>{index === 0 ? <code>{cell}</code> : cell}</td>
+								))}
+							</tr>
+						))}
+					</tbody>
+				</table>
+				{view.note && <p>{view.note}</p>}
+			</TabItem>
+		))
+	}
+</Tabs>

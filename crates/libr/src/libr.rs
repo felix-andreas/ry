@@ -29,6 +29,10 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 #[cfg(target_os = "linux")]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+/// About eleven days, in milliseconds.
+#[cfg(target_os = "linux")]
+const PURGE_DELAY_MS: std::ffi::c_long = 1_000_000_000;
+
 /// Two allocator defaults, set from a constructor that runs when the library loads because
 /// mimalloc reads them each time it reserves an arena or considers a purge. The environment
 /// variables `MIMALLOC_ARENA_EAGER_COMMIT` and `MIMALLOC_PURGE_DELAY` still override them.
@@ -44,8 +48,11 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// By default mimalloc also returns memory that stays free for 10 ms to the kernel, which zeroes
 /// each page again when it is next touched. Short-lived R values are freed and reallocated every
 /// few milliseconds, so on the benchmark tests that zeroing (`clear_page_erms`) was 15% of the
-/// profile. Never purging keeps resident memory at its peak, because freed memory is reused
-/// rather than returned.
+/// profile. The delay is therefore [`PURGE_DELAY_MS`], long enough that no purge ever comes due on
+/// its own, but not "never" (a negative delay): mimalloc schedules a purge only when the delay is
+/// non-negative, and a scheduled purge is what the forced `mi_collect` behind `gc()` and a dropped
+/// large table carries out. So freed memory is reused while R code runs and returned to the kernel
+/// when the program asks for a collection, as GNU R's `gc()` returns it.
 #[cfg(target_os = "linux")]
 #[used]
 #[unsafe(link_section = ".init_array")]
@@ -54,7 +61,7 @@ static ALLOCATOR_DEFAULTS: extern "C" fn() = {
         // SAFETY: setting an option's default has no preconditions.
         unsafe {
             libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
-            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, -1);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, PURGE_DELAY_MS);
         }
     }
     allocator_defaults

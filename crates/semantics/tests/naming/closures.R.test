@@ -412,7 +412,6 @@ f <- function() {
   20..21 x <- b0 captured
   30..31 g <- b1
   46..47 x -> b0 captured
-  unused g 30..31
 
 #---- nested_function_closes_over_outer_parameter
 f <- function(x) {
@@ -426,7 +425,6 @@ f <- function(x) {
   0..1 f <- b2
   21..22 g <- b1
   37..38 x -> b0 captured
-  unused g 21..22
 
 #---- nested_function_closes_over_top_level_global
 x <- 1L
@@ -443,7 +441,6 @@ f <- function() {
   0..1 f <- b1
   20..21 g <- b0
   36..37 x -> non-local deferred
-  unused g 20..21
 
 #---- multi_hop_nested_function_closes_over_outer_local
 f <- function() {
@@ -463,8 +460,6 @@ f <- function() {
   30..31 g <- b1
   52..53 h <- b2
   68..69 x -> b0 captured
-  unused h 52..53
-  unused g 30..31
 
 #---- closure_parameter_shadows_enclosing_binding
 f <- function() {
@@ -482,7 +477,6 @@ f <- function() {
   30..31 g <- b1
   47..48 x -> b2
   unused x 20..21
-  unused g 30..31
 
 #---- closure_local_shadows_enclosing_binding
 f <- function(x) {
@@ -501,7 +495,6 @@ f <- function(x) {
   21..22 g <- b1
   43..44 x <- b2
   57..58 x -> b2
-  unused g 21..22
   unused-parameter x 14..15
 
 #---- closure_uses_nearest_shadowing_binding_across_hops
@@ -530,8 +523,6 @@ f <- function() {
   71..72 h <- b3
   87..88 x -> b2 captured
   unused x 20..21
-  unused h 71..72
-  unused g 35..36
 
 #==== recursive_closures
 #---- local_recursive_function_resolves_its_own_name
