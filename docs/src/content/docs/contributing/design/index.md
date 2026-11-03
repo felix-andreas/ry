@@ -74,3 +74,10 @@ A Roc-style standard library of `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` a
 `Module.function` as plain R identifiers. It covers which of Roc's functions ry takes and why, how
 the names avoid every base R and recommended-package name, how the functions are typed as generic
 stubs, and why they are native builtins that are always available on ry's runtime.
+
+### [The typed runtime](/contributing/design/typed-runtime/)
+
+How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time from the checker's
+types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
+environment, native values freed by compiler-inserted reference counts with in-place reuse, and
+conversion only at the R boundary. It builds to the runtime contract of the native-types design.
