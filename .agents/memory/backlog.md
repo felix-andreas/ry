@@ -600,6 +600,9 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   parameter types satisfy the callee's masks at compile time (`annotations::return_admits`); other
   compiled calls still run `annotations::enter` and `check_return`. Typed and untyped code run
   equally fast: the profile proves the same facts the annotations do.
+  Not started: passing typed scalars and vectors unboxed across calls between typed closures, and
+  inlining small typed closures (not only natives) at their call sites. Strict mode keeps the
+  guards either way, because a strict-clean package is a hint, not a contract.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
 - **Closures from one site that speculate on an enclosure-local function compile for one
