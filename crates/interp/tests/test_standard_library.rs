@@ -1285,7 +1285,7 @@ fn declarations_and_runtime_bind_the_same_names() {
         listed, library,
         "types/std.exports must list exactly the standard library the runtime binds in `std`"
     );
-    let manifest = read("ry.exports") + "\n" + &library_manifest;
+    let extension_manifest = read("ry.exports");
     // The list and Array conversions are base builtins, listed in the manifest only for the
     // checker.
     let outside = |name: &str| {
@@ -1294,8 +1294,9 @@ fn declarations_and_runtime_bind_the_same_names() {
             "as.record" | "as.tuple" | "as.tag" | "as.Array" | "is.Array"
         )
     };
-    let exported: BTreeSet<String> = manifest
+    let exported: BTreeSet<String> = extension_manifest
         .lines()
+        .chain(library_manifest.lines())
         .filter(|line| !line.starts_with('#') && !outside(line))
         .map(str::to_owned)
         .collect();

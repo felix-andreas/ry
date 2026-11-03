@@ -4,7 +4,7 @@
 
 use {
     crate::{
-        Parse, SyntaxError,
+        Parse, SyntaxError, Unexpected,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
         tree::{Checkpoint, TreeBuilder},
@@ -246,10 +246,23 @@ impl Parser<'_> {
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
-        let found = self.peek_significant(self.pos, true);
-        error.incomplete = found.is_none();
-        error.found = found.map(|(_, pos)| self.token_range(pos));
+        match self.peek_significant(self.pos, true) {
+            Some((_, pos)) => error.unexpected = Unexpected::Token(self.token_range(pos)),
+            None => error.incomplete = true,
+        }
         self.errors.push(error);
+    }
+
+    /// Reports a construct that parsed in full but breaks one of ry's own rules, such as a
+    /// record that mixes named and unnamed items. Neither the token after it nor the end of the
+    /// input has anything to do with the error, so a console must not wait for more input.
+    fn error_rule(&mut self, range: TextRange, message: impl Into<String>) {
+        let reported = self.errors.len();
+        self.error_at(range, message);
+        if let Some(error) = self.errors.get_mut(reported) {
+            error.incomplete = false;
+            error.unexpected = Unexpected::Nothing;
+        }
     }
 
     /// A range crossing a line break (an error at a newline token) collapses onto
@@ -2222,11 +2235,11 @@ impl Parser<'_> {
         self.argument_list_items(L_BRACKET, Some(&mut items));
         for item in &items {
             match &item.kind {
-                ItemKind::Empty => self.error_at(item.range, "expected an item in this Array"),
+                ItemKind::Empty => self.error_rule(item.range, "expected an item in this Array"),
                 ItemKind::Dots => {
-                    self.error_at(item.range, "`...` cannot be spliced into an Array")
+                    self.error_rule(item.range, "`...` cannot be spliced into an Array")
                 }
-                ItemKind::Named(_) => self.error_at(
+                ItemKind::Named(_) => self.error_rule(
                     item.range,
                     "an Array item has no name; use a record such as `(x = 1, y = 2)` for named fields",
                 ),
@@ -2284,7 +2297,7 @@ impl Parser<'_> {
             self.argument_list_items(L_PAREN, Some(&mut items));
             if items.is_empty() {
                 let range = self.range_from(open);
-                self.error_at(
+                self.error_rule(
                     range,
                     "a tag without a payload is written without parentheses, as in `:None`",
                 );
@@ -2308,22 +2321,22 @@ impl Parser<'_> {
         for item in items {
             match &item.kind {
                 ItemKind::Empty => {
-                    self.error_at(item.range, format!("expected an item in this {what}"));
+                    self.error_rule(item.range, format!("expected an item in this {what}"));
                 }
                 ItemKind::Dots => {
-                    self.error_at(item.range, format!("`...` cannot be spliced into a {what}"));
+                    self.error_rule(item.range, format!("`...` cannot be spliced into a {what}"));
                 }
-                ItemKind::Positional if named => self.error_at(
+                ItemKind::Positional if named => self.error_rule(
                     item.range,
                     format!("this item needs a name: every field of a record is named, so a {what} cannot mix named and unnamed items"),
                 ),
-                ItemKind::Named(_) if !named => self.error_at(
+                ItemKind::Named(_) if !named => self.error_rule(
                     item.range,
                     format!("this item cannot have a name: no item of a tuple is named, so a {what} cannot mix named and unnamed items"),
                 ),
                 ItemKind::Named(name) => {
                     if seen.contains(&name.as_str()) {
-                        self.error_at(item.range, format!("the field `{name}` appears twice"));
+                        self.error_rule(item.range, format!("the field `{name}` appears twice"));
                     } else {
                         seen.push(name);
                     }
@@ -2548,7 +2561,7 @@ impl Parser<'_> {
                     let checkpoint = self.checkpoint();
                     let shape = self.pattern_list(true);
                     if shape.items == 0 && !shape.rest {
-                        self.error_at(
+                        self.error_rule(
                             shape.range,
                             "a tag without a payload is matched without parentheses, as in `:None`",
                         );
@@ -2564,7 +2577,7 @@ impl Parser<'_> {
                 let grouping =
                     shape.items == 1 && !shape.trailing_comma && !shape.named && !shape.rest;
                 if shape.items == 1 && !shape.trailing_comma && shape.named && !shape.rest {
-                    self.error_at(
+                    self.error_rule(
                         shape.range,
                         "a one-field record pattern needs a trailing comma, as in `(name = p,)`",
                     );
@@ -2639,7 +2652,7 @@ impl Parser<'_> {
             }
             if shape.named && positional > 0 {
                 let range = self.range_from(item_start);
-                self.error_at(range, "a pattern cannot mix named fields and unnamed items");
+                self.error_rule(range, "a pattern cannot mix named fields and unnamed items");
                 positional = 0;
             }
             self.eat_trivia(true);
@@ -2675,7 +2688,7 @@ impl Parser<'_> {
         }
         shape.range = self.range_from(open);
         if shape.rest && !shape.named && !(payload && shape.items == 0) {
-            self.error_at(
+            self.error_rule(
                 shape.range,
                 "`..` ignores the remaining fields of a record pattern, so it needs named fields before it",
             );
