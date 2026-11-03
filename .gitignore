@@ -33,4 +33,5 @@ roughly.toml
 # lives in scripts/corpus-manifest.txt).
 /corpus/
 .corpus
+.corpus-*
 .bench
