@@ -59,11 +59,18 @@ This page is the exact behavior.
   of a package loaded from source, `.onLoad` included, and code run from the console or a script
   see this mapping. Code inside an installed package calls base R's `system.file()`, which does
   not know the source package.
-- **testthat helpers**, the `tests/testthat/helper*.R` files, are sourced into the namespace after
-  the code when `export_all = TRUE`, the default, and attached with the package's objects, so tests
-  and the console can call them. A reload sources them again when it changed any code, or when a
-  helper was added, changed or deleted, so a helper's value computed from the package's functions
-  stays current. A helper that fails fails the load, and the next load sources it again.
+- **testthat** is attached when the package uses it, as `load_all()` attaches it: the package has a
+  `tests/testthat` or `inst/tests` directory and testthat is installed. It is attached after the
+  code and before `.onLoad`, so it sits on the search path right behind `package:<name>`, and test
+  code or console code that calls `test_that()` or `expect_equal()` without `testthat::` works.
+- **testthat helpers**, the `helper*.R` files of `tests/testthat` (or of `inst/tests` when there is
+  no `tests/testthat`), are sourced into the attached `package:<name>` environment after the
+  package is attached, when the package uses testthat and `export_all = TRUE`, the default. They run
+  with `NOT_CRAN=true`, as `load_all()` runs them. Tests and the console can call them, but they
+  are not part of the namespace, so `pkg:::helper` does not find them. A reload
+  sources them again when it changed any code, or when a helper was added, changed or deleted, so a
+  helper's value computed from the package's functions stays current. A helper that fails fails
+  the load, and the next load sources it again.
 - **A file in latin1** loads when `DESCRIPTION` says `Encoding: latin1` (or `ISO-8859-1`): its text
   is read as latin1, and its strings arrive in R as UTF-8. Without that field, a file that is not
   valid UTF-8 refuses the load with a message naming the field.

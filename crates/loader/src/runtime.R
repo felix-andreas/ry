@@ -77,11 +77,15 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(plan$warnings)) {
     for (warning_text in plan$warnings) warning(warning_text, call. = FALSE)
   }
-  helpers <- .ry_helpers(state, root, export_all, plan$full || !plan$noop)
-  # Switching `export_all` changes what is exported even when no file changed, and so does
-  # sourcing the helpers again.
-  resync <- !identical(state$export_all, export_all) || (!plan$full && !is.null(helpers))
-  if (!plan$full && plan$noop && current && !resync) {
+  # As `pkgload`, a package with testthat tests gets testthat attached and, when the load
+  # exports everything onto the search path, its helpers sourced there.
+  testthat <- .ry_uses_testthat(root)
+  attached <- isTRUE(attach) && (plan$full || !is.null(state$package_env))
+  helpers <- .ry_helpers(state, root, isTRUE(export_all) && attached && testthat,
+                         plan$full || !plan$noop)
+  # Switching `export_all` changes what is exported even when no file changed.
+  resync <- !identical(state$export_all, export_all)
+  if (!plan$full && plan$noop && current && !resync && is.null(helpers)) {
     state$changed <- character()
     .ry_commit(root)
     if (!quiet && report_noop) {
@@ -95,10 +99,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     .ry_force_s4(state)
   }
   state$export_all <- export_all
+  state$attach_testthat <- testthat && plan$package != "testthat"
   state$namespace_spec <- plan$namespace
   # Exports are resynced by scanning every name in the namespace, which a reload that only
-  # rebinds existing names cannot change.
-  plan$keeps_names <- isTRUE(plan$keeps_names) && !resync
+  # rebinds existing names cannot change, unless it runs `.onLoad`, which may bind any name.
+  plan$keeps_names <- isTRUE(plan$keeps_names) && !resync && !isTRUE(plan$run_on_load)
   if (!plan$full) {
     .ry_refuse_missing_s3(state, plan)
   }
@@ -107,25 +112,29 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   applied <- FALSE
   on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
-  if (!is.null(helpers)) {
-    .ry_source_helpers(state, helpers)
-  }
   applied <- TRUE
   # The names this load rebound, removed or changed the S3 dispatch of, which `ry test` reruns
   # the tests of first. `NULL` when the load ran code, which may have changed anything.
   state$changed <- if (plan$full) NULL else plan$changed
+  # The old helpers' names go before the sync, which then restores an export one of them hid.
+  if (!is.null(helpers)) {
+    .ry_drop_helpers(state)
+  }
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
     .ry_sync_package_env(state, if (resync) NULL else plan$touched, plan$keeps_names)
   }
   .ry_phase("attach")
+  if (!is.null(helpers) && !is.null(state$package_env)) {
+    .ry_source_helpers(state, helpers)
+  }
   .ry_commit(root)
   .ry_update_importers(state)
   if (!quiet) {
     elapsed <- proc.time()[["elapsed"]] - started
     held <- if (is.null(state$s4_deferred)) 0L else length(state$s4_deferred$run)
-    message(.ry_summary(plan, elapsed, held))
+    message(.ry_summary(plan, elapsed, held, helpers = !is.null(helpers)))
   }
   invisible(state$ns)
 }
@@ -157,15 +166,24 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
 }
 
-# The testthat helpers, `tests/testthat/helper*.R`, which `load_all()` sources into the
-# namespace when it exports everything, as `pkgload` does, so they are at hand interactively.
+# Whether the package has testthat tests, as `pkgload` decides it: it has a `tests/testthat` or
+# an `inst/tests` directory, and testthat is installed.
+.ry_uses_testthat <- function(root) {
+  any(dir.exists(file.path(root, c("inst/tests", "tests/testthat")))) &&
+    requireNamespace("testthat", quietly = TRUE)
+}
+
+# The testthat helpers, the `helper*.R` files of `tests/testthat` (else of `inst/tests`), which
+# `load_all()` sources into the attached package environment when it exports everything there,
+# as `pkgload` does, so tests and the console can call them but the namespace does not hold them.
 # A helper may compute a value from the package's code, so a reload sources them again when the
 # load changed anything or the helpers' names, sizes or modification times changed, and returns
 # NULL otherwise.
-.ry_helpers <- function(state, root, export_all, rerun) {
-  files <- if (isTRUE(export_all)) {
-    sort(list.files(file.path(root, "tests", "testthat"), pattern = "^helper.*\\.[rR]$",
-                    full.names = TRUE))
+.ry_helpers <- function(state, root, enabled, rerun) {
+  directory <- file.path(root, "tests", "testthat")
+  if (!dir.exists(directory)) directory <- file.path(root, "inst", "tests")
+  files <- if (enabled) {
+    sort(list.files(directory, pattern = "^helper.*\\.[rR]$", full.names = TRUE))
   } else {
     character()
   }
@@ -181,27 +199,37 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 # Names a helper bound are removed before the helpers run again, so a deleted helper leaves
-# nothing behind. The stamp is recorded only once every helper ran, so a helper that failed
-# runs again on the next load.
-.ry_source_helpers <- function(state, helpers) {
-  ns <- state$ns
-  if (length(state$helper_names)) {
-    rm(list = intersect(state$helper_names, names(ns)), envir = ns)
+# nothing behind.
+.ry_drop_helpers <- function(state) {
+  environment <- state$package_env
+  if (!is.null(environment) && length(state$helper_names)) {
+    rm(list = intersect(state$helper_names, names(environment)), envir = environment)
   }
+  state$helper_names <- NULL
   state$helpers_stamp <- NULL
-  before <- names(ns)
-  on.exit(state$helper_names <- setdiff(names(ns), before))
+}
+
+# The helpers run with `NOT_CRAN` set, as `pkgload` runs them. The stamp is recorded only once
+# every helper ran, so a helper that failed runs again on the next load.
+.ry_source_helpers <- function(state, helpers) {
+  environment <- state$package_env
+  before <- names(environment)
+  not_cran <- Sys.getenv("NOT_CRAN", unset = NA)
+  Sys.setenv(NOT_CRAN = "true")
+  on.exit({
+    state$helper_names <- setdiff(names(environment), before)
+    if (is.na(not_cran)) Sys.unsetenv("NOT_CRAN") else Sys.setenv(NOT_CRAN = not_cran)
+  })
   keep <- isTRUE(getOption("keep.source", interactive()))
   for (file in helpers$files) {
     withCallingHandlers(
-      sys.source(file, envir = ns, chdir = TRUE, keep.source = keep),
+      sys.source(file, envir = environment, chdir = TRUE, keep.source = keep),
       error = function(error) {
         message(sprintf("Error while loading %s", file))
       }
     )
   }
   state$helpers_stamp <- helpers$stamp
-  .ry_sync_exports(ns, state$namespace_spec, state$export_all)
 }
 
 # With `options(ry.load.verbose = TRUE)`, reports how long each phase of a load took.
@@ -485,13 +513,19 @@ View <- function(x, title) {
     .ry_load_compiled(state, plan$dynamic_libraries)
   }
   .ry_phase("S3")
+  # pkgload attaches testthat after the code and before `.onLoad`, so it lands on the search
+  # path behind the package, which is attached later.
+  if (isTRUE(state$attach_testthat)) {
+    library("testthat", warn.conflicts = FALSE)
+  }
+  if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
+    get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
+  }
+  # After `.onLoad`, as in pkgload, so a name it binds in the namespace is exported too.
   if (!plan$keeps_names) {
     .ry_sync_exports(ns, plan$namespace, state$export_all)
   }
   .ry_phase("exports")
-  if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
-    get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
-  }
 }
 
 # Reads the datasets of `data/` into the namespace's lazy data the way `data()` reads them, as
@@ -1014,7 +1048,8 @@ View <- function(x, title) {
 
 # Copies bindings, not values, so a lazy definition stays a promise on the search path too:
 # whichever environment forces it first, both see the value. Stale names always go, since
-# running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
+# running or undoing code (S4 registrations, `assign()`) changes names no plan lists, but the
+# names the testthat helpers bound there stay until the helpers run again; `touched`
 # limits the copying to the bindings a plan changed, and without it everything is copied.
 # Datasets come last and win over an export of the same name, as in R's attachNamespace(). A
 # plan that reloads them lists no `touched`, so only a full copy needs them.
@@ -1035,7 +1070,7 @@ View <- function(x, title) {
   datasets <- names(lazydata)
   present <- names(environment)
   stale <- present[!(present %in% exported) & !(present %in% imported) &
-                     !(present %in% datasets)]
+                     !(present %in% datasets) & !(present %in% state$helper_names)]
   if (length(stale)) rm(list = stale, envir = environment)
   if (!is.null(touched)) {
     names <- c(touched[touched %in% exported], exported[!(exported %in% present)])
@@ -1054,7 +1089,7 @@ View <- function(x, title) {
   }
 }
 
-.ry_summary <- function(plan, elapsed, held = 0L) {
+.ry_summary <- function(plan, elapsed, held = 0L, helpers = FALSE) {
   count <- function(n, singular, plural) sprintf("%d %s", n, if (n == 1L) singular else plural)
   timing <- sprintf("in %.0f ms", elapsed * 1000)
   if (plan$full) {
@@ -1082,6 +1117,6 @@ View <- function(x, title) {
             "S3 methods re-registered")
     }
   )
-  if (!length(parts)) parts <- "exports refreshed"
+  if (!length(parts)) parts <- if (helpers) "testthat helpers sourced" else "exports refreshed"
   sprintf("Reloaded %s: %s, %s.", plan$package, paste(parts, collapse = ", "), timing)
 }

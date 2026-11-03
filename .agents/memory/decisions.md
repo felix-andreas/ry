@@ -2444,8 +2444,16 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   (`R_GlobalContext` has no parent; comparing prompt text broke on `options(prompt =)` and fed
   `readline()`). A failed reload is retried only after the next change on disk. This is the one place the console feeds input after startup; it is a
   user-visible command like typing `load_all()`, and it keeps `.Last.value`.
+- **testthat follows pkgload 1.3's `load_all()`, not convenience.** A package with
+  `tests/testthat` or `inst/tests` and testthat installed gets `library(testthat)` after its code
+  and before `.onLoad` (so `package:testthat` sits behind `package:<name>`), and its `helper*.R`
+  files are sourced with `NOT_CRAN=true` into the attached package environment, not the namespace,
+  only when the load attaches and exports everything. Helpers used to go into the namespace, which
+  let package code see them and leaked them into `pkg:::`. Their names are kept in
+  `state$helper_names` so a package-environment sync does not drop them. Exports sync after
+  `.onLoad`, as pkgload's `setup_ns_exports` does, so a name `.onLoad` binds is attached too.
 - **Deferred:** updating other development packages' import copies of a changed binding, loading a
-  rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
+  rebuilt shared library under a new name, a `system.file()` shim for `inst/`, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
 
 # Decision record: the loader on ry's runtime

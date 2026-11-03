@@ -806,7 +806,8 @@ fn source_references_point_into_the_file() {
 
 #[test]
 fn system_file_finds_inst_and_helpers_are_sourced() {
-    if !r_available() {
+    // As with pkgload, helpers are sourced only for a package whose testthat is installed.
+    if !r_available() || !installed("testthat") {
         return;
     }
     let root = package(&[
@@ -840,7 +841,7 @@ fn system_file_finds_inst_and_helpers_are_sourced() {
 
 #[test]
 fn helpers_run_again_after_a_code_change_and_after_they_failed() {
-    if !r_available() {
+    if !r_available() || !installed("testthat") {
         return;
     }
     let root = package(&[
@@ -876,6 +877,52 @@ fn helpers_run_again_after_a_code_change_and_after_they_failed() {
         assert!(output.status.success(), "{runtime}: {printed}");
         assert!(
             printed.contains("2 \n3 \nhelper broke \n5 \n"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
+fn testthat_is_attached_and_helpers_sourced_as_pkgload_does() {
+    if !r_available() || !installed("testthat") {
+        return;
+    }
+    // pkgload's test directory is `inst/tests` when there is no `tests/testthat`, and its helpers
+    // run with `NOT_CRAN` set, in the attached package environment rather than the namespace.
+    let tested = package(&[
+        ("DESCRIPTION", "Package: tested\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(f)\n"),
+        ("R/a.R", "f <- function() 1\n"),
+        (
+            "inst/tests/helper-a.R",
+            "helper_cran <- Sys.getenv(\"NOT_CRAN\")\n",
+        ),
+        (
+            "inst/tests/test-a.R",
+            "test_that(\"f\", expect_equal(f(), 1))\n",
+        ),
+    ]);
+    let code = "cat(search()[2:3], helper_cran, \
+                exists('helper_cran', asNamespace('tested'), inherits = FALSE), '\\n')";
+    // A package without tests gets neither.
+    let untested = package(&[
+        ("DESCRIPTION", "Package: untested\nVersion: 1.0\n"),
+        ("NAMESPACE", "export(f)\n"),
+        ("R/a.R", "f <- function() 1\n"),
+    ]);
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, tested.path(), &[code]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("package:tested package:testthat true FALSE"),
+            "{runtime}: {printed}"
+        );
+        let output = ry_load_on(runtime, untested.path(), &["cat(search()[3], '\\n')"]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            !printed.contains("package:testthat"),
             "{runtime}: {printed}"
         );
     }

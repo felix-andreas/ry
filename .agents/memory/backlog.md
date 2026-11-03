@@ -85,6 +85,10 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   diagnostics, plus a fingerprint of about 16 ms taken twice (before and after the check).
 - **Compiled code under `ry load --runtime gnu-r`** still needs pkgbuild; only ry's runtime
   compiles with `rcmd`. A non-gcc platform inherits `rcmd`'s gaps (see "Platforms").
+- **Attaching testthat is eager**, as pkgload's `load_all()` is: a package with `tests/testthat`
+  pays for loading testthat on every cold load (about 0.2 s on GNU R; a tiny package's load went
+  from 14 ms to 1.2 s on a debug build of ry's runtime). A `package:testthat` of promises over its
+  exports would keep the search path identical and load testthat on first use.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 

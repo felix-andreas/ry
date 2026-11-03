@@ -1,0 +1,29 @@
+# A package author loads a package that has testthat tests and tries a test at the console, as
+# after `devtools::load_all()`: testthat is attached behind the package, so `test_that()` needs no
+# `testthat::`, and the helpers are on the search path with the package's objects but stay out of
+# its namespace.
+
+requires ry-runtime r-package:testthat
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file NAMESPACE
+| export(balance)
+file R/ledger.R
+| balance <- function(entries, opening = 0) opening + sum(entries)
+file tests/testthat/helper-entries.R
+| sample_entries <- function() c(1, 2, 3)
+file tests/testthat/test-ledger.R
+| test_that("balance adds the opening amount", expect_equal(balance(sample_entries(), 4), 10))
+
+run ry load --runtime ry -e "cat(search()[2:3], '\\n')" -e "test_that('at the console', expect_equal(balance(sample_entries()), 6))" -e "cat('in the namespace:', exists('sample_entries', asNamespace('ledger'), inherits = FALSE), '\\n')"
+expect exit 0
+expect stdout "package:ledger package:testthat"
+expect stdout "Test passed"
+expect stdout "in the namespace: FALSE"
+
+run ry load --runtime gnu-r -e "cat(search()[2:3], '\\n')" -e "test_that('at the console', expect_equal(balance(sample_entries()), 6))"
+expect exit 0
+expect stdout "package:ledger package:testthat"
+expect stdout "Test passed"
