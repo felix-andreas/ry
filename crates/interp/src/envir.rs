@@ -198,8 +198,13 @@ unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp>
 
 /// A copy of a frame's call, with the srcref current when the call was made as its `srcref`
 /// attribute, as GNU R's `sys.call` returns it.
+///
+/// Only the call's cells are copied, as GNU R's `shallow_duplicate` does: `do.call` puts the
+/// argument values themselves into the call, so a deep copy would cost as much as the arguments
+/// (data.table's `cedta()` runs `sys.calls()` on every `[`). The copy's cells add a reference
+/// to each argument, so writing into one through the returned call copies it first.
 pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
-    let call = values::duplicate(frame.call)?;
+    let call = values::shallow_duplicate(frame.call)?;
     if frame.srcref != nil() {
         values::set_attr(call, symbols().srcref, values::duplicate(frame.srcref)?)?;
     }
