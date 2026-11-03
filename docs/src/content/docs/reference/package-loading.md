@@ -49,8 +49,8 @@ This page is the exact behavior.
   of both branches: an import on either one resolves the names it brings in.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled and loaded,
   and `.onLoad` and `.onAttach` run. On ry's runtime, `src/` is compiled by ry itself, against
-  ry's own headers and `libR`, with the `ry-rcmd` that sits beside ry's runtime; GNU R and
-  pkgbuild are not involved. The R home this needs is created once per build of ry in ry's cache
+  ry's own headers and `libR`, with ry's own `R CMD` front end; GNU R and pkgbuild are not
+  involved. The R home this needs is created once per build of ry in ry's cache
   directory (`~/.cache/ry/home` on Linux). On GNU R, `src/` is compiled with
   [pkgbuild](https://pkgbuild.r-lib.org), as `load_all()` does.
 - **`system.file()`** finds a source package's files the way `load_all()` maps them: a path under
