@@ -72,12 +72,16 @@ compile time, about a millisecond per function, once per edit. Each instantiatio
 is compiled once, as Roc does.
 
 **Value tracking.** Inside one locked namespace or one strict file, the typed core is a closed
-program: it has no `eval`, no dynamic scoping and no rebinding, so the analysis can work out, for
+program: it has no `eval` and no dynamic scoping, and its bindings are locked, so the analysis can
+work out, for
 each variable, parameter and field, which allocation sites and which closures can reach it, and for
 each call, which functions it can reach. Bun's compiler does this for a whole program
-([prior art](/contributing/design/prior-art/#bun)). ry does it per namespace, because code outside
-a namespace can always reach it through an exported function. The results drive closure
-specialization across functions (see "Closures" below) and the facts the next section relies on.
+([prior art](/contributing/design/prior-art/#buns-compiler)). ry does it per namespace, because
+code outside a namespace reaches it through every function that escapes: an exported function, a
+registered S3 method, and any closure the namespace hands to R. Those functions' parameters only
+ever hold guesses. The results drive closure specialization across functions (see "Closures"
+below) and the facts the next section relies on. A locked binding can still be unlocked, so every
+result derived from one is discarded with the code that used it (see "Redefinition" below).
 Untyped R code is never closed, since `eval`, `get` and `assign` reach any binding, so it keeps the
 allocation profiles of the native path.
 
@@ -104,8 +108,9 @@ value read from a binding R code can write. A guess costs one layout check where
 and nowhere else.
 
 The check compares layouts, not contents, so it can fail on a value that still has the declared
-type. A record R code built with the right fields in another order, or with a field whose slot holds
-a pointer where the type's layout holds an unboxed double, has the type but not the layout. So a
+type. A record R code built with a field whose slot holds a pointer where the type's layout holds
+an unboxed double has the type but not the layout. Field order never causes a mismatch, because a
+record's fields are sorted by name in both its value and its layout. So a
 failed check runs the full structural check of the native-types contract, and:
 
 - a value that does not have the type is refused with the type-mismatch error the contract promises,
@@ -153,9 +158,11 @@ records, tags, lists or functions is a `VECSXP` of pointers. `List.append` grows
 the growable flag and true length R's own vectors use (`gp::GROWABLE`).
 
 **Records and tags.** A record, tuple or tag on the heap is the record object, whose layout id
-names the field names, the tag and each slot's representation: an unboxed `F64`, an R integer, an R
-logical, a ry number of a given width, or a pointer. The layout fixes the slot order, pointers
-first, so the collector traces a prefix and the object carries no per-slot mask. Untyped R code
+names the field names in name order, the tag and each slot's representation: an unboxed `F64`, an
+R integer, an R logical, a ry number of a given width, or a pointer. The layout maps each field to
+its slot and places the pointer slots first, so the collector traces a prefix and the object
+carries no per-slot mask. Typed code accepts only an unclassed record: one that carries a class
+attribute has a different layout and takes the structural check. Untyped R code
 gets the same layout as typed code when its values have the same representations, so
 `(x = 1, y = 2)` built by R and a `Record{x: F64, y: F64}` built by ry are one layout. A typed
 parameter therefore checks a record from R by comparing its layout id with the type's, in constant
@@ -194,14 +201,18 @@ cell's code pointer, which sends the next call through the interpreter.
 
 Bun cannot discard compiled code, so it makes its assumptions true by freezing built-ins: replacing
 a member of `Array.prototype` throws. ry cannot freeze R's bindings, because existing code changes
-locked bindings on purpose: testthat's `local_mocked_bindings` and `assignInNamespace` both unlock a
-namespace binding and rebind it. So each compiled file records which locked bindings its direct
-calls assume, and `unlockBinding` on one of them discards the code that assumed it, which then
-recompiles with a cell load at that call. Rebinding a locked binding is rare, so the direct call
-costs nothing in the common case. ry's own standard library is frozen instead: its namespaces
-cannot be unlocked, so a call of `List.map` or `Str.concat` is always direct and inlinable. No
-existing R code can depend on rebinding them. ry's types carry no class attribute, so S3 dispatch
-never reaches a ry record or tag, and its method tables need no freezing.
+locked bindings on purpose: testthat's `local_mocked_bindings` (through rlang's
+`env_binding_unlock`) and `assignInNamespace` both unlock a namespace binding and rebind it. So each
+compiled file records which locked bindings its direct calls, closure sets and facts assume, and
+the binding-unlock primitive (`R_unlockBinding`, which the R function `unlockBinding` and rlang
+both reach) discards the code that assumed the binding. That code recompiles with a cell load at the
+affected call. A test suite that mocks in every test recompiles every function that called a mocked
+binding directly, once per test, and code that never unlocks pays nothing.
+
+ry's own standard library is frozen instead: its namespaces cannot be unlocked, and no existing R
+code can depend on rebinding them. A program or package may still define its own `List.map`, which
+comes before the standard library's binding, so a call is direct and inlinable only where the
+checker resolves the name to the standard library. Elsewhere it takes the binding-cell path.
 
 **Entry and exit stubs.** A call from untyped R code into typed code goes through an entry stub,
 and a call from typed code to an R function boxes the arguments, calls the interpreter, and checks
@@ -299,8 +310,7 @@ uses, so it needs no run and no profile. The places it reports are:
 
 Worst first means a slow path inside more nested loops ranks higher, because no profile exists to
 rank by measured time. `--explain=json` prints one finding per line, for editors and CI. The user-facing
-wording and the diagnostic codes are the language session's to settle with the native-types
-contract.
+wording and the diagnostic codes follow the native-types contract.
 
 ## Measuring against the bar
 

@@ -364,15 +364,16 @@ run fast without trusting values that arrive from untyped code.
 
 - **Facts and guesses,** but with ry's contract: an annotation means the value has the type, so a
   value that does not conform is refused with a type-mismatch error. Only a value that conforms with
-  a different layout, such as a record R code built with its fields in another order, takes the
+  a different layout, such as a record whose number field R code stored as a pointer, takes the
   second copy.
 - **Value tracking per namespace.** The typed core of a locked namespace or a strict file has no
-  `eval` and no rebinding, so it is closed apart from its exported functions. Untyped R code is never
+  `eval` and its bindings are locked, so it is closed apart from the functions that escape to R
+  (exports, registered S3 methods and closures it hands out). Untyped R code is never
   closed, because `eval`, `get` and `assign` reach any binding, so it keeps allocation profiles.
 - **Freezing for ry's standard library.** No existing R code rebinds `List.map`, so its namespaces
-  cannot be unlocked and its calls are always direct. R's own locked bindings are not frozen, because
+  cannot be unlocked, and a call the checker resolves to it is direct. R's own locked bindings are not frozen, because
   testthat's `local_mocked_bindings` and `assignInNamespace` rebind them on purpose. Instead,
-  `unlockBinding` discards the compiled code whose direct calls assumed the binding.
+  the binding-unlock primitive discards the compiled code whose direct calls assumed the binding.
 - **Mapped, shared code** for the typed code cache, which matters for CI machines that run several
   test processes and are bound by memory.
 - **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
