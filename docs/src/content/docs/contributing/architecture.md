@@ -178,8 +178,8 @@ annotation never keeps the whole file's tree alive.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
-agreement candidates in `diagnostics.rs`, `item_name_range`, `item_binds_only_own_name`,
-`top_level::item_declared_pure`, and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+agreement candidates in `diagnostics.rs`, `item_name_range`, `item_syntax_flags` (whether
+an item binds only its own name, and whether it is declared pure), and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
 joins it with the rest (a bare `setClass` call is reported only when the file does not bind
@@ -198,15 +198,20 @@ and that a one-shot cold check memoizes no tree.
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
 over a node and its parent and makes owned nodes only for the matches. The per-file site collectors
-share one walk, `file_syntax_sites`, and the syntax lints walk the tree with `syntax::walk_tree`,
-making an owned node (`syntax::node_at`) only where a cheap test says a lint may fire.
+share one pass over the nodes, `file_syntax_sites`, which tests each role only on the kinds that
+can carry it. The syntax lints scan the kind column for the element kinds a lint or an annotation region
+can start at (`NodeRef::elements_of_kind`),
+track the enclosing annotation region by position (`NodeRef::encloses`), and make an owned node
+(`syntax::node_at`) only where a cheap test says a lint may fire. A borrowed `TokenRef` reads its
+kind, range and text only when asked, because a child walk mostly checks kinds.
 
 The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
 wall time. Several of them are worth knowing:
 
 - Every salsa read of a tracked function with several arguments interns its key and verifies a
-  memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
-  caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
+  memo. So in the server one item check resolves all its frame binders in one query
+  (`item_frame_binders`), and every item check caches the package names and schemes it looks up
+  in `SalsaGlobals`. `package_name` and
   `test_name` take only the name and read `ProjectFiles` themselves.
 - `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
   64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
@@ -224,6 +229,14 @@ wall time. Several of them are worth knowing:
   call, so no directive straddles a boundary.
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
+- Every item keeps its HIR, naming and check memos for the whole run, so each 8-byte field on
+  those values costs about half a megabyte across a 300K-line bench. `ItemNaming::extras` and
+  `ItemCheck::editor` keep the rarely populated and the editor-only fields behind one optional
+  box, and a one-shot check skips the per-item binder memo (`item_frame_binders`) and reads the
+  file's binders, a sorted array searched by name, directly.
+- mimalloc's `realloc` keeps the old block when the new size is at least half of it, so a `Vec`
+  shrunk with `into_boxed_slice` or `shrink_to_fit` can still hold twice its length. A buffer that
+  stays memoized is allocated at its exact size up front instead.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
   huge pages that a short-lived process never touched. What allocation still costs is mostly
   setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
@@ -295,9 +308,12 @@ element type that the expression addresses with a `Span`, so every HIR kind is `
 over kinds never touches ranges. A name written at a site with its own range (an argument name, a
 field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
 holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
-no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the tree through borrowed `syntax::NodeRef` cursors. It writes into a per-thread scratch module that keeps its capacity across
-items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
-capacity and lowering allocates a handful of arrays per item. Naming
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the tree through
+borrowed `syntax::NodeRef` cursors into a per-thread scratch (`hir::Parts`) that keeps its capacity
+across items. Sealing copies every array and the text into one allocation of exactly the needed
+size, a word header of section starts followed by the sections, so the memoized `Module` costs one
+allocation and no spare capacity. When every range in the item ends below 64 KiB, as almost all
+do, a range packs into one word. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
@@ -383,10 +399,11 @@ cold check hundreds of thousands of salsa dependency edges it never replays. It 
 `RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
 A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
 answers each name with a hash probe, instead of interning a name and going through `package_name`
-or `test_name`. A frame binder that `item_frame_binders` does not list comes from the file's
-binders, read once per reader, instead of a `frame_binder` memo per item and name. And
+or `test_name`. A frame binder comes from the file's binders, read once per reader, instead of
+the per-item `item_frame_binders` memo and a `frame_binder` memo per name it does not list. And
 `item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
-instead of one `interface_group` walk per item. Every read still goes through salsa, so the answers are the same
+instead of one `interface_group` walk per item; `ry check` runs that walk on a cloned handle
+beside the parallel edge pass. Every read still goes through salsa, so the answers are the same
 facts; only the granularity of the recorded dependencies changes. Under
 `syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
 per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.

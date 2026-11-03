@@ -730,6 +730,18 @@ slightly slower than a release binary. Debug builds keep line tables only (`[pro
 "line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
 inspect locals in a debugger.
 
+`crates/ry/tests/test_perf.rs` holds the memory budget of a whole cold `ry check --no-cache` with
+type errors on. It generates the three 300,000-line benchmark code bases with
+`tools/bench/generate.py`, runs the release binary on each, and fails when one peaks above
+256 MiB resident. It reads the child's own peak with `wait4`, so it measures the process the user
+would run, allocator included. It is ignored by default for the same reasons:
+
+```sh
+cargo test-release -p ry-lang --test test_perf -- --ignored --nocapture
+```
+
+`just perf` runs both suites.
+
 ## Guidelines
 
 - Add or tighten a fixture before writing a parser-local or crate-local unit test.

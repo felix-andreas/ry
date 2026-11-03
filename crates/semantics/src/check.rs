@@ -45,7 +45,10 @@ use {
         ops::Range,
         ptr::NonNull,
         rc::Rc,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
     thin_vec::ThinVec,
@@ -345,24 +348,9 @@ pub enum OperandExpectation {
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
-    pub expression_types: ExpressionTypes<'db>,
-    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
-    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
-    /// a pattern that cannot match records nothing.
-    pub pattern_types: PatternTypes<'db>,
-    /// The declared type each native record, tuple or tag literal was checked against, at an
-    /// annotated binding, a call argument or a nominal constructor, so completion can offer
-    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
-    /// the enclosing one's field or payload.
-    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
-    /// The element type each `for` loop binds its variable to, keyed by the loop. The
-    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
-    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
     pub errors: ThinVec<TypeError<'db>>,
     pub strict_origins: ThinVec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
-    /// Index into the declared overload set; absent when no candidate matched.
-    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
     pub masked_reads: SortedSet<ExprId>,
@@ -376,9 +364,40 @@ pub struct ItemCheck<'db> {
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
     pub match_findings: ThinVec<MatchFinding>,
+    /// What only editor features read, absent when the host asked for no editor facts, so a
+    /// one-shot check keeps no per-item slots for them.
+    pub editor: Option<Box<EditorFacts<'db>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct EditorFacts<'db> {
+    pub expression_types: ExpressionTypes<'db>,
+    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
+    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
+    /// a pattern that cannot match records nothing.
+    pub pattern_types: PatternTypes<'db>,
+    /// The declared type each native record, tuple or tag literal was checked against, at an
+    /// annotated binding, a call argument or a nominal constructor, so completion can offer
+    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
+    /// the enclosing one's field or payload.
+    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
+    /// The element type each `for` loop binds its variable to, keyed by the loop. The
+    /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
+    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
+    /// Index into the declared overload set; absent when no candidate matched.
+    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Call heads whose lookup skipped the binding naming resolved, because that binding
     /// cannot hold a function. Editor features navigate to the binding the call reaches.
     pub callee_targets: SortedMap<ExprId, CalleeTarget>,
+}
+
+static NO_EDITOR_FACTS: LazyLock<EditorFacts<'static>> = LazyLock::new(EditorFacts::default);
+
+impl<'db> ItemCheck<'db> {
+    /// The editor facts, empty when the host asked for none.
+    pub fn editor(&self) -> &EditorFacts<'db> {
+        self.editor.as_deref().unwrap_or(&NO_EDITOR_FACTS)
+    }
 }
 
 /// A DataFrame function whose result the checker computes from its arguments.
@@ -867,12 +886,9 @@ fn check_item_in<'db>(
         Some(context.table.resolve(db, ty))
     });
     let editor_facts = db.editor_facts();
-    let mut expression_types = ExpressionTypes::default();
-    let mut pattern_types = PatternTypes::default();
-    let mut literal_expectations = SortedMap::default();
-    let mut loop_variables = SortedMap::default();
+    let mut editor = None;
     if editor_facts {
-        expression_types = recorded
+        let expression_types = recorded
             .into_iter()
             .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
             .collect();
@@ -882,17 +898,33 @@ fn check_item_in<'db>(
                 *slot = Some(context.table.resolve(context.db, ty));
             }
         }
-        pattern_types = PatternTypes(ThinVec::from(patterns));
-        literal_expectations = context
+        let pattern_types = PatternTypes(ThinVec::from(patterns));
+        let literal_expectations = context
             .recorded_expectations
             .iter()
             .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
-        loop_variables = context
+        let loop_variables = context
             .recorded_loop_variables
             .iter()
             .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
+        editor = Some(Box::new(EditorFacts {
+            expression_types,
+            pattern_types,
+            literal_expectations,
+            loop_variables,
+            selected_overloads: context
+                .selected_overloads
+                .iter()
+                .map(|(&callee, &index)| (callee, index))
+                .collect(),
+            callee_targets: context
+                .callee_targets
+                .iter()
+                .map(|(&callee, &target)| (callee, target))
+                .collect(),
+        }));
     }
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
@@ -910,7 +942,7 @@ fn check_item_in<'db>(
     errors.dedup();
     let mut top_level_bindings = Vec::new();
     for (&id, info) in &naming.bindings {
-        if info.kind != BindingKind::TopLevel && !naming.loop_bound_slots.contains(&id) {
+        if info.kind != BindingKind::TopLevel && !naming.extras().loop_bound_slots.contains(&id) {
             continue;
         }
         let Some(entry) = context.environment.get(id) else {
@@ -932,7 +964,7 @@ fn check_item_in<'db>(
     let ambiguous: FxHashSet<_> = top_level_bindings
         .iter()
         .filter(|(id, name, _)| {
-            naming.loop_bound_slots.contains(id)
+            naming.extras().loop_bound_slots.contains(id)
                 && top_level_bindings
                     .iter()
                     .any(|(other, other_name, _)| other != id && other_name == name)
@@ -953,23 +985,10 @@ fn check_item_in<'db>(
         .collect();
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
-        expression_types,
-        pattern_types,
-        literal_expectations,
-        loop_variables,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: if editor_facts {
-            context.selected_overloads.into_iter().collect()
-        } else {
-            SortedMap::default()
-        },
-        callee_targets: if editor_facts {
-            context.callee_targets.into_iter().collect()
-        } else {
-            SortedMap::default()
-        },
+        editor,
         masked_reads: context.masked_reads.into_iter().collect(),
         column_misses: context.column_misses.into_iter().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
@@ -2744,7 +2763,7 @@ impl<'db> Checker<'db, '_> {
                 let first_call_error = self.errors.len();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);
-                if let Some(&slot) = self.naming.run_time_writes.get(&id) {
+                if let Some(&slot) = self.naming.extras().run_time_writes.get(&id) {
                     let written = unknown(self.db);
                     self.environment.set(slot, EnvEntry::Mono(written));
                     self.note_captured_write(slot, written);
@@ -2962,12 +2981,10 @@ impl<'db> Checker<'db, '_> {
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect(),
-                        condition_only: module[parameters]
-                            .iter()
-                            .filter(|parameter| {
-                                self.read_only_as_condition(*body, parameter.name) == Some(true)
-                            })
-                            .map(|parameter| Name::new(self.db, parameter.name))
+                        condition_only: self
+                            .condition_only_names(*body, &module[parameters])
+                            .into_iter()
+                            .map(|name| Name::new(self.db, name))
                             .collect(),
                         null_unless,
                         reduces,
@@ -3467,7 +3484,7 @@ impl<'db> Checker<'db, '_> {
             // writes (the closure runs later); a top-level slot reads the cross-item binding,
             // materialized so a loop join keeps it as the pre-state.
             None => {
-                if self.naming.captured_slots.contains(&slot) {
+                if self.naming.extras().captured_slots.contains(&slot) {
                     self.forward_captured.insert(slot);
                     if let Some(&join) = self.capture_joins.get(&slot) {
                         return join;
@@ -3623,7 +3640,7 @@ impl<'db> Checker<'db, '_> {
         if !naming.quiet_reads.contains_key(&id) {
             return None;
         }
-        let deferred = naming.deferred_quiet_reads.contains(&id);
+        let deferred = naming.extras().deferred_quiet_reads.contains(&id);
         let scheme = self
             .globals
             .and_then(|globals| globals.scheme(Symbol::new(name), deferred));
@@ -3798,7 +3815,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn note_captured_write(&mut self, slot: BindingId, value_ty: Ty<'db>) {
-        if !self.naming.captured_slots.contains(&slot) {
+        if !self.naming.extras().captured_slots.contains(&slot) {
             return;
         }
         let written = erase_vars(self.db, self.table.resolve(self.db, value_ty));
@@ -8570,47 +8587,70 @@ impl<'db> Checker<'db, '_> {
             .any_child(id, |child| self.writes_name(child, name))
     }
 
-    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
-    /// `Some(true)` when every read of `name` under `id` is the whole condition of an `if` or a
-    /// `while`, `Some(false)` when some read is anything else, and `None` when there is no read.
-    /// A nested function's reads count as other reads, since it may rebind the name.
-    fn read_only_as_condition(&self, id: ExprId, name: Symbol) -> Option<bool> {
+    /// The parameters whose every read under `body` is the whole condition of an `if` or a
+    /// `while`, and which are read at least once. A nested function's reads count like any
+    /// other. One walk serves every parameter, since a walk per parameter is quadratic in
+    /// long signatures.
+    fn condition_only_names(&self, body: ExprId, parameters: &[Formal]) -> Vec<Symbol> {
+        // Per parameter: read as a whole condition, and read some other way.
+        let mut reads: Vec<(Symbol, bool, bool)> = parameters
+            .iter()
+            .map(|parameter| (parameter.name, false, false))
+            .collect();
+        if reads.is_empty() {
+            return Vec::new();
+        }
+        self.record_condition_reads(body, &mut reads);
+        reads
+            .into_iter()
+            .filter(|&(_, as_condition, otherwise)| as_condition && !otherwise)
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    fn record_condition_reads(&self, id: ExprId, reads: &mut [(Symbol, bool, bool)]) {
         let module = self.module;
-        let strip = |mut id: ExprId| {
-            while let ExpressionKind::Paren(inner) = module.kind(id) {
-                id = *inner;
+        // A condition that is a tracked name, through any parentheses, is a condition read
+        // of it, and holds no other read.
+        let condition_name = |mut condition: ExprId| {
+            while let ExpressionKind::Paren(inner) = module.kind(condition) {
+                condition = *inner;
             }
-            id
-        };
-        let is_name = |id: ExprId| matches!(module.kind(strip(id)), ExpressionKind::NameRef(read) if *read == name);
-        let join = |left: Option<bool>, right: Option<bool>| match (left, right) {
-            (Some(false), _) | (_, Some(false)) => Some(false),
-            (None, other) | (other, None) => other,
-            (Some(true), Some(true)) => Some(true),
+            match module.kind(condition) {
+                ExpressionKind::NameRef(name) => reads.iter().position(|read| read.0 == *name),
+                _ => None,
+            }
         };
         match module.kind(id) {
-            ExpressionKind::NameRef(read) if *read == name => Some(false),
+            ExpressionKind::NameRef(name) => {
+                if let Some(read) = reads.iter_mut().find(|read| read.0 == *name) {
+                    read.2 = true;
+                }
+            }
             ExpressionKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } if is_name(*condition) => {
-                let branches = join(
-                    self.read_only_as_condition(*then_branch, name),
-                    else_branch.and_then(|branch| self.read_only_as_condition(branch, name)),
-                );
-                join(Some(true), branches)
+            } if let Some(position) = condition_name(*condition) => {
+                let (then_branch, else_branch) = (*then_branch, *else_branch);
+                if let Some(read) = reads.get_mut(position) {
+                    read.1 = true;
+                }
+                self.record_condition_reads(then_branch, reads);
+                if let Some(branch) = else_branch {
+                    self.record_condition_reads(branch, reads);
+                }
             }
-            ExpressionKind::While { condition, body } if is_name(*condition) => {
-                join(Some(true), self.read_only_as_condition(*body, name))
+            ExpressionKind::While { condition, body }
+                if let Some(position) = condition_name(*condition) =>
+            {
+                let body = *body;
+                if let Some(read) = reads.get_mut(position) {
+                    read.1 = true;
+                }
+                self.record_condition_reads(body, reads);
             }
-            _ => {
-                let mut verdict = None;
-                module.for_each_child(id, |child| {
-                    verdict = join(verdict, self.read_only_as_condition(child, name));
-                });
-                verdict
-            }
+            _ => module.for_each_child(id, |child| self.record_condition_reads(child, reads)),
         }
     }
 
@@ -10410,7 +10450,7 @@ impl<'db> Checker<'db, '_> {
         // new write of its slot. Naming records the write from the callee's name alone, so a
         // subject that is not a known frame, or a call that turns out to be some other
         // `setnames`, writes the subject's own type back and loses nothing.
-        if let Some(&slot) = self.naming.column_updates.get(&id) {
+        if let Some(&slot) = self.naming.extras().column_updates.get(&id) {
             let written = match (refined, arguments.first().and_then(|first| first.value)) {
                 (Some(ty), _) => Some(ty),
                 (None, Some(subject)) => self.recorded.get(&subject).copied(),
@@ -13829,7 +13869,7 @@ impl<'db> Checker<'db, '_> {
         };
         // Any other subject (a data.table, an unknown) keeps its type through `:=`, and the
         // write still has to land so the statement's binding carries that type forward.
-        if let Some(&slot) = self.naming.column_updates.get(&id) {
+        if let Some(&slot) = self.naming.extras().column_updates.get(&id) {
             let written = if is_query { result } else { target_ty };
             self.environment.set(slot, EnvEntry::Mono(written));
             self.note_captured_write(slot, written);
@@ -13942,7 +13982,7 @@ impl<'db> Checker<'db, '_> {
         // syntax, or a value of no known shape) evaluates its indexes in a frame ry cannot
         // see, where a `NULL` placeholder local names a column.
         let unseen_frame = !double
-            && (self.naming.masked_subsets.contains(&id)
+            && (self.naming.extras().masked_subsets.contains(&id)
                 || match self.table.resolve(self.db, subject).kind(self.db) {
                     TyKind::Unknown | TyKind::Any | TyKind::Var(_) => true,
                     TyKind::Named(name, _) => name.text(self.db) == "data.table",
@@ -13979,7 +14019,7 @@ impl<'db> Checker<'db, '_> {
         }
         // data.table syntax without a data.table-typed subject returns a shape no base
         // rule covers: silent `Unknown`.
-        if self.naming.masked_subsets.contains(&id) {
+        if self.naming.extras().masked_subsets.contains(&id) {
             return unknown(self.db);
         }
         if let TyKind::Named(name, _) = subject.kind(self.db)

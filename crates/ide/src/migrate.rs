@@ -321,8 +321,8 @@ fn collect_rewrites(
             expressions: hir
                 .map(|hir| {
                     let mut expressions = HashMap::new();
-                    for (index, range) in hir.ranges().iter().enumerate() {
-                        expressions.entry(*range).or_insert(ExprId::new(index));
+                    for (index, range) in hir.ranges().enumerate() {
+                        expressions.entry(range).or_insert(ExprId::new(index));
                     }
                     expressions
                 })
@@ -715,7 +715,7 @@ impl<'db> Migration<'_, 'db> {
         let text = node_text(node);
         let is_data_table = self
             .expression_id(node)
-            .and_then(|id| self.check?.expression_types.get(&id))
+            .and_then(|id| self.check?.editor().expression_types.get(&id))
             .is_some_and(|ty| match ty.kind(self.db) {
                 TyKind::Frame(FrameKind::DataTable, _) => true,
                 TyKind::Named(name, _) => name.text(self.db) == "data.table",
@@ -1280,7 +1280,7 @@ impl<'db> Migration<'_, 'db> {
     fn table(&self, node: &SyntaxNode) -> Table {
         let Some(ty) = self
             .expression_id(node)
-            .and_then(|id| self.check?.expression_types.get(&id))
+            .and_then(|id| self.check?.editor().expression_types.get(&id))
         else {
             return Table::Other;
         };

@@ -3298,8 +3298,12 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
     `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut. It is also
     the next memory cut: salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
-  - `collect_used_tokens` slices every token through `token_ref` (about 318 M instructions on
-    finance); skipping trivia before slicing is a cheap CPU cut.
+  - Done: kind-column scans, phase overlap, one-allocation HIR, memchr lexing and a one-pass tree
+    finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions.md`, "The
+    one-shot check scans kind columns and overlaps its serial phases"). Left: the parser and
+    `TreeBuilder` self cost (about 1.4 G), the lexer's ident scans and per-token work (about
+    0.65 G), and salsa fetch overhead spread across queries. Tried without gain: skipping the
+    `SalsaGlobals::layer` memo in one-shot mode (+64 M).
   - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k

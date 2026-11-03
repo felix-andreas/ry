@@ -398,7 +398,6 @@ impl fmt::Debug for Tree {
 /// Builds a [`Tree`] from a parser's events. A node is only known to wrap the elements after a
 /// checkpoint once the parser opens it there, so elements arrive in postorder (children before
 /// their parent) and [`TreeBuilder::finish`] lays them out in preorder in one linear pass.
-#[derive(Default)]
 pub(crate) struct TreeBuilder {
     kinds: Vec<SyntaxKind>,
     starts: Vec<TextSize>,
@@ -414,6 +413,16 @@ pub(crate) struct TreeBuilder {
 pub(crate) struct Checkpoint(u32);
 
 impl TreeBuilder {
+    pub(crate) fn with_capacity(elements: usize) -> TreeBuilder {
+        TreeBuilder {
+            kinds: Vec::with_capacity(elements),
+            starts: Vec::with_capacity(elements),
+            firsts: Vec::with_capacity(elements),
+            open: Vec::new(),
+            offset: TextSize::new(0),
+        }
+    }
+
     pub(crate) fn token(&mut self, kind: SyntaxKind, len: TextSize) {
         let index = self.next_index();
         self.kinds.push(kind);
@@ -486,22 +495,26 @@ impl TreeBuilder {
             }
         }
         let mut preorder = vec![0u32; count];
-        for element in (0..count - 1).rev() {
-            let parent = parents[element] as usize;
-            preorder[element] = preorder[parent] + 1 + (self.firsts[element] - self.firsts[parent]);
-        }
         let mut kinds = vec![SyntaxKind::ERROR; count];
         let mut starts = vec![TextSize::new(0); count];
         let mut ends = vec![0u32; count];
         let mut preorder_parents = vec![NO_PARENT; count];
-        for element in 0..count {
-            let position = preorder[element] as usize;
-            kinds[position] = self.kinds[element];
-            starts[position] = self.starts[element];
-            ends[position] = preorder[element] + (element as u32 - self.firsts[element]) + 1;
-            if let Some(&parent) = parents.get(element).filter(|&&parent| parent != NO_PARENT) {
-                preorder_parents[position] = preorder[parent as usize];
-            }
+        for element in (0..count).rev() {
+            let first = self.firsts[element];
+            let parent = parents[element];
+            let position = if parent == NO_PARENT {
+                0
+            } else {
+                let parent_position = preorder[parent as usize];
+                let position = parent_position + 1 + (first - self.firsts[parent as usize]);
+                preorder_parents[position as usize] = parent_position;
+                position
+            };
+            preorder[element] = position;
+            let slot = position as usize;
+            kinds[slot] = self.kinds[element];
+            starts[slot] = self.starts[element];
+            ends[slot] = position + (element as u32 - first) + 1;
         }
         Tree::from_columns(Columns {
             text: text.into(),
@@ -1311,22 +1324,61 @@ pub struct NodeRef<'a> {
     index: u32,
 }
 
-/// A token borrowed from a tree, read out in full.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A token borrowed from a tree. It reads nothing until asked: most tokens a child walk passes
+/// over are only checked for their kind, so slicing every token's text up front would cost more
+/// than the walk itself.
+#[derive(Clone, Copy)]
 pub struct TokenRef<'a> {
-    pub kind: SyntaxKind,
-    pub text: &'a str,
-    pub range: TextRange,
+    tree: &'a Tree,
+    index: u32,
 }
 
 pub type ElementRef<'a> = NodeOrToken<NodeRef<'a>, TokenRef<'a>>;
 
 fn token_ref(tree: &Tree, index: u32) -> TokenRef<'_> {
-    let range = tree.range(index);
-    TokenRef {
-        kind: tree.kind(index),
-        text: tree.slice(range),
-        range,
+    TokenRef { tree, index }
+}
+
+impl<'a> TokenRef<'a> {
+    #[inline]
+    pub fn kind(self) -> SyntaxKind {
+        self.tree.kind(self.index)
+    }
+
+    #[inline]
+    pub fn range(self) -> TextRange {
+        self.tree.range(self.index)
+    }
+
+    #[inline]
+    pub fn text(self) -> &'a str {
+        self.tree.slice(self.range())
+    }
+
+    pub fn parent(self) -> Option<NodeRef<'a>> {
+        Some(NodeRef {
+            tree: self.tree,
+            index: self.tree.parent(self.index)?,
+        })
+    }
+}
+
+impl PartialEq for TokenRef<'_> {
+    fn eq(&self, other: &TokenRef<'_>) -> bool {
+        self.kind() == other.kind() && self.range() == other.range() && self.text() == other.text()
+    }
+}
+
+impl Eq for TokenRef<'_> {}
+
+impl fmt::Debug for TokenRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenRef")
+            .field("kind", &self.kind())
+            .field("text", &self.text())
+            .field("range", &self.range())
+            .finish()
     }
 }
 
@@ -1395,7 +1447,7 @@ impl<'a> NodeRef<'a> {
     }
 
     pub fn has_child(self, kind: SyntaxKind) -> bool {
-        self.child_nodes().any(|child| child.kind() == kind)
+        kind.is_node() && self.child_kinds().any(|child| child == kind)
     }
 
     /// The text of a node that is a single token, such as most names.
@@ -1419,6 +1471,94 @@ impl<'a> NodeRef<'a> {
             .map(move |index| NodeRef { tree, index })
     }
 
+    /// This node and every node under it whose kind `wanted` accepts, in preorder. One scan of
+    /// the kind column, so a walk after a few sparse kinds pays only a kind test per element.
+    pub fn descendants_of_kind<F: Fn(SyntaxKind) -> bool>(
+        self,
+        wanted: F,
+    ) -> impl Iterator<Item = NodeRef<'a>> + use<'a, F> {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        let first = self.index;
+        tree.columns
+            .kinds
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(move |&(_, &kind)| kind.is_node() && wanted(kind))
+            .map(move |(offset, _)| NodeRef {
+                tree,
+                index: first + offset as u32,
+            })
+    }
+
+    /// This node and every element under it whose kind `wanted` accepts, tokens included, in
+    /// preorder. One scan of the kind column, so the elements a walk ignores are never built.
+    pub fn elements_of_kind<F: Fn(SyntaxKind) -> bool>(
+        self,
+        wanted: F,
+    ) -> impl Iterator<Item = ElementRef<'a>> + use<'a, F> {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        let first = self.index;
+        tree.columns
+            .kinds
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(move |&(_, &kind)| wanted(kind))
+            .map(move |(offset, _)| element_ref(tree, first + offset as u32))
+    }
+
+    /// The tokens under this node whose kind `wanted` accepts, in source order, skipping the
+    /// whole subtree of every node `pruned` accepts (this one included). Kinds are tested on
+    /// the kind column, so only the wanted tokens are built.
+    pub fn tokens_outside<P: Fn(SyntaxKind) -> bool, W: Fn(SyntaxKind) -> bool>(
+        self,
+        pruned: P,
+        wanted: W,
+    ) -> impl Iterator<Item = TokenRef<'a>> + use<'a, P, W> {
+        let tree = self.tree;
+        let end = tree.end(self.index);
+        let mut index = self.index;
+        std::iter::from_fn(move || {
+            while index < end {
+                let current = index;
+                let kind = tree.kind(current);
+                if kind.is_node() {
+                    index = if pruned(kind) {
+                        tree.end(current)
+                    } else {
+                        current + 1
+                    };
+                    continue;
+                }
+                index = current + 1;
+                if wanted(kind) {
+                    return Some(token_ref(tree, current));
+                }
+            }
+            None
+        })
+    }
+
+    /// Whether any element under this one, this one included, has a kind `wanted` accepts.
+    /// One scan of the kind column, so it is far cheaper than a walk and suits a test that
+    /// lets a walk be skipped.
+    pub fn any_kind(self, wanted: impl Fn(SyntaxKind) -> bool) -> bool {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        tree.columns
+            .kinds
+            .get(start..end)
+            .is_some_and(|kinds| kinds.iter().any(|&kind| wanted(kind)))
+    }
+
     /// The first node in preorder under this one, this one included, with `kind` and exactly
     /// `range`. Starts never decrease in preorder, so every element starting where `range`
     /// starts sits in one run that a binary search finds.
@@ -1433,6 +1573,24 @@ impl<'a> NodeRef<'a> {
             .map(|index| NodeRef { tree, index })
     }
 
+    /// Every element under this one, this one included, in preorder, tokens included.
+    pub fn descendants_with_tokens(
+        self,
+    ) -> impl DoubleEndedIterator<Item = ElementRef<'a>> + use<'a> {
+        let tree = self.tree;
+        (self.index..tree.end(self.index)).map(move |index| element_ref(tree, index))
+    }
+
+    /// Whether `element` is this node or lies under it, from the elements' positions in the
+    /// tree, so an empty element on this node's boundary is placed exactly.
+    pub fn encloses(self, element: ElementRef<'_>) -> bool {
+        let (tree, index) = match element {
+            NodeOrToken::Node(node) => (node.tree, node.index),
+            NodeOrToken::Token(token) => (token.tree, token.index),
+        };
+        std::ptr::eq(tree, self.tree) && (self.index..self.tree.end(self.index)).contains(&index)
+    }
+
     /// Every token under this node, in source order.
     pub fn tokens(self) -> impl Iterator<Item = TokenRef<'a>> + use<'a> {
         let tree = self.tree;
@@ -1440,76 +1598,6 @@ impl<'a> NodeRef<'a> {
             .filter(move |&index| !tree.is_node(index))
             .map(move |index| token_ref(tree, index))
     }
-}
-
-/// One step of [`walk_tree`].
-#[derive(Clone, Copy)]
-pub enum TreeEvent<'a> {
-    /// A node, with its parent (`None` for the root) and its range.
-    Enter {
-        node: NodeRef<'a>,
-        parent: Option<NodeRef<'a>>,
-        range: TextRange,
-    },
-    /// The end of a node, after its last child.
-    Leave(NodeRef<'a>),
-    /// A comment or literal token, the only tokens a whole-file pass reads.
-    Token {
-        kind: SyntaxKind,
-        text: &'a str,
-        range: TextRange,
-    },
-}
-
-/// The nodes under `root`, `root` included, in preorder, as borrowed cursors. Tokens other
-/// than comments and literals are skipped: most elements of a tree are tokens, and the
-/// whole-file passes read only nodes, comments and literals.
-#[inline]
-pub fn walk_tree(root: NodeRef<'_>, mut visit: impl FnMut(TreeEvent<'_>)) {
-    let tree = root.tree;
-    let mut open: Vec<u32> = Vec::new();
-    for index in root.index..tree.end(root.index) {
-        while let Some(&top) = open.last()
-            && tree.end(top) <= index
-        {
-            visit(TreeEvent::Leave(NodeRef { tree, index: top }));
-            open.pop();
-        }
-        let kind = tree.kind(index);
-        if kind.is_node() {
-            visit(TreeEvent::Enter {
-                node: NodeRef { tree, index },
-                parent: open.last().map(|&parent| NodeRef {
-                    tree,
-                    index: parent,
-                }),
-                range: tree.range(index),
-            });
-            open.push(index);
-        } else if is_walked_token(kind) {
-            let range = tree.range(index);
-            visit(TreeEvent::Token {
-                kind,
-                text: tree.slice(range),
-                range,
-            });
-        }
-    }
-    while let Some(top) = open.pop() {
-        visit(TreeEvent::Leave(NodeRef { tree, index: top }));
-    }
-}
-
-/// Whether [`walk_tree`] reports a token of this kind; every other token is skipped.
-pub fn is_walked_token(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::COMMENT
-            | SyntaxKind::STRING
-            | SyntaxKind::DOUBLE
-            | SyntaxKind::INTEGER
-            | SyntaxKind::COMPLEX
-    )
 }
 
 impl PartialEq for NodeRef<'_> {
@@ -1530,14 +1618,14 @@ impl<'a> ElementRef<'a> {
     pub fn kind(self) -> SyntaxKind {
         match self {
             NodeOrToken::Node(node) => node.kind(),
-            NodeOrToken::Token(token) => token.kind,
+            NodeOrToken::Token(token) => token.kind(),
         }
     }
 
     pub fn range(self) -> TextRange {
         match self {
             NodeOrToken::Node(node) => node.range(),
-            NodeOrToken::Token(token) => token.range,
+            NodeOrToken::Token(token) => token.range(),
         }
     }
 }

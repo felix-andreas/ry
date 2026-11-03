@@ -76,7 +76,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
         if naming.maybe_undefined.contains(&expression) {
             line.push_str(" maybe-undefined");
         }
-        if naming.captured_slots.contains(&binding) {
+        if naming.extras().captured_slots.contains(&binding) {
             line.push_str(" captured");
         }
         reads.push((start_of(module, expression), line));
@@ -90,7 +90,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     }
     for (&expression, name) in &naming.quiet_reads {
         let mut line = format!("  {} {name} -> quiet", span(module.range(expression)));
-        if naming.deferred_quiet_reads.contains(&expression) {
+        if naming.extras().deferred_quiet_reads.contains(&expression) {
             line.push_str(" deferred");
         }
         reads.push((start_of(module, expression), line));
@@ -114,34 +114,42 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
         output.push_str(&format!("{line}\n"));
     }
 
-    render_set(output, "operator reads", naming.quiet_operator_reads.iter());
-    render_set(output, "super-globals", naming.super_globals.iter());
+    render_set(
+        output,
+        "operator reads",
+        naming.extras().quiet_operator_reads.iter(),
+    );
+    render_set(
+        output,
+        "super-globals",
+        naming.extras().super_globals.iter(),
+    );
     render_set(output, "used top-level", naming.used_top_level_names.iter());
-    for unused in &naming.unused_assignments {
+    for unused in &naming.extras().unused_assignments {
         output.push_str(&format!(
             "  unused {} {}\n",
             unused.name,
             span(unused.range)
         ));
     }
-    for unused in &naming.unused_parameters {
+    for unused in &naming.extras().unused_parameters {
         output.push_str(&format!(
             "  unused-parameter {} {}\n",
             unused.name,
             span(unused.range)
         ));
     }
-    for target in &naming.invalid_assignment_targets {
+    for target in &naming.extras().invalid_assignment_targets {
         output.push_str(&format!("  invalid-target {}\n", span(target.range)));
     }
-    for mismatch in &naming.or_pattern_mismatches {
+    for mismatch in &naming.extras().or_pattern_mismatches {
         output.push_str(&format!(
             "  or-pattern-missing {} {}\n",
             mismatch.name,
             span(mismatch.range)
         ));
     }
-    for &expression in &naming.masked_subsets {
+    for &expression in &naming.extras().masked_subsets {
         output.push_str(&format!(
             "  masked-subset {}\n",
             span(module.range(expression))

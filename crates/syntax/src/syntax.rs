@@ -22,7 +22,7 @@ pub use {
     tree::{
         ChildrenRef, Direction, ElementRef, NodeOrToken, NodeRef, Preorder, PreorderWithTokens,
         SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
-        TokenAtOffset, TokenRef, Tree, TreeEvent, WalkEvent, is_walked_token, walk_tree,
+        TokenAtOffset, TokenRef, Tree, WalkEvent,
     },
 };
 
@@ -279,13 +279,6 @@ pub fn node_at(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<
 /// The source text of `node`: one slice of the file text, so it never allocates.
 pub fn node_text(node: &SyntaxNode) -> Cow<'_, str> {
     Cow::Borrowed(node.text())
-}
-
-/// Every token under `node` in source order.
-pub fn for_each_token(node: &SyntaxNode, mut visit: impl FnMut(SyntaxKind, &str)) {
-    for token in node.node_ref().tokens() {
-        visit(token.kind, token.text);
-    }
 }
 
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length

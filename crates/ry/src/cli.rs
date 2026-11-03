@@ -13,6 +13,7 @@ use {
     },
     ignore::gitignore::{Gitignore, GitignoreBuilder},
     loader::SourceEncoding,
+    memchr::memchr2_iter,
     miette::{
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
@@ -26,6 +27,7 @@ use {
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
             derive_from_syntax, project_fold_shares,
         },
+        lints::LintLevel,
         metadata::{
             NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -578,18 +580,33 @@ fn analyze_project_with(
     });
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
-    let mut paths = collect_r_files(walk, exclude.as_ref())?;
-    // `exclude` scopes the project walk; it does not veto a file named directly.
-    for target in requested {
-        if !target.is_dir() && !paths.contains(target) {
-            paths.push(target.clone());
-        }
-    }
-
     let mut db = match purpose {
         Purpose::Diagnostics => RootDatabase::one_shot(),
         Purpose::Rewrites => RootDatabase::one_shot_with_editor_facts(),
     };
+    // The sources and the environment are independent inputs, and a large `NAMESPACE` takes
+    // as long to parse as the walk and the reads take, so the two overlap. `DESCRIPTION` is
+    // read first because it names the sources' encoding.
+    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+    let encoding = SourceEncoding::of(description_source.as_deref().unwrap_or_default());
+    let (sources, environment) = thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut paths = collect_r_files(walk, exclude.as_ref())?;
+            // `exclude` scopes the project walk; it does not veto a file named directly.
+            for target in requested {
+                if !target.is_dir() && !paths.contains(target) {
+                    paths.push(target.clone());
+                }
+            }
+            Ok::<_, CommandError>(read_sources(paths, encoding))
+        });
+        let environment = install_environment(&db, root, &config, description_source);
+        match reader.join() {
+            Ok(sources) => (sources, environment),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    });
+    let sources = sources?;
     let ProjectEnvironment {
         metadata,
         namespace_source,
@@ -600,14 +617,13 @@ fn analyze_project_with(
         stub_problems,
         data_files,
         failures: environment_failures,
-    } = install_environment(&db, root, &config);
+    } = environment;
     failures += environment_failures;
     let namespace_path = root.join("NAMESPACE");
 
-    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(paths.len());
-    let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
-    let encoding = SourceEncoding::of(description_source.as_deref().unwrap_or_default());
-    for (path, read) in read_sources(paths, encoding) {
+    let mut checked: Vec<(PathBuf, String, Option<String>)> = Vec::with_capacity(sources.len());
+    let mut reported: Vec<bool> = Vec::with_capacity(sources.len());
+    for (path, read) in sources {
         let (source, document) = match read {
             Ok(read) => read,
             Err(err) => {
@@ -865,7 +881,7 @@ fn analyze_project_with(
                     .tokens(index)
                     .unwrap_or_default()
                     .iter()
-                    .filter_map(|token| imported.get(token.as_str()).copied())
+                    .filter_map(|token| imported.get(token.as_str()))
                     .collect();
             }
         }
@@ -908,27 +924,49 @@ fn analyze_project_with(
         .collect();
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim. The
-    // interface edges follow for the same reason, and because the walk that finds the project's
-    // cyclic groups reads every item's edges on one thread.
+    // interface edges follow for the same reason.
     in_parallel(&db, workers, &checked_order, |db, index| {
-        if !checked(index) {
-            return;
-        }
-        let file = files[index];
-        let items = semantics::item_tree(db, file);
-        for &item in items {
-            semantics::item_naming(db, item);
-        }
-        for &item in items {
-            semantics::item_interface_edges(db, item);
+        if checked(index) {
+            for &item in semantics::item_tree(db, files[index]) {
+                semantics::item_naming(db, item);
+            }
         }
     });
-    // The group walk records one dependency edge per item, and salsa keeps that capacity in the
-    // handle's reused query-stack frame, so every later query at the same depth would clear a
-    // table sized for the whole project. A throwaway handle takes the walk and drops the frame.
+    // The edges read the project-wide name maps, which read every item. Built inside one item's
+    // edges, a map would run on one core while the others wait on it, and leave that handle's
+    // reused query-stack frame sized for the whole project, which every later query at the same
+    // depth would clear. So each layer's maps are built first, on a throwaway handle of its own.
     if let Some(project) = ProjectFiles::try_get(&db) {
-        semantics::project_interface_groups(&db.clone(), project);
+        thread::scope(|scope| {
+            for test in [false, true] {
+                let db = db.clone();
+                scope.spawn(move || {
+                    semantics::NameLookup::new(&db, project, test);
+                });
+            }
+        });
     }
+    // The walk that finds the project's cyclic groups reads every item's edges on one thread,
+    // so it runs beside the parallel edge pass and waits only on edges another thread is still
+    // computing. The walk records one dependency edge per item, and salsa keeps that capacity
+    // in the handle's reused query-stack frame, so every later query at the same depth would
+    // clear a table sized for the whole project: a throwaway handle takes the walk and drops
+    // the frame.
+    thread::scope(|scope| {
+        if let Some(project) = ProjectFiles::try_get(&db) {
+            let db = db.clone();
+            scope.spawn(move || {
+                semantics::project_interface_groups(&db, project);
+            });
+        }
+        in_parallel(&db, workers, &checked_order, |db, index| {
+            if checked(index) {
+                for &item in semantics::item_tree(db, files[index]) {
+                    semantics::item_interface_edges(db, item);
+                }
+            }
+        });
+    });
     // Whether the file's findings are known, from the record or from this run.
     let has_findings: Vec<bool> = (0..files.len())
         .map(|index| recorded[index].is_some() || checked(index))
@@ -937,43 +975,31 @@ fn analyze_project_with(
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect();
-    for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
-        let rendered = document_diagnostics(db, files[index], &config);
-        apply_suppressions(rendered, files[index].text(db))
-    }) {
-        per_file[index] = diagnostics;
-    }
-    // Computed last so the `unused-import` lint sees the whole package.
-    let mut namespace = None;
-    if let Some(namespace_source) = &namespace_source {
-        let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
-        let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
-        let mut problems =
-            namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
-        // R resolves an export with `exists()` from the namespace, which inherits through base
-        // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
-        let defines = |name: &str| {
-            ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_binds(&db, files, name))
-                || semantics::check::DEFAULT_SEARCH_PATH
-                    .iter()
-                    .any(|package| namespace_exports(&db, package, name))
-        };
-        problems.extend(namespace::namespace_export_problems(
-            &namespace_file.exports,
-            &namespace_file.imports,
-            &defines,
-            &knows,
-            &exports,
-            &used_tokens,
-        ));
-        problems.extend(namespace::unused_import_diagnostics(
-            &namespace_file.imports,
-            &used_tokens,
-            config.lint.unused_import,
-        ));
-        namespace = Some((namespace_path, namespace_source.clone(), problems));
-    }
+    // The namespace verdict reads only naming and the stubs, so it runs on a spare handle
+    // beside the checks instead of after them, on cores the checks leave
+    // idle as they finish.
+    let namespace = thread::scope(|scope| {
+        let verdict = namespace_source.as_ref().map(|namespace_source| {
+            let db = db.clone();
+            let (namespace_file, used_tokens) = (&namespace_file, &used_tokens);
+            let unused_import = config.lint.unused_import;
+            let namespace_path = namespace_path.clone();
+            scope.spawn(move || {
+                let problems = namespace_problems(&db, namespace_file, used_tokens, unused_import);
+                (namespace_path, namespace_source.clone(), problems)
+            })
+        });
+        for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
+            let rendered = document_diagnostics(db, files[index], &config);
+            apply_suppressions(rendered, files[index].text(db))
+        }) {
+            per_file[index] = diagnostics;
+        }
+        verdict.map(|verdict| match verdict.join() {
+            Ok(verdict) => verdict,
+            Err(panic) => std::panic::resume_unwind(panic),
+        })
+    });
     if cache == CacheUse::ReadWrite {
         let positions: FxHashMap<SourceFile, u32> = files
             .iter()
@@ -1033,6 +1059,42 @@ fn analyze_project_with(
     ))
 }
 
+/// The `NAMESPACE` findings: imports of unknown names, exports nothing defines, and, as the
+/// `unused-import` lint, imports no file uses.
+fn namespace_problems(
+    db: &RootDatabase,
+    namespace_file: &NamespaceFile,
+    used_tokens: &FxHashSet<&str>,
+    unused_import: LintLevel,
+) -> Vec<Diagnostic> {
+    let knows = |package: &str| namespace_known(db, package).unwrap_or(false);
+    let exports = |package: &str, name: &str| namespace_exports(db, package, name);
+    let mut problems =
+        namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
+    // R resolves an export with `exists()` from the namespace, which inherits through base
+    // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
+    let defines = |name: &str| {
+        ProjectFiles::try_get(db).is_some_and(|files| semantics::package_binds(db, files, name))
+            || semantics::check::DEFAULT_SEARCH_PATH
+                .iter()
+                .any(|package| namespace_exports(db, package, name))
+    };
+    problems.extend(namespace::namespace_export_problems(
+        &namespace_file.exports,
+        &namespace_file.imports,
+        &defines,
+        &knows,
+        &exports,
+        used_tokens,
+    ));
+    problems.extend(namespace::unused_import_diagnostics(
+        &namespace_file.imports,
+        used_tokens,
+        unused_import,
+    ));
+    problems
+}
+
 /// A package's analysis kept from one check to the next within a process, so a check after
 /// an edit re-derives only what the edit invalidated. A console session's reloads each check a
 /// strict package, and a fresh [`analyze_project`] would analyze all of `R/` every time.
@@ -1064,7 +1126,8 @@ pub(crate) fn check_package_code(
         _ => {
             // Kept for edits, so the queries keep their firewalls.
             let db = RootDatabase::default();
-            let installed = install_environment(&db, root, config);
+            let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
+            let installed = install_environment(&db, root, config, description_source);
             let project = ProjectFiles::builder(Vec::new())
                 .durability(Durability::HIGH)
                 .new(&db);
@@ -1222,11 +1285,13 @@ struct ProjectEnvironment {
 }
 
 /// Reads the inputs of the project at `root` besides its R files (stubs, settings,
-/// `DESCRIPTION`, `NAMESPACE` and data files) into `db`, which holds no inputs yet.
+/// `NAMESPACE` and data files) into `db`, which holds no inputs yet, along with the already
+/// read `DESCRIPTION`.
 fn install_environment(
     db: &RootDatabase,
     root: &Path,
     config: &config::Config,
+    description_source: Option<String>,
 ) -> ProjectEnvironment {
     let mut failures = 0;
     // Override stubs fold on top of the shipped corpus (later sources win); an
@@ -1269,7 +1334,6 @@ fn install_environment(
         .as_deref()
         .map(parse_namespace)
         .unwrap_or_default();
-    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let dependencies = description_source
         .as_deref()
         .map(parse_description_dependencies)
@@ -2250,18 +2314,12 @@ impl LineStarts {
     fn new(text: &str) -> LineStarts {
         let mut starts = vec![0u32];
         let bytes = text.as_bytes();
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            match bytes[offset] {
-                b'\r' => {
-                    // `\r\n` is one break, not two.
-                    offset += usize::from(bytes.get(offset + 1) == Some(&b'\n'));
-                    starts.push(offset as u32 + 1);
-                }
-                b'\n' => starts.push(offset as u32 + 1),
-                _ => {}
+        for offset in memchr2_iter(b'\n', b'\r', bytes) {
+            // `\r\n` is one break, not two: its `\n` ends the line.
+            if bytes[offset] == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
+                continue;
             }
-            offset += 1;
+            starts.push(offset as u32 + 1);
         }
         LineStarts { starts }
     }

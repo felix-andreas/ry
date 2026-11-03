@@ -23,12 +23,14 @@ pub fn parse(text: &str) -> Parse {
     }
     offsets.push(offset);
 
+    // A tree holds about 1.6 elements per token (the tokens plus their nodes).
+    let builder = TreeBuilder::with_capacity(tokens.len() + tokens.len() * 3 / 4);
     let mut parser = Parser {
         text,
         tokens,
         offsets,
         pos: 0,
-        builder: TreeBuilder::default(),
+        builder,
         errors: lexer_errors,
         groups: vec![0],
         depth: 0,

@@ -236,7 +236,7 @@ fn typed_hover(
         let line = filled_parameter(db, file, offset, argument.name).unwrap_or_else(|| {
             match argument
                 .value
-                .and_then(|value| check.expression_types.get(&value))
+                .and_then(|value| check.editor().expression_types.get(&value))
             {
                 Some(ty) => format!(
                     "{}: {}",
@@ -256,7 +256,7 @@ fn typed_hover(
     // not settle records no type of its own; its declared signature still says what it takes,
     // which beats widening to the call's result.
     if let Some(innermost) = position.expression_at()
-        && check.expression_types.get(&innermost).is_none()
+        && check.editor().expression_types.get(&innermost).is_none()
         && let ExpressionKind::NameRef(name) = &hir.kind(innermost)
         && item_naming(db, position.item)
             .as_ref()
@@ -283,7 +283,7 @@ fn typed_hover(
     // `pkg::name` as a call head likewise: its stub signature when that package's stub declares
     // it, else the bare name, which the caller documents from the installed package.
     if let Some(innermost) = position.expression_at()
-        && check.expression_types.get(&innermost).is_none()
+        && check.editor().expression_types.get(&innermost).is_none()
         && let ExpressionKind::Namespace {
             package: Some(package),
             name: Some(name),
@@ -314,7 +314,7 @@ fn typed_hover(
     let (expression, ty) = position
         .expressions_at()
         .into_iter()
-        .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
+        .find_map(|id| check.editor().expression_types.get(&id).map(|ty| (id, *ty)))?;
     let ty = without_impossible_vectors(db, ty);
 
     let (lines, definition) = match &hir.kind(expression) {
@@ -399,7 +399,7 @@ fn member_at<'db>(
             PatternKind::Tag { name, .. } => {
                 let range: TextRange = tag_range(hir.name_range(*name))?;
                 if range.contains_inclusive(relative) {
-                    let ty = check.pattern_types.get(PatId::new(index))?;
+                    let ty = check.editor().pattern_types.get(PatId::new(index))?;
                     return Some(Member {
                         range,
                         label: None,
@@ -415,14 +415,14 @@ fn member_at<'db>(
                     return Some(Member {
                         range: field.name_range,
                         label: Some(field.name.to_string()),
-                        ty: check.pattern_types.get(field.pattern)?,
+                        ty: check.editor().pattern_types.get(field.pattern)?,
                     });
                 }
             }
             _ => {}
         }
     }
-    for (index, (kind, &range)) in hir.kinds().iter().zip(hir.ranges()).enumerate() {
+    for (index, (kind, range)) in hir.kinds().iter().zip(hir.ranges()).enumerate() {
         if !range.contains_inclusive(relative) {
             continue;
         }
@@ -432,8 +432,11 @@ fn member_at<'db>(
                     .iter()
                     .find(|parameter| parameter.range.contains_inclusive(relative))
                 {
-                    let TyKind::Function(function) =
-                        check.expression_types.get(&ExprId::new(index))?.kind(db)
+                    let TyKind::Function(function) = check
+                        .editor()
+                        .expression_types
+                        .get(&ExprId::new(index))?
+                        .kind(db)
                     else {
                         return None;
                     };
@@ -455,7 +458,7 @@ fn member_at<'db>(
                 return Some(Member {
                     range: hir.name_range(*variable),
                     label: Some(hir.name(*variable).to_string()),
-                    ty: *check.loop_variables.get(&ExprId::new(index))?,
+                    ty: *check.editor().loop_variables.get(&ExprId::new(index))?,
                 });
             }
             ExpressionKind::Record(fields) => {
@@ -466,7 +469,7 @@ fn member_at<'db>(
                     return Some(Member {
                         range: field.name_range,
                         label: Some(field.name.to_string()),
-                        ty: *check.expression_types.get(&field.value)?,
+                        ty: *check.editor().expression_types.get(&field.value)?,
                     });
                 }
             }
@@ -486,16 +489,19 @@ fn member_at<'db>(
                     hir.expressions()
                         .find_map(|expression| match expression.kind {
                             ExpressionKind::Assign { target, value, .. } if *target == field => {
-                                check.expression_types.get(value).copied()
+                                check.editor().expression_types.get(value).copied()
                             }
                             _ => None,
                         })
                 };
                 let ty = check
+                    .editor()
                     .expression_types
                     .get(&field)
                     .copied()
-                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))
+                    .or_else(|| {
+                        field_type(db, *check.editor().expression_types.get(target)?, &name)
+                    })
                     .or_else(assigned)?;
                 return Some(Member {
                     range: name_range,
@@ -561,7 +567,8 @@ fn updated_column_at<'db>(
     arguments: &[Argument],
     relative: TextSize,
 ) -> Option<Member<'db>> {
-    let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
+    let TyKind::Frame(_, Some(columns)) = check.editor().expression_types.get(&query)?.kind(db)
+    else {
         return None;
     };
     let column_ty = |name: &str| {
@@ -653,8 +660,8 @@ fn hover_definition<'db>(
     name: &str,
 ) -> Option<HoverDefinition> {
     let naming = item_naming(db, item).as_ref()?;
-    let callee_target =
-        item_check(db, item).and_then(|check| check.callee_targets.get(&expression).copied());
+    let callee_target = item_check(db, item)
+        .and_then(|check| check.editor().callee_targets.get(&expression).copied());
     let binding = match callee_target {
         Some(CalleeTarget::Slot(binding)) => Some(binding),
         Some(CalleeTarget::Project) => return global_hover_definition(db, files, name, None),
@@ -827,6 +834,7 @@ fn referenced_scheme<'db>(
     }
     let candidates = stubs(db)?.schemes.get(name)?;
     let index = check
+        .editor()
         .selected_overloads
         .get(&reference)
         .copied()
@@ -1241,7 +1249,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             } = kind
             {
                 let variable_range = hir.name_range(*variable);
-                if let Some(&ty) = check.loop_variables.get(&ExprId::new(index))
+                if let Some(&ty) = check.editor().loop_variables.get(&ExprId::new(index))
                     && is_hintable(db, ty, false)
                 {
                     hints.push(InlayHint {
@@ -1259,7 +1267,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                     .filter(|argument| argument.name.is_none() && argument.value.is_some())
                     .count()
                     > 1
-                && let Some(&callee_type) = check.expression_types.get(callee)
+                && let Some(&callee_type) = check.editor().expression_types.get(callee)
                 && let TyKind::Function(function) = callee_type.kind(db)
             {
                 let offset = node.text_range().start();
@@ -1617,6 +1625,7 @@ fn frame_column_reads(
     };
     let columns_of = |expression: ExprId| -> Vec<&str> {
         match check
+            .editor()
             .expression_types
             .get(&expression)
             .map(|ty| ty.kind(db))
@@ -1867,6 +1876,7 @@ pub fn signature_help_with(
         let arguments = &hir[arguments];
         let cursor_index = argument_index_at(db, position.item, hir, *range, arguments, offset);
         let function = check
+            .editor()
             .expression_types
             .get(callee)
             .copied()
@@ -1918,7 +1928,12 @@ pub fn signature_help_with(
             .iter()
             .map(|scheme| scheme_signature(db, scheme, arguments, hir, cursor_index))
             .collect();
-        let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
+        let selected = check
+            .editor()
+            .selected_overloads
+            .get(&callee)
+            .copied()
+            .unwrap_or(0);
         // The committed candidate renders instantiated with this call site's types.
         if let Some(function) = function
             && let Some(entry) = signatures.get_mut(selected)
@@ -2730,7 +2745,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             continue;
         };
 
-        for unused in &naming.unused_assignments {
+        for unused in &naming.extras().unused_assignments {
             let target_range = unused.range + item_offset;
             if !ranges_overlap(target_range, viewport) {
                 continue;
@@ -3247,7 +3262,7 @@ pub fn type_definition(
     let ty = position
         .expressions_at()
         .into_iter()
-        .find_map(|id| check.expression_types.get(&id).copied())?;
+        .find_map(|id| check.editor().expression_types.get(&id).copied())?;
     let TyKind::Named(name, _) = ty.kind(db) else {
         return None;
     };
@@ -4881,9 +4896,13 @@ fn string_subscript_completion(
             }
             _ => None,
         });
-    let fields = match target
-        .map(|target| check.expression_types.get(&target).map(|ty| ty.kind(db)))
-    {
+    let fields = match target.map(|target| {
+        check
+            .editor()
+            .expression_types
+            .get(&target)
+            .map(|ty| ty.kind(db))
+    }) {
         Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
         Some(_) => return None,
         None => dataframe_columns_for(db, file, hir, check, string_range)?,
@@ -4958,7 +4977,7 @@ fn dataframe_columns_for<'db>(
         .min_by_key(|(length, _)| *length)?;
     // A frame typed by a named definition, such as a parameter of type `Sales`, has the
     // columns of the definition's body.
-    match representation(db, file, *check.expression_types.get(&subject)?).kind(db) {
+    match representation(db, file, *check.editor().expression_types.get(&subject)?).kind(db) {
         TyKind::Frame(_, Some(columns)) => Some(columns.as_slice()),
         _ => None,
     }
@@ -5375,7 +5394,7 @@ fn dollar_completions(
                 _ => None,
             })
             .min_by_key(|(range, _)| range.len())?;
-        let target_ty = representation(db, file, *check.expression_types.get(&target)?);
+        let target_ty = representation(db, file, *check.editor().expression_types.get(&target)?);
         let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
             TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
                 .iter()
@@ -5762,7 +5781,7 @@ fn subject_along<'db>(
             }
             _ => None,
         })?;
-    let types = descend(db, *check.expression_types.get(&scrutinee)?, steps);
+    let types = descend(db, *check.editor().expression_types.get(&scrutinee)?, steps);
     Some(PatternSubject { types })
 }
 
@@ -5922,7 +5941,7 @@ fn literal_expected_fields(
         hir.expressions()
             .enumerate()
             .filter(|(_, expression)| expression.range == range)
-            .find_map(|(index, _)| check.literal_expectations.get(&ExprId::new(index)))
+            .find_map(|(index, _)| check.editor().literal_expectations.get(&ExprId::new(index)))
             .copied()
     };
 
@@ -6026,7 +6045,9 @@ fn frame_query_completions(
             })
             .min_by_key(|(length, _)| *length)
             .map(|(_, target)| target)?;
-        let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
+        let TyKind::Frame(_, Some(columns)) =
+            check.editor().expression_types.get(&target)?.kind(db)
+        else {
             return None;
         };
         let mut renderer = TypeRenderer::default();
@@ -6672,6 +6693,7 @@ fn argument_name_completions(
     // Each parameter that can be named, with its detail, and how many come before `...` (the
     // ones a positional argument fills).
     let typed_function = check
+        .editor()
         .expression_types
         .get(&callee)
         .copied()
@@ -7045,9 +7067,10 @@ fn inferred_scheme<'db>(
         check.scheme.clone()?
     } else {
         let ty = check
+            .editor()
             .expression_types
             .get(&id)
-            .or_else(|| check.expression_types.get(&value))?;
+            .or_else(|| check.editor().expression_types.get(&value))?;
         TypeScheme::monomorphic(*ty)
     };
     scheme.body = without_impossible_vectors(db, scheme.body);
@@ -7224,8 +7247,8 @@ fn target_at<'db>(
 fn copy_origin(naming: &ItemNaming, mut binding: BindingId) -> CopySource {
     // Naming records a copy's source from a strictly enclosing scope, so a chain is no longer
     // than the scope nesting; the bound only keeps a malformed map from hanging the editor.
-    for _ in 0..naming.replacement_copies.len() {
-        let Some(source) = naming.replacement_copies.get(&binding) else {
+    for _ in 0..naming.extras().replacement_copies.len() {
+        let Some(source) = naming.extras().replacement_copies.get(&binding) else {
             break;
         };
         match *source {
@@ -7356,8 +7379,8 @@ fn expression_target<'db>(
         }));
     }
     // A call head skips bindings that hold no function, so it navigates where the call goes.
-    let callee_target =
-        item_check(db, item).and_then(|check| check.callee_targets.get(&expression).copied());
+    let callee_target = item_check(db, item)
+        .and_then(|check| check.editor().callee_targets.get(&expression).copied());
     let binding = match callee_target {
         Some(CalleeTarget::Slot(binding)) => Some(binding),
         Some(CalleeTarget::Project | CalleeTarget::Library) => {
@@ -7699,7 +7722,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
             slot_occurrences(db, *item, *binding, &mut result);
             named_argument_occurrences(db, files, *item, *binding, &mut result);
             if let Some(naming) = item_naming(db, *item) {
-                for &copy in naming.replacement_copies.keys() {
+                for &copy in naming.extras().replacement_copies.keys() {
                     if copy_origin(naming, copy) == CopySource::Slot(*binding) {
                         slot_occurrences(db, *item, copy, &mut result);
                     }
@@ -7758,7 +7781,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             slot_occurrences(db, item, *binding, &mut result);
                         }
                     }
-                    for &copy in naming.replacement_copies.keys() {
+                    for &copy in naming.extras().replacement_copies.keys() {
                         let copies_global = match copy_origin(naming, copy) {
                             CopySource::NonLocal(source) => source == *name,
                             CopySource::Slot(origin) => {
@@ -7806,7 +7829,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                 calls
                                     .into_iter()
                                     .filter(|expression| {
-                                        check.callee_targets.get(expression)
+                                        check.editor().callee_targets.get(expression)
                                             == Some(&CalleeTarget::Project)
                                     })
                                     .map(|expression| Occurrence {
@@ -7893,7 +7916,7 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let callee_targets = (!naming.callee_fallbacks.is_empty())
         .then(|| item_check(db, item))
         .flatten()
-        .map(|check| &check.callee_targets);
+        .map(|check| &check.editor().callee_targets);
     let reaches = |expression: &ExprId, resolved: BindingId| match callee_targets
         .as_ref()
         .and_then(|targets| targets.get(expression))

@@ -13,14 +13,14 @@ use {
         hir::{
             AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
         },
-        inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax,
+        inline_annotations_enabled, item_hir, item_syntax_flags,
         metadata::namespace_active,
         naming::{base_masking_family, data_argument_flags},
         package_layer,
         stubs::{QUALIFIED_ONLY_NAMESPACES, StubSources, stubs},
     },
     rustc_hash::FxHashSet,
-    syntax::{SyntaxKind, TextRange, native_values::object_system_function},
+    syntax::{TextRange, native_values::object_system_function},
 };
 
 /// How one top-level statement of a package file behaves when the package loads.
@@ -112,27 +112,10 @@ pub fn item_effect_free<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 }
 
 /// Whether the item declares the function it binds pure, with `#: @pure` or an inline
-/// `@pure function`. Trusted, not checked against the body: a body edit leaves the `bool`
-/// unchanged, and salsa backdates it.
-#[salsa::tracked]
+/// `@pure function`. Trusted, not checked against the body, so a body edit leaves it unchanged.
 pub fn item_declared_pure<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
-    if item_annotation_syntax(db, item)
-        .is_some_and(|syntax| crate::annotations::declares_pure(&syntax.syntax_node()))
-    {
-        return true;
-    }
-    let Some(syntax) = item_syntax(db, item) else {
-        return false;
-    };
-    let root = syntax.syntax_node();
-    let marked = root.kind() == SyntaxKind::BINARY_EXPR
-        && root.children().any(|child| {
-            child.kind() == SyntaxKind::FUNCTION_DEF
-                && child
-                    .children()
-                    .any(|part| part.kind() == SyntaxKind::PURE_MARKER)
-        });
-    marked && inline_annotations_enabled(db)
+    let flags = item_syntax_flags(db, item);
+    flags.comment_pure || (flags.inline_pure && inline_annotations_enabled(db))
 }
 
 /// The names the item's `<<-` assignments write, wherever they sit. A package namespace is
@@ -261,7 +244,7 @@ pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, C
             return (false, CalleeOrigin::Conditional);
         }
         if let Some(winner) = definitions.winner {
-            return (*item_declared_pure(db, winner), CalleeOrigin::Project);
+            return (item_declared_pure(db, winner), CalleeOrigin::Project);
         }
         if INTRINSIC_PURE.contains(&name) {
             return (true, CalleeOrigin::Other);

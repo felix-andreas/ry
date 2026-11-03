@@ -208,6 +208,20 @@ pub fn is_inline_site(node: &SyntaxNode) -> bool {
     is_inline_site_ref(node.node_ref())
 }
 
+/// Whether a subtree holding an element of `kind` may hold a `#:` annotation or an inline
+/// site: every site is or contains one of these kinds, so a subtree without any has none.
+pub fn may_mark_site(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::ANNOTATION
+            | SyntaxKind::TYPE_DEFINITION
+            | SyntaxKind::NEW_EXPR
+            | SyntaxKind::TYPE_ASCRIPTION
+            | SyntaxKind::TYPE_BINDER_LIST
+            | SyntaxKind::RETURN_TYPE
+    )
+}
+
 /// [`is_inline_site`] on a borrowed node, for whole-file searches.
 pub fn is_inline_site_ref(node: NodeRef<'_>) -> bool {
     match node.kind() {
@@ -882,8 +896,8 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
         }
     }
     for token in node.node_ref().tokens() {
-        if token.kind == SyntaxKind::ANNOTATION_MARKER {
-            markers.push(token.range.start());
+        if token.kind() == SyntaxKind::ANNOTATION_MARKER {
+            markers.push(token.range().start());
         }
     }
     let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
@@ -1027,13 +1041,13 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
     node.node_ref()
         .child_tokens()
-        .any(|token| token.kind == kind)
+        .any(|token| token.kind() == kind)
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {
     node.node_ref()
         .child_tokens()
-        .any(|token| token.kind == SyntaxKind::IDENT && token.text == word)
+        .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == word)
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the

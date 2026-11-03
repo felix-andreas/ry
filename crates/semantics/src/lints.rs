@@ -9,11 +9,11 @@ use {
     },
     std::cell::LazyCell,
     syntax::{
-        Direction, NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TreeEvent,
+        Direction, NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
         is_inline_annotation_kind,
         native_values::{object_system_function, object_systems_disabled_message},
-        node_at, node_text, walk_tree,
+        node_text,
     },
 };
 
@@ -288,7 +288,7 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             if exempt {
                 continue;
             }
-            for unused in &naming.unused_parameters {
+            for unused in &naming.extras().unused_parameters {
                 diagnostics.push(Diagnostic::new(
                     unused.range + span.range.start(),
                     severity,
@@ -381,91 +381,125 @@ fn shadow_lints(
 fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints) {
     let diagnostics = &mut lints.always;
     line_length_lint(root, config, diagnostics);
-    // `#:` annotation regions and inline annotations are type syntax, not R identifiers.
-    // One entry per open node, so a `Leave` knows whether its node opened a region.
-    let mut opens_annotation = Vec::new();
-    let mut annotation_depth = 0usize;
+    // `#:` annotation regions and inline annotations are type syntax, not R identifiers. Regions
+    // never overlap except by nesting, so the outermost open one is all the walk tracks.
+    let top = root.node_ref();
+    let mut region: Option<NodeRef<'_>> = None;
     // The walk reads borrowed nodes and makes an owned one only where a cheap test says a lint
     // may fire.
-    walk_tree(root.node_ref(), |event| match event {
-        TreeEvent::Enter {
-            node,
-            parent,
-            range,
-        } => {
-            let kind = node.kind();
-            let opens = kind == SyntaxKind::ANNOTATION
-                || is_inline_annotation_kind(kind, parent.map(NodeRef::kind));
-            opens_annotation.push(opens);
-            annotation_depth += usize::from(opens);
-            if opens || !may_lint(node, parent, config) {
-                return;
+    let visited = |kind| {
+        matches!(
+            kind,
+            SyntaxKind::ANNOTATION
+                | SyntaxKind::TYPE_ASCRIPTION
+                | SyntaxKind::RETURN_TYPE
+                | SyntaxKind::TYPE_DEFINITION
+                | SyntaxKind::NEW_TYPE
+                | SyntaxKind::PURE_MARKER
+                | SyntaxKind::TYPE_BINDER_LIST
+                | SyntaxKind::BINARY_EXPR
+                | SyntaxKind::ARGUMENT_LIST
+                | SyntaxKind::PARAMETER
+                | SyntaxKind::NAME
+                | SyntaxKind::CALL_EXPR
+                | SyntaxKind::BRACE_EXPR
+                | SyntaxKind::UNARY_EXPR
+                | SyntaxKind::IF_EXPR
+                | SyntaxKind::WHILE_EXPR
+                | SyntaxKind::SUBSET_EXPR
+                | SyntaxKind::FUNCTION_DEF
+                | SyntaxKind::COMMENT
+                | SyntaxKind::STRING
+                | SyntaxKind::DOUBLE
+                | SyntaxKind::INTEGER
+                | SyntaxKind::COMPLEX
+        )
+    };
+    // Only the region openers and the kinds a lint inspects are visited. A region stays open
+    // across the skipped elements, but nothing is decided on those.
+    for element in top.elements_of_kind(visited) {
+        if region.is_some_and(|region| !region.encloses(element)) {
+            region = None;
+        }
+        let in_annotation = region.is_some();
+        match element {
+            NodeOrToken::Node(node) => {
+                let kind = node.kind();
+                let parent = (node != top).then(|| node.parent()).flatten();
+                if kind == SyntaxKind::ANNOTATION
+                    || is_inline_annotation_kind(kind, parent.map(NodeRef::kind))
+                {
+                    region = region.or(Some(node));
+                    continue;
+                }
+                if !may_lint(node, parent, config) {
+                    continue;
+                }
+                let red = root.at(node);
+                match kind {
+                    SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
+                    SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
+                    SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
+                    SyntaxKind::NAME if !in_annotation => {
+                        boolean_shorthand_lint(&red, config, &mut lints.unless_redefined);
+                    }
+                    SyntaxKind::CALL_EXPR => {
+                        object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
+                        data_table_lint(&red, config, &mut lints.unless_redefined, diagnostics);
+                        call_lints(&red, config, diagnostics);
+                    }
+                    SyntaxKind::BRACE_EXPR => {
+                        unreachable_code_lint(&red, config, &mut lints.unless_redefined);
+                    }
+                    SyntaxKind::UNARY_EXPR => comparison_negation_lint(&red, config, diagnostics),
+                    SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
+                        vector_logic_lint(&red, config, diagnostics);
+                        implicit_assignment_lint(&red, config, diagnostics);
+                        while_true_lint(&red, config, diagnostics);
+                    }
+                    SyntaxKind::SUBSET_EXPR => order_subset_lint(&red, config, diagnostics),
+                    SyntaxKind::FUNCTION_DEF => {
+                        redundant_return_lint(&red, config, &mut lints.unless_redefined);
+                    }
+                    _ => {}
+                }
             }
-            let Some(red) = node_at(root, kind, range) else {
-                panic!("syntax_lints: no node of kind {kind:?} at {range:?}");
-            };
-            match kind {
-                SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
-                SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
-                SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
-                SyntaxKind::NAME if annotation_depth == 0 => {
-                    boolean_shorthand_lint(&red, config, &mut lints.unless_redefined);
+            NodeOrToken::Token(token) => {
+                let kind = token.kind();
+                if in_annotation
+                    || !matches!(
+                        kind,
+                        SyntaxKind::COMMENT
+                            | SyntaxKind::STRING
+                            | SyntaxKind::DOUBLE
+                            | SyntaxKind::INTEGER
+                            | SyntaxKind::COMPLEX
+                    )
+                {
+                    continue;
                 }
-                SyntaxKind::CALL_EXPR => {
-                    object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
-                    data_table_lint(&red, config, &mut lints.unless_redefined, diagnostics);
-                    call_lints(&red, config, diagnostics);
+                let (text, range) = (token.text(), token.range());
+                match kind {
+                    SyntaxKind::COMMENT => commented_code_lint(text, range, config, diagnostics),
+                    SyntaxKind::STRING => single_quotes_lint(text, range, config, diagnostics),
+                    _ if text.starts_with('.') => push_lint(
+                        diagnostics,
+                        opt_in(config.numeric_leading_zero),
+                        Severity::Warning,
+                        "numeric-leading-zero",
+                        range,
+                        format!("Write `0{text}` with a leading zero, which is easier to read"),
+                        Some((
+                            Applicability::Safe,
+                            "Add a leading zero",
+                            format!("0{text}"),
+                        )),
+                    ),
+                    _ => {}
                 }
-                SyntaxKind::BRACE_EXPR => {
-                    unreachable_code_lint(&red, config, &mut lints.unless_redefined);
-                }
-                SyntaxKind::UNARY_EXPR => comparison_negation_lint(&red, config, diagnostics),
-                SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR => {
-                    vector_logic_lint(&red, config, diagnostics);
-                    implicit_assignment_lint(&red, config, diagnostics);
-                    while_true_lint(&red, config, diagnostics);
-                }
-                SyntaxKind::SUBSET_EXPR => order_subset_lint(&red, config, diagnostics),
-                SyntaxKind::FUNCTION_DEF => {
-                    redundant_return_lint(&red, config, &mut lints.unless_redefined);
-                }
-                _ => {}
             }
         }
-        TreeEvent::Leave(_) => {
-            if opens_annotation.pop() == Some(true) {
-                annotation_depth -= 1;
-            }
-        }
-        TreeEvent::Token { kind, text, range } => {
-            if kind == SyntaxKind::COMMENT && annotation_depth == 0 {
-                commented_code_lint(text, range, config, diagnostics);
-            }
-            if kind == SyntaxKind::STRING && annotation_depth == 0 {
-                single_quotes_lint(text, range, config, diagnostics);
-            }
-            if matches!(
-                kind,
-                SyntaxKind::DOUBLE | SyntaxKind::INTEGER | SyntaxKind::COMPLEX
-            ) && annotation_depth == 0
-                && text.starts_with('.')
-            {
-                push_lint(
-                    diagnostics,
-                    opt_in(config.numeric_leading_zero),
-                    Severity::Warning,
-                    "numeric-leading-zero",
-                    range,
-                    format!("Write `0{text}` with a leading zero, which is easier to read"),
-                    Some((
-                        Applicability::Safe,
-                        "Add a leading zero",
-                        format!("0{text}"),
-                    )),
-                );
-            }
-        }
-    });
+    }
 }
 
 /// Counts characters, not bytes, so a line of accented text is measured as it reads. The range

@@ -7,7 +7,7 @@ use {
         lints::{LintLevel, lint_severity},
         metadata::NamespaceImport,
     },
-    syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token},
+    syntax::{SyntaxKind, SyntaxNode, TextRange},
 };
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
@@ -128,16 +128,48 @@ pub fn unused_import_diagnostics(
 /// `unused_import_diagnostics`, and the exported names plus the run-time definers for
 /// `namespace_export_problems`. A token scan records only these instead of every token text in
 /// the package.
+pub struct TrackedNames<'a> {
+    names: FxHashSet<&'a str>,
+    /// Which first bytes and lengths (capped at 63) some name has: most tokens fail one of them,
+    /// which rules them out without hashing their text.
+    first_bytes: [bool; 256],
+    lengths: u64,
+}
+
+impl<'a> TrackedNames<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// The tracked name spelled `text`, borrowed from the tracked set.
+    pub fn get(&self, text: &str) -> Option<&'a str> {
+        self.names.get(text).copied()
+    }
+}
+
 pub fn tracked_names<'a>(
     imports: &'a [NamespaceImport],
     exports: &'a [(String, TextRange)],
-) -> FxHashSet<&'a str> {
-    imports
+) -> TrackedNames<'a> {
+    let names: FxHashSet<&str> = imports
         .iter()
         .filter_map(|import| import.name.as_deref())
         .chain(exports.iter().map(|(name, _)| name.as_str()))
         .chain(RUNTIME_DEFINERS.iter().copied())
-        .collect()
+        .collect();
+    let mut first_bytes = [false; 256];
+    let mut lengths = 0u64;
+    for name in &names {
+        if let Some(&byte) = name.as_bytes().first() {
+            first_bytes[usize::from(byte)] = true;
+        }
+        lengths |= 1u64 << name.len().min(63);
+    }
+    TrackedNames {
+        names,
+        first_bytes,
+        lengths,
+    }
 }
 
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
@@ -145,18 +177,28 @@ pub fn tracked_names<'a>(
 /// scan allocates nothing per token.
 pub fn collect_used_tokens<'a>(
     root: &SyntaxNode,
-    imported: &FxHashSet<&'a str>,
+    tracked: &TrackedNames<'a>,
     out: &mut FxHashSet<&'a str>,
 ) {
     let mut insert = |text: &str| {
-        if let Some(&name) = imported.get(text) {
+        let Some(&byte) = text.as_bytes().first() else {
+            return;
+        };
+        if !tracked.first_bytes[usize::from(byte)]
+            || tracked.lengths & (1u64 << text.len().min(63)) == 0
+        {
+            return;
+        }
+        if let Some(&name) = tracked.names.get(text) {
             out.insert(name);
         }
     };
-    for_each_token(root, |kind, text| {
-        if kind.is_trivia() {
-            return;
-        }
+    for token in root
+        .node_ref()
+        .tokens_outside(|_| false, |kind| !kind.is_trivia())
+    {
+        let kind = token.kind();
+        let text = token.text();
         insert(text);
         if kind == SyntaxKind::STRING {
             let content = text
@@ -166,7 +208,7 @@ pub fn collect_used_tokens<'a>(
                 insert(content);
             }
         }
-    });
+    }
 }
 
 #[cfg(test)]

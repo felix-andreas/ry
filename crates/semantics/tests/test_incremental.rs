@@ -81,10 +81,10 @@ fn an_effect_added_to_a_pure_function_reclassifies_only_that_function() {
     );
     settle_top_level(&db, &files);
     assert_eq!(
-        db.executions_since(&["item_top_level", "item_declared_pure", "item_check"]),
-        [1, 0, 1],
-        "the edited body is reclassified, its unchanged `#: @pure` block is not reread, and \
-         the caller's classification stays memoized"
+        db.executions_since(&["item_top_level", "item_syntax_flags", "item_check"]),
+        [1, 1, 1],
+        "the edited body is reclassified and its syntax flags are reread, but they come out \
+         unchanged, so the caller's classification stays memoized"
     );
 }
 

@@ -9,6 +9,7 @@ publish = false
 path = "src/syntax.rs"
 
 [dependencies]
+memchr = "2.7"
 text-size.workspace = true
 
 # Test-only oracle: the corpus acceptance test compares our error verdict against

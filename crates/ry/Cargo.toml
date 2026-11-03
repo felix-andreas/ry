@@ -25,6 +25,7 @@ mimalloc = ["dep:libmimalloc-sys"]
 [dependencies]
 clap.workspace = true
 dirs = "6"
+memchr = "2.7"
 libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true }
 console.workspace = true
 ignore.workspace = true

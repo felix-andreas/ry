@@ -130,7 +130,7 @@ fn render_file(db: &RootDatabase, file: SourceFile) -> String {
         if definition && let (Some(name), Some(scheme)) = (item.name(db), &check.scheme) {
             output.push_str(&format!("{name}: {}\n", renderer.render_scheme(db, scheme)));
         } else if let Some(root) = item_hir(db, item).as_ref().and_then(|module| module.root)
-            && let Some(&ty) = check.expression_types.get(&root)
+            && let Some(&ty) = check.editor().expression_types.get(&root)
         {
             output.push_str(&renderer.render(db, ty));
             output.push('\n');
@@ -286,7 +286,7 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
             TopLevel::Generator => "generator",
             TopLevel::Effect { .. } => "effect",
         };
-        let pure = if *item_declared_pure(db, span.item) {
+        let pure = if item_declared_pure(db, span.item) {
             " (pure)"
         } else {
             ""

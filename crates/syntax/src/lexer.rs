@@ -5,6 +5,7 @@
 use {
     crate::{SyntaxError, kind::SyntaxKind},
     SyntaxKind::*,
+    memchr::memchr2,
     text_size::{TextRange, TextSize},
 };
 
@@ -18,8 +19,9 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     let mut lexer = Lexer {
         text,
         pos: 0,
-        // R averages a little over four bytes a token, so this rarely regrows.
-        tokens: Vec::with_capacity(text.len() / 4),
+        // Counting whitespace runs as tokens, R averages under three bytes a token and rarely
+        // fewer than two and a half.
+        tokens: Vec::with_capacity(text.len() / 2),
         errors: Vec::new(),
         in_annotation: false,
     };
@@ -109,7 +111,10 @@ impl Lexer<'_> {
         let first = self.bump().expect("next_token called at end of input");
         match first {
             ' ' | '\t' | '\u{c}' => {
-                self.eat_while(|c| c == ' ' || c == '\t' || c == '\u{c}');
+                self.pos += self.text.as_bytes()[self.pos..]
+                    .iter()
+                    .position(|&byte| !matches!(byte, b' ' | b'\t' | b'\x0c'))
+                    .unwrap_or(self.text.len() - self.pos);
                 WHITESPACE
             }
             '\n' => NEWLINE,
@@ -123,16 +128,14 @@ impl Lexer<'_> {
                     ANNOTATION_MARKER
                 } else {
                     // A line break is ASCII, so a byte scan cannot stop inside a character.
-                    self.pos += self.text.as_bytes()[self.pos..]
-                        .iter()
-                        .position(|&byte| byte == b'\n' || byte == b'\r')
+                    self.pos += memchr2(b'\n', b'\r', &self.text.as_bytes()[self.pos..])
                         .unwrap_or(self.text.len() - self.pos);
                     COMMENT
                 }
             }
             '\'' | '"' => self.quoted(
                 start,
-                first,
+                first as u8,
                 STRING,
                 "unterminated string; expected a closing quote",
             ),
@@ -141,7 +144,7 @@ impl Lexer<'_> {
             c if c.is_ascii_digit() => self.number(start),
             '`' => self.quoted(
                 start,
-                '`',
+                b'`',
                 IDENT,
                 "unterminated backtick name; expected a closing `` ` ``",
             ),
@@ -282,22 +285,40 @@ impl Lexer<'_> {
     }
 
     /// Backtick names follow string escape rules: `` \` `` does not end the name.
+    ///
+    /// The quote, the backslash and the line breaks are ASCII, so a byte scan for them never
+    /// stops inside a character.
     fn quoted(
         &mut self,
         start: usize,
-        quote: char,
+        quote: u8,
         kind: SyntaxKind,
         unterminated: &str,
     ) -> SyntaxKind {
+        let bytes = self.text.as_bytes();
+        let annotation = self.in_annotation;
         loop {
-            match self.bump() {
-                Some('\\') => {
+            let rest = &bytes[self.pos..];
+            // Outside an annotation a line break belongs to the string, so only the quote and the
+            // backslash stop the scan. In an annotation a line break before them stops it too.
+            let stop = match memchr2(quote, b'\\', rest) {
+                Some(offset) if annotation => {
+                    memchr2(b'\n', b'\r', &rest[..offset]).or(Some(offset))
+                }
+                None if annotation => memchr2(b'\n', b'\r', rest),
+                found => found,
+            };
+            let Some(offset) = stop else {
+                self.pos = self.text.len();
+                break;
+            };
+            self.pos += offset + 1;
+            match bytes[self.pos - 1] {
+                b'\\' => {
                     self.bump();
                 }
-                Some(c) if c == quote => return kind,
-                Some('\n' | '\r') if self.in_annotation => break,
-                Some(_) => {}
-                None => break,
+                byte if byte == quote => return kind,
+                _ => break,
             }
         }
         self.end_unterminated_at_line_break(start);

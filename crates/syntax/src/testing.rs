@@ -729,47 +729,43 @@ fn check_geometry(node: &SyntaxNode, input: &str) {
 /// agree with the plain child-by-child definitions a nested tree would use.
 fn check_navigation(root: &SyntaxNode, input: &str) {
     let mut text = String::new();
-    crate::for_each_token(root, |_, token| text.push_str(token));
+    for token in root.node_ref().tokens() {
+        text.push_str(token.text());
+    }
     assert_eq!(text, input, "token walk lost text for input {input:?}");
     let descendants: Vec<SyntaxNode> = root.descendants().collect();
-    let mut visited = Vec::new();
-    let mut tokens = Vec::new();
-    let mut open = 0usize;
-    crate::walk_tree(root.node_ref(), |event| match event {
-        crate::TreeEvent::Enter {
-            node,
-            parent,
-            range,
-        } => {
-            open += 1;
-            visited.push((node.kind(), parent.map(crate::NodeRef::kind), range));
-        }
-        crate::TreeEvent::Leave(_) => open -= 1,
-        crate::TreeEvent::Token { kind, text, range } => {
-            tokens.push((kind, text.to_owned(), range));
-        }
-    });
-    assert_eq!(open, 0, "tree walk left nodes open for input {input:?}");
-    let expected_tokens: Vec<_> = root
+    let walked: Vec<_> = root
+        .node_ref()
         .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| crate::is_walked_token(token.kind()))
-        .map(|token| (token.kind(), token.text().to_owned(), token.text_range()))
+        .map(|element| (element.kind(), element.range()))
+        .collect();
+    let elements: Vec<crate::SyntaxElement> = root.descendants_with_tokens().collect();
+    let expected: Vec<_> = elements
+        .iter()
+        .map(|element| (element.kind(), element.text_range()))
         .collect();
     assert_eq!(
-        tokens, expected_tokens,
-        "tree walk tokens diverged for input {input:?}"
+        walked, expected,
+        "element walk diverged for input {input:?}"
     );
-    let expected: Vec<_> = descendants
-        .iter()
-        .map(|node| {
-            let parent = (node != root)
-                .then(|| node.parent().map(|parent| parent.kind()))
-                .flatten();
-            (node.kind(), parent, node.text_range())
-        })
-        .collect();
-    assert_eq!(visited, expected, "tree walk diverged for input {input:?}");
+    for node in descendants.iter().take(8) {
+        let enclosed: Vec<bool> = root
+            .node_ref()
+            .descendants_with_tokens()
+            .map(|element| node.node_ref().encloses(element))
+            .collect();
+        let expected: Vec<bool> = elements
+            .iter()
+            .map(|element| {
+                let parent = match element {
+                    NodeOrToken::Node(child) => Some(child.clone()),
+                    NodeOrToken::Token(token) => token.parent(),
+                };
+                std::iter::successors(parent, SyntaxNode::parent).any(|ancestor| ancestor == *node)
+            })
+            .collect();
+        assert_eq!(enclosed, expected, "enclosure diverged for input {input:?}");
+    }
     for node in &descendants {
         let first = descendants
             .iter()

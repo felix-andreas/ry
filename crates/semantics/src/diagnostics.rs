@@ -1,6 +1,6 @@
 use {
     crate::{
-        AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+        AnnotationTarget, Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile,
         TypeDefinitions,
         annotations::{
             Annotation, Slot, comment_slots, inline_slots, is_type_kind, lower_inline_annotation,
@@ -176,8 +176,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
         let _ = item_name_range(db, item);
-        let _ = crate::item_binds_only_own_name(db, item);
-        let _ = crate::top_level::item_declared_pure(db, item);
+        let _ = crate::item_syntax_flags(db, item);
     }
 }
 
@@ -514,7 +513,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(naming) = item_naming(db, item) else {
             continue;
         };
-        for unused in &naming.unused_assignments {
+        for unused in &naming.extras().unused_assignments {
             let range = unused.range + offset;
             diagnostics.push(Diagnostic::new(
                 range,
@@ -523,7 +522,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 format!("`{}` is assigned but never used.", unused.name),
             ));
         }
-        for target in &naming.invalid_assignment_targets {
+        for target in &naming.extras().invalid_assignment_targets {
             let range = target.range + offset;
             // A trailing operator pulled the next line in only if the break falls after
             // the operator; a break before it is an ordinary continuation.
@@ -549,7 +548,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // The arm body reads every name the pattern binds, so an alternative that leaves one
         // out would run the body with that name unset or holding a stale value.
-        for mismatch in &naming.or_pattern_mismatches {
+        for mismatch in &naming.extras().or_pattern_mismatches {
             diagnostics.push(Diagnostic::new(
                 mismatch.range + offset,
                 Severity::Error,
@@ -756,6 +755,12 @@ struct ReadContext<'db> {
     test_files: Option<ProjectFiles>,
     library: Option<&'db StubLibrary<'db>>,
     super_globals: &'db BTreeSet<Symbol>,
+    /// The package's top-level and conditional definitions, which nearly every unresolved
+    /// candidate probes.
+    package: Option<(
+        &'db FxHashMap<Symbol, Item<'db>>,
+        &'db FxHashMap<Symbol, Vec<Item<'db>>>,
+    )>,
 }
 
 fn read_context(db: &dyn Db, file: SourceFile) -> ReadContext<'_> {
@@ -772,6 +777,12 @@ fn read_context(db: &dyn Db, file: SourceFile) -> ReadContext<'_> {
         }),
         library: stubs(db),
         super_globals: super_globals(db, file),
+        package: files.map(|files| {
+            (
+                crate::package_definitions(db, files),
+                crate::conditional_slot_items(db, files),
+            )
+        }),
     }
 }
 
@@ -793,7 +804,7 @@ fn classify_non_local_read(
     if let Some(&earliest) = context.positions.get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
-            || naming.deferred_quiet_reads.contains(expression))
+            || naming.extras().deferred_quiet_reads.contains(expression))
     {
         return NonLocalRead::Resolvable;
     }
@@ -803,12 +814,21 @@ fn classify_non_local_read(
     if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
+    if native_symbol(
+        db,
+        name,
+        naming.extras().native_routine_reads.contains(expression),
+    ) {
         return NonLocalRead::Resolvable;
     }
     let files = context.files;
     let test_files = context.test_files;
-    if crate::package_scheme_exists_in(db, files, context.library, name)
+    let package_binds = |_: &str| {
+        context.package.is_some_and(|(definitions, conditional)| {
+            definitions.contains_key(&symbol) || conditional.contains_key(&symbol)
+        })
+    };
+    if crate::package_scheme_exists_in(db, context.library, name, package_binds)
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
@@ -1862,7 +1882,7 @@ fn earlier_value_read(
             naming.non_locals.iter().any(|(expression, read)| {
                 *read == name && !naming.deferred_non_locals.contains(expression)
             }) || naming.quiet_reads.iter().any(|(expression, read)| {
-                *read == name && !naming.deferred_quiet_reads.contains(expression)
+                *read == name && !naming.extras().deferred_quiet_reads.contains(expression)
             })
             // A statement that also writes the name, such as a loop doing
             // `rownum <- rownum + 1`, reads the earlier value on the path before its own write.
@@ -2122,7 +2142,7 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
     for &item in item_tree(db, file) {
         if let Some(naming) = item_naming(db, item) {
-            names.extend(naming.super_globals.iter().copied());
+            names.extend(naming.extras().super_globals.iter().copied());
         }
     }
     names
@@ -2577,12 +2597,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // Quiet reads are never reported unresolved, but at run time they fall back to
         // enclosing bindings, so they keep definers alive.
         for (expression, name) in &naming.quiet_reads {
-            let deferred = naming.deferred_quiet_reads.contains(expression);
+            let deferred = naming.extras().deferred_quiet_reads.contains(expression);
             reads.push((index, *name, deferred));
         }
         // R resolves `%op%` when the expression runs and helper operators are used
         // project-wide, so operator reads count as deferred.
-        for name in &naming.quiet_operator_reads {
+        for name in &naming.extras().quiet_operator_reads {
             reads.push((index, *name, true));
         }
         // A loop's first iteration reads the earlier binding of its carried variable.
