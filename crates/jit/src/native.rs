@@ -159,6 +159,15 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
     compiled
 }
 
+/// Whether `function` has a native function for some argument types.
+pub unsafe fn has_native(function: Sexp) -> bool {
+    NATIVES.with_borrow(|natives| {
+        natives
+            .iter()
+            .any(|((closure, _), native)| *closure == function && native.is_some())
+    })
+}
+
 /// Whether every function lookup `native` assumes still finds the same function.
 unsafe fn still_resolves(native: &Native) -> bool {
     native.speculations.iter().all(|assumed| {
@@ -2905,6 +2914,13 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
         return Some(value.car());
     }
     let symbol = value.cdr();
+    if matches!(
+        symbol.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) {
+        // A promise of a constant evaluates to the constant itself.
+        return Some(symbol);
+    }
     if symbol.kind() != SexpType::Symbol || value.tag() == values::nil() {
         return None;
     }

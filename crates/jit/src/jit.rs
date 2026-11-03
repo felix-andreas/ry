@@ -15,6 +15,7 @@
 mod analysis;
 mod codegen;
 mod native;
+pub use native::has_native;
 mod runtime;
 
 use {

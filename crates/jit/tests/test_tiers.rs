@@ -865,10 +865,11 @@ fn formal_shadows_enclosing_function() {
 
 #[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
-    // The signature stands in for the profile, so a first call that can run long (here, one
-    // with a loop) runs compiled code, while a straight-line body waits until it is hot because
-    // compiling it would cost more than the one call. A call whose values the declared types do
-    // not predict still gets tier 0's answer.
+    // The signature stands in for the profile, so a first call runs compiled code: a typed
+    // scalar function runs as a native function from its first call, whose values fix the
+    // argument types, unless an argument is a promise of a computation (`c(1, 2.5)`), which only
+    // the frame may force; a straight-line body then waits until it is hot. A call whose values the declared types do not predict still gets tier 0's
+    // answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
         let cases = [
@@ -876,7 +877,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "ft <- function(x: double, y: double) -> double x * y + 1",
                 "ft(2, 3)",
                 "7",
-                Some(false),
+                Some(true),
             ),
             (
                 "fi <- function(x: double) -> double x * 2",
@@ -900,7 +901,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "fu <- function(x: double, y) -> double x + y",
                 "fu(1, 2)",
                 "3",
-                Some(false),
+                Some(true),
             ),
             (
                 "fl <- function(v: double[]) -> double { s <- 0; for (i in seq_along(v)) s <- s + v[i]; s }",
@@ -1166,15 +1167,17 @@ fn fuzz_typed_closures_agree_with_tier_zero() {
     });
 }
 
-/// Whether the global closure `name` holds compiled code right now.
+/// Whether the global closure `name` holds compiled code right now, or runs as a native
+/// function.
 unsafe fn has_compiled_code(name: &str) -> bool {
     unsafe {
         let function = lower::parse_text(name, "<test>")
             .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
         function.is_ok_and(|function| {
             function.kind() == heap::object::SexpType::Closure
-                && function.cdr().kind() == heap::object::SexpType::Bytecode
-                && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
+                && (jit::has_native(function)
+                    || function.cdr().kind() == heap::object::SexpType::Bytecode
+                        && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil())
         })
     }
 }
