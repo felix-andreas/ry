@@ -71,9 +71,53 @@ adopts content hashes. A cache hit costs a map and a relocation, and a miss cost
 compile time, about a millisecond per function, once per edit. Each instantiation the checker sees
 is compiled once, as Roc does.
 
+**Value tracking.** Inside one locked namespace or one strict file, the typed core is a closed
+program: it has no `eval`, no dynamic scoping and no rebinding, so the analysis can work out, for
+each variable, parameter and field, which allocation sites and which closures can reach it, and for
+each call, which functions it can reach. Bun's compiler does this for a whole program
+([prior art](/contributing/design/prior-art/#bun)). ry does it per namespace, because code outside
+a namespace can always reach it through an exported function. The results drive closure
+specialization across functions (see "Closures" below) and the facts the next section relies on.
+Untyped R code is never closed, since `eval`, `get` and `assign` reach any binding, so it keeps the
+allocation profiles of the native path.
+
+**Mapped, shared code.** The disk cache holds one file per namespace or strict file, with every
+function's machine code and its tables. The code is position-independent, and everything that
+differs between processes (runtime entry points, interned `CHARSXP` pointers, layout ids) is loaded
+from a small table each process fills when it maps the file. The code pages are then mapped
+read-only straight from the file, so the four test processes a CI machine runs share one copy, and
+only the table is private to each. A file is written once, to a temporary name that is then renamed
+into place, so a process never maps a half-written file.
+
 **Backend.** Cranelift, as for the JIT tier (`r-runtime.md`, section 5). LLVM would win some
 throughput on numeric loops, but the bar is set on programs that call functions and walk data,
 where layout and calls dominate.
+
+## Facts and guesses
+
+A type in compiled code is either a fact or a guess, a split that comes from Bun's compiler. A
+fact describes a value the typed core created, such as a record built by `(x = 1, y = 2)` in typed
+code or a list returned by `List.map`. The checker proves its layout, so a field read is one load
+with no check, and a fact costs nothing at run time. A guess describes a value that arrives from
+outside the typed core: an argument from untyped R code, a value returned by an R function, or a
+value read from a binding R code can write. A guess costs one layout check where the value arrives,
+and nowhere else.
+
+The check compares layouts, not contents, so it can fail on a value that still has the declared
+type. A record R code built with the right fields in another order, or with a field whose slot holds
+a pointer where the type's layout holds an unboxed double, has the type but not the layout. So a
+failed check runs the full structural check of the native-types contract, and:
+
+- a value that does not have the type is refused with the type-mismatch error the contract promises,
+  so annotations keep their meaning at the boundary;
+- a value that has the type but not its layout goes to a second compiled copy of the function in
+  which only that parameter is dynamic. That copy reads the parameter's fields by name and its slots
+  by their recorded representation, while every other parameter stays a fact, and the value is
+  neither converted nor copied.
+
+Bun compiles every second copy at build time, because its executables carry no compiler. ry has a
+compiler at run time, so a second copy is compiled at the first failed check of that parameter and
+cached like the first.
 
 ## Representations
 
@@ -115,8 +159,8 @@ first, so the collector traces a prefix and the object carries no per-slot mask.
 gets the same layout as typed code when its values have the same representations, so
 `(x = 1, y = 2)` built by R and a `Record{x: F64, y: F64}` built by ry are one layout. A typed
 parameter therefore checks a record from R by comparing its layout id with the type's, in constant
-time and with no conversion. A record whose layout differs is refused with the type-mismatch error
-the contract promises. Every builtin that reads records (`$`, `[[`, `identical`, printing,
+time and with no conversion. A record whose layout differs takes the path in "Facts and guesses"
+above. Every builtin that reads records (`$`, `[[`, `identical`, printing,
 `as.list`) works on that one object kind.
 
 **Flattening.** A record or tag that never escapes a function is never allocated: its fields are
@@ -148,12 +192,24 @@ loaded package. In a script, where globals can be rebound, the call loads the co
 callee's binding cell, so it is one load and an indirect call, and rebinding the name clears the
 cell's code pointer, which sends the next call through the interpreter.
 
+Bun cannot discard compiled code, so it makes its assumptions true by freezing built-ins: replacing
+a member of `Array.prototype` throws. ry cannot freeze R's bindings, because existing code changes
+locked bindings on purpose: testthat's `local_mocked_bindings` and `assignInNamespace` both unlock a
+namespace binding and rebind it. So each compiled file records which locked bindings its direct
+calls assume, and `unlockBinding` on one of them discards the code that assumed it, which then
+recompiles with a cell load at that call. Rebinding a locked binding is rare, so the direct call
+costs nothing in the common case. ry's own standard library is frozen instead: its namespaces
+cannot be unlocked, so a call of `List.map` or `Str.concat` is always direct and inlinable. No
+existing R code can depend on rebinding them. ry's types carry no class attribute, so S3 dispatch
+never reaches a ry record or tag, and its method tables need no freezing.
+
 **Entry and exit stubs.** A call from untyped R code into typed code goes through an entry stub,
 and a call from typed code to an R function boxes the arguments, calls the interpreter, and checks
 the result against the call's declared type. The typed core has no lazy evaluation, so an entry
 stub forces each argument promise at entry, in order, and checks it once: a type code, a length of
 one, no attributes and not `NA` for a scalar, a layout id for a record, and a scan for a list from
-R. This differs from checking an annotated argument when it is forced, which is the rule for typed
+R. Only the layout check is inline in the stub, while the scan and a failed layout check take the path in
+"Facts and guesses". This differs from checking an annotated argument when it is forced, which is the rule for typed
 R code, and the change is recorded in `decisions.md` when it is built. A function-typed parameter
 cannot be checked at entry: an untyped closure passed to it gets a wrapper that checks each call's
 arguments and result, and a typed closure passes as its code pointer and captures.
@@ -166,8 +222,11 @@ call path.
 **Closures.** A typed closure that captures by value under the contract's rule is a code pointer
 and a heap block of its captured values at their natural width. Where the checker knows the exact
 closure at a call site, as for a lambda passed to `List.map` in the same function, the call is
-direct and the lambda inlines, which is Roc's lambda-set specialization restricted to what one
-function can see. A closure that fails the capture rule keeps R's environment semantics and is
+direct and the lambda inlines, which is Roc's lambda-set specialization. Value tracking extends it across functions in one
+namespace: a function-typed parameter that only lambdas of its own namespace reach is specialized
+on that set, so each call is a direct call or a jump on a small closure id. A parameter that also
+receives closures from outside, which every exported function's parameters do, keeps the indirect
+call through the code pointer. A closure that fails the capture rule keeps R's environment semantics and is
 called through the interpreter.
 
 **Loops.** Interrupts are tested at loop back edges with one load. A list read is a bounds check
@@ -224,15 +283,41 @@ because their boxed form is R's own scalar, and so does a `Str` already in UTF-8
 `List<Bool>` and `List<Str>` cross from ry to R without a copy, and from R to ry with one scan for
 `NA`, attributes and encoding. Every other value crosses by conversion.
 
+## Explaining slow paths
+
+Typed code can still run slowly where it meets R, and the reason is invisible in the source. So
+`ry check --explain` lists every place in strict-clean typed code that compiles to a slow path,
+worst first, with the fix for each, as Bun's `--explain` does. It reads the same facts the backend
+uses, so it needs no run and no profile. The places it reports are:
+
+- a parameter that receives guesses whose check is a scan, such as a `List<Record{...}>` from R,
+  with the fix to convert once with `List.from_r` where the value enters;
+- a call from typed code to an R function, which boxes its arguments and checks its result;
+- a closure that fails the capture rule, which runs through the interpreter;
+- a function-typed parameter called indirectly because closures from outside the namespace reach it;
+- a call through a binding cell, in a script whose globals can be rebound.
+
+Worst first means a slow path inside more nested loops ranks higher, because no profile exists to
+rank by measured time. `--explain=json` prints one finding per line, for editors and CI. The user-facing
+wording and the diagnostic codes are the language session's to settle with the native-types
+contract.
+
 ## Measuring against the bar
 
 - **Rust references.** Each typed benchmark program has a Rust twin in `tools/bench/why/rust/`, and
   `just bench-why` reports the typed time against it. The language session's hill climb runs on
   these.
-- **Differential checks.** The oracle compares typed against untyped against GNU R on every typed
-  benchmark program and on a typed oracle suite. A fuzzer generates typed programs (records, tags,
-  lists, strings, closures) and compares the compiled result with the interpreter's implementation
-  of the same program.
+- **Three runs per program.** Every typed oracle program and every program the fuzzer generates
+  (records, tags, lists, strings, closures) runs three ways: in the interpreter with annotations
+  checked, compiled, and compiled with every annotation erased, which runs it as untyped ry. All
+  three must print the same output and exit with the same status, and the oracle adds GNU R where
+  the erased program is plain R. This is Bun's test matrix.
+- **Every guess fails.** `RY_FORCE_GUESS_FAIL` makes every layout check fail, so every second copy
+  and every structural check runs, and the three runs must still agree.
+- **Every fact checked.** `RY_CHECK_FACTS` compiles a check before each use of a fact: the layout
+  id before each field read, a zero count before each in-place update, and the bound before each
+  list read whose bounds check was removed. A failed check panics with the function and the fact,
+  so a soundness bug in the IR shows up as a precise failure instead of corrupt memory.
 - **Collector stress.** The same fuzzer runs under `RY_GC_STRESS`, which collects at every
   allocation, to check the stack maps and the activation list.
 
@@ -241,7 +326,9 @@ because their boxed form is R's own scalar, and so does a `Str` already in UTF-8
 The typed core IR and its lowering in the analysis, its serialized form beside the bytecode, the
 Cranelift backend over it, layouts with slot representations in place of per-object masks, the
 native number vector kinds, stack-map rooting with the activation list, the entry and exit stubs,
-uniqueness inference, the disk cache and the Rust twins. The native path in
+uniqueness inference, value tracking per namespace, the second copies for guesses, the mapped disk
+cache with its per-process table, the invalidation of direct calls on `unlockBinding`,
+`ry check --explain`, the two test modes and the Rust twins. The native path in
 `crates/jit/src/native.rs` keeps serving typed code over R types that is not strict-clean.
 
 ## Open questions
@@ -256,5 +343,10 @@ uniqueness inference, the disk cache and the Rust twins. The native path in
   seconds on a cold cache. Compiling at first call and filling the cache in the background may be
   the better default for `ry run`, with eager compilation for `ry load` and test runs.
 - **Untyped records with a mixed layout.** Untyped code may build records of one field set whose
-  slots take different representations from call to call, which multiplies layouts. Whether that
-  needs a cap with a fallback to all-pointer slots is to be measured on the benchmark code bases.
+  slots take different representations from call to call, which multiplies layouts. A second copy
+  keeps such a record correct at typed entry, but every call that passes one runs the second copy,
+  at dynamic speed. Whether layouts need a cap with a fallback to all-pointer slots is to
+  be measured on the benchmark code bases.
+- **One cache file per namespace.** A namespace's file is rewritten when any of its functions
+  changes, which is cheap for packages but costs a whole-file write per edit in a large strict
+  script. Splitting a file into mapped chunks is the fallback if that shows up in `ry load` times.

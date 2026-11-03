@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Prior art from new language implementations
-description: "What Roc, Bend, goose and Vx do best, and which of their ideas ry's R runtime adopts or rejects"
+description: "What Roc, Bend, goose, Vx and Bun's compiler do best, and which of their ideas ry's R runtime adopts or rejects"
 tags: [runtime, memory-management, compilation, type-system, ffi]
 status: draft
 generated: { by: ry-research-agent/1, at: 2026-10-31T16:00:00Z }
@@ -32,14 +32,17 @@ sources:
     resource: https://github.com/vx-lang/Vx
     title: "Vx repository: README.md, ROADMAP.md, docs/language_rules_for_a_parallel_compiler.md, www/book/src/quick-reference.md"
     last_modified: 2026-10-31T07:28:21-07:00
+  - id: bun-aot
+    resource: https://bun.sh/docs/compiler/aot
+    title: "Bun documentation: the ahead-of-time compiler, and its internals page"
   - id: okf
     resource: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
     title: Open Knowledge Format v0.2
     last_modified: 2026-08-21T13:08:36-07:00
 ---
 
-This page studies four recent language implementations for ideas that ry's R runtime can use, and
-decides which ones it takes. One constraint decides every verdict, and it comes from
+This page studies four recent language implementations and one new compiler for ideas that ry's R
+runtime can use, and decides which ones it takes. One constraint decides every verdict, and it comes from
 [the runtime design](/contributing/design/r-runtime/): R's C API must work unchanged. Any object a
 native package can reach is therefore a non-moving heap object with a reference count, reached
 through a raw `SEXP` pointer, rooted by `PROTECT`, possibly an ALTREP vector, and possibly written to
@@ -68,6 +71,13 @@ by native code without regard for its reference count.
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
 | Macros | Vx (`macro_rules`), Bend (templates) | **Reject** | ry has no macros, for checking speed; R's own non-standard evaluation keeps working |
+| Types as facts (free) or guesses (one layout check), with a second compiled copy for a failed guess | Bun | **Adopt, keeping errors for non-conforming values** | Typed entry stubs (`typed-runtime.md`, "Facts and guesses") |
+| Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
+| Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
+| Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | The typed code cache |
+| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
+| Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
+| No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first failed check |
 
 ## Roc
 
@@ -317,6 +327,64 @@ compiles the module with `llc` to an object file, links it with `clang` and runs
 - **MLIR and LLVM as the JIT backend,** for the compile-latency reasons in the runtime design.
 - **Placement types as a language feature,** because no benchmark code base targets accelerators.
 
+## Bun's compiler
+
+**What it is.** `bun compile` (shorthand for `bun build --compile --aot`) compiles TypeScript and
+JavaScript to machine code at build time and writes one executable with no JIT, no bytecode and no
+profiling data in it. Bun documents it as experimental.[^bun-aot] It type-checks the whole program,
+tracks values through it, optimizes each function and generates code with the backend of
+JavaScriptCore's fastest JIT.[^bun-aot]
+
+**What it does best for ry.** It solves the problem ry's typed runtime has: typed code that must
+run fast without trusting values that arrive from untyped code.
+
+- **Facts and guesses.** A type describing a value the program creates is a fact: objects get fixed
+  layouts and a property read is one load with no check. A type describing a value from outside
+  (`JSON.parse`, `any`, `as`, a `.d.ts`-only package) is a guess and costs one layout check where
+  the value arrives. A failed check sends the call to a second copy of the function that treats only
+  that parameter as plain JavaScript. A mismatch never throws or converts, so types change speed and
+  never behavior.[^bun-aot]
+- **Whole-program value tracking.** For each variable, parameter and property it works out which
+  objects can reach it, and for each call which functions it can reach. Untyped JavaScript gets fixed
+  layouts the same way, and code the compiler cannot resolve looks properties up at run
+  time.[^bun-aot]
+- **Freezing instead of deoptimizing.** An executable cannot discard compiled code, so replacing or
+  deleting a member of a built-in object such as `Array.prototype` throws a `TypeError`, which makes
+  the compiler's assumption true. Adding members, or patching `console`, `process` or `fetch`,
+  works.[^bun-aot]
+- **Shared code.** The machine code and its tables are read-only and mapped straight from the file,
+  so processes and workers share them.[^bun-aot]
+- **Explaining slow paths.** `--explain` lists code that compiled to a slow path, worst first, with a
+  fix for each, and `--explain=json` prints one object per line.[^bun-aot]
+- **The test matrix.** Each test runs under `bun run`, compiled, and compiled with every annotation
+  erased, and all three must match in output and exit status. Programs are also compiled with every
+  guess forced to fail, and a mode checks every fact the executable relies on at run time.[^bun-aot]
+
+**What ry adopts.** All six, fitted to R (`typed-runtime.md` holds the design):
+
+- **Facts and guesses,** but with ry's contract: an annotation means the value has the type, so a
+  value that does not conform is refused with a type-mismatch error. Only a value that conforms with
+  a different layout, such as a record R code built with its fields in another order, takes the
+  second copy.
+- **Value tracking per namespace.** The typed core of a locked namespace or a strict file has no
+  `eval` and no rebinding, so it is closed apart from its exported functions. Untyped R code is never
+  closed, because `eval`, `get` and `assign` reach any binding, so it keeps allocation profiles.
+- **Freezing for ry's standard library.** No existing R code rebinds `List.map`, so its namespaces
+  cannot be unlocked and its calls are always direct. R's own locked bindings are not frozen, because
+  testthat's `local_mocked_bindings` and `assignInNamespace` rebind them on purpose. Instead,
+  `unlockBinding` discards the compiled code whose direct calls assumed the binding.
+- **Mapped, shared code** for the typed code cache, which matters for CI machines that run several
+  test processes and are bound by memory.
+- **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
+- **The test matrix** for typed differential tests and the typed fuzzer.
+
+**What ry rejects.**
+
+- **Compiling every fallback at build time,** because ry has a compiler at run time and compiles a
+  second copy at the first failed check.
+- **Types that never change behavior,** because ry's annotations are checked at the boundary and
+  report mismatches.
+
 ## About this page's format
 
 This page is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
@@ -325,6 +393,7 @@ trust (`generated`, `verified`) fields that format defines, and each claim about
 source with a footnote keyed to a `sources` entry. The docs site does not render frontmatter, so each
 footnote also carries the source's link.
 
+[^bun-aot]: Bun documentation: the ahead-of-time compiler, and its internals page, <https://bun.sh/docs/compiler/aot>, <https://bun.sh/docs/compiler/internals>
 [^okf]: Open Knowledge Format v0.2, <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 [^roc]: Roc repository: docs/langref, design.md, design/lambda-set-specialization.md, <https://github.com/roc-lang/roc>
 [^perceus]: Reinking, Xie, de Moura and Leijen: Perceus, Garbage Free Reference Counting with Reuse, <https://www.microsoft.com/en-us/research/wp-content/uploads/2020/11/perceus-tr-v4.pdf>
