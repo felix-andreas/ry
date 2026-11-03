@@ -3,7 +3,7 @@
 //!
 //! A marker is the rest of a fence's info string after the language, starting with the word
 //! `ry`, such as ```` ```text ry check typing ````. Expressive Code ignores the extra words, so
-//! the rendered site does not show them. `contributing/testing.md` documents the format;
+//! the rendered site does not show them. `development/testing.md` documents the format;
 //! the short version:
 //!
 //! - A marked `text` block is the output of the nearest `r` block above it, or of every tab of the

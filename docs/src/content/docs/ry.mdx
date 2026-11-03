@@ -122,7 +122,7 @@ When a comment and an inline annotation disagree, ry uses the inline one and war
 
 A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Each of
 your functions has one signature, and there is no inheritance, so inference stays fast enough for
-every keystroke. [Type checking](/type-checking/overview) and the
+every keystroke. The [tutorial](/tutorial/types) and the
 [type system reference](/reference/type-system) have the rules.
 
 ## Records, tags and `match`
@@ -157,8 +157,8 @@ A `match` that misses a case is a `non-exhaustive-match` error, and an arm the e
 cover is an `unreachable-pattern` warning. Patterns are `_`, a name, a literal, a tag with payload
 patterns, `(p, q)`, `(x = p, ..)`, `p | q`, and a guard `p if (cond)`. Records have value
 semantics, and passing one to an R function is an error until you convert it with `as.list()`.
-[Records and tags](/type-checking/records-and-tags) and [Arrays](/type-checking/arrays) have the
-details.
+[Records, tuples and tags](/reference/type-system#records-tuples-and-tags) and
+[Arrays](/reference/type-system#arrays) have the rules.
 
 ## Standard library
 
@@ -187,7 +187,7 @@ sales |>
 Verbs: `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`, `join`, `join_asof`,
 `head`, and lazy queries through `LazyFrame`. Existing data.table code runs unchanged, most of its
 queries on the same engine, and data.table's own test suite passes under ry.
-[DataFrames](/guides/dataframes) has the API.
+[DataFrames](/reference/dataframes) has the API.
 
 ## Strict mode
 
@@ -195,7 +195,7 @@ queries on the same engine, and data.table's own test suite passes under ry.
 run means every value has a known type. `ry run`, `ry R`, `ry load` and the console then refuse code
 with a strict-mode error. Combined with `object-systems = false`, it also rejects new S4, R6 and
 Reference Classes, which otherwise get an `object-system` warning recommending records and tags.
-[Strict mode](/type-checking/strict-mode) lists what it reports.
+[Strict mode](/reference/type-system#strict-mode) lists what it reports.
 
 ## Running and loading packages
 
@@ -203,7 +203,7 @@ Reference Classes, which otherwise get an `object-system` warning recommending r
 `load_all()` and no restart. In RStudio, `source(pipe("ry load --r-entry"))` in `~/.Rprofile` gives
 you a fast `load_all()`. On a 326,000-line package, a cold load takes 1.3 to 1.7 s against
 `devtools::load_all()`'s 9.6 s, and a reload after an edit 79 to 83 ms against 8.6 s.
-[Running and reloading](/guides/running) has the details.
+[Package loading](/reference/package-loading) has the details.
 
 ## Editor
 
@@ -212,7 +212,7 @@ go-to-definition, references, rename, call hierarchy, signature help, inlay hint
 refactorings (extract variable or function, inline, convert between `#:` and inline types), an
 outline, folding, semantic highlighting, formatting, and code lenses to run and debug tests. The VS
 Code extension adds a debugger, a console with live values, a data viewer and a plot panel. Any
-LSP editor can run `ry server`. [Editors](/guides/editors) lists everything.
+LSP editor can run `ry server`. [Installation](/installation#editors) sets each editor up.
 
 ## Performance
 

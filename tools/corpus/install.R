@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # Installs the benchmark dependency closure, plus the Suggests of each root package,
-# into a dedicated GNU R library. See docs/src/content/docs/contributing/corpus-and-oracle.md.
+# into a dedicated GNU R library. See docs/src/content/docs/development/corpus-and-oracle.md.
 #
 # Environment:
 #   RY_CORPUS_DIR       output directory (default: <repo>/.corpus)
