@@ -229,14 +229,24 @@ pub unsafe fn select_positions(
     let extent = length(vector);
     match kind {
         SexpType::Logical | SexpType::Integer => {
-            return gather(kind, values::ints(vector), positions, count, NA_INTEGER, |result| {
-                values::ints_mut(result)
-            });
+            return gather(
+                kind,
+                values::ints(vector),
+                positions,
+                count,
+                NA_INTEGER,
+                |result| values::ints_mut(result),
+            );
         }
         SexpType::Real => {
-            return gather(kind, values::reals(vector), positions, count, NA_REAL, |result| {
-                values::reals_mut(result)
-            });
+            return gather(
+                kind,
+                values::reals(vector),
+                positions,
+                count,
+                NA_REAL,
+                |result| values::reals_mut(result),
+            );
         }
         SexpType::Raw => {
             return gather(kind, values::raws(vector), positions, count, 0, |result| {
@@ -276,9 +286,13 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     match index.kind() {
         SexpType::Integer => {
             let positions = values::ints(index);
-            if positions.iter().all(|&position| position <= 0 && position != NA_INTEGER)
-                && let Some(keep) =
-                    excluded(length(object), positions.iter().map(|&position| -f64::from(position)))
+            if positions
+                .iter()
+                .all(|&position| position <= 0 && position != NA_INTEGER)
+                && let Some(keep) = excluded(
+                    length(object),
+                    positions.iter().map(|&position| -f64::from(position)),
+                )
             {
                 return Ok(Some(gather_kept(object, &keep)?));
             }
@@ -1975,18 +1989,22 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 | SexpType::Language
                 | SexpType::Nil
         ) {
-            return Err(error(format!(
-                "incompatible types (from {} to {}) in subassignment type fix",
+            return Err(incompatible_types(
+                crate::coerce::type_name(object),
                 crate::coerce::type_name(value),
-                crate::coerce::type_name(object)
-            )));
+                "subassignment type fix",
+            ));
         }
         values::pairlist_to_list(value)?
     } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
         // GNU R coerces the value to a list first: a call becomes the list of its parts, and a
-        // symbol cannot be coerced, so it becomes `NULL` and deletes the selected elements.
+        // symbol cannot be coerced. R 4.6.1 makes that an error; earlier releases warn, and the
+        // symbol becomes `NULL` and deletes the selected elements.
         match value.kind() {
             SexpType::Language => values::pairlist_to_list(value)?,
+            SexpType::Symbol if crate::system::r_at_least_release(4, 6, 1) => {
+                return Err(error("'symbol' object cannot be coerced to type 'list'"));
+            }
             SexpType::Symbol => {
                 conditions::warning_call(call, "'symbol' object cannot be coerced to type 'list'")?;
                 nil()
@@ -2562,13 +2580,7 @@ unsafe fn subassign_type_fix(object: SexpType, value: SexpType) -> R<SexpType> {
                 | SexpType::String
         )
     };
-    let refused = || {
-        error(format!(
-            "incompatible types (from {} to {}) in subassignment type fix",
-            value.name(),
-            object.name()
-        ))
-    };
+    let refused = || incompatible_types(object.name(), value.name(), "subassignment type fix");
     match object {
         SexpType::List => match value {
             SexpType::Closure | SexpType::Builtin | SexpType::Special => Err(error(format!(
@@ -2602,6 +2614,18 @@ unsafe fn subassign_type_fix(object: SexpType, value: SexpType) -> R<SexpType> {
             SexpType::List
         }),
     }
+}
+
+/// GNU R's refusal to assign a `value` type into an `object` type. R 4.4 names the object's
+/// type first; earlier releases name the value's first.
+fn incompatible_types(object: &str, value: &str, context: &str) -> Unwind {
+    let (from, to) = match crate::system::r_at_least(4, 4) {
+        true => (object, value),
+        false => (value, object),
+    };
+    error(format!(
+        "incompatible types (from {from} to {to}) in {context}"
+    ))
 }
 
 /// `x[[i]] <- value` with one subscript, which for a list may be a path of several (recursive
@@ -2671,9 +2695,7 @@ unsafe fn subassign2_one(
     }
     if object.kind() == SexpType::Expression && value != nil() {
         if value.kind() == SexpType::List {
-            return Err(error(
-                "incompatible types (from list to expression) in [[ assignment",
-            ));
+            return Err(incompatible_types("expression", "list", "[[ assignment"));
         }
         subassign_type_fix(SexpType::Expression, value.kind())?;
     }
@@ -2804,8 +2826,18 @@ unsafe fn atomic_replacement_check(value: Sexp) -> R<()> {
         || value.kind().is_atomic()
         || matches!(value.kind(), SexpType::List | SexpType::Expression))
     {
-        // GNU R reads the length of a value that has none and reports this.
-        return Err(error("long vectors not supported yet: subassign.c:1841"));
+        // GNU R reads the length of a value that has none and reports this, naming the line of
+        // `subassign.c` that reads it, which moves between releases.
+        let line = match crate::system::r_at_least_release(4, 6, 2) {
+            true => 1861,
+            false if crate::system::r_at_least(4, 6) => 1856,
+            false if crate::system::r_at_least(4, 5) => 1854,
+            false if crate::system::r_at_least(4, 4) => 1851,
+            false => 1841,
+        };
+        return Err(error(format!(
+            "long vectors not supported yet: subassign.c:{line}"
+        )));
     }
     match length(value) {
         0 => Err(error("replacement has length zero")),

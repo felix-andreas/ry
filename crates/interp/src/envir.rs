@@ -1263,7 +1263,44 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             crate::format::set_output_decimal(&mark);
             Ok(value)
         }
-        // GNU R keeps `scipen` as given and reads it as an integer where it is used.
+        // R 4.5 stores `scipen` as an integer within -9..9999, warning about a value it moves
+        // there; earlier releases keep it as given and read it as an integer where it is used.
+        "scipen" if crate::system::r_at_least(4, 5) => {
+            let numeric = match value.kind() {
+                SexpType::Logical | SexpType::Real => true,
+                SexpType::Integer => !values::inherits(value, "factor"),
+                _ => false,
+            };
+            if !numeric || length(value) != 1 {
+                return Err(error("invalid 'scipen'"));
+            }
+            let digits = if value.kind() == SexpType::Real {
+                let number = crate::arith::real_at(value, 0);
+                if number.is_nan() {
+                    NA_INTEGER
+                } else if number >= f64::from(i32::MAX) + 1.0 || number <= f64::from(i32::MIN) {
+                    return Err(error(format!(
+                        "setting scipen={} is out of range",
+                        crate::format::format_g(number)
+                    )));
+                } else {
+                    number as i32
+                }
+            } else {
+                values::as_integer_scalar(value)
+            };
+            const LOWEST: i32 = -9;
+            const HIGHEST: i32 = 9999;
+            if digits == NA_INTEGER || !(LOWEST..=HIGHEST).contains(&digits) {
+                let used = match digits {
+                    NA_INTEGER => 0,
+                    _ => digits.clamp(LOWEST, HIGHEST),
+                };
+                crate::conditions::warning(format!("invalid 'scipen' {digits}, used {used}"))?;
+                return scalar_integer(used);
+            }
+            scalar_integer(digits)
+        }
         "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))

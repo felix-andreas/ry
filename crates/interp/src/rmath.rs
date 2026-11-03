@@ -7956,6 +7956,13 @@ fn bessel_jy(x: f64, nu: f64) -> (f64, f64) {
 
 /// GNU R stops at orders this large, where its recurrences would need too much memory.
 const BESSEL_NU_MAX: f64 = 1e7;
+/// R 4.6.2 lets `J`, `I` and `K` go to this order (`M_bessel_j_max_alpha` and
+/// `M_bessel_ik_max_alpha`), and warns beyond it.
+const BESSEL_NU_MAX_WIDE: f64 = 1e9;
+
+fn bessel_limits_widened() -> bool {
+    crate::system::r_at_least_release(4, 6, 2)
+}
 /// Above this argument, unscaled `I` is reported as infinite, as GNU R does.
 const BESSEL_EXPARG: f64 = 709.0;
 
@@ -7968,6 +7975,14 @@ pub fn bessel_i(x: f64, alpha: f64, expo: f64) -> f64 {
         return f64::NAN;
     }
     let scaled = expo as i32 == 2;
+    if alpha > BESSEL_NU_MAX_WIDE && bessel_limits_widened() {
+        warning(format!(
+            "besselI(x, nu): nu={} > max_alpha_i (= {}): too large for bessel_i() algorithm",
+            format_g(alpha),
+            format_g(BESSEL_NU_MAX_WIDE)
+        ));
+        return f64::NAN;
+    }
     if alpha < 0.0 {
         let na = alpha.floor();
         // Abramowitz and Stegun 9.6.2 and 9.6.6.
@@ -8031,6 +8046,14 @@ pub fn bessel_k(x: f64, alpha: f64, expo: f64) -> f64 {
         return f64::NAN;
     }
     let alpha = alpha.abs();
+    if alpha > BESSEL_NU_MAX_WIDE && bessel_limits_widened() {
+        warning(format!(
+            "besselK(x, nu): |nu|={} > max_alpha_k (= {}): too large for bessel_k() algorithm",
+            format_g(alpha),
+            format_g(BESSEL_NU_MAX_WIDE)
+        ));
+        return f64::NAN;
+    }
     let scaled = expo as i32 == 2;
     if x == 0.0 {
         return f64::INFINITY;
@@ -8063,7 +8086,16 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
             bessel_y(x, -alpha) * sinpi_(alpha)
         };
     }
-    if alpha > BESSEL_NU_MAX {
+    if bessel_limits_widened() {
+        if alpha > BESSEL_NU_MAX_WIDE {
+            warning(format!(
+                "besselJ(x, nu): nu={} > max_alpha_j (= {}): too large for bessel_j() algorithm",
+                format_g(alpha),
+                format_g(BESSEL_NU_MAX_WIDE)
+            ));
+            return f64::NAN;
+        }
+    } else if alpha > BESSEL_NU_MAX {
         warning(format!(
             "besselJ(x, nu): nu={} too large for bessel_j() algorithm",
             format_g(alpha)
@@ -8258,6 +8290,14 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     }
     let na = alpha.floor();
     if alpha < 0.0 {
+        if -alpha > BESSEL_NU_MAX && bessel_limits_widened() {
+            warning(format!(
+                "besselY(x, -nu): nu = {} > {} =: max_alpha_y, too large for bessel_y() algorithm",
+                format_g(-alpha),
+                format_g(BESSEL_NU_MAX)
+            ));
+            return f64::NAN;
+        }
         // Abramowitz and Stegun 9.1.2.
         return (if alpha - na == 0.5 {
             0.0
@@ -8270,10 +8310,18 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
         };
     }
     if alpha > BESSEL_NU_MAX {
-        warning(format!(
-            "besselY(x, nu): nu={} too large for bessel_y() algorithm",
-            format_g(alpha)
-        ));
+        let message = match bessel_limits_widened() {
+            true => format!(
+                "besselY(x, nu): nu={} > {} =: max_alpha_y, too large for bessel_y() algorithm",
+                format_g(alpha),
+                format_g(BESSEL_NU_MAX)
+            ),
+            false => format!(
+                "besselY(x, nu): nu={} too large for bessel_y() algorithm",
+                format_g(alpha)
+            ),
+        };
+        warning(message);
         return f64::NAN;
     }
     if x == 0.0 {
