@@ -844,6 +844,11 @@ impl<'p> Walker<'p> {
                 if index.kind == Kind::Never {
                     return Ok(index);
                 }
+                // `x[TRUE]` recycles the logical over the whole vector, while `x[[TRUE]]` reads the
+                // first element, so only `[[` may treat a logical index as a position.
+                if operation == Operation::Subset && index.kind == Kind::Known(Ty::Lgl) {
+                    return Err(Refusal("`[` with a logical index selects, not indexes"));
+                }
                 let index_ty = index.kind.numeric()?;
                 let value = match (emitter.as_mut(), vector.value, index.value, index_ty) {
                     (Some(emitter), Some(vector), Some(index), Some(index_ty)) => {

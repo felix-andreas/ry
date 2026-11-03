@@ -130,10 +130,10 @@ pub struct Compiled {
 
 /// What one deoptimization point writes back before tier 0 resumes at `pc`.
 ///
-/// Every deoptimization point used to box and flush its values in its own cold block, which
-/// made those blocks most of a function's code and most of its compile time. Now each point only
-/// stores its raw values into a scratch area, one 8-byte cell each in the order below, and
-/// jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
+/// Each point only stores its raw values into a scratch area, one 8-byte cell each in the order
+/// below, and jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
+/// Boxing and flushing in a cold block per point would make those blocks most of a function's
+/// code and most of its compile time.
 pub struct Exit {
     pub pc: usize,
     pub why: i32,
@@ -272,7 +272,9 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.add_global_root(tier1);
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
-    counters[profile::ENTRIES] = 0;
+    // Halfway to the threshold, tier 0 keeps recording type feedback, so the activation that
+    // just deoptimized records the type that broke the speculation and the recompile sees it.
+    counters[profile::ENTRIES] = bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2);
     counters[profile::BACK_EDGES] = 0;
     if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;

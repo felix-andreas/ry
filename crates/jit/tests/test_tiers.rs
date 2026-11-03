@@ -552,6 +552,13 @@ fn native_functions_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // `x[TRUE]` recycles the logical over the whole vector; `x[[TRUE]]` is the first element.
+        (
+            "lg <- function(x) sum(x[TRUE]) + x[[TRUE]]",
+            "p <- c(0.5, 1.5, 2)\ns <- 0\nfor (i in 1:n) s <- s + lg(p)\ns",
+            "(n = 600L)",
+            false,
+        ),
         (
             "cnt <- function(n) { k <- 0L; i <- 0L; while (TRUE) { i <- i + 1L; if (i > n) break; if (i %% 3L == 0L) next; k <- k + i }; k }",
             "s <- 0L\nfor (i in 1:n) s <- s + cnt(i %% 40L)\ns",

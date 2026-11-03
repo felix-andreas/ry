@@ -152,11 +152,11 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                         describe(machine.code)
                     );
                 }
-                if reason == analysis::MOSTLY_TIER0 {
-                    counters[profile::TIER_STATE] |= runtime::LOOPS_ONLY;
-                    counters[profile::ENTRIES] = runtime::NEVER_HOT;
-                } else if reason != analysis::COLD
+                // The plan had no profile yet, so a verdict on how much would run natively is not
+                // final: only a refusal that no profile can change stops the body for good.
+                if reason != analysis::COLD
                     && reason != analysis::NOTHING_NATIVE
+                    && reason != analysis::MOSTLY_TIER0
                     && reason != analysis::BRIEF
                 {
                     counters[profile::TIER_STATE] = -1;
@@ -187,6 +187,14 @@ unsafe fn compiled_for<'a>(
 ) -> Option<&'a Compiled> {
     unsafe {
         let constants = machine.code.cdr();
+        // A body that compiled only for its loop would spend each call handing its instructions
+        // back to tier 0, so calls keep running in tier 0 and only the loop enters compiled code.
+        if !in_loop
+            && values::ints(constants.element(PROFILE))[profile::TIER_STATE] & runtime::LOOPS_ONLY
+                != 0
+        {
+            return None;
+        }
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
             let address = tier1.external_address() as *const Compiled;
@@ -228,10 +236,6 @@ unsafe fn compiled_for<'a>(
         let counters = values::ints_mut(constants.element(PROFILE));
         let state = counters[profile::TIER_STATE];
         if !hot || state < 0 {
-            return None;
-        }
-        if state & runtime::LOOPS_ONLY != 0 && !in_loop {
-            counters[profile::ENTRIES] = runtime::NEVER_HOT;
             return None;
         }
         if runtime::compiles(state) >= MAX_COMPILES {

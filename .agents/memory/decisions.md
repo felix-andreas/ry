@@ -6804,6 +6804,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   pointer only when `warm` holds: the body has a loop, has compiled code, or is halfway to the
   entry threshold and the tier has not given up on it. A body refused as `MOSTLY_TIER0` gets the
   entry count `runtime::NEVER_HOT`, so tier 0 stops asking the tier about its calls.
+- **Two follow-ons keep the gates from trapping a body.** `runtime::invalidate` resets the entry
+  count to half the threshold rather than zero, so the activation that just deoptimized records
+  the type that broke the speculation and the recompile sees it; from zero, the body could
+  compile the same speculation until it ran out of compiles. And a `LOOPS_ONLY` body that did
+  compile for its loop still runs its calls in tier 0 (`compiled_for` returns early), because
+  entering compiled code from the top would hand most instructions back one by one.
+- **A first-call `MOSTLY_TIER0` verdict is not final.** The first call plans without a profile,
+  so that refusal leaves the tier state alone and the body tiers up normally later.
 - **Why loops always record.** A loop can turn hot inside a body's only activation, and its
   compile needs the types of the instructions that ran before it. Switching recording on at
   half the back-edge threshold left those without feedback, so the loop was refused as cold

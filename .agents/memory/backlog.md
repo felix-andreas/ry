@@ -601,6 +601,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   equally fast: the profile proves the same facts the annotations do.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
+- **Closures from one site that speculate on an enclosure-local function compile for one
+  enclosure only.** Since such closures share one body, code that is not portable (it calls a
+  helper defined in the parent function's frame) runs for the first enclosure, every other
+  enclosure stays in tier 0, and each recompile after the first enclosure dies spends one of
+  the body's compiles. Per-enclosure code for a shared body, or speculating on the helper's body
+  rather than its binding, would fix it. Alternating enclosures of portable code also re-walk
+  every speculation on each switch.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
