@@ -22,6 +22,12 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: JIT register type for native numbers
+
+- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. Every native number other than `F64` (`I64` above all, which `List.range`, `List.len` and loop counters produce) is a boxed heap record (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
+- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
+- Fix: unboxed `I64`/`I32`/`U*`/`F32` register types in the JIT with overflow-checked arithmetic, a native-number list layout (a dense buffer of one number type instead of an R list of boxes), and `for` over `List.range` lowered to a counted loop.
+
 ## Open: two Renviron readers
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.

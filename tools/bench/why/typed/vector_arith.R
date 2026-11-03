@@ -1,11 +1,8 @@
-# Vector code: whole-vector arithmetic on a million doubles, repeated in a loop.
-vector_arith <- function(x: double[], times: integer) -> double {
+# Whole-list arithmetic on a million doubles, repeated in a loop.
+vector_arith <- function(x: List<F64>, times: I64) -> F64 {
   total <- 0
-  for (k in seq_len(times)) {
-    y <- x * 2 + x / 3 - 1
-    total <- total + sum(y)
-  }
+  for (k in List.range(1, times)) total <- total + List.sum(x * 2 + x / 3 - 1)
   total
 }
-x: double[] <- seq(0, 1, length.out = 1000000L)
-measure("vector_arith", function() vector_arith(x, 20L))
+x <- List.from_r(seq(0, 1, length.out = 1000000L))
+measure("vector_arith", function() vector_arith(x, 20))

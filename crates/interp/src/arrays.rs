@@ -500,6 +500,38 @@ unsafe fn fits(kind: Items, value: Sexp, single: bool) -> bool {
     item_kind(value).is_ok_and(|found| found == kind)
 }
 
+/// An index of native integers (`I64` positions, as typed code writes them, or a list of them)
+/// as the R double vector the position rules read; any other index as it is. Positions are list
+/// lengths, far below 2^53, so the conversion is exact for every position in bounds.
+unsafe fn native_positions(index: Sexp) -> R<Sexp> {
+    let integer = |number: numbers::Number| -> Option<f64> {
+        let source = numbers::source(number);
+        let value = numbers::to_double(source);
+        let fractional = matches!(
+            number.ty,
+            numbers::NumberType::F32 | numbers::NumberType::Dec
+        );
+        (!fractional).then_some(value)
+    };
+    if let Some(number) = numbers::read(index) {
+        return match integer(number) {
+            Some(value) => values::scalar_real(value),
+            None => Ok(index),
+        };
+    }
+    if index.kind() != SexpType::List || length(index) == 0 {
+        return Ok(index);
+    }
+    let mut converted = Vec::with_capacity(length(index));
+    for position in 0..length(index) {
+        match numbers::read(values::list_elt(index, position)).and_then(integer) {
+            Some(value) => converted.push(value),
+            None => return Ok(index),
+        }
+    }
+    values::real_vector(&converted)
+}
+
 /// The one position `[[` and `[[<-` take: a positive whole number in bounds.
 unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &str) -> R<usize> {
     let [index] = indices else {
@@ -508,6 +540,8 @@ unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &
             format!("`{operator}` on a list takes one position"),
         ));
     };
+    let converted = native_positions(*index)?;
+    let index = &converted;
     let single = match index.kind() {
         SexpType::Integer if length(*index) == 1 => Some(f64::from(values::ints(*index)[0])),
         SexpType::Real if length(*index) == 1 => Some(values::reals(*index)[0]),
@@ -531,7 +565,7 @@ unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &
 /// with NA or with names an Array does not have.
 unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
     let count = length(array);
-    let index = values::materialize(index)?;
+    let index = values::materialize(native_positions(index)?)?;
     match index.kind() {
         SexpType::Logical => {
             let mask = values::ints(index);

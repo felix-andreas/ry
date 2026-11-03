@@ -64,6 +64,12 @@ const PRINTS: &[(&str, &str)] = &[
     ("[1i64, 2i64] < [1i64, 3i64]", "[FALSE, TRUE]\n"),
     ("[1i64, 2i64] == 2i64", "[FALSE, TRUE]\n"),
     ("[1.5f32] > [0.5f32]", "[TRUE]\n"),
+    // A list takes native integer positions, as typed code writes them.
+    ("[10.5, 20, 30][[2i64]]", "[1] 20\n"),
+    ("[10.5, 20, 30][List.range(2, 3)]", "[20, 30]\n"),
+    ("List.sort_asc([3i64, 1i64, 2i64])", "[1i64, 2i64, 3i64]\n"),
+    ("List.sum([3i64, 1i64])", "4i64\n"),
+    ("List.max([3u8, 1u8])", ":Ok(3u8)\n"),
     ("n + 1", "6i64\n"),
     ("1L - n", "-4i64\n"),
     ("n * 3", "15i64\n"),
