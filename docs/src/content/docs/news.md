@@ -10,6 +10,27 @@ description: Release announcements and project news
 Version 0.4.0-beta adds ry's own R runtime beside the checker, plus the language features that only
 that runtime runs.
 
+### Highlights
+
+- **Your R code runs faster.** On the eleven programs on [Why ry](/why-ry), ry's runtime beats GNU
+  R on ten: 1.2 times faster on vectorized arithmetic, 5 to 7 times on loops over vectors, and 130
+  times on recursive `fib` (0.01 s against 1.31 s). `log_rank`, which spends its time in builtins,
+  runs at GNU R's speed. [Benchmarks](/benchmarks) has the code and the method.
+- **Types reach run time.** Inline annotations sit beside `#:` comments, and ry's runtime checks them
+  at function boundaries. [Strict mode](/type-checking/strict-mode) rejects untyped code, and
+  `ry check --annotate` writes the types it asks for.
+- **Records, tuples, tagged unions and `match`** model data with exhaustiveness checks, and typed
+  code that uses them compiles to machine code at its first call.
+- **One binary.** A release archive holds `ry` alone. The runtime is embedded in it and unpacked into
+  your cache directory the first time you run code.
+- **Package development is built in.** `ry load` loads your package lazily, `ry test` runs its tests
+  and `ry document` writes its documentation, each a drop-in for the devtools command.
+- **`DataFrame`** is a typed table that runs on the Polars engine, and the
+  [standard library](/reference/standard-library) (`Result`, `List`, `Str`, `Dict`, `Set` and more)
+  now covers Roc's builtins.
+
+### All changes
+
 - **`ry run script.R` runs R on ry's runtime**, and `ry R script.R` runs the same script on GNU R.
   ry's runtime still reads base R from your GNU R installation, so both need one.
 - **Inline annotations** such as `function(price: double) -> double` sit beside `#:` comments. ry's
@@ -147,10 +168,34 @@ that runtime runs.
   reloads, the debugger's message framing, CSV reading and rendered graphics files. The bugs they
   found are fixed, and an unclosed quote in a CSV file is now an error.
 
-Each release archive now holds `ry`, ry's runtime library and `ry-rcmd` side by side, for Linux
-(x86_64), macOS (Apple silicon) and Windows (x86_64), and so does each platform's VS Code extension.
-The macOS and Windows runtimes have not been run on a real Mac or Windows machine before this
-release's smoke test (Windows only under Wine), so treat them as experimental.
+### Installing
+
+Each release has one archive per platform, for Linux (x86_64), macOS (Apple silicon) and Windows
+(x86_64): `ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz` and
+`ry-x86_64-pc-windows-gnullvm.zip`. Each holds the single `ry` binary, and each platform's VS Code
+extension bundles the same binary. The Linux binary is built on Ubuntu 22.04 and needs glibc 2.35 or
+newer. [Installation](/installation) has every other way to install ry.
+
+### Known limitations
+
+- **ry's runtime still needs GNU R**, version 4.3 or later built as a shared library, because it
+  reads base R's sources and the default packages from that installation. `ry check`, `ry fmt` and
+  `ry server` need no R.
+- **The macOS and Windows runtimes are experimental.** Before this release's smoke test they had not
+  run on a real Mac or Windows machine (Windows only under Wine). Linux is the tested platform.
+- **Peak memory is often higher than GNU R's.** On the benchmark programs, ry uses more memory on
+  eight of eleven, up to 1.8 times as much (`drawdown`, 133 MiB against 73 MiB).
+- **Not every package passes its tests yet**: 9 of the 164 packages that pass on GNU R still fail on
+  ry's runtime, and `apply` over rows is about 1.4 times slower than on GNU R.
+
+### Licence
+
+ry 0.3 was UPL-1.0 throughout. Parts of ry's runtime translate GNU R's own C code, so the `ry`
+binary and the crates behind the runtime are now GPL-2.0-or-later, like GNU R. The tooling crates
+(the parser, the checker, the formatter and the editor features) stay UPL-1.0, the C headers that
+packages compile against are LGPL-2.1-or-later as R's are, and the VS Code and Zed extensions are
+MIT. [Licensing](/reference/licensing) has the details, including why the binary as a whole is
+passed on under GPL-3.0-or-later.
 
 ## ry 0.3.0, a complete rewrite
 
