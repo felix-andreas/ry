@@ -1346,7 +1346,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
     if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
         runtime()
             .heap
-            .update_policy(|policy| policy.stress = heap::GcStress::EveryAllocation);
+            .update_policy(|policy| policy.stress = heap::GcStress::EVERY_ALLOCATION);
     }
     // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
     // instead of killing the process.

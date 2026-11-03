@@ -337,6 +337,18 @@ SEXP rytest_named_dim(void)
     return getAttrib(getAttrib(array, R_DimSymbol), R_NamesSymbol);
 }
 
+/* udunits' ut_trim trims a string in place by moving its text forward and writing a NUL. */
+SEXP rytest_trim_in_place(SEXP x)
+{
+    char *text = (char *) CHAR(STRING_ELT(x, 0));
+    size_t start = strspn(text, " ");
+    size_t length = strlen(text + start);
+    memmove(text, text + start, length + 1);
+    while (length > 0 && text[length - 1] == ' ')
+        text[--length] = '\0';
+    return x;
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -984,6 +996,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
     {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
     {"rytest_named_dim", (DL_FUNC) &rytest_named_dim, 0},
+    {"rytest_trim_in_place", (DL_FUNC) &rytest_trim_in_place, 1},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
