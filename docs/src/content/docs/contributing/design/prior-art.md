@@ -74,7 +74,7 @@ by native code without regard for its reference count.
 | Types as facts (free) or guesses (one check), with a second compiled copy that reads a guess in place | Bun | **Adopt, keeping errors for non-conforming values** | Typed entry stubs (`typed-runtime.md`, "Facts and guesses") |
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | The typed code cache |
+| Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
 | Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
 | No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
@@ -376,7 +376,7 @@ run fast without trusting values that arrive from untyped code.
   cannot be unlocked, and a call the checker resolves to it is direct. R's own locked bindings are
   not frozen, because testthat's `local_mocked_bindings` and `assignInNamespace` rebind them on purpose. Instead,
   the binding-unlock primitive discards the compiled code whose direct calls assumed the binding.
-- **Mapped, shared code** for the typed code cache, which matters for CI machines that run several
+- **Mapped, shared code** for the typed code that `ry install` writes into each installed package, which matters for CI machines that run several
   test processes and are bound by memory, and for `ry build --exe`, which writes a standalone
   executable as `bun compile` does.
 - **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.

@@ -7310,6 +7310,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
   checkable at the end of every test run. Native layouts (inline small strings, unboxed lists of
   flattened records, a dense-entry `Dict`) are the Rust-shaped data the 1.5 to 2 times Rust bar
   needs, and R vector headers, intern tables and collector tracing would cost on every operation.
+- **Layouts.** Data-oriented throughout: a heap record or tag variant is a slot in a per-type pool
+  stored as a struct of arrays (one column per field and one count column), a reference is a
+  32-bit index with a union's tag in its upper bits, lists store record items as columns and `Bool`
+  as a bitset, short non-escaping lists live on the stack, and a `Dict` over densely numbered keys
+  is a flat array plus a presence bitset, while a hashed `Dict` packs seven hash bits into the upper
+  bits of each index entry.
 - **Impact.** A `List<F64>` reaches C only through a copy, and an ALTREP wrapper is the deferred
   fix if the boundary copy shows up. The design and its test matrix are in
   `contributing/design/typed-runtime.md`.
@@ -7317,10 +7323,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Typed code compiles ahead of time, and `ry build --exe` writes an executable
 
 - **Chosen shape.** `ry run` and `ry load` compile every typed function of a strict file before its
-  first call, and `ry install` compiles a package's at install time, so typed code never starts in
-  an interpreter. Machine code is cached on disk under a hash of the source, the types and the
-  compiler build, one position-independent file per namespace, mapped read-only and shared between
-  processes, with a per-process table for addresses. `ry build --exe` appends that file and the
+  first call, on a thread per core, and `ry install` compiles a package's at install time into the
+  installed package, so typed code never starts in an interpreter. There is no code cache
+  (AGENTS.md, "Performance principles"): an installed package's code file is build output, one
+  position-independent file per namespace, mapped read-only and shared between processes, with a
+  per-process table for addresses, and code for a script or a package under development is compiled
+  at each start and lives in memory. `ry build --exe` appends that file and the
   untyped bytecode to ry's runtime as a standalone executable. Plain `ry build` keeps writing a
   source tarball, as `devtools::build()` does, because existing workflows rely on it.
 - **Tests.** Every typed program runs interpreted, compiled, and compiled with annotations erased,
