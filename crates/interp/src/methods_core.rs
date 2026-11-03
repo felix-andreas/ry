@@ -91,15 +91,16 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
     Ok(())
 }
 
-/// Every copy of the `initialize` generic's default method the namespace holds: the generic's
-/// `default` slot and the `ANY` entries of its methods tables.
+/// Every method of the `initialize` generic the namespace holds: the generic's `default` slot
+/// and every entry of its methods tables. Inherited dispatch caches a copy of the default method
+/// per class (with its own `target`), and the saved namespace already holds such copies, so the
+/// caller picks the default method's copies out by their hash.
 unsafe fn default_initialize_methods(namespace: Sexp) -> R<Vec<Sexp>> {
     let generic = eval::value_of(eval::find_var_in_frame(install("initialize")?, namespace)?)?;
     if generic.kind() != SexpType::Closure {
         return Ok(Vec::new());
     }
     let mut methods = vec![get_attr(generic, install("default")?)];
-    let any = install("ANY")?;
     let table = eval::find_var_in_frame(install(".__T__initialize:methods")?, namespace)?;
     let mut tables = vec![eval::value_of(table)?];
     for name in [".MTable", ".AllMTable"] {
@@ -109,8 +110,13 @@ unsafe fn default_initialize_methods(namespace: Sexp) -> R<Vec<Sexp>> {
         )?)?);
     }
     for table in tables {
-        if table.kind() == SexpType::Environment {
-            let method = eval::value_of(eval::find_var_in_frame(any, table)?)?;
+        if table.kind() != SexpType::Environment {
+            continue;
+        }
+        for symbol in crate::heap().frame_symbols(table) {
+            let Some(method) = quiet_value(symbol, table)? else {
+                continue;
+            };
             if !methods.contains(&method) {
                 methods.push(method);
             }
@@ -144,15 +150,17 @@ unsafe fn do_new(call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(true)
 }
 
-/// The default `initialize` method, for an object whose arguments all name slots: sets the
-/// slots on a copy of `.Object`, binds it as `.Object` and calls `validObject(.Object)` from the
-/// method's frame, as the R code does.
+/// The default `initialize` method. Unnamed arguments are taken last first: one of the object's
+/// own class replaces it, and one of the class's data part goes through the data-part replacement
+/// method `as<-` finds cached for it. Named arguments then set slots on a copy, and the method
+/// binds the result as `.Object` and calls `validObject(.Object)` from its own frame, as the R code
+/// does.
 unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let done = values::scalar_bool(true)?;
     let skip = values::scalar_bool(false)?;
     let object_symbol = install(".Object")?;
-    let Some(object) = quiet_value(object_symbol, frame)? else {
+    let Some(mut object) = quiet_value(object_symbol, frame)? else {
         return Ok(skip);
     };
     let list_dots = lcons(install("list")?, cons(symbols().dots, nil())?)?;
@@ -169,23 +177,46 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
         return Ok(skip);
     };
     let names = values::names(args);
-    if names.kind() != SexpType::String {
-        return Ok(skip);
-    }
+    let name_at = |index: usize| -> &[u8] {
+        if names.kind() == SexpType::String {
+            names.element(index).bytes()
+        } else {
+            b""
+        }
+    };
     let slots = slot(definition, "slots")?;
     if slots.kind() != SexpType::List {
         return Ok(skip);
     }
     let slot_names = values::names(slots);
     let package = slot(definition, "package")?;
+    let class_name = class.element(0).bytes();
+    let data_class = element(slots, b".Data");
+
+    let mut supers = Vec::new();
+    for index in (0..length(args)).rev() {
+        if !name_at(index).is_empty() {
+            continue;
+        }
+        let value = args.element(index);
+        let value_class = dispatch::class_of(value)?;
+        if value_class.element(0).bytes() == class_name {
+            supers.push((value, false));
+            continue;
+        }
+        if !data_part_super(class, definition, value_class, data_class)? {
+            return Ok(skip);
+        }
+        supers.push((value, true));
+    }
+
     let mut assignments = Vec::with_capacity(length(args));
     for index in 0..length(args) {
-        let name = names.element(index);
-        let name_bytes = name.bytes();
-        if name_bytes.is_empty()
-            || name_bytes == b".Data"
-            || (0..index).any(|earlier| names.element(earlier).bytes() == name_bytes)
-        {
+        let name_bytes = name_at(index);
+        if name_bytes.is_empty() {
+            continue;
+        }
+        if (0..index).any(|earlier| name_at(earlier) == name_bytes) {
             return Ok(skip);
         }
         let Some(position) = position_of(slot_names, name_bytes) else {
@@ -199,6 +230,12 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
         let value_class = dispatch::class_of(value)?;
         let same = length(value_class) == 1
             && value_class.element(0).bytes() == slot_class.element(0).bytes();
+        // The R code replaces `.Object` with what the first slot assignment returns and drops
+        // what later ones return, relying on `slot<-` modifying its argument. A data part is set
+        // on a new object, so it is kept only as the first named argument.
+        if name_bytes == b".Data" && (!same || !assignments.is_empty()) {
+            return Ok(skip);
+        }
         if !same {
             let Some(slot_definition) = cached_class(slot_class)? else {
                 return Ok(skip);
@@ -226,17 +263,161 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
                 }
             }
         }
-        assignments.push((install_text(name)?, value));
+        assignments.push((install_text(names.element(index))?, value));
     }
-    let copy = values::shallow_duplicate(object)?;
-    crate::heap().root(copy);
-    for (symbol, value) in assignments {
-        crate::subset::assign_slot(copy, symbol, value)?;
+
+    for (value, data_part) in supers {
+        object = if data_part {
+            crate::subset::assign_slot(object, symbols().dot_data, value)?
+        } else {
+            value
+        };
+        crate::heap().root(object);
     }
-    eval::define(object_symbol, copy, frame)?;
+    if !assignments.is_empty() {
+        let mut copy = values::shallow_duplicate(object)?;
+        crate::heap().root(copy);
+        for (index, (symbol, value)) in assignments.into_iter().enumerate() {
+            let assigned = crate::subset::assign_slot(copy, symbol, value)?;
+            if index == 0 {
+                copy = assigned;
+                crate::heap().root(copy);
+            }
+        }
+        object = copy;
+    }
+    eval::define(object_symbol, object, frame)?;
     let validate = lcons(install("validObject")?, cons(object_symbol, nil())?)?;
     eval::eval(validate, frame)?;
     Ok(done)
+}
+
+/// Whether the R code takes an unnamed argument of class `value_class` as the data part of an
+/// object of `class`, through `as(.Object, Classi) <- obj`, and does so without running anything
+/// observable: the class must extend the argument's (and not the reverse), the argument's class
+/// must be the data part's, and `as<-` must find the standard data-part replacement method
+/// already cached in `coerce<-`'s table.
+unsafe fn data_part_super(
+    class: Sexp,
+    definition: Sexp,
+    value_class: Sexp,
+    data_class: Option<Sexp>,
+) -> R<bool> {
+    let Some(data_class) = data_class else {
+        return Ok(false);
+    };
+    if length(value_class) != 1
+        || data_class.kind() != SexpType::String
+        || length(data_class) != 1
+        || data_class.element(0).bytes() != value_class.element(0).bytes()
+    {
+        return Ok(false);
+    }
+    let super_class = value_class.element(0).bytes();
+    let Some(value_definition) = cached_class(value_class)? else {
+        return Ok(false);
+    };
+    if name_extends(
+        value_class,
+        Some(value_definition),
+        class.element(0).bytes(),
+    )? != Some(false)
+        || name_extends(class, Some(definition), super_class)? != Some(true)
+    {
+        return Ok(false);
+    }
+    // `getGeneric()` finds the generic in the generic table; the namespace's own binding may be
+    // a lazy-load promise no one has forced.
+    let methods = interp().globals.methods_namespace;
+    let Some(generics) = quiet_value(install(".genericTable")?, methods)? else {
+        return Ok(false);
+    };
+    if generics.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    let Some(generic) = quiet_value(install("coerce<-")?, generics)? else {
+        return Ok(false);
+    };
+    if generic.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    let Some(table) = quiet_value(install(".MTable")?, generic.tag())? else {
+        return Ok(false);
+    };
+    if table.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    let mut label = class.element(0).bytes().to_vec();
+    label.push(b'#');
+    label.extend_from_slice(super_class);
+    let Some(method) = quiet_value(values::install_bytes(&label)?, table)? else {
+        return Ok(false);
+    };
+    is_data_part_replacement(method, super_class)
+}
+
+/// Whether `method` is the replacement method the methods package makes for a data part of class
+/// `data_class`: `function(from, to, value) { from@.Data <- as(value, data_class, strict =
+/// FALSE); from }`. For a value of exactly that class, calling it sets the data part with
+/// `setDataPart()` and nothing else.
+unsafe fn is_data_part_replacement(method: Sexp, data_class: &[u8]) -> R<bool> {
+    if method.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    let (from, value) = (install("from")?, install("value")?);
+    let mut formal = method.car();
+    for expected in [from, install("to")?, value] {
+        if formal.kind() != SexpType::Pairlist || formal.tag() != expected {
+            return Ok(false);
+        }
+        formal = formal.cdr();
+    }
+    if formal != nil() {
+        return Ok(false);
+    }
+    let Some([assignment, result]) = call_args(crate::bytecode::closure_body(method), "{")? else {
+        return Ok(false);
+    };
+    if result.1 != from {
+        return Ok(false);
+    }
+    let Some([target, coercion]) = call_args(assignment.1, "<-")? else {
+        return Ok(false);
+    };
+    let Some([object, part]) = call_args(target.1, "@")? else {
+        return Ok(false);
+    };
+    let Some([coerced, class, strict]) = call_args(coercion.1, "as")? else {
+        return Ok(false);
+    };
+    Ok(object.1 == from
+        && part.1 == symbols().dot_data
+        && coerced.1 == value
+        && class.0 == nil()
+        && class.1.kind() == SexpType::String
+        && length(class.1) == 1
+        && class.1.element(0).bytes() == data_class
+        && strict.0 == install("strict")?
+        && strict.1.kind() == SexpType::Logical
+        && length(strict.1) == 1
+        && is_false(strict.1))
+}
+
+/// The tags and values of the arguments of a call to `function` with exactly `N` arguments.
+unsafe fn call_args<const N: usize>(call: Sexp, function: &str) -> R<Option<[(Sexp, Sexp); N]>> {
+    if call.kind() != SexpType::Language || call.car() != install(function)? {
+        return Ok(None);
+    }
+    let mut args = [(nil(), nil()); N];
+    let mut cell = call.cdr();
+    for arg in &mut args {
+        if cell.kind() != SexpType::Pairlist {
+            return Ok(None);
+        }
+        *arg = (cell.tag(), cell.car());
+        cell = cell.cdr();
+    }
+    Ok((cell == nil()).then_some(args))
 }
 
 /// `validObject(object)` for an object whose slots all hold values of their declared classes
@@ -265,11 +446,7 @@ unsafe fn plainly_valid(object: Sexp) -> R<bool> {
     let slot_names = values::names(slots);
     for index in 0..length(slots) {
         let name = slot_names.element(index);
-        if matches!(name.bytes(), b".Data" | b".S3Class") {
-            return Ok(false);
-        }
-        let symbol = install_text(name)?;
-        if !has_attribute(object, symbol) {
+        if name.bytes() == b".S3Class" {
             return Ok(false);
         }
         let slot_class = slots.element(index);
@@ -279,8 +456,18 @@ unsafe fn plainly_valid(object: Sexp) -> R<bool> {
         let Some(slot_definition) = cached_class(slot_class)? else {
             return Ok(false);
         };
-        let value = crate::subset::get_slot(object, symbol, nil())?;
-        let value_class = dispatch::class_of(value)?;
+        let value_class = if name.bytes() == b".Data" {
+            match data_part_class(object, slot_class.element(0).bytes())? {
+                Some(class) => values::scalar_string(class)?,
+                None => return Ok(false),
+            }
+        } else {
+            let symbol = install_text(name)?;
+            if !has_attribute(object, symbol) {
+                return Ok(false);
+            }
+            dispatch::class_of(crate::subset::get_slot(object, symbol, nil())?)?
+        };
         let class2 = slot_class.element(0).bytes();
         if value_class.element(0).bytes() == class2 || class2 == b"ANY" {
             continue;
@@ -312,6 +499,26 @@ unsafe fn plainly_valid(object: Sexp) -> R<bool> {
         }
     }
     Ok(!values::is_function(slot(definition, "validity")?))
+}
+
+/// The class of `getDataPart(object)` when the data part is a basic class that `getDataPart`
+/// strips every attribute from, so the class is the implicit class of the object's type.
+unsafe fn data_part_class(object: Sexp, data_class: &[u8]) -> R<Option<&'static str>> {
+    if matches!(data_class, b"matrix" | b"array" | b"ts") || !basic_classes()?.contains(&data_class)
+    {
+        return Ok(None);
+    }
+    Ok(match object.kind() {
+        SexpType::Logical => Some("logical"),
+        SexpType::Integer => Some("integer"),
+        SexpType::Real => Some("numeric"),
+        SexpType::Complex => Some("complex"),
+        SexpType::String => Some("character"),
+        SexpType::List => Some("list"),
+        SexpType::Raw => Some("raw"),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => Some("function"),
+        _ => None,
+    })
 }
 
 const BAIL: i32 = 0;

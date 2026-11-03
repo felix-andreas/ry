@@ -63,6 +63,9 @@ differ. Remaining, in the order the cold first-`new()` profile of `target/s4heav
   and `setValidity`.
 - `cacheMetaData` and `.checkGroupSigLength` (the import cost, see "Start-up and imports are the
   floor of a warm `ry load`" below).
+- `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
+  data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
+  `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
 - `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
   `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
   union member, a subclass), which costs about 200 µs per `new()` (`new("Holder", value = "a",
@@ -75,7 +78,8 @@ differ. Remaining, in the order the cold first-`new()` profile of `target/s4heav
 
 Micro-benchmarks (release, per call): `new()` with three same-class slots 13.7 µs (GNU R 130 µs,
 ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 µs (GNU R 11.8 µs),
-`extends("Point3", "Point")` 2.1 µs (GNU R 6.7 µs).
+`extends("Point3", "Point")` 2.1 µs (GNU R 6.7 µs), `new("MethodDefinition", f)` 50 µs (ry before
+526 µs), `new()` of a class containing `numeric` with one slot 50 µs (before 418 µs, GNU R 299 µs).
 
 ## Open: collector throughput on the benchmark suites
 

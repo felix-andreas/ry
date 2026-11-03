@@ -7356,12 +7356,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
   an `.Internal` that either does the whole job and returns, or returns without observable effect.
   A hash mismatch (another GNU R version) leaves the function as it is, so the core can never
   apply to code it was not written against. Patching the closure in place, instead of replacing the
-  binding, reaches every copy that holds the same closure; the default `initialize` method has four
-  separate copies, and all are patched. A preloaded base image carries the patched closures.
+  binding, reaches every copy that holds the same closure. The default `initialize` method has
+  several separate copies, including one per class that inherited dispatch cached in `.AllMTable`,
+  so every entry of the generic's tables is hashed and the matching ones are patched. A preloaded
+  base image carries the patched closures.
 - **Exactness rules.** A fast path reads promises only when forcing them runs no code
   (`quiet_value`), bails before any effect wherever R code could observe the work (validity
-  functions, `as()` caching coerce methods, user `initialize` methods, `.Data` and `.S3Class`
-  slots, list entries in the class table), and evaluates the calls that may signal in the R
+  functions, `as()` caching coerce methods, user `initialize` methods, `.S3Class` slots, a data
+  part not set through the standard replacement method already cached in `coerce<-`'s table, list
+  entries in the class table), and evaluates the calls that may signal in the R
   function's frame, so condition calls and `sys.calls()` match GNU R. Known difference: when a fast
   path completes, the R function's frame-local temporaries are not bound; only code that inspects
   that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
