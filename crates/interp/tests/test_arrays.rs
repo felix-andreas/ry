@@ -106,7 +106,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.map(xs, function(x) x * 2)", "[2, 4, 6]\n"),
     ("List.keep_if(xs, function(x) x > 1)", "[2, 3]\n"),
     ("List.sum(xs)", "[1] 6\n"),
-    ("List.len(xs)", "[1] 3\n"),
+    ("List.len(xs)", "3i64\n"),
     ("List.map(xs, function(x) x > 1)", "[FALSE, TRUE, TRUE]\n"),
     ("List.map(points, function(p) p$x)", "[1, 3]\n"),
     ("List.first(xs)", ":Ok(1)\n"),
@@ -136,7 +136,7 @@ const PRINTS: &[(&str, &str)] = &[
         "List.append(list(\"a\"), [1])",
         "[[1]]\n[1] \"a\"\n\n[[2]]\n[1]\n\n",
     ),
-    (".ry_is_list(List.single([1, 2]))", "[1] FALSE\n"),
+    (".ry_is_list(List.single([1, 2]))", "[1] TRUE\n"),
     // Empty Arrays deparse to text that rebuilds them with their item type.
     ("deparse(words[0])", "[1] \"List.from_r(character(0))\"\n"),
     ("deparse(xs[0])", "[1] \"List.from_r(numeric(0))\"\n"),
@@ -227,7 +227,7 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "List.map(xs, function(x) c(x, x))",
-        "`List.map()` received a list, so its result must be one: a list item must be a single value",
+        "`List.map()` received a list, so its result must be one too: a list item must be a single value",
     ),
 ];
 

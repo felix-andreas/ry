@@ -1592,6 +1592,9 @@ enum Model {
     Scalar(Scalar),
     List(Vec<Scalar>),
     Found(Option<Scalar>),
+    /// A count or a position, which the library gives as an `I64`.
+    Whole(i64),
+    FoundWhole(i64),
     Error,
 }
 
@@ -1708,7 +1711,9 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 Ok(add(acc, arith(x, Scalar::Int(Some(i as i32 + 1)), '*')))
             });
             (
-                format!("List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * i)"),
+                format!(
+                    "List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * Num.to_r(i))"
+                ),
                 model,
             )
         }
@@ -1777,7 +1782,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
             });
             (
                 format!(
-                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (i > {limit}) :Break(acc) else :Continue(acc + x) }})"
+                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (Num.to_r(i) > {limit}) :Break(acc) else :Continue(acc + x) }})"
                 ),
                 model,
             )
@@ -1820,7 +1825,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 .map(|(i, &x)| arith(x, Scalar::Int(Some(i as i32 + 1)), '*'))
                 .collect();
             (
-                format!("List.map_with_index({list}, function(x, i) x * i)"),
+                format!("List.map_with_index({list}, function(x, i) x * Num.to_r(i))"),
                 Model::List(mapped),
             )
         }
@@ -1931,10 +1936,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                             }
                         }
                     }
-                    (
-                        "count_if",
-                        model.unwrap_or(Model::Scalar(Scalar::Int(Some(count)))),
-                    )
+                    ("count_if", model.unwrap_or(Model::Whole(i64::from(count))))
                 }
                 choice => {
                     let last = choice >= 7;
@@ -1944,7 +1946,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                         &answers(order),
                         true,
                         |at| match index {
-                            true => Model::Found(Some(Scalar::Int(Some(at as i32 + 1)))),
+                            true => Model::FoundWhole(at as i64 + 1),
                             false => Model::Found(Some(items[at])),
                         },
                         Model::Found(None),
@@ -2160,6 +2162,8 @@ fn render(model: &Model) -> String {
         }
         Model::Found(Some(value)) => format!(":Ok({})", scalar(*value)),
         Model::Found(None) => ":Err(:NotFound)".to_owned(),
+        Model::Whole(value) => format!("{value}i64"),
+        Model::FoundWhole(value) => format!(":Ok({value}i64)"),
         Model::Error => "stop(\"the model fails\")".to_owned(),
     }
 }

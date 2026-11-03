@@ -662,7 +662,7 @@ unsafe fn unsigned_list(values: impl Iterator<Item = u32>, ty: numbers::NumberTy
 
 /// `value` as a native number of the unsigned type `ty`.
 /// A length, count or 1-based position as the `I64` its signature promises.
-unsafe fn whole_number(value: usize) -> R<Sexp> {
+pub unsafe fn whole_number(value: usize) -> R<Sexp> {
     let value = i64::try_from(value).map_err(|_| error(format!("{value} does not fit I64")))?;
     numbers::alloc(numbers::Number {
         ty: numbers::NumberType::I64,

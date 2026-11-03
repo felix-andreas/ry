@@ -128,15 +128,12 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.to_r(List.from_r(c(1L, 2L)))", "[1] 1 2\n"),
     ("List.to_r(list(n, Num.to_i64(7)))", "[1] 5 7\n"),
     ("List.to_r(List.range(1, 3))", "[1] 1 2 3\n"),
-    (
-        "List.range(1, 3)",
-        "[[1]]\n1i64\n\n[[2]]\n2i64\n\n[[3]]\n3i64\n\n",
-    ),
+    ("List.range(1, 3)", "[1i64, 2i64, 3i64]\n"),
     (
         "List.range(Num.to_u8(254), Num.to_u8(255))",
-        "[[1]]\n254u8\n\n[[2]]\n255u8\n\n",
+        "[254u8, 255u8]\n",
     ),
-    ("List.range(3, 2)", "list()\n"),
+    ("List.range(3, 2)", "[]\n"),
     ("Str.to_i64(\"42\")", ":Ok(42i64)\n"),
     // Equality is structural, and numbers are keys and set elements.
     ("identical(n, Num.to_i64(5))", "[1] TRUE\n"),
@@ -153,20 +150,17 @@ const PRINTS: &[(&str, &str)] = &[
         "the dict's keys are I64, and this one is I32",
     ),
     (
-        "{ d <- Dict.empty(); for (i in 1:50) d <- Dict.insert(d, Num.to_i64(i), i); c(Dict.len(d), Result.with_default(Dict.get(d, Num.to_i64(37)), 0L)) }",
-        "[1] 50 37\n",
+        "{ d <- Dict.empty(); for (i in 1:50) d <- Dict.insert(d, Num.to_i64(i), i); [Dict.len(d), Result.with_default(Dict.get(d, Num.to_i64(37)), 0L)] }",
+        "[50i64, 37i64]\n",
     ),
-    (
-        "Dict.keys(Dict.single(Num.to_u8(1), TRUE))",
-        "[[1]]\n1u8\n\n",
-    ),
+    ("Dict.keys(Dict.single(Num.to_u8(1), TRUE))", "[1u8]\n"),
     (
         "Set.contains(Set.from_list(list(n, Num.to_i64(6))), Num.to_i64(6))",
         "[1] TRUE\n",
     ),
     (
         "Set.len(Set.from_list(list(n, n, Num.to_i64(6))))",
-        "[1] 2\n",
+        "2i64\n",
     ),
     (
         "{ s <- Set.from_list(List.range(1, 100)); gc(); Set.contains(s, Num.to_i64(99)) }",
