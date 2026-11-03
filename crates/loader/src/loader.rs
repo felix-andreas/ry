@@ -307,11 +307,44 @@ pub struct DeferredS4 {
     pub foreign_methods: Vec<ForeignMethod>,
     /// Every namespace binding the definitions make.
     pub names: Vec<String>,
-    /// A key for the S4 metadata the definitions produce, when running them depends on nothing
-    /// but their own text, the package's imports and the version of R: each reads only names
-    /// they bind themselves and functions in [`PURE_S4_READS`]. A backend may then save what
-    /// they bind and restore it in a later process instead of running them.
-    pub cache_key: Option<String>,
+    /// The definitions split into groups whose results a backend may save and restore one
+    /// group at a time ([`S4Group`]), in the order of each group's first definition.
+    pub groups: Vec<S4Group>,
+    /// The index in [`DeferredS4::groups`] of each definition, in the order of
+    /// [`DeferredS4::run`].
+    pub group_of: Vec<usize>,
+}
+
+/// A set of held-back definitions that a backend saves and restores together, because running
+/// them leaves state no other group writes. Two definitions share a group when both write one
+/// piece of S4 state: a class and every class it inherits from or that inherits from it, with
+/// the unions over them, their validity methods and coercions within them (one entry in each
+/// other's `contains` and `subclasses`); a generic and all its methods (one methods table); or
+/// another package's class that unions add themselves to (its `contains`, in definition order).
+///
+/// Running a group may also read what other groups produce: a slot's class or a class in a
+/// prototype, whose prototype becomes part of the new class, the classes a coercion converts,
+/// or a method's signature classes, which the method records only by name and package. A group
+/// that reads state another group writes after it, in collation order, is merged with that
+/// group, so that rerunning the group alone sees what an eager load showed it.
+///
+/// The key covers the text of the group's definitions, which of the class names they mention
+/// the package defines, and the key of every group whose classes they read. A backend that
+/// restores the groups whose keys match and reruns the rest, in collation order, therefore
+/// produces what running every definition produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S4Group {
+    /// `None` when the group must run in every process: one of its definitions reads a name
+    /// other than its own bindings and the functions in [`PURE_S4_READS`], or reads a group
+    /// that must.
+    pub key: Option<String>,
+    /// The classes its definitions define, in order.
+    pub classes: Vec<String>,
+    /// The generics whose methods tables it writes, the package's and other packages', in
+    /// order.
+    pub generics: Vec<String>,
+    /// The namespace bindings its definitions make by assignment, such as class generators.
+    pub binds: Vec<String>,
 }
 
 /// A held-back method for another package's generic.
@@ -1930,7 +1963,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     let mut held: FxHashSet<&str> = definitions
         .iter()
         .filter_map(|(_, _, _, definition)| match definition {
-            S4Definition::Class { class } => Some(class.as_str()),
+            S4Definition::Class { class, .. } => Some(class.as_str()),
             _ => None,
         })
         .collect();
@@ -1966,7 +1999,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     let mut generics = Vec::new();
     for (_, _, _, definition) in &definitions {
         match definition {
-            S4Definition::Class { class } | S4Definition::Union { class, .. } => {
+            S4Definition::Class { class, .. } | S4Definition::Union { class, .. } => {
                 classes.push(class.clone())
             }
             S4Definition::Generic { generic } => generics.push(generic.clone()),
@@ -2023,25 +2056,11 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         }
         names.extend(item.binds.iter().cloned());
     }
-    let pure = definitions.iter().all(|(_, _, item, _)| {
-        item.reads.iter().all(|name| {
-            PURE_S4_READS.contains(&name.as_str()) || names.iter().any(|bound| bound == name)
-        })
-    });
-    let cache_key = pure.then(|| {
-        let mut hasher = Xxh3::new();
-        let mut field = |bytes: &[u8]| {
-            hasher.update(&(bytes.len() as u64).to_le_bytes());
-            hasher.update(bytes);
-        };
-        field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
-        field(index.package.as_bytes());
-        field(index.version.as_bytes());
-        for (_, _, item, _) in &definitions {
-            field(&item.hash.to_le_bytes());
-        }
-        format!("{:032x}", hasher.digest128())
-    });
+    let held: Vec<(&IndexedItem, &S4Definition)> = definitions
+        .iter()
+        .map(|(_, _, item, definition)| (*item, *definition))
+        .collect();
+    let (groups, group_of) = s4_groups(&index.package, &index.version, &held);
     names.extend(classes.iter().map(|class| format!(".__C__{class}")));
     names.extend(
         generics
@@ -2056,8 +2075,484 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         generics,
         foreign_methods,
         names,
-        cache_key,
+        groups,
+        group_of,
     })
+}
+
+/// A piece of S4 state that held-back definitions write (see [`S4Group`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum S4Cell<'a> {
+    /// The classes connected by inheritance and union membership, by the index of one of them.
+    Classes(usize),
+    /// A generic's methods tables.
+    Generic(&'a str),
+    /// Another package's class that a union names as a member.
+    Foreign(&'a str),
+}
+
+/// How a definition depends on a cell another definition writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum S4Read {
+    /// It reads what the cell holds, so every write must come first and a change must rerun it.
+    Content,
+    /// It reads only whether the class with this index is defined.
+    Defined(usize),
+}
+
+/// Splits the held-back definitions, in collation order, into [`S4Group`]s, and returns the
+/// groups with each definition's group.
+fn s4_groups(
+    package: &str,
+    version: &str,
+    definitions: &[(&IndexedItem, &S4Definition)],
+) -> (Vec<S4Group>, Vec<usize>) {
+    // The package's classes, each with the definitions that define it.
+    let mut class_ids: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut definers: Vec<Vec<usize>> = Vec::new();
+    for (position, (_, definition)) in definitions.iter().enumerate() {
+        if let S4Definition::Class { class, .. } | S4Definition::Union { class, .. } = definition {
+            let id = *class_ids.entry(class.as_str()).or_insert_with(|| {
+                definers.push(Vec::new());
+                definers.len() - 1
+            });
+            definers[id].push(position);
+        }
+    }
+    let class_id = |name: &str| class_ids.get(name).copied();
+    let mut lineage = Disjoint::new(definers.len());
+    for (_, definition) in definitions {
+        match definition {
+            S4Definition::Class {
+                class,
+                contains,
+                mentions,
+            } => {
+                let Some(id) = class_id(class) else { continue };
+                // Without literal superclasses, any class it names may be one.
+                for superclass in contains.as_ref().unwrap_or(mentions) {
+                    if let Some(superclass) = class_id(superclass) {
+                        lineage.union(id, superclass);
+                    }
+                }
+            }
+            S4Definition::Union { class, members } => {
+                let Some(id) = class_id(class) else { continue };
+                for member in members.iter().filter_map(|member| class_id(member)) {
+                    lineage.union(id, member);
+                }
+            }
+            _ => {}
+        }
+    }
+    let classes_of = |lineage: &mut Disjoint, name: &str| {
+        class_id(name).map(|id| S4Cell::Classes(lineage.find(id)))
+    };
+    // The cells each definition writes, and the classes each one names.
+    let mut writes: Vec<Vec<S4Cell>> = Vec::with_capacity(definitions.len());
+    for (_, definition) in definitions {
+        let mut cells = Vec::new();
+        match definition {
+            S4Definition::Class { class, .. } | S4Definition::Validity { class } => {
+                cells.extend(classes_of(&mut lineage, class));
+            }
+            S4Definition::Union { class, members } => {
+                cells.extend(classes_of(&mut lineage, class));
+                cells.extend(
+                    members
+                        .iter()
+                        .filter(|member| class_id(member).is_none())
+                        .map(|member| S4Cell::Foreign(member)),
+                );
+            }
+            S4Definition::Generic { generic } | S4Definition::Method { generic, .. } => {
+                cells.push(S4Cell::Generic(generic));
+            }
+            S4Definition::Coerce { from, to, replace } => {
+                cells.push(S4Cell::Generic("coerce"));
+                if *replace {
+                    cells.push(S4Cell::Generic("coerce<-"));
+                }
+                // `setAs()` between a class and one it extends rewrites the extension.
+                let (from, to) = (
+                    classes_of(&mut lineage, from),
+                    classes_of(&mut lineage, to),
+                );
+                if from.is_some() && from == to {
+                    cells.extend(from);
+                }
+            }
+        }
+        writes.push(cells);
+    }
+    let mut writers: FxHashMap<S4Cell, Vec<usize>> = FxHashMap::default();
+    for (position, cells) in writes.iter().enumerate() {
+        for cell in cells {
+            writers.entry(*cell).or_default().push(position);
+        }
+    }
+    let mut groups = Disjoint::new(definitions.len());
+    for positions in writers.values() {
+        for pair in positions.windows(2) {
+            groups.union(pair[0], pair[1]);
+        }
+    }
+    // Completing a class's prototype calls `new()` for each slot whose class has no prototype
+    // given, which runs any `initialize` method defined by then for that class or one it
+    // extends. Such a method's body may read anything, so a class that runs one is not cached.
+    let initialized: Vec<(usize, S4Cell)> = definitions
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, definition))| match definition {
+            S4Definition::Method { generic, signature } if generic == "initialize" => {
+                let (_, class) = signature.first()?;
+                Some((position, classes_of(&mut lineage, class)?))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut lineage_mentions: FxHashMap<S4Cell, Vec<S4Cell>> = FxHashMap::default();
+    for (_, definition) in definitions {
+        if let S4Definition::Class {
+            class, mentions, ..
+        } = definition
+            && let Some(cell) = classes_of(&mut lineage, class)
+        {
+            let read = lineage_mentions.entry(cell).or_default();
+            read.extend(
+                mentions
+                    .iter()
+                    .filter_map(|mention| classes_of(&mut lineage, mention)),
+            );
+        }
+    }
+    let bound_by: FxHashMap<&str, usize> = definitions
+        .iter()
+        .enumerate()
+        .flat_map(|(position, (item, _))| {
+            item.binds.iter().map(move |name| (name.as_str(), position))
+        })
+        .collect();
+    let mut impure = vec![false; definitions.len()];
+    let mut reads: Vec<Vec<(S4Cell, S4Read)>> = Vec::with_capacity(definitions.len());
+    for (position, (item, definition)) in definitions.iter().enumerate() {
+        let mut read = Vec::new();
+        match definition {
+            S4Definition::Class { class, mentions, .. } => {
+                read.extend(
+                    mentions
+                        .iter()
+                        .filter_map(|mention| classes_of(&mut lineage, mention))
+                        .map(|cell| (cell, S4Read::Content)),
+                );
+                let own = classes_of(&mut lineage, class);
+                let slot_classes = own
+                    .and_then(|cell| lineage_mentions.get(&cell))
+                    .map_or(&[][..], Vec::as_slice);
+                for (method, initialized) in &initialized {
+                    if slot_classes.contains(initialized) {
+                        if *method < position {
+                            impure[position] = true;
+                        }
+                        read.push((S4Cell::Generic("initialize"), S4Read::Content));
+                    }
+                }
+            }
+            S4Definition::Method { signature, .. } => {
+                read.extend(signature.iter().filter_map(|(_, class)| {
+                    let id = class_id(class)?;
+                    Some((S4Cell::Classes(lineage.find(id)), S4Read::Defined(id)))
+                }));
+            }
+            S4Definition::Coerce { from, to, .. } => {
+                read.extend(
+                    [from, to]
+                        .into_iter()
+                        .filter_map(|class| classes_of(&mut lineage, class))
+                        .map(|cell| (cell, S4Read::Content)),
+                );
+            }
+            S4Definition::Union { .. }
+            | S4Definition::Validity { .. }
+            | S4Definition::Generic { .. } => {}
+        }
+        for name in &item.reads {
+            match bound_by.get(name.as_str()) {
+                Some(&binder) if binder != position => read.extend(
+                    writes[binder]
+                        .iter()
+                        .map(|cell| (*cell, S4Read::Content)),
+                ),
+                Some(_) => {}
+                None if PURE_S4_READS.contains(&name.as_str()) => {}
+                None => impure[position] = true,
+            }
+        }
+        reads.push(read);
+    }
+    // A read of state written after the reader, in collation order, sees something else in an
+    // eager load than once every other group has run, so the two run together, in order.
+    for (position, read) in reads.iter().enumerate() {
+        for (cell, kind) in read {
+            let later = match kind {
+                S4Read::Content => writers
+                    .get(cell)
+                    .and_then(|positions| positions.iter().find(|&&writer| writer > position)),
+                S4Read::Defined(id) => definers[*id].iter().find(|&&definer| definer > position),
+            };
+            if let Some(&later) = later {
+                groups.union(position, later);
+            }
+        }
+    }
+    // Groups read each other's results only in collation order, except that two groups may
+    // each read the other where their definitions interleave. Such a cycle becomes one group,
+    // so every key covers the keys of what its group reads.
+    loop {
+        let roots: Vec<usize> = (0..definitions.len())
+            .map(|position| groups.find(position))
+            .collect();
+        let mut edges: FxHashMap<usize, BTreeSet<usize>> = FxHashMap::default();
+        for (position, read) in reads.iter().enumerate() {
+            for (cell, kind) in read {
+                if *kind != S4Read::Content {
+                    continue;
+                }
+                for &writer in writers.get(cell).map_or(&[][..], Vec::as_slice) {
+                    if roots[writer] != roots[position] {
+                        edges
+                            .entry(roots[position])
+                            .or_default()
+                            .insert(roots[writer]);
+                    }
+                }
+            }
+        }
+        let cycles = strongly_connected(&edges);
+        if cycles.is_empty() {
+            break;
+        }
+        for cycle in cycles {
+            for pair in cycle.windows(2) {
+                groups.union(pair[0], pair[1]);
+            }
+        }
+    }
+    // Groups in the order of their first definition, which is also an order in which every
+    // group comes after the groups it reads.
+    let mut index_of: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut group_of = Vec::with_capacity(definitions.len());
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for position in 0..definitions.len() {
+        let root = groups.find(position);
+        let index = *index_of.entry(root).or_insert_with(|| {
+            members.push(Vec::new());
+            members.len() - 1
+        });
+        members[index].push(position);
+        group_of.push(index);
+    }
+    let mut keys: Vec<Option<String>> = Vec::with_capacity(members.len());
+    let mut result = Vec::with_capacity(members.len());
+    for (index, positions) in members.iter().enumerate() {
+        let mut read_groups = BTreeSet::new();
+        for &position in positions {
+            for (cell, kind) in &reads[position] {
+                if *kind != S4Read::Content {
+                    continue;
+                }
+                for &writer in writers.get(cell).map_or(&[][..], Vec::as_slice) {
+                    if group_of[writer] != index {
+                        read_groups.insert(group_of[writer]);
+                    }
+                }
+            }
+        }
+        let cached = positions.iter().all(|&position| !impure[position])
+            && read_groups
+                .iter()
+                .all(|&group| keys.get(group).is_some_and(Option::is_some));
+        let key = cached.then(|| {
+            let mut hasher = Xxh3::new();
+            let mut field = |bytes: &[u8]| {
+                hasher.update(&(bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            };
+            field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
+            field(package.as_bytes());
+            field(version.as_bytes());
+            for &position in positions {
+                let (item, definition) = definitions[position];
+                field(&item.hash.to_le_bytes());
+                // Whether each class it names is the package's decides what it reads.
+                let named: Vec<&String> = match definition {
+                    S4Definition::Class { mentions, .. } => mentions.iter().collect(),
+                    S4Definition::Union { members, .. } => members.iter().collect(),
+                    S4Definition::Method { signature, .. } => {
+                        signature.iter().map(|(_, class)| class).collect()
+                    }
+                    S4Definition::Coerce { from, to, .. } => vec![from, to],
+                    S4Definition::Validity { class } => vec![class],
+                    S4Definition::Generic { .. } => Vec::new(),
+                };
+                let defined: Vec<u8> = named
+                    .iter()
+                    .map(|name| u8::from(class_id(name).is_some()))
+                    .collect();
+                field(&defined);
+            }
+            for &group in &read_groups {
+                if let Some(Some(key)) = keys.get(group) {
+                    field(key.as_bytes());
+                }
+            }
+            format!("{:032x}", hasher.digest128())
+        });
+        keys.push(key.clone());
+        let mut classes = Vec::new();
+        let mut generics: Vec<String> = Vec::new();
+        let mut binds = Vec::new();
+        for &position in positions {
+            let (item, definition) = definitions[position];
+            match definition {
+                S4Definition::Class { class, .. } | S4Definition::Union { class, .. } => {
+                    if !classes.contains(class) {
+                        classes.push(class.clone());
+                    }
+                }
+                _ => {}
+            }
+            for cell in &writes[position] {
+                if let S4Cell::Generic(generic) = cell
+                    && !generics.iter().any(|known| known == generic)
+                {
+                    generics.push((*generic).to_owned());
+                }
+            }
+            binds.extend(item.binds.iter().cloned());
+        }
+        result.push(S4Group {
+            key,
+            classes,
+            generics,
+            binds,
+        });
+    }
+    (result, group_of)
+}
+
+/// Union-find over indices, whose root is always the smallest index of its set, so the result
+/// does not depend on the order of the unions.
+struct Disjoint {
+    parent: Vec<usize>,
+}
+
+impl Disjoint {
+    fn new(size: usize) -> Self {
+        Disjoint {
+            parent: (0..size).collect(),
+        }
+    }
+
+    fn find(&mut self, mut index: usize) -> usize {
+        while let Some(&parent) = self.parent.get(index) {
+            if parent == index {
+                break;
+            }
+            let grandparent = self.parent.get(parent).copied().unwrap_or(parent);
+            self.parent[index] = grandparent;
+            index = parent;
+        }
+        index
+    }
+
+    fn union(&mut self, first: usize, second: usize) {
+        let (first, second) = (self.find(first), self.find(second));
+        if first != second {
+            let (low, high) = (first.min(second), first.max(second));
+            self.parent[high] = low;
+        }
+    }
+}
+
+/// The strongly connected components of `edges` with more than one node, by Tarjan's
+/// algorithm, iteratively, with nodes visited in increasing order.
+fn strongly_connected(edges: &FxHashMap<usize, BTreeSet<usize>>) -> Vec<Vec<usize>> {
+    let mut nodes: BTreeSet<usize> = edges.keys().copied().collect();
+    nodes.extend(edges.values().flatten().copied());
+    let mut index_of: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut low: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut on_stack: FxHashSet<usize> = FxHashSet::default();
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next = 0;
+    let empty = BTreeSet::new();
+    for &start in &nodes {
+        if index_of.contains_key(&start) {
+            continue;
+        }
+        // Each frame is a node and the successors it has yet to visit.
+        let mut frames: Vec<(usize, Vec<usize>)> = Vec::new();
+        index_of.insert(start, next);
+        low.insert(start, next);
+        next += 1;
+        stack.push(start);
+        on_stack.insert(start);
+        frames.push((
+            start,
+            edges.get(&start).unwrap_or(&empty).iter().rev().copied().collect(),
+        ));
+        while let Some((node, pending)) = frames.last_mut() {
+            let node = *node;
+            if let Some(successor) = pending.pop() {
+                if !index_of.contains_key(&successor) {
+                    index_of.insert(successor, next);
+                    low.insert(successor, next);
+                    next += 1;
+                    stack.push(successor);
+                    on_stack.insert(successor);
+                    frames.push((
+                        successor,
+                        edges
+                            .get(&successor)
+                            .unwrap_or(&empty)
+                            .iter()
+                            .rev()
+                            .copied()
+                            .collect(),
+                    ));
+                } else if on_stack.contains(&successor) {
+                    let reached = index_of[&successor];
+                    if let Some(value) = low.get_mut(&node) {
+                        *value = (*value).min(reached);
+                    }
+                }
+                continue;
+            }
+            frames.pop();
+            let node_low = low[&node];
+            if let Some((parent, _)) = frames.last()
+                && let Some(value) = low.get_mut(parent)
+            {
+                *value = (*value).min(node_low);
+            }
+            if node_low == index_of[&node] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack.remove(&member);
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                if component.len() > 1 {
+                    component.sort_unstable();
+                    components.push(component);
+                }
+            }
+        }
+    }
+    components
 }
 
 /// The names among `roots` whose call may read a changed binding, through any chain of lazy

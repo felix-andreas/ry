@@ -71,7 +71,15 @@ pub struct ItemLoad {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum S4Definition {
     /// `setClass("Name", ...)`.
-    Class { class: String },
+    Class {
+        class: String,
+        /// The superclasses as written: the `contains` argument and the unnamed arguments of
+        /// `representation()`. `None` when one of them is not a string literal.
+        contains: Option<Vec<String>>,
+        /// Every string literal in the call outside function literals, which includes each
+        /// class it names as a superclass, a slot's class, or in a prototype.
+        mentions: Vec<String>,
+    },
     /// `setGeneric("name", function(...) standardGeneric("name"))`. Without its own
     /// definition, `setGeneric` wraps an existing function and says so, which cannot wait.
     Generic { generic: String },
@@ -940,6 +948,12 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
     match callee.as_str() {
         "setClass" => Some(S4Definition::Class {
             class: string_argument(0, "Class")?,
+            contains: superclasses(argument(1, "representation"), argument(3, "contains")),
+            mentions: {
+                let mut mentions = Vec::new();
+                string_mentions(&call, &mut mentions);
+                mentions
+            },
         }),
         "setGeneric" => {
             let generic = string_argument(0, "name")?;
@@ -1003,6 +1017,54 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
             })
         }
         _ => None,
+    }
+}
+
+/// The superclasses a `setClass()` call writes: its `contains` argument and the unnamed
+/// arguments of its representation, as in `representation("Base", x = "numeric")`. `None` when
+/// either is not built from string literals, so the caller cannot tell which classes it names.
+fn superclasses(
+    representation: Option<&SyntaxNode>,
+    contains: Option<&SyntaxNode>,
+) -> Option<Vec<String>> {
+    let mut classes = Vec::new();
+    if let Some(contains) = contains {
+        if let Some(class) = string_literal(contains) {
+            classes.push(class);
+        } else {
+            let call = call_parts(contains)?;
+            if !matches!(call.callee.as_str(), "c" | "character") {
+                return None;
+            }
+            for argument in &call.arguments {
+                classes.push(string_literal(&argument.value)?);
+            }
+        }
+    }
+    if let Some(representation) = representation {
+        let call = call_parts(representation)?;
+        if !matches!(call.callee.as_str(), "representation" | "list" | "c") {
+            return None;
+        }
+        for argument in call.arguments.iter().filter(|argument| argument.name.is_none()) {
+            classes.push(string_literal(&argument.value)?);
+        }
+    }
+    Some(classes)
+}
+
+/// Collects the string literals under `node`, each once, skipping function literals, whose
+/// bodies do not run when the call does.
+fn string_mentions(node: &SyntaxNode, mentions: &mut Vec<String>) {
+    for child in node.children() {
+        if child.kind() == SyntaxKind::FUNCTION_DEF {
+            continue;
+        }
+        match string_literal(&child) {
+            Some(string) if !mentions.contains(&string) => mentions.push(string),
+            Some(_) => {}
+            None => string_mentions(&child, mentions),
+        }
     }
 }
 
