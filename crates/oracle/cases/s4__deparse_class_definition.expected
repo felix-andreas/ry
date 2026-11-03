@@ -1,0 +1,26 @@
+[stdout]
+| new("SClassExtension", subClass = structure("MethodDefinition", package = "methods"), 
+|     superClass = structure("function", package = "methods"), 
+|     package = "methods", coerce = function (from, strict = TRUE) 
+|     {
+|         attributes(from) <- NULL
+|         from
+|     }, test = function (object) 
+|     TRUE, replace = function (from, to, value) 
+|     {
+|         from@.Data <- as(value, "function", strict = FALSE)
+|         from
+|     }, simple = TRUE, by = character(0), dataPart = TRUE, distance = 1)
+| new("Point", x = c(1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5), y = c(10, 
+| 20, 30, 40, 50, 60, 70))
+| list(new("Point", x = c(1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5
+| ), y = c(10, 20, 30, 40, 50, 60, 70)), list(a = "a long string to push the line past the cutoff", 
+|     b = new("Point", x = c(1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 
+|     8.5), y = c(10, 20, 30, 40, 50, 60, 70))))
+| [1] 3
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 3L

@@ -430,17 +430,26 @@ impl Deparser {
     unsafe fn s4(&mut self, parts: S4Parts) {
         self.print("new(");
         self.print(&format::encode_string(&parts.class, Some('"')));
-        for (name, value) in parts.slots {
+        // GNU R breaks a line past the cutoff before every argument after the class.
+        let mut broken = false;
+        let arguments = parts
+            .slots
+            .into_iter()
+            .map(|(name, value)| (Some(name), value))
+            .chain(parts.data.map(|data| (None, data)));
+        for (name, value) in arguments {
             self.print(", ");
-            self.print(&quote_name(&name));
-            self.print(" = ");
+            self.line_break(&mut broken);
+            if let Some(name) = name {
+                self.print(&quote_name(&name));
+                self.print(" = ");
+            }
             self.deparse(value);
         }
-        if let Some(data) = parts.data {
-            self.print(", ");
-            self.deparse(data);
-        }
         self.print(")");
+        if broken {
+            self.indent -= 1;
+        }
     }
 
     /// The `srcref` list an expression vector is written from under `useSource`: one srcref per
@@ -1195,19 +1204,16 @@ impl Deparser {
         self.print(opener);
         let mut broken = false;
         for index in 0..count {
-            // GNU R's vector deparse breaks a line that is past the cutoff before the next element
-            // (and before the closing parenthesis), without indenting the continuation.
-            if index > 0 && self.length > self.cutoff {
-                self.write_line();
+            // GNU R's `vec2buff` breaks a line past the cutoff before every element, the first
+            // included.
+            if index > 0 {
+                self.print(", ");
             }
+            self.line_break(&mut broken);
             if nice {
                 self.name_prefix(names, index);
             }
             self.deparse(list.element(index));
-            if index + 1 < count {
-                self.print(", ");
-                self.line_break(&mut broken);
-            }
         }
         if broken {
             self.indent -= 1;
@@ -1540,8 +1546,11 @@ unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
         )
     };
     let quoted = values::call(symbols.quote, &[object]).ok()?;
-    let slot_names_call = values::call(methods_function("slotNames").ok()?, &[quoted]).ok()?;
-    let slot_names = crate::eval::eval(slot_names_call, values::base_namespace()).ok()?;
+    // The slots come from the class definition, as GNU R reads them, not from `slotNames(x)`:
+    // for a class representation that names the slots of the class it describes.
+    let definition_call = values::call(methods_function("getClassDef").ok()?, &[class]).ok()?;
+    let definition = crate::eval::eval(definition_call, values::base_namespace()).ok()?;
+    let slot_names = values::names(get_attr(definition, values::install("slots").ok()?));
     if slot_names.kind() != SexpType::String {
         return None;
     }
