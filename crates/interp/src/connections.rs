@@ -4,9 +4,10 @@
 //! A connection lives in a slot of a fixed table of [`NCONNECTIONS`], as in GNU R: slots 0, 1
 //! and 2 are stdin, stdout and stderr, and the R-level connection object is an integer vector
 //! holding the slot number, classed `c(<class>, "connection")`. Every connection but the
-//! standard three also carries a `conn_id` attribute, an external pointer whose address is the
-//! slot's `Rconn`. Closing a connection frees its slot and clears that address, so an R object
-//! that outlives its connection reads as an invalid connection instead of dangling.
+//! standard three also carries a `conn_id` attribute, an external pointer whose address is a
+//! serial number, as in GNU R. The slot number alone names the connection: an R object that
+//! outlives its connection reads as invalid until a new connection takes the slot, and then
+//! names that one, as in GNU R.
 //!
 //! Every connection is driven through the method pointers of its `Rconn`, because packages fill
 //! them in for custom connections (curl, processx) and call them directly on any connection
@@ -249,6 +250,8 @@ pub struct Table {
     /// The connection messages, warnings and errors go to: `stderr` unless
     /// `sink(type = "message")` diverted them. Unlike output, these diversions do not nest.
     message_slot: usize,
+    /// The serial number the next connection's `conn_id` gets as its address.
+    next_id: usize,
 }
 
 struct Entry {
@@ -313,6 +316,7 @@ impl Table {
             entries,
             sinks: Vec::new(),
             message_slot: 2,
+            next_id: 1,
         }
     }
 
@@ -390,15 +394,9 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .ok()
         .and_then(entry)
         .ok_or_else(invalid)?;
-    // The `conn_id` object itself identifies the connection, not its address: a package may
-    // store its own pointer there, as curl does with its multi handle.
-    let id = values::get_attr(object, values::install("conn_id")?);
-    // Closing clears the `conn_id` address, so an object kept past `close()` stays invalid even
-    // once a new connection takes its slot. Any other address is accepted, because curl stores
-    // its own handle there, and GNU R never looks at it.
-    if id.kind() == SexpType::ExternalPtr && id.external_address().is_null() {
-        return Err(invalid());
-    }
+    // The slot alone names the connection, as in GNU R, which never looks at `conn_id`: an
+    // object kept past `close()` names whatever connection takes its slot next, and one read
+    // back by `unserialize()`, whose `conn_id` address is null, still names its slot.
     Ok((slot as usize, entry.con))
 }
 
@@ -1348,10 +1346,7 @@ unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
     (*con).canwrite = (*inner).canwrite;
     (*con).text = text as Rboolean;
     (*con).ex_ptr = (*inner).ex_ptr;
-    (*con).id = con.cast();
-    if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
-        id.set_external_address(con.cast());
-    }
+    (*con).id = (*inner).id;
     if let Some(Some(slot_entry)) = entries().get_mut(slot) {
         *slot_entry = Entry {
             con,
@@ -2506,7 +2501,12 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
     };
     let heap = crate::heap();
     let tag = values::install("connection")?;
-    let id = heap.alloc_external_ptr(con.cast(), tag, nil())?;
+    // GNU R's `conn_id` address is a small serial number rather than the struct's address, and
+    // packages read it: parallelly parses it with `strtoi(, 16L)` to tell connections apart.
+    let table = &mut interp().connections;
+    let serial = table.next_id as *mut c_void;
+    table.next_id += 1;
+    let id = heap.alloc_external_ptr(serial, tag, nil())?;
     heap.root(id);
     heap.alloc_weak_ref(
         id,
@@ -2516,22 +2516,22 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
         false,
     )?;
     (*con).ex_ptr = id.as_ptr().cast();
-    (*con).id = con.cast();
+    (*con).id = serial;
     connection_object(slot)
 }
 
 /// Runs when a connection's `conn_id` becomes unreachable.
 unsafe extern "C" fn connection_finalizer(id: Sexp) {
     from_native(|| {
-        let address = id.external_address();
-        if address.is_null() {
+        if id.external_address().is_null() {
             return Ok(());
         }
-        let found = (3..NCONNECTIONS).find(|&slot| {
-            entry(slot).is_some_and(|entry| entry.con.cast() == address && !entry.pinned)
+        let found = (3..NCONNECTIONS).find_map(|slot| {
+            entry(slot)
+                .filter(|entry| (*entry.con).ex_ptr == id.as_ptr().cast() && !entry.pinned)
+                .map(|entry| (slot, entry.con))
         });
-        if let Some(slot) = found {
-            let con = address as Rconnection;
+        if let Some((slot, con)) = found {
             // GNU R destroys a closed connection, or any text connection, silently and warns
             // only about an open one of another class.
             if (*con).isopen == 0 || class_of(con) == "textConnection" {
