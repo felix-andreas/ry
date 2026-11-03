@@ -178,7 +178,8 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `updateform(old, new)`: `new` with each `.` replaced by the matching side of `old`.
+/// `updateform(old, new)`: `new` with each `.` replaced by the matching side of `old`, in the
+/// environment of `old`.
 pub unsafe fn updateform(call: &NativeCall<'_>) -> R<Sexp> {
     let old = call.arg(0);
     let new = values::duplicate(call.arg(1))?;
@@ -207,8 +208,10 @@ pub unsafe fn updateform(call: &NativeCall<'_>) -> R<Sexp> {
         let expanded = expand_dots(cell.car(), rhs)?;
         heap.set_car(cell, expanded);
     }
+    // The result keeps the old formula's environment, as in GNU R, so a model refitted from an
+    // updated formula still finds its variables.
     let environment_symbol = symbols().dot_environment;
-    let environment = values::get_attr(new, environment_symbol);
+    let environment = values::get_attr(old, environment_symbol);
     values::clear_attributes(new);
     values::set_attr(new, environment_symbol, environment)?;
     Ok(new)
