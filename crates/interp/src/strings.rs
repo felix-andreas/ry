@@ -4060,7 +4060,14 @@ unsafe fn character_vector(x: Sexp) -> R<Sexp> {
 unsafe fn copy_shape(from: Sexp, to: Sexp) -> R<()> {
     let symbols = symbols();
     for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
-        let value = get_attr(from, symbol);
+        // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into names.
+        let value = if symbol == symbols.names
+            && matches!(from.kind(), SexpType::Pairlist | SexpType::Language)
+        {
+            values::names(from)
+        } else {
+            get_attr(from, symbol)
+        };
         if value != nil() {
             set_attr(to, symbol, value)?;
         }
