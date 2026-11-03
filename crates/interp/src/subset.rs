@@ -3332,14 +3332,30 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     let count = dispatch_length(object, call.env)?;
     let result = alloc(SexpType::Integer, count)?;
     crate::heap().root(result);
+    // As in GNU R, a classed object's elements come from its `[[` method, because its `length`
+    // method may count elements its storage does not hold (posterior's `rvar` is an empty list
+    // of some length).
+    let subset2 = if listlike && object.is_object() {
+        Some(crate::builtins::primitive("[[").ok_or_else(|| error("no [[ primitive"))?)
+    } else {
+        None
+    };
     for index in 0..count {
-        let element = match object.kind() {
+        let element = match subset2 {
+            Some(subset2) => crate::scope(|| {
+                let position = values::scalar_integer(index as i32 + 1)?;
+                let element = eval::apply(
+                    nil(),
+                    subset2,
+                    &eval::value_args(&[object, position]),
+                    call.env,
+                )?;
+                dispatch_length(element, call.env)
+            })?,
             // A classed element answers with its own `length` method, S4 ones included
             // (Matrix's sparse vectors).
-            SexpType::List | SexpType::Expression => {
-                dispatch_length(object.element(index), call.env)?
-            }
-            _ => 1,
+            None if listlike => dispatch_length(object.element(index), call.env)?,
+            None => 1,
         };
         values::ints_mut(result)[index] = element as i32;
     }

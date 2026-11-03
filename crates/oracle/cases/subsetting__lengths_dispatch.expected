@@ -1,0 +1,11 @@
+[stdout]
+| [1] 1 2 3
+|  a  b 
+|  2 26 
+| [1] "error"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "error"
