@@ -77,29 +77,47 @@ whose compiler is being rewritten in Zig. It has no 0.1 release yet.[^roc]
 **What it does best for ry.** Roc's memory model is the closest match to R's own value semantics.
 Lists and other builtins are reference counted, and a builtin that receives a value whose count is
 one updates it in place, while a shared value is shallowly cloned first.[^roc] So `List.set` on a
-unique list costs nothing extra. Roc applies the Perceus "functional but in place" scheme to do
-this.[^perceus] The decision is still made at runtime: Roc's design notes say that "runtime mutation
-still uses `refcount == 1` to decide whether in-place mutation is allowed". The compiler's part is to
-make the counts precise, inserting increments and decrements exactly where they are needed and
-solving which arguments are only borrowed, so the runtime check succeeds as often as it can.[^roc]
-That is R's copy-on-modify contract (R decides by `MAYBE_SHARED`, which reads the count), with a
-compiler that keeps the counts tight.
+unique list costs nothing extra. The older Rust compiler does this with the Perceus "functional but
+in place" scheme (`inc_dec.rs`, `borrow.rs`, `reset_reuse.rs`), and its reuse still tests the count at
+runtime.[^perceus] The Zig compiler replaces Perceus with its own pass (`src/lir/arc.zig`), which runs
+after all specialization: it infers borrowed parameters, moves fields out of aggregates that die, and
+reuses dying allocations as the destination of a new value. In optimized builds it also infers
+uniqueness, so where it can prove a value is unique it removes the `refcount == 1` check
+altogether.[^roc] Roc's alias analysis (Morphic) was built to decide in-place updates for list
+operations, but every optimization level calls its trivial solver, which answers "immutable", because
+of a loop bug and little measured gain.[^roc] So in practice uniqueness is either proven by the ARC
+pass or checked at runtime, which is R's copy-on-modify contract (R decides by `MAYBE_SHARED`, which
+reads the count) with a compiler that keeps the counts tight.
 
 When a function only reads an argument, passing it leaves its count unchanged, and the compiler works
 this out by itself.[^roc] Higher-order functions compile by **lambda set specialization**, a form of
 defunctionalization: by code generation time a closure is a tagged union whose tag names the
 procedure and whose payload is the captured environment, so calls through it are direct (Roc also
-has boxed erased callables for the cases this does not cover).[^roc] Its inference is Hindley-Milner,
+has boxed erased callables for the cases this does not cover).[^roc] The Zig compiler monomorphizes
+by default, and it has an experimental `--specialize=no` mode, `.boxy`, that passes runtime type
+descriptors instead, which trades speed for compile time.[^roc] Its inference is Hindley-Milner,
 and its only ad hoc polymorphism is static dispatch on nominal types; dynamic dispatch is
 unsupported by design.[^roc]
 
 Roc has an interpreter, a dev backend that emits machine code directly for fast builds (also for
 wasm32), and LLVM for optimized builds, all fed from shared lower-level IRs.[^roc] Its platforms
 supply the allocator: the host implements `malloc` and `free` for the Roc code it embeds, which lets
-a web server allocate each request into an arena and reset it afterwards.[^roc]
+a web server allocate each request into an arena and reset it afterwards.[^roc] Roc has no stackless
+coroutines or continuation transform: its interpreter recurses on the native stack, tail calls
+compile through tail-recursion-modulo-cons and a trampoline, and asynchronous IO lives only in hosts
+(basic-cli blocks on a tokio runtime for each hosted call).[^roc] Effectful functions are direct calls
+into the host through the C ABI.
 
 **What ry adopts.**
 
+- **Monomorphized natives with an unboxed calling convention.** A closure typed `#: (x: double) ->
+  double` compiles, at its first call, to a native function per argument type list. Its arguments and
+  result travel as machine words, with no promises, no environment and no argument matching, and only
+  the boundary to untyped code boxes them. Records, tuples and tags travel as pointers whose field
+  types come from an allocation-site profile, and `match` compiles to a branch on the layout id. This
+  is Roc's specialization applied at runtime, where R loads code: the cache key is the closure and
+  the argument types seen, not a whole-program instantiation (`decisions.md`, "Typed closures run as
+  native functions over records, tags and match").
 - **Precise counts in compiled code.** The interpreter keeps R's count updates at every binding,
   which is what native code observes. The JIT tracks counts precisely inside a compiled function and
   drops increments and decrements that cancel. Three rules keep this correct for R. A binding in an
@@ -125,7 +143,10 @@ a web server allocate each request into an arena and reset it afterwards.[^roc]
 - **Static-only dispatch,** because R's S3 dispatch on `class(x)`, S4 generics and R6 methods are
   dynamic by definition, and existing code depends on that. ry gets most of the benefit by
   speculating on the class seen at a call site, guarded by the class attribute.
-- **Whole-program monomorphization,** because R loads code at runtime.
+- **Whole-program monomorphization,** because R loads code at runtime. ry specializes per closure and
+  argument type list at its first call instead.
+- **Runtime type descriptors in place of specialization** (`.boxy`), because ry's tier 0 interpreter
+  already plays that role and the native tier exists to remove it.
 - **Purity inference.** Roc infers which functions are effectful, lets only those call each other,
   and so guarantees that a top-level constant performs no effect and can be evaluated at compile
   time. It has no effect polymorphism, so a higher-order function exists twice, as `Try.map_ok` and
@@ -169,6 +190,12 @@ within 0.8 to 1.5 times the time of hand-written C, sixteen threads give 9 to 12
 and an integrated GPU up to 67 times.[^bendrt] Foreign functionality enters through effects: an
 effect is a definition of type `IO(R)` whose body imports a `.c` (and a `.js`) file that registers a
 C implementation, which the compiler splices into the generated program.[^bend]
+
+Bend's runtime is also stackless: user code never grows the C stack. A call compiles to a tail call,
+a cut or a fork of a segment (with `preserve_none` and `musttail` in the generated C), a pending
+continuation is a heap node, and IO is written in continuation-passing style.[^bendrt] Its
+predecessor HVM2 packs a term into 32-bit ports with 24-bit numbers, and balances work through
+per-thread redex bags that neighbouring threads steal from.[^bend]
 
 **What ry adopts.**
 
@@ -263,8 +290,11 @@ that reads device memory, transfers with no declared hardware path, and working 
 device's declared capacity.[^vx] Machines are described declaratively (memory capacities,
 bandwidths, links), so a program can be checked against a target it is not running on.[^vx] Its
 frontend identifies every symbol and instantiation by a 256-bit content hash and type-checks modules
-in parallel without locks, with output that is byte-identical across thread counts.[^vx] Its JIT is
-LLVM run through `lli`.[^vx]
+in parallel without locks, with output that is byte-identical across thread counts.[^vx] An identifier
+packs a module hash, a symbol hash, a generic hash and flags; an instantiation gets an arena index,
+and content digests are used only inside evaluation, never merged into the identity.[^vx] Its "JIT"
+compiles the module with `llc` to an object file, links it with `clang` and runs the executable;
+`lli` appears only in its roadmap.[^vx]
 
 **What ry adopts.**
 

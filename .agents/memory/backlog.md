@@ -580,6 +580,17 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **Typed natives, the rest of the end shape** (`decisions.md`, "Typed closures run as native
+  functions over records, tags and match"). Typed closures run as natives at their first call over
+  scalars, plain vectors, records, tags and `match`. Not built, by expected gain:
+  scalar replacement of records that never escape a native (each construction allocates today);
+  vector results and vector builtins (`c`, `numeric`, `sum`) inside natives; strings and the
+  standard library (`Str`, `List`, `Dict`) inside natives; uniqueness in-place update of a record
+  or vector whose count is one; recompiling when a slot profile widens (a mixed profile refuses
+  for good); guards, `|`, `..`, literal and nested patterns in `match`.
+  The why-ry programs that gain nothing typed show the order: bond_book needs `seq_len`, `rep` and
+  vector results, report needs `paste`, closures needs captured variables (`a * scale`).
+
 - **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
   comparisons, `if` and calls to other such closures compiles to a frameless native function
   (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.

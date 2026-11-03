@@ -23,9 +23,10 @@ type-mismatch
 ## Speed
 
 Loops and recursion run several times faster on ry's runtime than on GNU R, and vectorized code runs
-about as fast.
+about as fast. Typed functions over numbers, records and `match` run as native code, an order of
+magnitude faster again.
 
-<BenchmarkTable programs={["fib", "drawdown", "vector_arith", "log_rank"]} />
+<BenchmarkTable programs={["fib", "drawdown", "orders", "expr_tree", "vector_arith", "log_rank"]} />
 
 [All benchmarks](/benchmarks)
 
