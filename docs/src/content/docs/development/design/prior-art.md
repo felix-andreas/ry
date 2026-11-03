@@ -1,8 +1,8 @@
 ---
 type: Reference
 title: Prior art from new language implementations
-description: "What Roc, Bend, goose, Vx and Bun's compiler do best, and which of their ideas ry's R runtime adopts or rejects"
-tags: [runtime, memory-management, compilation, type-system, ffi]
+description: "What Roc, Bend, goose, Vx and Bun's compiler, and the production JITs of JavaScriptCore (Bun), LuaJIT and V8, do best, and which of their ideas ry's R runtime adopts or rejects"
+tags: [runtime, memory-management, compilation, jit, type-system, ffi]
 status: draft
 generated: { by: ry-research-agent/1, at: 2026-10-31T16:00:00Z }
 verified: { by: ry-review-agent/1, at: 2026-10-31T16:30:00Z }
@@ -35,14 +35,51 @@ sources:
   - id: bun-aot
     resource: https://bun.sh/docs/compiler/aot
     title: "Bun documentation: the ahead-of-time compiler, and its internals page"
+  - id: jsc-speculation
+    resource: https://webkit.org/blog/10308/speculation-in-javascriptcore/
+    title: "Pizlo: Speculation in JavaScriptCore (WebKit blog, 2020)"
+  - id: jsc-b3
+    resource: https://webkit.org/blog/5852/introducing-the-b3-jit-compiler/
+    title: "Pizlo: Introducing the B3 JIT Compiler (WebKit blog, 2016)"
+  - id: jsc-ftl
+    resource: https://webkit.org/blog/3362/introducing-the-webkit-ftl-jit/
+    title: "Pizlo: Introducing the WebKit FTL JIT (WebKit blog, 2014)"
+  - id: bun
+    resource: https://bun.sh/docs/bundler
+    title: "Bun documentation: the bundler and bytecode caching (`--bytecode`)"
+  - id: luajit
+    resource: https://github.com/LuaJIT/LuaJIT
+    title: "LuaJIT repository: src/vm_x64.dasc, src/lj_obj.h, src/lj_tab.c, src/lj_snap.c, src/lj_opt_sink.c"
+  - id: v8-ignition
+    resource: https://v8.dev/blog/ignition-interpreter
+    title: "V8 blog: Firing up the Ignition interpreter (2016)"
+  - id: v8-sparkplug
+    resource: https://v8.dev/blog/sparkplug
+    title: "V8 blog: Sparkplug, a non-optimizing JavaScript compiler (2021)"
+  - id: v8-maglev
+    resource: https://v8.dev/blog/maglev
+    title: "V8 blog: Maglev, V8's fastest optimizing JIT (2023)"
+  - id: v8-turboshaft
+    resource: https://v8.dev/blog/leaving-the-sea-of-nodes
+    title: "V8 blog: Land ahoy, leaving the Sea of Nodes (2025)"
+  - id: v8-hidden-classes
+    resource: https://v8.dev/docs/hidden-classes
+    title: "V8 documentation: Maps (hidden classes) in V8"
+  - id: v8-lite
+    resource: https://v8.dev/blog/v8-lite
+    title: "V8 blog: A lighter V8 (2019), lazy feedback allocation"
+  - id: rust-tail-calls
+    resource: https://github.com/rust-lang/rfcs/pull/3407
+    title: "Rust RFC 3407: explicit tail calls (`become`)"
   - id: okf
     resource: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
     title: Open Knowledge Format v0.2
     last_modified: 2026-08-21T13:08:36-07:00
 ---
 
-This page studies four recent language implementations and one new compiler for ideas that ry's R
-runtime can use, and decides which ones it takes. One constraint decides every verdict, and it comes from
+This page studies four recent language implementations, one new compiler, and the production JITs
+of JavaScriptCore, LuaJIT and V8 for ideas that ry's R runtime can use, and decides which ones it
+takes. One constraint decides every verdict, and it comes from
 [the runtime design](/development/design/r-runtime/): R's C API must work unchanged. Any object a
 native package can reach is therefore a non-moving heap object with a reference count, reached
 through a raw `SEXP` pointer, rooted by `PROTECT`, possibly an ALTREP vector, and possibly written to
@@ -80,6 +117,14 @@ by native code without regard for its reference count.
 | No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
 | A standalone executable with its machine code mapped from the file | Bun | **Adopt** | `ry build --exe` |
 | Reference counting with no tracing collector, for immutable acyclic values | Roc, Koka, Lean 4 | **Adopt for native typed values** | Typed ry's own values; R values stay under the collector (`typed-runtime.md`, "Memory") |
+| Shapes as cache keys, adapted to frames: remember slot k, check the symbol there | JavaScriptCore, V8 | **Adopt** | Local variable reads, with no invalidation |
+| Watchpoint sets per binding | JavaScriptCore | **Adopt** | Watched binding cells invalidate dependent compiled bodies |
+| Polymorphic inline caches | JavaScriptCore, V8 | **Adopt, scoped** | S3 dispatch sites, keyed on the class vector |
+| Dense, lazily allocated feedback vectors | V8 | **Adopt** | Feedback slots only for value-producing instructions |
+| Fast mid tier on feedback, compiled off the main thread | V8 (Maglev) | **Adopt, scoped** | Tier 1 with lower thresholds |
+| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Defer** | The form of a baseline tier, preferred over copy-and-patch |
+| NaN-boxing of values native code can see | LuaJIT, JavaScriptCore | **Reject** | A `SEXP` must be a pointer |
+| Trace compilation | LuaJIT | **Reject** | Cranelift is a method JIT; promises make traces fragile |
 
 ## Roc
 
@@ -388,6 +433,236 @@ run fast without trusting values that arrive from untyped code.
   second copy at the first call that needs it.
 - **Types that never change behavior,** because ry's annotations are checked at the boundary and
   report mismatches.
+## Production JITs: JavaScriptCore, LuaJIT and V8
+
+The four languages above know their types or ownership statically. ry's untyped tiers face a different problem, the one production JavaScript and Lua engines solve:
+running dynamically typed code fast while anything may be redefined at any time. The performance bar
+in the mandate is Bun, which is JavaScriptCore, and ry's tier 0 runs real R code slower than GNU R's
+bytecode interpreter: ggplot2, lattice and PerformanceAnalytics render 1.2 to 1.9 times slower than
+on GNU R, which the knowledge base attributes to interpreter call cost. On the nine
+production-shaped workloads of `just bench-real`, untyped R runs at 0.95 times GNU R's speed with
+the JIT off and 0.96 times with it on (geometric means, `benchmarks.mdx`). `ry run
+--profile-summary` splits that time into tier-0 instructions (23 to 44%), closure call setup (12
+to 24%), builtins (about 25%) and S3 method lookup (up to 17%), with tier 1 under 3% on all but one
+workload, because most hot closures run too few times to reach it.
+This part studies the three engines for ideas that close that gap.
+
+R adds two constraints to the `SEXP` one at the top of this page. Environments are first-class and
+mutable from anywhere (`assign`, `eval`, `sys.function`, `parent.frame`, and native code through
+`Rf_defineVar`), so no frame layout is ever final. Arguments are lazy promises, so whether and when
+an argument's expression runs depends on the callee.
+
+### JavaScriptCore and Bun
+
+**What it is.** JavaScriptCore runs code in four tiers. The LLInt is an interpreter written in
+offlineasm, a portable assembly language that compiles to each target's assembler. The Baseline JIT
+emits a fixed template per bytecode. The DFG is a speculative optimizing compiler, and the FTL is a
+slower, stronger backend for the hottest code, built on the B3 compiler since B3 replaced LLVM
+there.[^jsc-speculation][^jsc-b3][^jsc-ftl] Code moves up the tiers by counters, enters optimized
+code at loop headers (OSR entry), and leaves it at a failed speculation (OSR exit) for the Baseline
+tier.[^jsc-speculation]
+
+**What it does best for ry.** Speculation is fed by three mechanisms. A **structure** (a hidden
+class) names the layout of an object's properties, so a property read caches "structure S, offset
+k" and becomes a compare and a load. An inline cache that sees several structures becomes a
+**polymorphic** cache with one case each, and past a limit it goes megamorphic. Every value-producing
+bytecode keeps a **value profile**, and the inline caches double as profiles, so the DFG reads the
+structures a site saw from its cache. **Watchpoints** cover facts that rarely change, such as "this
+global holds this function": compiled code depends on a watchpoint set instead of checking, and
+when the fact changes the set fires and throws away the dependent code.[^jsc-speculation] Bun adds
+fast startup (a transpiler cache, and bytecode caching with `bun build --bytecode`) and implements
+its hot builtins in Zig and C++.[^bun]
+
+**What ry adopts.**
+
+- **Inline caches as the profile.** ry already does this for functions: tier 0's lookup cache holds
+  the binding cell it found, keyed on the enclosure and the symbol's lookup stamp
+  (`cached_cell` in `crates/interp/src/bytecode.rs`), and tier 1 speculates on that cell.
+- **Shapes, adapted to frames.** An environment is R's dictionary object, as an object is
+  JavaScript's, but ry's lookup cache skips function frames entirely, because their bindings come
+  and go without moving any stamp. So every read of a local variable searches the frame
+  (`Frame::find` in `crates/heap/src/env.rs`): a bit-filter test, then a scan of the inline
+  symbol and cell pairs, or a hash probe past 16 bindings. A structure id cannot work for a frame,
+  because `assign` from anywhere would have to update it. ry's frame layout allows a cheaper key:
+  bindings stay in insertion order, and removal leaves a tombstone instead of shifting, so a
+  binding keeps its slot until the frame compacts. A cache that remembers "slot k" for a symbol at
+  an instruction checks `bindings[k].symbol == symbol` and reads the cell, one compare and two
+  loads, and needs no invalidation, because the check reads the frame itself. A miss falls back to
+  the search. A closure's formals sit in the leading slots, so the compiler knows their slots
+  before the first call. **Adopt.**
+  On the `validation` workload of `just bench-real` with the JIT off, the frame search
+  (`Heap::frame_cell`) takes 2.9% of the run's samples by self time, and the inline-cache misses
+  that fall back to a full lookup are 1.5% of the time split in `ry run --profile-summary`.
+- **Watchpoint sets per binding.** Today a compiled body checks its function speculations on every
+  entry: one global binding epoch, and when that moved, the lookup stamp of each speculated symbol
+  (`valid` in `crates/jit/src/runtime.rs`). The epoch moves on every top-level binding, which a
+  package load or a test suite does constantly, so the per-symbol path runs often. A watched
+  binding cell can instead list the compiled bodies that depend on it (the cell's third field
+  holds nothing for an ordinary binding), and assigning or removing it invalidates them, so entry
+  checks one flag. One R-specific check stays: a function frame can gain a binding that shadows
+  the speculated one (`assign` into `parent.frame()`), and that path, which the `rooted` check
+  covers today, is not a watched cell. Section 5 of the runtime design plans watch sets; this is
+  their concrete shape. **Adopt.**
+  How often `valid()` reaches the per-symbol loop on a real test suite is not yet measured.
+- **Polymorphic inline caches for S3 dispatch.** S3 method lookup goes through one global table
+  (`MethodCache` in `crates/interp/src/dispatch.rs`) that is cleared whenever the binding epoch or
+  the collection count changes. A per-site cache in the style of a polymorphic property cache would
+  hold up to four entries, keyed on the class attribute: first by the pointer of the class vector,
+  which objects from one constructor usually share (unverified), then by comparing its elements,
+  which are interned `CHARSXP`s and so compare by pointer. An object without a class attribute is
+  keyed on its implicit class (type and `dim`). Past four classes the site goes megamorphic and
+  uses the global table. The entries are invalidated by the lookup stamps of the method names,
+  which per-binding watch sets make precise. **Adopt, scoped** to `UseMethod` and the internally
+  dispatching builtins.
+- **Value profiling, extended.** Tier 0 records a bit set of eleven value kinds per instruction
+  (`feedback` in `bytecode.rs`). JavaScriptCore also profiles call targets and structures; ry's
+  equivalents are the closure a call site called and the class a dispatch site saw, which the
+  inlining and S3 items above need. **Adopt.**
+- **OSR entry and exit** are built: tier 1 enters at loop headers and deoptimizes to tier 0.
+- **Bun's two non-JIT reasons,** builtins in a systems language and cached bytecode, are already
+  section 5 of the runtime design.
+
+**What ry rejects or defers.**
+
+- **An interpreter in assembly.** The LLInt is in offlineasm so that it controls register
+  assignment and dispatch, and shares its frame layout with the JIT tiers. ry's tier 0 is a
+  `match` in a Rust loop with `step` inlined into it, and its register window is already shared
+  with tier 1. The cheap path to LLInt-like dispatch in Rust is one handler function per
+  instruction, each ending in a tail call through a handler table (`become`, Rust's explicit tail
+  calls, nightly only), which keeps the machine state in argument registers across instructions as
+  hand-written assembly does.[^rust-tail-calls] On a scalar loop with the JIT off
+  (`s <- s + i * 2` and a comparison, 2e7 iterations), the shared indirect jump that decodes the
+  next instruction and branches to its handler takes about 28% of all samples, the largest single
+  cost, because every instruction mispredicts through the same branch. Allocation of result
+  scalars takes about 8%. A per-handler tail call would split that one branch into one per
+  instruction, which is what the LLInt gets from offlineasm. ry already builds on nightly Rust
+  (`rust-toolchain.toml`), so `become` is available. Production R code runs mostly in tier 0 and
+  the call path, so the gain lands where the measured gap to GNU R is; the call-path design
+  (`call-path.md`) evaluates threaded handlers against a restructured `match` loop.
+- **Four tiers.** Each tier adds a compiler to maintain and a set of transitions to test. ry has two,
+  and the V8 section below argues what a third would be.
+
+### LuaJIT
+
+**What it is.** LuaJIT is Mike Pall's Lua implementation. Its interpreter is hand-written assembly,
+generated with DynASM (`vm_x64.dasc`), which pins the bytecode base, the program counter and the
+dispatch table to fixed machine registers and ends every handler by decoding and jumping to the
+next one. A value is one 64-bit word: a double is itself, and every other type is encoded in the
+unused NaN space, with pointers in the low bits (`lj_obj.h`). A table has an array part for dense
+integer keys and a hash part for the rest (`lj_tab.c`).[^luajit]
+
+**What it does best for ry.** The JIT is a trace compiler: it records the path a hot loop actually
+takes, through calls, as a linear SSA trace, specializing on the constants it sees, including the
+identity of each called function. Every guard carries a **snapshot**, a compact map from interpreter
+slots to the trace's values at that point, which is all a side exit needs to rebuild the
+interpreter's state (`lj_snap.c`). A hot side exit gets a side trace of its own. **Allocation
+sinking** moves an allocation the trace does not let escape onto the side exits that need it, so
+the hot path never allocates (`lj_opt_sink.c`).[^luajit]
+
+**What ry adopts.**
+
+- **Snapshots** are built in spirit: each tier 1 guard has an exit record listing the registers and
+  slots tier 0 will read and their machine representations, and a cold block that stores them
+  before one shared exit (`emit_deopts` in `crates/jit/src/codegen.rs`). Recompiling with updated
+  feedback, up to four times per body, plays the role of side traces in a method JIT.
+- **Allocation sinking,** extended from scalars to small vectors and lists. Compiled code already
+  boxes an unboxed scalar only on exit. The same rule for a short vector or a list a loop builds
+  and consumes is the escape analysis already adopted from Bend above, and LuaJIT's pass is the
+  concrete design for it. **Adopt, scoped.**
+- **Specialization on constants.** A call such as `sum(x, na.rm = TRUE)` or `x[i, , drop = FALSE]`
+  passes a literal that selects the builtin's path. Tier 1 can pick that path at compile time, as
+  LuaJIT specializes a trace on a constant key. **Adopt, scoped** to literal arguments of base
+  builtins.
+- **Array and hash parts.** ry's frames have the same split by size: inline pairs, with a hash index
+  past 16 bindings. Built.
+
+**What ry rejects.**
+
+- **NaN-boxing for any value native code can see.** A `SEXP` is a pointer to a header, and native
+  code dereferences it, so a register, a binding, a list element or an argument that can reach the C
+  API must hold a real pointer. Inside ry the idea is already used where native code cannot look:
+  compiled code keeps scalars unboxed in machine registers, and a ry record stores an integer or a
+  logical slot under a quiet-NaN prefix (`Slot` in `crates/heap/src/object.rs`). Tagging tier 0's
+  registers too would remove the allocation of scalar results, but every builtin call would box its
+  operands. The knowledge base's plan, reusing a register's scalar in place when it is unshared,
+  removes most of those allocations with one representation, so it comes first.
+- **A trace JIT.** Cranelift is a method compiler, and ry already has OSR and deoptimization around
+  it. R's control flow also suits traces badly: a hot loop calls closures whose arguments are
+  promises, so a trace through a call has to record which promises the callee forces and in what
+  order, and S3 dispatch, `tryCatch` and `on.exit` multiply the paths. Riposte, the one tracing JIT
+  for R, was a research prototype for vector code that ran no packages (section 3 of the runtime
+  design).
+- **An assembly interpreter,** for the reasons given under JavaScriptCore.
+
+### V8
+
+**What it is.** Ignition, V8's interpreter, runs a register-machine bytecode with an implicit
+accumulator: most instructions read or write the accumulator, which shortens their
+operands.[^v8-ignition] Sparkplug, the baseline compiler, walks the bytecode once and emits, for each
+instruction, a fixed sequence that mostly calls a builtin, with no IR and no register allocation. It
+keeps Ignition's frame layout, so switching between the two at any instruction needs no frame
+translation, and the post reports a gain of 5 to 15 percent on real-world benchmarks.[^v8-sparkplug]
+Maglev is a mid-tier SSA compiler that specializes on feedback; the post puts its compile speed at
+about ten times slower than Sparkplug and ten times faster than TurboFan.[^v8-maglev] TurboFan is
+the top tier, whose sea-of-nodes IR V8 has since replaced with a control-flow graph
+(Turboshaft).[^v8-turboshaft] Objects have hidden classes (maps), as JavaScriptCore's have
+structures.[^v8-hidden-classes] Each function's feedback lives in a **feedback vector**, a side
+array with one slot per inline-cache site, assigned when the bytecode is generated and allocated
+only once the function has run a few times.[^v8-lite]
+
+**What ry adopts.**
+
+- **Dense, lazily allocated feedback.** ry's lazy half is built: tier 0 records feedback only once a
+  body is warm (`warm` in `bytecode.rs`). Its storage is one integer per code word, operands
+  included, so most of the array is never written. Assigning feedback slots at compile time, only to
+  the instructions that produce values, gives a dense side array with no unused entries, which is
+  the data-oriented layout the mandate asks for. **Adopt.**
+  The share of code words that carry feedback over a package's bytecode is not yet measured.
+- **A fast mid tier.** Tier 1 already has Maglev's shape: it builds a typed plan straight from the
+  bytecode and its feedback, with no R-level IR. Its thresholds (3000 entries, 10,000 back edges)
+  are high because Cranelift compiles slowly for code that runs only a few thousand times. Maglev's
+  lesson is that compile speed decides how early a tier can pay off. ry can build the plan on the
+  main thread, which reads the heap, and run Cranelift on another thread, which does not, and then
+  lower the thresholds. **Adopt, scoped.**
+  On the `validation` workload, tier 1 compiles 73 bodies in about 15 ms of the run's 3 s, about
+  0.2 ms per body including planning, so compile time is not what keeps code in tier 0 there: the
+  thresholds are. The split between planning and Cranelift is not yet measured.
+
+**What ry rejects or defers.**
+
+- **The accumulator.** It shortens bytecode for an interpreter that cannot allocate registers.
+  ry's tier 0 names every register, tier 1 maps each one to a Cranelift variable, and rewriting the
+  bytecode would gain encoding size, not speed.
+- **A Sparkplug-style baseline tier, deferred, but preferred over copy-and-patch.** ry's tier 0 and
+  tier 1 already share the register window, which is Sparkplug's key property. A baseline tier for
+  ry would emit, per instruction, a call to the existing handler (`step_one`) with its operands as
+  immediates and its branches as native jumps. That removes decoding and dispatch, and keeps the
+  allocations, guards and frame searches that dominate tier 0. It is simpler to build and maintain
+  than copy-and-patch stencils, so if measurements call for a baseline tier, this is its form.
+- **A sea-of-nodes top tier.** V8 left it for a control-flow graph, citing compile time and
+  maintenance cost.[^v8-turboshaft]
+
+### Verdicts
+
+| Idea | From | Verdict | Where it lands in ry |
+| --- | --- | --- | --- |
+| Inline caches as the profile the optimizer reads | JavaScriptCore, V8 | **Built, extend** | Tier 0 function lookups; tier 1 speculates on the cached cell |
+| Shapes as cache keys, adapted to frames: remember slot k, check the symbol there | JavaScriptCore, V8 | **Adopt** | Local variable reads in tier 0 and in compiled code that keeps the environment |
+| Watchpoint sets per binding | JavaScriptCore | **Adopt** | Watched binding cells list dependent bodies; replaces the epoch and stamp check at entry |
+| Polymorphic inline caches | JavaScriptCore, V8 | **Adopt, scoped** | S3 dispatch sites, keyed on the class vector; the global method cache as megamorphic fallback |
+| Value profiling of call targets and classes | JavaScriptCore | **Adopt** | Beside tier 0's value-kind feedback |
+| OSR entry and exit | All three | **Built** | Loop headers; deoptimization to tier 0 |
+| Snapshots for side exits | LuaJIT | **Built, as per-exit records** | Tier 1's deoptimization exits |
+| Allocation sinking | LuaJIT | **Adopt, scoped** | Short vectors and lists a compiled loop builds and consumes |
+| Specialization on constant arguments | LuaJIT | **Adopt, scoped** | Literal arguments of base builtins (`na.rm`, `drop`) |
+| NaN-boxing of values native code can see | LuaJIT, JavaScriptCore | **Reject** | A `SEXP` must be a pointer; unboxing stays inside compiled code and record slots |
+| Interpreter in assembly with fixed-register dispatch | JavaScriptCore, LuaJIT | **Defer** | Tail-call dispatch in Rust, after tier 0's allocation and lookup costs |
+| Trace compilation | LuaJIT | **Reject** | Promises and dispatch make traces fragile; Cranelift is a method JIT |
+| Dense feedback slots, allocated lazily | V8 | **Adopt** (lazy half built) | Feedback only for value-producing instructions |
+| Fast mid tier on feedback | V8 (Maglev) | **Adopt, scoped** | Tier 1, compiled off the main thread, with lower thresholds |
+| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Defer; preferred over copy-and-patch** | Calls to tier 0's handlers, if a baseline tier is built |
+| Accumulator bytecode | V8 (Ignition) | **Reject** | Tier 0 keeps named registers |
+| Sea-of-nodes optimizer, a fourth tier | V8, JavaScriptCore | **Reject** | Two tiers, measured before a third |
 
 ## About this page's format
 
@@ -406,3 +681,15 @@ footnote also carries the source's link.
 [^goose]: goose repository: README.md, docs/implementation.md, docs/reference.md, <https://github.com/aardappel/goose>
 [^goose-lang]: goose-lang/goose: a Go subset with a semantics in Coq, <https://github.com/goose-lang/goose>
 [^vx]: Vx repository: README.md, ROADMAP.md, docs/language_rules_for_a_parallel_compiler.md, www/book/src/quick-reference.md, <https://github.com/vx-lang/Vx>
+[^jsc-speculation]: Pizlo: Speculation in JavaScriptCore (WebKit blog, 2020), <https://webkit.org/blog/10308/speculation-in-javascriptcore/>
+[^jsc-b3]: Pizlo: Introducing the B3 JIT Compiler (WebKit blog, 2016), <https://webkit.org/blog/5852/introducing-the-b3-jit-compiler/>
+[^jsc-ftl]: Pizlo: Introducing the WebKit FTL JIT (WebKit blog, 2014), <https://webkit.org/blog/3362/introducing-the-webkit-ftl-jit/>
+[^bun]: Bun documentation: the bundler and bytecode caching, <https://bun.sh/docs/bundler>
+[^luajit]: LuaJIT repository: src/vm_x64.dasc, src/lj_obj.h, src/lj_tab.c, src/lj_snap.c, src/lj_opt_sink.c, <https://github.com/LuaJIT/LuaJIT>
+[^v8-ignition]: V8 blog: Firing up the Ignition interpreter (2016), <https://v8.dev/blog/ignition-interpreter>
+[^v8-sparkplug]: V8 blog: Sparkplug, a non-optimizing JavaScript compiler (2021), <https://v8.dev/blog/sparkplug>
+[^v8-maglev]: V8 blog: Maglev, V8's fastest optimizing JIT (2023), <https://v8.dev/blog/maglev>
+[^v8-turboshaft]: V8 blog: Land ahoy, leaving the Sea of Nodes (2025), <https://v8.dev/blog/leaving-the-sea-of-nodes>
+[^v8-hidden-classes]: V8 documentation: Maps (hidden classes) in V8, <https://v8.dev/docs/hidden-classes>
+[^v8-lite]: V8 blog: A lighter V8 (2019), <https://v8.dev/blog/v8-lite>
+[^rust-tail-calls]: Rust RFC 3407: explicit tail calls, <https://github.com/rust-lang/rfcs/pull/3407>

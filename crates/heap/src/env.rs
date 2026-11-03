@@ -75,10 +75,25 @@ fn filter_bit(symbol: Sexp) -> u64 {
 }
 
 impl Frame {
-    pub fn with_capacity(bindings: usize) -> Frame {
-        Frame {
-            bindings: SmallVec::with_capacity(bindings),
-            ..Frame::default()
+    /// Initializes an empty frame at `frame` with room for `bindings` bindings.
+    ///
+    /// The frame is written field by field where it lives: a closure call creates one, and
+    /// building it on the stack and moving it copied the whole inline binding buffer (about a
+    /// twentieth of a tier-0 call).
+    ///
+    /// # Safety
+    /// `frame` must be valid for writes and must not hold a live frame.
+    #[inline(always)]
+    pub unsafe fn write_empty(frame: *mut Frame, bindings: usize) {
+        use std::ptr::{addr_of_mut, write};
+        write(addr_of_mut!((*frame).bindings), SmallVec::new());
+        write(addr_of_mut!((*frame).index), None);
+        write(addr_of_mut!((*frame).table), None);
+        write(addr_of_mut!((*frame).formals), 0);
+        write(addr_of_mut!((*frame).removed), 0);
+        write(addr_of_mut!((*frame).filter), 0);
+        if bindings > INLINE_BINDINGS {
+            (*frame).bindings.reserve_exact(bindings);
         }
     }
 

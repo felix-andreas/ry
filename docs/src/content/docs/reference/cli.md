@@ -182,6 +182,30 @@ With standard input piped (`echo '1 + 1' | ry run`), the console skips the edito
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
 like `R --no-echo`, except that it keeps going after an error.
 
+### Profile summary
+
+`ry run --profile-summary FILE script.R` runs the script and, when it ends, writes a Markdown
+summary of where the time went to FILE. Setting `RY_PROFILE_SUMMARY=FILE` does the same for any
+session of ry's runtime. Only the process that reads the variable is profiled: time spent in child
+processes (`callr`, `parallel`'s workers) does not count. The summary is meant to be shared from a private code
+base: it holds no source code, no names from your code and no data. It lists:
+
+- the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
+  lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
+  handling, frame introspection (`sys.call`, `parent.frame`, `match.call`), garbage collection,
+  JIT compilation and JIT-compiled code;
+- base R's builtins by time and by number of calls;
+- native code (`.Call`, `.External`, `.C`) by package. A package outside R's own, its
+  recommended packages and the common CRAN dependencies ry benchmarks against is printed as
+  `private-` and a hash of its name;
+- event counts: closure calls, promises created and forced, S3 and S4 dispatches, conditions
+  signalled, JIT compilations and deoptimizations, collections and the peak memory in use.
+
+The time split comes from sampling what the runtime is doing once a millisecond, so a share below
+about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
+of three runs of the `timeseries` workload in `just bench-real`, 7% on the median). Without the
+option, the hooks cost one predictable branch each.
+
 `ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),
 and it keeps its `-f FILE`, which is `ry R -i FILE`.
 

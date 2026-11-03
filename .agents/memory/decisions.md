@@ -1903,9 +1903,14 @@ registered-methods table (resolved first, since replacing an existing binding's 
 move the epoch) and whether the top environment's own frame is searched (it is not when the
 calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
 binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
-value is no longer a function. The whole cache is dropped when the binding epoch or the collection
-count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
-collection may free an environment whose address a later key reuses. A walk that passed a function
+value is no longer a function. The whole cache is dropped when the binding epoch changes, which
+covers bindings appearing or disappearing and enclosures changing. The cache is a GC root
+(`dispatch::trace_method_cache`), so no key's environment is freed and its address reused while the
+entry exists; dropping it on every collection instead made a dispatch-heavy loop that collects
+often (xts, zoo) repeat the full walk after each minor collection. The method name `generic.class`
+is cached beside it by the pair of symbols (`MethodCache::names`), because building and interning
+the name was about a third of a `UseMethod` on the `timeseries` workload; symbols are never freed,
+so that table needs no invalidation. A walk that passed a function
 frame, an active binding, or a non-function binding of the name is not cached, because a later
 change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
 to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
