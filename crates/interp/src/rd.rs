@@ -256,8 +256,9 @@ fn builtin_shape(name: &str) -> Option<Shape> {
     Some(match name {
         "cr" | "dots" | "ldots" | "R" | "tab" => Shape::Zero,
         "acronym" | "abbr" | "bold" | "cite" | "command" | "dfn" | "dQuote" | "email" | "emph"
-        | "file" | "pkg" | "sQuote" | "strong" | "var" | "itemize"
-        | "enumerate" | "describe" => Shape::One(Latex),
+        | "file" | "pkg" | "sQuote" | "strong" | "var" | "itemize" | "enumerate" | "describe" => {
+            Shape::One(Latex)
+        }
         "link" | "linkS4class" | "linkS4methods" => Shape::OptionThenOne(Latex),
         "code" | "donttest" | "dontdiff" | "dontshow" | "testonly" | "special" => Shape::One(RCode),
         "Sexpr" => Shape::OptionThenOne(RCode),
@@ -897,10 +898,12 @@ impl Parser {
     /// or the macro environment it was given.
     /// Whether `name` is a macro GNU R's lexer knows, built in or user defined.
     unsafe fn is_macro(&mut self, name: &str) -> R<bool> {
-        Ok(matches!(name, "newcommand" | "renewcommand" | "RdOpts" | "item")
-            || section_shape(name).is_some()
-            || builtin_shape(name).is_some()
-            || self.user_macro(&format!("\\{name}"))?.is_some())
+        Ok(
+            matches!(name, "newcommand" | "renewcommand" | "RdOpts" | "item")
+                || section_shape(name).is_some()
+                || builtin_shape(name).is_some()
+                || self.user_macro(&format!("\\{name}"))?.is_some(),
+        )
     }
 
     unsafe fn user_macro(&mut self, tag: &str) -> R<Option<(usize, String)>> {

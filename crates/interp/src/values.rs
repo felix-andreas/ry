@@ -209,6 +209,9 @@ symbol_table! {
 pub struct Globals {
     /// `R_MethodsNamespace`, once `methods` is loaded.
     pub methods_namespace: Sexp,
+    /// The expression templates the native class definitions fill in, as the methods package's
+    /// R code fills them in with `substitute()`.
+    pub methods_templates: Sexp,
     /// Whether the methods package turned S4 dispatch on, which makes `standardGeneric` and
     /// primitive generics dispatch.
     pub methods_dispatch: bool,
@@ -234,6 +237,7 @@ impl Globals {
     pub(crate) fn placeholder() -> Globals {
         Globals {
             methods_namespace: Sexp::dangling(),
+            methods_templates: Sexp::dangling(),
             methods_dispatch: false,
             allow_primitive_methods: true,
             primitive_methods: rustc_hash::FxHashMap::default(),
@@ -248,10 +252,12 @@ impl Globals {
         let nil = crate::heap().nil();
         let globals = &mut interp().globals;
         globals.methods_namespace = nil;
+        globals.methods_templates = nil;
     }
 
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
         marker.mark(self.methods_namespace);
+        marker.mark(self.methods_templates);
         for methods in self.primitive_methods.values() {
             marker.mark(methods.generic);
             marker.mark(methods.methods);

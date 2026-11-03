@@ -229,14 +229,24 @@ pub unsafe fn select_positions(
     let extent = length(vector);
     match kind {
         SexpType::Logical | SexpType::Integer => {
-            return gather(kind, values::ints(vector), positions, count, NA_INTEGER, |result| {
-                values::ints_mut(result)
-            });
+            return gather(
+                kind,
+                values::ints(vector),
+                positions,
+                count,
+                NA_INTEGER,
+                |result| values::ints_mut(result),
+            );
         }
         SexpType::Real => {
-            return gather(kind, values::reals(vector), positions, count, NA_REAL, |result| {
-                values::reals_mut(result)
-            });
+            return gather(
+                kind,
+                values::reals(vector),
+                positions,
+                count,
+                NA_REAL,
+                |result| values::reals_mut(result),
+            );
         }
         SexpType::Raw => {
             return gather(kind, values::raws(vector), positions, count, 0, |result| {
@@ -276,9 +286,13 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     match index.kind() {
         SexpType::Integer => {
             let positions = values::ints(index);
-            if positions.iter().all(|&position| position <= 0 && position != NA_INTEGER)
-                && let Some(keep) =
-                    excluded(length(object), positions.iter().map(|&position| -f64::from(position)))
+            if positions
+                .iter()
+                .all(|&position| position <= 0 && position != NA_INTEGER)
+                && let Some(keep) = excluded(
+                    length(object),
+                    positions.iter().map(|&position| -f64::from(position)),
+                )
             {
                 return Ok(Some(gather_kept(object, &keep)?));
             }

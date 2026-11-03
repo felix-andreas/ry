@@ -18,8 +18,8 @@ use {
         session::{FNV_OFFSET, eval_text, stable_hash},
         unwind::R,
         values::{
-            self, cons, get_attr, install, lcons, length, missing_arg, nil, scalar_integer,
-            symbols, unbound,
+            self, cons, cons_tagged, get_attr, install, lcons, length, missing_arg, nil,
+            scalar_integer, symbols, unbound,
         },
     },
     heap::object::{Sexp, SexpType, gp},
@@ -50,6 +50,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4Extends", 1, do_extends),
     internal("ryS4SetGeneric", 1, do_set_generic),
     internal("ryS4SetMethod", 1, do_set_method),
+    internal("ryS4SetClass", 1, do_set_class),
 ];
 
 /// The methods package's functions that get a fast path, with the [`stable_hash`] of the formals
@@ -65,6 +66,7 @@ const FAST_PATHS: &[(&str, &[u64])] = &[
     ("extends", &[0x2df8_66a4_f3b4_1f5e]),
     ("setGeneric", &[0xe3ac_b876_a896_9c54]),
     ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
+    ("setClass", &[0x3a03_d885_5064_d505]),
 ];
 
 /// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
@@ -78,9 +80,10 @@ const BUNDLED_VERSION: &str = include_str!("../../../tools/base-r/VERSION");
 pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
     let prologues = eval_text(include_str!("methods_core.R"), namespace)?;
     crate::heap().root(prologues);
+    interp().globals.methods_templates = eval_text(METHODS_TEMPLATES, namespace)?;
     let version = eval_text(".__NAMESPACE__.$spec[[\"version\"]]", namespace)?;
-    let bundled = values::first_string(version)
-        .is_some_and(|version| version == BUNDLED_VERSION.trim());
+    let bundled =
+        values::first_string(version).is_some_and(|version| version == BUNDLED_VERSION.trim());
     let names = values::names(prologues);
     let print = std::env::var_os("RY_PRINT_METHODS_HASHES").is_some();
     let mut missed = Vec::new();
@@ -1018,6 +1021,9 @@ unsafe fn is_false(value: Sexp) -> bool {
 unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
+    if !native_definitions() {
+        bail!(skip);
+    }
     let Some(name) = forced_arg(frame, "name")? else {
         bail!(skip);
     };
@@ -1168,17 +1174,22 @@ unsafe fn make_generic(
 /// reports the missing default method, on the formals as symbols. Arguments after `...` are
 /// passed by name.
 unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Sexp]) -> R<Sexp> {
-    let message = values::scalar_string(
-        "invalid call in method dispatch to '%s' (no default method)",
-    )?;
+    let message =
+        values::scalar_string("invalid call in method dispatch to '%s' (no default method)")?;
     let format = lcons(
         install("gettextf")?,
         cons(message, cons(generic_name, nil())?)?,
     )?;
-    let domain = values::cons_tagged(values::scalar_logical(heap::object::NA_LOGICAL)?, nil(), install("domain")?)?;
+    let domain = values::cons_tagged(
+        values::scalar_logical(heap::object::NA_LOGICAL)?,
+        nil(),
+        install("domain")?,
+    )?;
     let body = lcons(install("stop")?, cons(format, domain)?)?;
     let fallback = values::triple(SexpType::Closure, formals, body, values::base_env())?;
-    let dots = formal_names.iter().position(|&symbol| symbol == symbols().dots);
+    let dots = formal_names
+        .iter()
+        .position(|&symbol| symbol == symbols().dots);
     let mut arguments = nil();
     for (index, &symbol) in formal_names.iter().enumerate().rev() {
         let tag = match dots {
@@ -1197,6 +1208,9 @@ unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Se
 unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
+    if !native_definitions() {
+        bail!(skip);
+    }
     let Some(name) = forced_arg(frame, "f")? else {
         bail!(skip);
     };
@@ -1550,6 +1564,991 @@ unsafe fn match_signature_length(signature: Sexp, signature_length: usize) -> R<
     Ok(Some(result))
 }
 
+/// `setClass(Class, ...)` for a new class of the package `where` belongs to, given by `slots`
+/// (or named `representation` entries) of defined classes, a `prototype` list of slot values,
+/// and `contains` naming classes of the same package, or as `representation = "VIRTUAL"` alone.
+/// Builds the definition `makeClassRepresentation()`, `completeClassDefinition()` and `setIs()`
+/// build, with the same extension objects and their coerce and replace methods, and makes the
+/// same changes: binds the definitions of the class and of each class it extends, which records
+/// the new subclass, in `where` and in the class cache, and returns the generator function.
+///
+/// The shapes taken are the ones in which the R code computes the inheritance graph by
+/// appending: the first superclass may have superclasses of its own, later ones may not, and no
+/// class is reached twice. Every class involved is defined by the package itself, so its
+/// definition is rebound where it lives.
+unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let skip = values::scalar_bool(false)?;
+    if !native_definitions() {
+        bail!(skip);
+    }
+    for name in [
+        "validity",
+        "access",
+        "version",
+        "sealed",
+        "package",
+        "S3methods",
+    ] {
+        if !eval::is_missing(install(name)?, frame)? {
+            bail!(skip);
+        }
+    }
+    let Some(class) = forced_arg(frame, "Class")? else {
+        bail!(skip);
+    };
+    if !is_plain_name(class) {
+        bail!(skip);
+    }
+    let Some(place) = forced_arg(frame, "where")? else {
+        bail!(skip);
+    };
+    if place.kind() != SexpType::Environment || place.has_gp(gp::FRAME_LOCKED) {
+        bail!(skip);
+    }
+    let Some(package) = package_name(place)? else {
+        bail!(skip);
+    };
+    // `.requirePackage(package)`, the environment of the coerce and replace methods.
+    let registry = crate::heap().known().namespace_registry;
+    if quiet_value(install_text(package.element(0))?, registry)? != Some(place) {
+        bail!(skip);
+    }
+    if !cache_on_assign(place)? || duplicate_classes()? {
+        bail!(skip);
+    }
+    let Some(class_table) = methods_value(".classTable")? else {
+        bail!(skip);
+    };
+    if class_table.kind() != SexpType::Environment
+        || crate::methods::cached_class_definition(class, class_table)? != nil()
+    {
+        bail!(skip);
+    }
+    let name = class.element(0);
+    let meta = class_meta_symbol(name.bytes())?;
+    if bound_from(meta, place) || !assignable(place, meta) {
+        bail!(skip);
+    }
+
+    let mut own: Vec<(Sexp, Sexp)> = Vec::new();
+    let mut virtual_class = false;
+    if !eval::is_missing(install("slots")?, frame)? {
+        if !eval::is_missing(install("representation")?, frame)? {
+            bail!(skip);
+        }
+        let Some(slots) = forced_arg(frame, "slots")? else {
+            bail!(skip);
+        };
+        let Some(pairs) = named_classes(slots) else {
+            bail!(skip);
+        };
+        own = pairs;
+    } else if !eval::is_missing(install("representation")?, frame)? {
+        let Some(representation) = forced_arg(frame, "representation")? else {
+            bail!(skip);
+        };
+        if is_plain_name(representation) && representation.element(0).bytes() == b"VIRTUAL" {
+            virtual_class = true;
+        } else {
+            let Some(pairs) = named_classes(representation) else {
+                bail!(skip);
+            };
+            own = pairs;
+        }
+    }
+    let contains = if eval::is_missing(install("contains")?, frame)? {
+        alloc_strings(0)?
+    } else {
+        match forced_arg(frame, "contains")? {
+            Some(contains) => contains,
+            None => bail!(skip),
+        }
+    };
+    if contains.kind() != SexpType::String || contains.attrib() != nil() {
+        bail!(skip);
+    }
+    let prototype = if eval::is_missing(install("prototype")?, frame)? {
+        None
+    } else {
+        match forced_arg(frame, "prototype")? {
+            Some(value) if value == nil() => None,
+            Some(value) => Some(value),
+            None => bail!(skip),
+        }
+    };
+    let prototype_names = match prototype {
+        None => Vec::new(),
+        Some(list) => {
+            let names = values::names(list);
+            if list.kind() != SexpType::List
+                || list.has_gp(gp::S4_OBJECT)
+                || names.kind() != SexpType::String
+                || list.attrib().cdr() != nil()
+            {
+                bail!(skip);
+            }
+            let names: Vec<Sexp> = (0..length(list))
+                .map(|index| names.element(index))
+                .collect();
+            if !distinct_names(&names) {
+                bail!(skip);
+            }
+            names
+        }
+    };
+    if virtual_class && (length(contains) > 0 || prototype.is_some()) {
+        bail!(skip);
+    }
+    if !virtual_class && own.is_empty() && length(contains) == 0 {
+        bail!(skip);
+    }
+
+    let mut supers: Vec<Super> = Vec::new();
+    for index in 0..length(contains) {
+        let super_name = contains.element(index);
+        if super_name == values::na_string()
+            || supers
+                .iter()
+                .any(|known| known.name.bytes() == super_name.bytes())
+            || super_name.bytes() == name.bytes()
+        {
+            bail!(skip);
+        }
+        let Some(definition) = local_class(super_name, package, place)? else {
+            bail!(skip);
+        };
+        let superclasses = slot(definition, "contains")?;
+        if index > 0 && length(superclasses) > 0 {
+            bail!(skip);
+        }
+        supers.push(Super {
+            name: super_name,
+            definition,
+        });
+    }
+    // The superclasses of the first superclass, which the new class extends through it.
+    let mut ancestors: Vec<Super> = Vec::new();
+    if let Some(first) = supers.first() {
+        let extensions = slot(first.definition, "contains")?;
+        let extension_names = values::names(extensions);
+        for index in 0..length(extensions) {
+            let ancestor_name = extension_names.element(index);
+            if supers
+                .iter()
+                .any(|known| known.name.bytes() == ancestor_name.bytes())
+            {
+                bail!(skip);
+            }
+            let Some(definition) = local_class(ancestor_name, package, place)? else {
+                bail!(skip);
+            };
+            if !plain_extension(extensions.element(index))? {
+                bail!(skip);
+            }
+            ancestors.push(Super {
+                name: ancestor_name,
+                definition,
+            });
+        }
+    }
+    let mut lineage: Vec<Sexp> = supers.iter().map(|known| known.name).collect();
+    lineage.extend(ancestors.iter().map(|known| known.name));
+    for known in supers.iter().chain(&ancestors) {
+        let subclasses = slot(known.definition, "subclasses")?;
+        if element(subclasses, name.bytes()).is_some() || !closed_subclasses(subclasses)? {
+            bail!(skip);
+        }
+    }
+    if let Some(needed) = methods_value(".NeedPrimitiveMethods")? {
+        let needed = values::names(needed);
+        if lineage
+            .iter()
+            .any(|known| position_of(needed, known.bytes()).is_some())
+        {
+            bail!(skip);
+        }
+    } else {
+        bail!(skip);
+    }
+    if !definition_caches(name.bytes(), &lineage, prototype.is_some())? {
+        bail!(skip);
+    }
+
+    // The slots: the class's own, then each superclass's, which include their superclasses'.
+    let package_symbol = install("package")?;
+    let mut slots: Vec<(Sexp, Sexp)> = Vec::with_capacity(own.len());
+    for &(slot_name, slot_class) in &own {
+        let Some(definition) = cached_class(values::scalar_string_charsxp(slot_class)?)? else {
+            bail!(skip);
+        };
+        let qualified = values::scalar_string_charsxp(slot_class)?;
+        values::set_attr(qualified, package_symbol, slot(definition, "package")?)?;
+        slots.push((slot_name, qualified));
+    }
+    for known in &supers {
+        let super_slots = slot(known.definition, "slots")?;
+        let super_names = values::names(super_slots);
+        for index in 0..length(super_slots) {
+            let slot_name = super_names.element(index);
+            if matches!(slot_name.bytes(), b".Data" | b".S3Class")
+                || slots
+                    .iter()
+                    .any(|&(known, _)| known.bytes() == slot_name.bytes())
+            {
+                bail!(skip);
+            }
+            slots.push((slot_name, super_slots.element(index)));
+        }
+    }
+    if !virtual_class && slots.is_empty() {
+        bail!(skip);
+    }
+    if prototype_names
+        .iter()
+        .any(|&prototype_name| !slots.iter().any(|&(known, _)| known == prototype_name))
+    {
+        bail!(skip);
+    }
+
+    let Some(default_prototype) = methods_value(".defaultPrototype")? else {
+        bail!(skip);
+    };
+    let prototype_object = values::duplicate(default_prototype)?;
+    if let Some(list) = prototype {
+        for (index, &prototype_name) in prototype_names.iter().enumerate() {
+            let value = list.element(index);
+            let stored = if value == nil() { s4_null()? } else { value };
+            values::set_attr(prototype_object, install_text(prototype_name)?, stored)?;
+        }
+    }
+    // Without a prototype list, `reconcilePropertiesAndPrototype()` fills the missing own slots
+    // before `defaultPrototype()` copies the superclasses' slots. With one, it turns the list
+    // into a `classPrototypeDef` and fills them in as attributes of that wrapper instead, so the
+    // object gets them only after the superclasses' slots.
+    let own_first = prototype.is_none();
+    for phase in [true, false] {
+        if phase == own_first {
+            for &(slot_name, slot_class) in &own {
+                let symbol = install_text(slot_name)?;
+                if has_attribute(prototype_object, symbol) {
+                    continue;
+                }
+                let Some(value) = try_new(slot_class, place)? else {
+                    bail!(skip);
+                };
+                let stored = if value == nil() { s4_null()? } else { value };
+                values::set_attr(prototype_object, symbol, stored)?;
+            }
+        } else {
+            for known in &supers {
+                let super_prototype = slot(known.definition, "prototype")?;
+                let super_slots = values::names(slot(known.definition, "slots")?);
+                for index in 0..length(super_slots) {
+                    let symbol = install_text(super_slots.element(index))?;
+                    if !has_attribute(prototype_object, symbol) {
+                        values::set_attr(
+                            prototype_object,
+                            symbol,
+                            get_attr(super_prototype, symbol),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    for &(slot_name, slot_class) in &slots {
+        let value = get_attr(prototype_object, install_text(slot_name)?);
+        if value == s4_null()? {
+            continue;
+        }
+        let Some(class_definition) =
+            cached_class(values::scalar_string_charsxp(slot_class.element(0))?)?
+        else {
+            bail!(skip);
+        };
+        if is_true(slot(class_definition, "virtual")?) {
+            continue;
+        }
+        let value_class = dispatch::class_of(value)?;
+        let first = values::scalar_string_charsxp(value_class.element(0))?;
+        if name_extends(first, cached_class(first)?, slot_class.element(0).bytes())? != Some(true) {
+            bail!(skip);
+        }
+    }
+    prototype_object.set_gp_bits(gp::S4_OBJECT, true);
+
+    let Some(representation_class) = cached_class(values::scalar_string("classRepresentation")?)?
+    else {
+        bail!(skip);
+    };
+    let Some(extension_class) = cached_class(values::scalar_string("SClassExtension")?)? else {
+        bail!(skip);
+    };
+    let class_name = values::scalar_string_charsxp(name)?;
+    values::set_attr(class_name, package_symbol, package)?;
+
+    // The direct extensions, as `setIs()` makes them once the class is complete.
+    let slot_names: Vec<Sexp> = slots.iter().map(|&(slot_name, _)| slot_name).collect();
+    let mut directs: Vec<Sexp> = Vec::with_capacity(supers.len());
+    for known in &supers {
+        let extension = direct_extension(
+            extension_class,
+            class_name,
+            package,
+            &slot_names,
+            known,
+            place,
+        )?;
+        directs.push(extension);
+    }
+    // The extensions through the first superclass: one in the new class's `contains`, and one
+    // in each ancestor's `subclasses`, whose replace method names the superclass with its
+    // package.
+    let mut through_contains = Vec::with_capacity(ancestors.len());
+    let mut through_subclasses = Vec::with_capacity(ancestors.len());
+    if let (Some(first), Some(&direct)) = (supers.first(), directs.first()) {
+        let extensions = slot(first.definition, "contains")?;
+        let first_class_name = slot(first.definition, "className")?;
+        for (index, ancestor) in ancestors.iter().enumerate() {
+            let to_extension = extensions.element(index);
+            let plain = values::scalar_string_charsxp(first.name)?;
+            through_contains.push(combine_extensions(
+                direct,
+                to_extension,
+                plain,
+                ancestor.name,
+                first,
+            )?);
+            through_subclasses.push(combine_extensions(
+                direct,
+                to_extension,
+                first_class_name,
+                ancestor.name,
+                first,
+            )?);
+        }
+    }
+
+    let mut contains_entries: Vec<(Sexp, Sexp)> = supers
+        .iter()
+        .zip(&directs)
+        .map(|(known, &extension)| (known.name, extension))
+        .collect();
+    contains_entries.extend(
+        ancestors
+            .iter()
+            .zip(&through_contains)
+            .map(|(known, &extension)| (known.name, extension)),
+    );
+    sort_by_distance(&mut contains_entries)?;
+    let contains_list = if virtual_class {
+        named_list(&[])?
+    } else if contains_entries.is_empty() {
+        values::alloc(SexpType::List, 0)?
+    } else {
+        named_list(&contains_entries)?
+    };
+    let slots_list = if slots.is_empty() {
+        values::alloc(SexpType::List, 0)?
+    } else {
+        named_list(&slots)?
+    };
+    let definition = crate::methods::new_object(representation_class)?;
+    crate::heap().root(definition);
+    let version = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
+    crate::heap().root(version);
+    for (slot_name, value) in [
+        ("className", class_name),
+        ("slots", slots_list),
+        ("contains", contains_list),
+        ("prototype", prototype_object),
+        ("virtual", values::scalar_bool(virtual_class)?),
+        ("validity", nil()),
+        ("access", values::alloc(SexpType::List, 0)?),
+        ("package", package),
+        ("versionKey", version),
+        ("sealed", values::scalar_bool(false)?),
+        ("subclasses", values::alloc(SexpType::List, 0)?),
+    ] {
+        crate::subset::assign_slot(definition, install(slot_name)?, value)?;
+    }
+
+    for (known, &direct) in supers.iter().zip(&directs) {
+        let mut subclasses = list_entries(slot(known.definition, "subclasses")?);
+        subclasses.push((name, direct));
+        sort_by_distance(&mut subclasses)?;
+        record_subclasses(known, &subclasses, place, class_table)?;
+    }
+    for (known, &extension) in ancestors.iter().zip(&through_subclasses) {
+        let mut subclasses = list_entries(slot(known.definition, "subclasses")?);
+        subclasses.push((name, extension));
+        record_subclasses(known, &subclasses, place, class_table)?;
+    }
+    eval::define(meta, definition, place)?;
+    eval::define(install_text(name)?, definition, class_table)?;
+    if !supers.is_empty() {
+        cache_extends(name, contains_list)?;
+    }
+
+    let generator_formals = cons_tagged(missing_arg(), nil(), symbols().dots)?;
+    let generator_body = lcons(
+        install("new")?,
+        cons(class_name, cons(symbols().dots, nil())?)?,
+    )?;
+    let generator = values::triple(SexpType::Closure, generator_formals, generator_body, place)?;
+    for (attribute, value) in [
+        ("className", class_name),
+        ("package", package),
+        ("class", methods_class("classGeneratorFunction")?),
+    ] {
+        values::set_attr(generator, install(attribute)?, value)?;
+    }
+    generator.set_gp_bits(gp::S4_OBJECT, true);
+    Ok(generator)
+}
+
+/// A class the new one extends, by name, with its definition.
+struct Super {
+    name: Sexp,
+    definition: Sexp,
+}
+
+/// The definition of the class `name` when `setIs()` may rebind it in `place`: a plain class
+/// of `package` that is bound there, unsealed, without a data part, a test or a coercion of
+/// its own toward its superclasses, and with a prototype for a virtual class to give its
+/// subclasses.
+unsafe fn local_class(name: Sexp, package: Sexp, place: Sexp) -> R<Option<Sexp>> {
+    let Some(definition) = cached_class(values::scalar_string_charsxp(name)?)? else {
+        return Ok(None);
+    };
+    let meta = class_meta_symbol(name.bytes())?;
+    if !is_plain_representation(definition)
+        || quiet_value(meta, place)? != Some(definition)
+        || !assignable(place, meta)
+        || slot_text(definition, "package")? != package.element(0).bytes()
+        || !is_false(slot(definition, "sealed")?)
+        || element(slot(definition, "slots")?, b".Data").is_some()
+        || element(slot(definition, "slots")?, b".S3Class").is_some()
+    {
+        return Ok(None);
+    }
+    let contains = slot(definition, "contains")?;
+    for index in 0..length(contains) {
+        if !plain_extension(contains.element(index))? {
+            return Ok(None);
+        }
+    }
+    let is_virtual = is_true(slot(definition, "virtual")?);
+    if is_virtual && slot(definition, "prototype")? == nil() {
+        return Ok(None);
+    }
+    if !is_virtual && length(slot(definition, "slots")?) == 0 {
+        return Ok(None);
+    }
+    Ok(Some(definition))
+}
+
+/// Whether an extension is a simple `SClassExtension` that is not to a data part.
+unsafe fn plain_extension(extension: Sexp) -> R<bool> {
+    let class = values::class_attr(extension);
+    Ok(length(class) == 1
+        && class.element(0).bytes() == b"SClassExtension"
+        && simple(extension)?
+        && is_false(slot(extension, "dataPart")?))
+}
+
+/// Whether `.walkClassGraph()` over a class's `subclasses` finds nothing to add: every
+/// subclass of a direct subclass is already listed.
+unsafe fn closed_subclasses(subclasses: Sexp) -> R<bool> {
+    let names = values::names(subclasses);
+    for index in 0..length(subclasses) {
+        let extension = subclasses.element(index);
+        let class = values::class_attr(extension);
+        if length(class) != 1 || class.element(0).bytes() != b"SClassExtension" {
+            return Ok(false);
+        }
+        if length(slot(extension, "by")?) > 0 {
+            continue;
+        }
+        let Some(definition) = cached_class(values::scalar_string_charsxp(names.element(index))?)?
+        else {
+            return Ok(false);
+        };
+        let deeper = values::names(slot(definition, "subclasses")?);
+        for inner in 0..length(deeper) {
+            if position_of(names, deeper.element(inner).bytes()).is_none() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Whether the dispatch caches the R code fills while defining the class are full already,
+/// and no coerce method from the new class to the classes it extends exists for `setIs()` to
+/// replace.
+unsafe fn definition_caches(name: &[u8], lineage: &[Sexp], prototype: bool) -> R<bool> {
+    let Some(generics) = methods_value(".genericTable")? else {
+        return Ok(false);
+    };
+    if generics.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    let mut initialize_labels = vec![&b"classRepresentation"[..], b"SClassExtension"];
+    if prototype {
+        initialize_labels.push(b"classPrototypeDef");
+    }
+    let requirements: [(&str, &[&[u8]]); 3] = [
+        ("initialize", &initialize_labels),
+        (
+            "coerce",
+            &[b"NULL#OptionalFunction", b"function#classGeneratorFunction"],
+        ),
+        ("coerce<-", &[b"classGeneratorFunction#function"]),
+    ];
+    for (generic_name, labels) in requirements {
+        if generic_name != "initialize" && quiet_value(install(generic_name)?, generics)?.is_none()
+        {
+            return Ok(false);
+        }
+        let Some((methods_table, all_table)) = generic_tables(generic_name)? else {
+            return Ok(false);
+        };
+        for label in labels {
+            if quiet_value(values::install_bytes(label)?, all_table)?.is_none() {
+                return Ok(false);
+            }
+        }
+        if generic_name != "initialize" {
+            for known in lineage {
+                let mut label = name.to_vec();
+                label.push(b'#');
+                label.extend_from_slice(known.bytes());
+                let symbol = values::install_bytes(&label)?;
+                if crate::heap().frame_cell(methods_table, symbol).is_some()
+                    || crate::heap().frame_cell(all_table, symbol).is_some()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The `.MTable` and `.AllMTable` of a generic of the methods package.
+unsafe fn generic_tables(generic_name: &str) -> R<Option<(Sexp, Sexp)>> {
+    let Some(generic) = methods_value(generic_name)? else {
+        return Ok(None);
+    };
+    if generic.kind() != SexpType::Closure {
+        return Ok(None);
+    }
+    let (Some(methods_table), Some(all_table)) = (
+        quiet_value(install(".MTable")?, generic.tag())?,
+        quiet_value(install(".AllMTable")?, generic.tag())?,
+    ) else {
+        return Ok(None);
+    };
+    if methods_table.kind() != SexpType::Environment || all_table.kind() != SexpType::Environment {
+        return Ok(None);
+    }
+    Ok(Some((methods_table, all_table)))
+}
+
+/// `tryNew(class, where)` for a defined slot class: a virtual class's prototype, or `new()` of
+/// the class when no `initialize` method of its own could fail without arguments. `None` when
+/// that needs R code that could fail.
+unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
+    let Some(definition) = cached_class(values::scalar_string_charsxp(class)?)? else {
+        return Ok(None);
+    };
+    if is_true(slot(definition, "virtual")?) {
+        return slot(definition, "prototype").map(Some);
+    }
+    let Some((methods_table, _)) = generic_tables("initialize")? else {
+        return Ok(None);
+    };
+    let contained = values::names(slot(definition, "contains")?);
+    let mut labels = vec![class.bytes()];
+    labels.extend((0..length(contained)).map(|index| contained.element(index).bytes()));
+    for label in labels {
+        if crate::heap()
+            .frame_cell(methods_table, values::install_bytes(label)?)
+            .is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let Some(new) = methods_value("new")? else {
+        return Ok(None);
+    };
+    eval::eval(values::call(new, &[definition])?, place).map(Some)
+}
+
+/// The extension from the new class to a superclass that `makeExtends()` makes once the class
+/// is complete: a simple one, whose coerce method rebuilds or relabels the object and whose
+/// replace method copies the superclass's slots back. To a virtual class, it coerces by
+/// returning the object and replaces only with a value of that class.
+unsafe fn direct_extension(
+    extension_class: Sexp,
+    class_name: Sexp,
+    package: Sexp,
+    slot_names: &[Sexp],
+    known: &Super,
+    place: Sexp,
+) -> R<Sexp> {
+    let super_name = slot(known.definition, "className")?;
+    let (Some(simple_coerce), Some(simple_test), Some(simple_replace)) = (
+        methods_value(".simpleExtCoerce")?,
+        methods_value(".simpleExtTest")?,
+        methods_value(".simpleExtReplace")?,
+    ) else {
+        return Err(crate::unwind::error(
+            "the methods package lacks its extension functions",
+        ));
+    };
+    let (coerce, replace) = if is_true(slot(known.definition, "virtual")?) {
+        let body = template(
+            Template::ReplaceVirtual,
+            &[("FROM", class_name), ("TO", super_name)],
+        )?;
+        let replace = values::triple(SexpType::Closure, simple_replace.car(), body, place)?;
+        (simple_coerce, replace)
+    } else {
+        let super_slots = values::names(slot(known.definition, "slots")?);
+        let same_slots = slot_names.len() == length(super_slots)
+            && slot_names
+                .iter()
+                .all(|slot_name| position_of(super_slots, slot_name.bytes()).is_some());
+        let coerce_body = if same_slots {
+            template(Template::CoerceSame, &[("CLASS", super_name)])?
+        } else {
+            template(
+                Template::CoerceNew,
+                &[
+                    ("CLASS", values::scalar_string_charsxp(known.name)?),
+                    ("TOSLOTS", super_slots),
+                ],
+            )?
+        };
+        let replace_body = template(Template::ReplaceSlots, &[("TOSLOTS", super_slots)])?;
+        (
+            values::triple(SexpType::Closure, simple_coerce.car(), coerce_body, place)?,
+            values::triple(SexpType::Closure, simple_replace.car(), replace_body, place)?,
+        )
+    };
+    let extension = crate::methods::new_object(extension_class)?;
+    crate::heap().root(extension);
+    for (slot_name, value) in [
+        ("subClass", class_name),
+        ("superClass", super_name),
+        ("package", package),
+        ("coerce", coerce),
+        ("test", simple_test),
+        ("replace", replace),
+        ("simple", values::scalar_bool(true)?),
+        ("by", alloc_strings(0)?),
+        ("dataPart", values::scalar_bool(false)?),
+        ("distance", values::scalar_real(1.0)?),
+    ] {
+        crate::subset::assign_slot(extension, install(slot_name)?, value)?;
+    }
+    Ok(extension)
+}
+
+/// `.combineExtends(by_extension, to_extension, by, to, TRUE)` for two simple extensions that
+/// are not to a data part: from the new class through `known` (named `by`) to the class `to`.
+unsafe fn combine_extensions(
+    by_extension: Sexp,
+    to_extension: Sexp,
+    by: Sexp,
+    to: Sexp,
+    known: &Super,
+) -> R<Sexp> {
+    let from = install("from")?;
+    let to_coerce = slot(to_extension, "coerce")?;
+    let to_body = crate::bytecode::closure_body(to_coerce);
+    let by_body = crate::bytecode::closure_body(slot(by_extension, "coerce")?);
+    let coerce_body = if by_body == from && to_body == from {
+        from
+    } else {
+        template(Template::CombineCoerce, &[("E1", by_body), ("E2", to_body)])?
+    };
+    let coerce = values::triple(
+        SexpType::Closure,
+        to_coerce.car(),
+        coerce_body,
+        to_coerce.tag(),
+    )?;
+    let by_replace = slot(by_extension, "replace")?;
+    let by_replace_body = crate::bytecode::closure_body(by_replace);
+    let replace_body = if is_true(slot(known.definition, "virtual")?) {
+        let skip_replace = slot(to_extension, "replace")?;
+        template(
+            Template::CombineReplaceVirtual,
+            &[
+                ("BODY", crate::bytecode::closure_body(skip_replace)),
+                ("TO", slot(by_extension, "subClass")?),
+            ],
+        )?
+    } else {
+        template(
+            Template::CombineReplace,
+            &[
+                ("BY", by),
+                ("TO", values::scalar_string_charsxp(to)?),
+                ("STRICT", values::scalar_bool(true)?),
+                ("BYEXPR", by_replace_body),
+            ],
+        )?
+    };
+    let replace = values::triple(
+        SexpType::Closure,
+        by_replace.car(),
+        replace_body,
+        by_replace.tag(),
+    )?;
+    let distance = values::as_real_scalar(slot(to_extension, "distance")?)
+        + values::as_real_scalar(slot(by_extension, "distance")?);
+    let combined = values::shallow_duplicate(to_extension)?;
+    crate::heap().root(combined);
+    for (slot_name, value) in [
+        ("coerce", coerce),
+        ("replace", replace),
+        ("by", slot(to_extension, "subClass")?),
+        ("subClass", slot(by_extension, "subClass")?),
+        ("distance", values::scalar_real(distance)?),
+        ("package", slot(by_extension, "package")?),
+    ] {
+        crate::subset::assign_slot(combined, install(slot_name)?, value)?;
+    }
+    Ok(combined)
+}
+
+/// Rebinds the definition of a class the new one extends, with `subclasses` as its list of
+/// subclasses, where it lives and in the class cache, as `assignClassDef()` does.
+unsafe fn record_subclasses(
+    known: &Super,
+    subclasses: &[(Sexp, Sexp)],
+    place: Sexp,
+    class_table: Sexp,
+) -> R<()> {
+    let definition = values::shallow_duplicate(known.definition)?;
+    crate::heap().root(definition);
+    crate::subset::assign_slot(definition, install("subclasses")?, named_list(subclasses)?)?;
+    eval::define(class_meta_symbol(known.name.bytes())?, definition, place)?;
+    eval::define(install_text(known.name)?, definition, class_table)?;
+    cache_extends(known.name, slot(definition, "contains")?)
+}
+
+/// `.cache_class(name, extends(definition))`: the class and the names of what it extends.
+unsafe fn cache_extends(name: Sexp, contains: Sexp) -> R<()> {
+    let contained = values::names(contains);
+    let count = if contained.kind() == SexpType::String {
+        length(contained)
+    } else {
+        0
+    };
+    let extends = alloc_strings(count + 1)?;
+    let heap = crate::heap();
+    heap.set_element(extends, 0, name);
+    for index in 0..count {
+        heap.set_element(extends, index + 1, contained.element(index));
+    }
+    interp()
+        .globals
+        .s4_extends
+        .insert(name.bytes().into(), extends);
+    Ok(())
+}
+
+/// The slot names and classes of a `slots` argument or a `representation` list: a character
+/// vector or a list of single strings, every element named, the names distinct.
+unsafe fn named_classes(value: Sexp) -> Option<Vec<(Sexp, Sexp)>> {
+    let names = values::names(value);
+    if names.kind() != SexpType::String
+        || value.attrib().cdr() != nil()
+        || value.has_gp(gp::S4_OBJECT)
+        || length(value) == 0
+    {
+        return None;
+    }
+    let mut pairs = Vec::with_capacity(length(value));
+    for index in 0..length(value) {
+        let class = match value.kind() {
+            SexpType::String => value.element(index),
+            SexpType::List => {
+                let item = value.element(index);
+                if !is_plain_name(item) {
+                    return None;
+                }
+                item.element(0)
+            }
+            _ => return None,
+        };
+        if class == values::na_string() || class.bytes().is_empty() {
+            return None;
+        }
+        pairs.push((names.element(index), class));
+    }
+    let slot_names: Vec<Sexp> = pairs.iter().map(|&(slot_name, _)| slot_name).collect();
+    if !distinct_names(&slot_names)
+        || slot_names
+            .iter()
+            .any(|slot_name| matches!(slot_name.bytes(), b".Data" | b"class" | b".S3Class"))
+    {
+        return None;
+    }
+    Some(pairs)
+}
+
+/// Whether names are non-empty, not `NA` and distinct.
+unsafe fn distinct_names(names: &[Sexp]) -> bool {
+    names.iter().enumerate().all(|(index, &name)| {
+        name != values::na_string()
+            && !name.bytes().is_empty()
+            && !names[..index]
+                .iter()
+                .any(|earlier| earlier.bytes() == name.bytes())
+    })
+}
+
+/// Whether `symbol` is bound in `env` or an environment it encloses.
+unsafe fn bound_from(symbol: Sexp, env: Sexp) -> bool {
+    let mut frame = env;
+    while frame != values::empty_env() {
+        if crate::heap().frame_cell(frame, symbol).is_some() {
+            return true;
+        }
+        frame = frame.enclosure();
+    }
+    false
+}
+
+/// `classMetaName(name)`: the symbol `.__C__name`.
+unsafe fn class_meta_symbol(name: &[u8]) -> R<Sexp> {
+    let mut text = b".__C__".to_vec();
+    text.extend_from_slice(name);
+    values::install_bytes(&text)
+}
+
+/// The names and elements of a list.
+unsafe fn list_entries(list: Sexp) -> Vec<(Sexp, Sexp)> {
+    let names = values::names(list);
+    if list.kind() != SexpType::List || names.kind() != SexpType::String {
+        return Vec::new();
+    }
+    (0..length(list))
+        .map(|index| (names.element(index), list.element(index)))
+        .collect()
+}
+
+unsafe fn named_list(entries: &[(Sexp, Sexp)]) -> R<Sexp> {
+    let heap = crate::heap();
+    let list = values::alloc(SexpType::List, entries.len())?;
+    let names = alloc_strings(entries.len())?;
+    for (index, &(name, value)) in entries.iter().enumerate() {
+        heap.set_element(list, index, value);
+        heap.set_element(names, index, name);
+    }
+    values::set_attr(list, symbols().names, names)?;
+    Ok(list)
+}
+
+/// Orders extensions by distance, keeping the order of equal ones, as `sort.list()` does.
+unsafe fn sort_by_distance(entries: &mut [(Sexp, Sexp)]) -> R<()> {
+    let mut keyed = Vec::with_capacity(entries.len());
+    for &(name, extension) in entries.iter() {
+        let distance = values::as_real_scalar(slot(extension, "distance")?);
+        keyed.push((distance, name, extension));
+    }
+    keyed.sort_by(|left, right| left.0.total_cmp(&right.0));
+    for (entry, (_, name, extension)) in entries.iter_mut().zip(keyed) {
+        *entry = (name, extension);
+    }
+    Ok(())
+}
+
+/// The R expressions the native class definitions fill in, in the order of
+/// `METHODS_TEMPLATES`.
+#[derive(Clone, Copy)]
+enum Template {
+    CoerceSame,
+    CoerceNew,
+    ReplaceSlots,
+    ReplaceVirtual,
+    CombineCoerce,
+    CombineReplaceVirtual,
+    CombineReplace,
+}
+
+/// The expressions of `.simpleCoerceExpr()`, `.simpleReplaceExpr()`, `makeExtends()` and
+/// `.combineExtends()` in R 4.6, with the placeholders their `substitute()` calls fill in.
+const METHODS_TEMPLATES: &str = r#"list(
+    quote({class(from) <- CLASS; from}),
+    quote({ value <- methods::new(CLASS)
+            for(what in TOSLOTS)
+                methods::slot(value, what) <- methods::slot(from, what)
+            value }),
+    quote({
+        for(what in TOSLOTS)
+            methods::slot(from, what) <- methods::slot(value, what)
+        from
+    }),
+    quote({
+        if(!is(value, TO))
+            stop(gettextf("the computation: 'as(object,\"%s\") <- value' is valid when object has class %s only if 'is(value, \"%s\")' is TRUE ('class(value)' was %s)\n",
+                 TO, dQuote(FROM), TO, dQuote(class(value))), domain = NA)
+        value
+    }),
+    quote({from <- E1; E2}),
+    quote(methods::as(BODY, TO)),
+    quote({
+        .value <- methods::as(from, BY, STRICT)
+        methods::as(.value, TO) <- value
+        value <- .value
+        BYEXPR
+    })
+)"#;
+
+/// The template `which` with its placeholders replaced, as `substitute()` replaces them: every
+/// call is copied and the values go in as they are.
+unsafe fn template(which: Template, bindings: &[(&str, Sexp)]) -> R<Sexp> {
+    let templates = interp().globals.methods_templates;
+    if templates.kind() != SexpType::List || length(templates) <= which as usize {
+        return Err(crate::unwind::error("the methods templates are not loaded"));
+    }
+    let mut symbols = Vec::with_capacity(bindings.len());
+    for &(placeholder, value) in bindings {
+        symbols.push((install(placeholder)?, value));
+    }
+    substitute_symbols(templates.element(which as usize), &symbols)
+}
+
+unsafe fn substitute_symbols(expression: Sexp, bindings: &[(Sexp, Sexp)]) -> R<Sexp> {
+    match expression.kind() {
+        SexpType::Symbol => Ok(bindings
+            .iter()
+            .find(|&&(symbol, _)| symbol == expression)
+            .map_or(expression, |&(_, value)| value)),
+        SexpType::Language | SexpType::Pairlist => {
+            let head = substitute_symbols(expression.car(), bindings)?;
+            let rest = substitute_symbols(expression.cdr(), bindings)?;
+            values::triple(expression.kind(), head, rest, expression.tag())
+        }
+        _ => Ok(expression),
+    }
+}
+
+/// Whether the native definitions are on. Setting `RY_METHODS_NATIVE=0` makes every
+/// definition run its R code, for comparing the two.
+fn native_definitions() -> bool {
+    static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NATIVE.get_or_init(|| std::env::var_os("RY_METHODS_NATIVE").is_none_or(|value| value != "0"))
+}
+
 // Definition helpers.
 
 /// The value of the argument `name` in `frame`, forced as the R body forces it at this point,
@@ -1580,8 +2579,7 @@ unsafe fn is_plain_name(value: Sexp) -> bool {
 /// The value bound to `name` in the methods namespace. Its bindings are lazy-load promises, and
 /// forcing one only reads the saved value, as the R code reading the variable would.
 unsafe fn methods_value(name: &str) -> R<Option<Sexp>> {
-    let Some(cell) =
-        crate::heap().frame_cell(interp().globals.methods_namespace, install(name)?)
+    let Some(cell) = crate::heap().frame_cell(interp().globals.methods_namespace, install(name)?)
     else {
         return Ok(None);
     };
@@ -1762,7 +2760,11 @@ unsafe fn s4_null() -> R<Sexp> {
 /// A class attribute for a class of the methods package.
 unsafe fn methods_class(class: &str) -> R<Sexp> {
     let value = values::scalar_string(class)?;
-    values::set_attr(value, install("package")?, values::scalar_string("methods")?)?;
+    values::set_attr(
+        value,
+        install("package")?,
+        values::scalar_string("methods")?,
+    )?;
     Ok(value)
 }
 
