@@ -397,6 +397,19 @@ nursery's budget for small objects scales with the old small objects only, as GN
 trigger ignores vector memory, so a few big live vectors do not let as many bytes of small garbage
 pile up.
 
+Reference counts also free large temporaries before any collection finds them. A store that
+drops a list's or a large atomic vector's count to zero puts it in a zero-count table, and once the
+table's vectors add up to 4 MB, the next allocation reconciles it. Reconciling marks the roots one
+level deep (the protect stack, the precious set, handles, the interpreter's frames and bytecode
+registers, the fields of objects whose stores do not count, and the elements of lists native code
+has seen). Then it frees each entry still at zero and unmarked, so a dead list gives up its
+elements and a dead large vector's mapping goes back at once. It runs only at an allocation because
+C code may hold an unprotected `SEXP` until its next one. Environments, closures and promises stay
+with the tracing collector, which also takes care of cycles. Counts only ever overcount, so a
+missed decrement leaves an object to tracing and never frees one early. `RY_GC_VERIFY=1` makes a
+reconcile free nothing and run a full collection instead, which panics if the collection reaches an
+object the reconcile would have freed.
+
 Vectors of a megabyte or more get an anonymous mapping each (`crates/heap/src/large.rs`), which
 goes back to the kernel when the vector dies, as glibc's `mmap` threshold returns GNU R's large
 vectors. libR's global allocator does the same for its own blocks of that size, so the buffers a

@@ -294,7 +294,9 @@ pub struct GcPolicy {
     pub min_heap_limit: usize,
     pub growth: HeapGrowth,
     pub stress: GcStress,
-    /// Checks the write barrier's invariant before every minor collection (`RY_GC_VERIFY`).
+    /// Checks the write barrier's invariant before every minor collection, and replaces each
+    /// reconcile's frees with a full collection that panics if it reaches one of them
+    /// (`RY_GC_VERIFY`).
     pub verify: bool,
     /// Adds each collection's processor and elapsed time to the statistics, which `gc.time()`
     /// turns on.
@@ -2265,10 +2267,11 @@ impl Heap {
     }
 
     /// Frees a large atomic vector a reconcile found dead. Its bytes stay counted until a collection
-    /// recounts them (a minor one for a young vector, a major one for an old one), so a reconcile returns pages early without moving the
-    /// collections. Uncounting them would put the next collection off, and the dead temporaries
-    /// only a collection finds, such as a forced promise's value, would pile up meanwhile: a
-    /// loop of `y <- rep(runif(1e6), 10)` then peaked a quarter higher.
+    /// recounts them (a minor one for a young vector, a major one for an old one), so a reconcile
+    /// returns pages early without moving the collections. Uncounting them would put the next
+    /// collection off, and the dead temporaries only a collection finds, such as a forced
+    /// promise's value, would pile up meanwhile: a loop of `y <- rep(runif(1e6), 10)` then peaked
+    /// a quarter higher.
     unsafe fn free_released(&mut self, object: Sexp) {
         if object.gc_bits() & gc_bits::MARK == 0
             && let Some(position) = self.young_large.iter().rposition(|&young| young == object)
