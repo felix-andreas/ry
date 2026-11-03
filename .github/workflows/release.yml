@@ -1,13 +1,10 @@
-# Staged here because the agents' token cannot write .github/workflows. Activate it, together with
-# the CI workflow beside it, from the repository root:
-#
-#   git mv -f .github/pending/workflows/* .github/workflows/ && rm -r .github/pending
-#
 # A release runs when a version tag is pushed (`git tag 0.4.0-beta && git push origin 0.4.0-beta`)
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
-# and smoke-tests every archive without publishing anything. The checklist and the one-time
-# Marketplace setup are in docs/src/content/docs/contributing/releasing.md. Past runner setup,
-# every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs locally.
+# and smoke-tests every archive without publishing anything. A run started by hand can also limit
+# the release to Linux (`platforms`) and leave out the VS Code extension (`vscode`). The checklist
+# and the one-time Marketplace setup are in docs/src/content/docs/contributing/releasing.md. Past
+# runner setup, every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs
+# locally.
 name: Release
 
 on:
@@ -20,6 +17,15 @@ on:
         required: true
       publish:
         description: "Publish the GitHub release and the VS Code extension (unticked builds and smoke-tests only)"
+        type: boolean
+        default: true
+      platforms:
+        description: "Platforms to build and release (a tag push always builds all)"
+        type: choice
+        options: [all, linux]
+        default: all
+      vscode:
+        description: "Package and publish the VS Code extension"
         type: boolean
         default: true
 
@@ -36,14 +42,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # ubuntu-22.04 is the oldest supported runner, so the Linux archive needs no newer glibc than
+      # 2.35. The Windows target is gnullvm because it links the UCRT, as Rtools-built packages do,
+      # so ry.exe, R.dll and package DLLs share one C runtime. The `linux` choice of `platforms`
+      # keeps the Linux entry alone.
       matrix:
-        include:
-          # The oldest supported runner, so the Linux archive needs no newer glibc than 2.35.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: macos-14, target: aarch64-apple-darwin }
-          # gnullvm links the UCRT, as Rtools-built packages do, so ry.exe, R.dll and package DLLs
-          # share one C runtime.
-          - { os: windows-latest, target: x86_64-pc-windows-gnullvm }
+        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-14","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-gnullvm"}]') }}
     defaults:
       run:
         shell: bash
@@ -128,6 +132,7 @@ jobs:
           path: release/${{ env.VERSION }}
           merge-multiple: true
       - name: package the VS Code extension
+        if: github.event_name == 'push' || inputs.vscode
         run: just release-assets "$VERSION"
       - name: publish
         env:
