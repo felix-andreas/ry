@@ -69,8 +69,11 @@ All of them are in `crates/interp/src`.
 | `stats_tests.rs` | `src/library/stats/src/swilk.c`, `src/library/stats/src/prho.c` |
 | `stats_nlm.rs` | `src/appl/uncmin.c` |
 | `stats_optimize.rs` | `src/appl/integrate.c`, `src/library/stats/src/optimize.c` |
+| `register_s3_methods.R` | `src/library/base/R/namespace.R` (`registerS3methods`) |
 
 `stats_lbfgsb.rs` follows the BSD-licensed L-BFGS-B 3.0 reference code and keeps its notice, and
 the font metrics in `graphics.rs` and `graphics_render.rs` come from Adobe's AFM
 files under Adobe's terms; both notices are in `THIRD_PARTY_NOTICES`. Base R's own R code is not
-part of ry: the runtime reads it from the GNU R installation at run time.
+part of ry: the runtime reads it from the GNU R installation at run time. The one exception is
+`register_s3_methods.R`, a copy of one base R function whose per-method loops run natively, which
+replaces the installed function only when that is exactly the code it was copied from.

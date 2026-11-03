@@ -71,6 +71,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         )));
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
+    install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
     // GNU R's order: the site profile, then the user profile, both after `methods` loads.
@@ -113,6 +114,86 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     crate::frame::attach_package()?;
     conditions::print_warnings()?;
     Ok(())
+}
+
+/// GNU R 4.3.3's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
+/// `RY_PRINT_REGISTER_HASH` prints the hash of the installed one, for updating this together with
+/// `register_s3_methods.R`.
+const GNU_REGISTER_S3_METHODS: u64 = 0x7ee6_83a0_363f_ff46;
+
+/// Replaces base R's `registerS3methods()` with `register_s3_methods.R`, which runs its two
+/// per-method loops natively: they cost every namespace load about a millisecond per hundred S3
+/// methods in R, which is most of the time `stats`, `utils` and the packages a script imports
+/// take to load. The copy follows one GNU R release, so it replaces base R's function only when
+/// that is exactly the code it was made from, recognised by its hash; any other keeps its own.
+unsafe fn install_register_s3_methods() -> R<()> {
+    let symbol = values::install("registerS3methods")?;
+    let original = eval::value_of(eval::find_var_in_frame(symbol, base_namespace())?)?;
+    if original.kind() != SexpType::Closure {
+        return Ok(());
+    }
+    let mut hash = FNV_OFFSET;
+    stable_hash(original.car(), &mut hash);
+    stable_hash(crate::bytecode::closure_body(original), &mut hash);
+    if std::env::var_os("RY_PRINT_REGISTER_HASH").is_some() {
+        eprintln!("{hash:#018x}");
+    }
+    if hash != GNU_REGISTER_S3_METHODS {
+        return Ok(());
+    }
+    let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
+    eval::define(symbol, replacement, base_namespace())
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// An FNV-1a hash of code that is the same in every process, unlike a hash of object addresses:
+/// symbols and strings contribute their text, and attributes such as srcrefs are left out.
+unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
+    let mut mix = |bytes: &[u8]| {
+        for &byte in bytes {
+            *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(&object.kind().code().to_le_bytes());
+    match object.kind() {
+        SexpType::Symbol => mix(object.car().bytes()),
+        SexpType::String => {
+            for index in 0..length(object) {
+                let element = object.element(index);
+                if element == values::na_string() {
+                    mix(&[0xff]);
+                } else {
+                    mix(element.bytes());
+                    mix(&[0]);
+                }
+            }
+        }
+        SexpType::Logical | SexpType::Integer => {
+            for value in values::ints(object) {
+                mix(&value.to_le_bytes());
+            }
+        }
+        SexpType::Real => {
+            for value in values::reals(object) {
+                mix(&value.to_bits().to_le_bytes());
+            }
+        }
+        SexpType::List | SexpType::Expression => {
+            for index in 0..length(object) {
+                stable_hash(object.element(index), hash);
+            }
+        }
+        SexpType::Pairlist | SexpType::Language => {
+            let mut cell = object;
+            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+                stable_hash(cell.tag(), hash);
+                stable_hash(cell.car(), hash);
+                cell = cell.cdr();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Evaluates every expression of a file in `env`, without printing, as GNU R sources its startup

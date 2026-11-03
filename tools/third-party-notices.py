@@ -260,29 +260,33 @@ def heading(title):
 
 def r_derived_section():
     entries = defaultdict(list)
-    pattern = re.compile(r"^// GNU R: (\S+) \((.*)\)$")
-    for path in sorted((ROOT / "crates").glob("*/src/**/*.rs")):
+    paths = sorted(
+        [*(ROOT / "crates").glob("*/src/**/*.rs"), *(ROOT / "crates").glob("*/src/**/*.R")]
+    )
+    for path in paths:
+        comment = "#" if path.suffix == ".R" else "//"
+        pattern = re.compile(rf"^{comment} GNU R: (\S+) \((.*)\)$")
         lines = path.read_text().splitlines()
-        if not lines or not lines[0].startswith("// SPDX-License-Identifier"):
+        if not lines or not lines[0].startswith(f"{comment} SPDX-License-Identifier"):
             continue
         relative = path.relative_to(ROOT).as_posix()
         for index, line in enumerate(lines):
-            if not line.startswith("//"):
+            if not line.startswith(comment):
                 break
             match = pattern.match(line)
             if not match:
                 continue
             notices = []
             for follower in lines[index + 1:]:
-                if not follower.startswith("//     "):
+                if not follower.startswith(f"{comment}     "):
                     break
-                notices.append(follower[len("//     "):])
+                notices.append(follower[len(f"{comment}     "):])
             entries[relative].append((match.group(1), match.group(2), notices))
     out = [
-        "These files of ry's runtime are modified translations into Rust of parts of GNU R's C",
-        "sources, distributed under the GNU General Public License, version 2 or later, as GNU R",
-        "is. GNU R is Copyright (C) The R Core Team and the authors named below; its sources are",
-        "at https://www.r-project.org.",
+        "These files of ry's runtime are modified translations into Rust, or modified copies, of",
+        "parts of GNU R's sources, distributed under the GNU General Public License, version 2 or",
+        "later, as GNU R is. GNU R is Copyright (C) The R Core Team and the authors named below;",
+        "its sources are at https://www.r-project.org.",
         "",
     ]
     for relative, sources in entries.items():

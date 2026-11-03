@@ -88,6 +88,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(crate::heap().known().namespace_registry)
     }),
     internal("importIntoEnv", 4, do_import_into_env).invisible(),
+    internal("ryLocalS4Generics", 3, do_local_s4_generics),
+    internal("ryRegisterS3Methods", 5, do_register_s3_methods),
     internal("isNamespaceEnv", 1, |call| unsafe {
         scalar_bool(is_namespace(call.arg(0)))
     }),
@@ -1414,6 +1416,174 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
         }
     }
     Ok(nil())
+}
+
+/// `ryLocalS4Generics(names, env, is_generic)`: for each name bound in the namespace `env`,
+/// whether its value is an S4 generic, which the `registerS3methods()` the runtime installs
+/// (`register_s3_methods.R`) asks of every S3 generic a package defines. `is_generic` is
+/// `methods::is(f, "genericFunction")`, called only for a value that is an object at all, since
+/// `is()` answers `FALSE` for every other one.
+unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let env = environment_arg(call.arg(1), "env")?;
+    let is_generic = call.arg(2);
+    let mut generic = Vec::with_capacity(length(names));
+    for index in 0..length(names) {
+        let symbol = values::install_charsxp(names.element(index))?;
+        let value = value_of(find_var(symbol, env)?)?;
+        if value == unbound() {
+            return Err(call.error(format!("object '{}' not found", symbol_name(symbol))));
+        }
+        let is_s4_generic = (value.is_object() || value.has_gp(gp::S4_OBJECT))
+            && values::is_true(eval::apply(
+                nil(),
+                is_generic,
+                &eval::value_args(&[value]),
+                call.env,
+            )?);
+        generic.push(i32::from(is_s4_generic));
+    }
+    values::logical_vector(&generic)
+}
+
+/// `ryRegisterS3Methods(fin, env, frame, method_code, helpers)`: the loop of GNU R's
+/// `registerS3methods()` that registers each S3 method a namespace declares for a generic it
+/// imports, run natively because it costs most of a package's load time in R. `fin` is that
+/// function's five-column character matrix of generic, class, method, table name and delayed
+/// package. Each method is bound in its generic's S3 methods table to a promise of
+/// `method_code` (`get(method, envir = home)`) whose environment holds `x`, `method`, `home` and
+/// `envir` and encloses `frame`, exactly the binding GNU R's `assignWrapped()` makes. The
+/// `helpers` closures run the steps that stay in R: `namespace`, `missing`, `generic`,
+/// `default`, `table`, `existing` and `home` (see `register_s3_methods.R`). The value is the
+/// overwritten methods, as the rows of a two-column matrix flattened by row.
+unsafe fn do_register_s3_methods(call: &Call<'_>) -> R<Sexp> {
+    let fin = call.arg(0);
+    let env = environment_arg(call.arg(1), "env")?;
+    let frame = environment_arg(call.arg(2), "frame")?;
+    let method_code = call.arg(3);
+    let helpers = call.arg(4);
+    let helper = |name: &str| -> R<Sexp> {
+        let names = values::names(helpers);
+        (0..length(helpers))
+            .find(|&index| string_at(names, index).as_deref() == Some(name))
+            .map(|index| helpers.element(index))
+            .ok_or_else(|| error(format!("no '{name}' helper")))
+    };
+    let run = |function: Sexp, arguments: &[Sexp]| {
+        eval::apply(nil(), function, &eval::value_args(arguments), call.env)
+    };
+    let (namespace, missing, generic, default, new_table, existing, home) = (
+        helper("namespace")?,
+        helper("missing")?,
+        helper("generic")?,
+        helper("default")?,
+        helper("table")?,
+        helper("existing")?,
+        helper("home")?,
+    );
+    let known = value_of(find_var_in_frame(
+        values::install(".knownS3Generics")?,
+        base_namespace(),
+    )?)?;
+    let known_names = values::names(known);
+    let known_generics: rustc_hash::FxHashMap<String, Sexp> = (0..length(known_names))
+        .rev()
+        .filter_map(|index| {
+            Some((
+                string_at(known_names, index)?.into_owned(),
+                known.element(index),
+            ))
+        })
+        .collect();
+    let table_symbol = values::install(".__S3MethodsTable__.")?;
+    let (x_symbol, method_symbol, home_symbol, envir_symbol) = (
+        values::install("x")?,
+        values::install("method")?,
+        values::install("home")?,
+        values::install("envir")?,
+    );
+    let dispatch = interp().globals.methods_dispatch;
+    let rows = length(fin) / 5;
+    let mut overwritten = Vec::new();
+    for row in 0..rows {
+        let column = |index: usize| fin.element(row + index * rows);
+        crate::scope(|| {
+            let genname = column(0);
+            let generic_name = char_str(genname);
+            let defenv = match known_generics.get(generic_name.as_ref()) {
+                Some(&package) if package != values::na_string() => {
+                    let registry = crate::heap().known().namespace_registry;
+                    let package_symbol = values::install_charsxp(package)?;
+                    let loaded = value_of(find_var_in_frame(package_symbol, registry)?)?;
+                    if loaded.kind() == SexpType::Environment {
+                        loaded
+                    } else {
+                        run(namespace, &[scalar_string(&char_str(package))?])?
+                    }
+                }
+                _ => {
+                    let symbol = values::install_charsxp(genname)?;
+                    let mut function = value_of(find_var(symbol, env.enclosure())?)?;
+                    if function == unbound() || function == nil() {
+                        run(missing, &[scalar_string(&generic_name)?])?;
+                    }
+                    if dispatch
+                        && (function.is_object() || function.has_gp(gp::S4_OBJECT))
+                        && values::is_true(run(generic, &[function])?)
+                    {
+                        function = run(default, &[function])?;
+                    }
+                    if function.kind() == SexpType::Closure {
+                        function.tag()
+                    } else {
+                        base_namespace()
+                    }
+                }
+            };
+            let mut table = value_of(find_var_in_frame(table_symbol, defenv)?)?;
+            if table == unbound() || table == nil() {
+                table = run(new_table, &[defenv])?;
+            }
+            let name = column(3);
+            let name_symbol = values::install_charsxp(name)?;
+            let current = match crate::heap().frame_cell(table, name_symbol) {
+                None => nil(),
+                Some(cell)
+                    if cell.has_gp(gp::ACTIVE_BINDING)
+                        || (cell.cdr().kind() == SexpType::Promise
+                            && cell.cdr().car() == unbound()) =>
+                {
+                    run(existing, &[table, scalar_string(&char_str(name))?])?
+                }
+                Some(cell) => value_of(cell.cdr())?,
+            };
+            let method = column(2);
+            if current != nil() {
+                let own = value_of(find_var(values::install_charsxp(method)?, env)?)?;
+                if !crate::sort::identical(current, own, &crate::sort::IdenticalFlags::default()) {
+                    let current_home = run(home, &[current])?;
+                    overwritten.push(char_str(name).into_owned());
+                    overwritten.push(string_at(current_home, 0).unwrap_or_default().into_owned());
+                }
+            }
+            let promise_env = new_env(frame)?;
+            let heap = crate::heap();
+            heap.define(promise_env, x_symbol, scalar_string(&char_str(name))?)?;
+            heap.define(
+                promise_env,
+                method_symbol,
+                scalar_string(&char_str(method))?,
+            )?;
+            heap.define(promise_env, home_symbol, env)?;
+            heap.define(promise_env, envir_symbol, table)?;
+            define(
+                name_symbol,
+                eval::make_promise(method_code, promise_env)?,
+                table,
+            )
+        })?;
+    }
+    string_vector(&overwritten)
 }
 
 // Calling functions.

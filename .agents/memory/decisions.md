@@ -7203,3 +7203,51 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Measured** (`cargo test ... -p libr --test test_linpack --no-run -j4` from a clean profile directory, peak RSS of the largest child process): fat LTO 11.08 GiB in 1,797 s, the bench profile 3.60 GiB in 685 s.
 - **Target shape.** `[profile.bench]` inherits release with `lto = false` (thin local LTO) and 16 codegen units. `cargo test-release` (`.cargo/config.toml` alias for `cargo test --profile bench`), `just perf`, `just simulate` and `cargo bench` use it. Plain `cargo test --release` still works on a machine with the memory.
 - **Dev debug info.** `[profile.dev] debug = "line-tables-only"`: libr's `test_linpack` went from 0.28 to 0.11 GB and the debug `libR.so` from 1.03 to 0.85 GB. An interp test binary barely shrinks (0.88 to 0.78 GB), because its `.text` (185 MB) and relocations dominate, not debug info.
+
+# Decision record: start-up and imports run GNU R's code, with its hot loops native
+
+- **Problem.** A warm `ry load` of a large S4 package spends most of its time before the package's
+  own code runs: process start (base, `methods` and the default packages, about 130 to 170 ms) and
+  the imports' `loadNamespace` (about 230 to 300 ms for lubridate, data.table and xts). Both run
+  GNU R's own R code from the installed R home, so neither the loader nor the S4 cache touches them.
+- **Options weighed.**
+  - *A preloaded heap image* of the state after start-up (and after the imports). The heap sits in
+    one fixed reservation, but the interpreter's own state (symbol and string tables, `Globals`,
+    builtin and native-routine tables, connections, external pointers into loaded DLLs) lives in
+    Rust collections and C libraries outside it, so an image needs a serializer for every one of
+    them, and an import with compiled code cannot be imaged at all. Kept as the end shape for base
+    alone, under "bundle base R into the `ry` binary" in `backlog.md`.
+  - *A fork server* (a resident process that has started and loaded the imports, forking a child
+    per `ry load`). It would cut start plus imports to a few milliseconds, but it is not exact: the
+    child inherits the server's environment variables, user profile, `tempdir()` and library
+    paths unless each is replayed, packages that start thread pools at load (data.table's OpenMP)
+    switch to one thread after a fork, and a package updated on disk leaves the server stale.
+    Rejected while exactness is the bar.
+  - *Native hot loops behind GNU R's code* (chosen). The runtime replaces one base R function at a
+    time with a copy whose per-item loops run natively, guarded so that it applies only to the
+    exact GNU R code it was copied from.
+- **`registerS3methods`** (`crates/interp/src/register_s3_methods.R`, `do_register_s3_methods` and
+  `do_local_s4_generics` in `envir.rs`, `install_register_s3_methods` in `session.rs`). Its loops
+  called `tryCatch`, `methods::is` and `get0` per method, and cost 41 ms of the default packages
+  and 34 ms of the imports above (37 ms each on GNU R). The native loop
+  performs the same steps in the same order (generic lookup, `genfun@default` for an S4 generic,
+  table creation, the overwrite check with `identical()`, and the `delayedAssign` promise with the
+  same environment `assignWrapped` makes) and calls back into R for each step that can signal or
+  dispatch: `asNamespace` of an unloaded package, the not-found error, `methods::is` on an object,
+  `@default`, creating a table, reading an unforced binding, `environmentName`. Now 8 ms in each.
+  `methods::is(f, "genericFunction")` is skipped for a value with no class attribute and no S4
+  bit, where it is always `FALSE`.
+- **Why a hash guard.** Base R's R code is read from the installed GNU R so that ry behaves like
+  whichever release it finds (licensing record above). The copy follows R 4.3.3, so the runtime
+  replaces the installed function only when an FNV-1a hash of its formals and body (symbols and
+  strings by their text, attributes ignored) equals the 4.3.3 one; any other release keeps its own
+  function at its own speed. `RY_PRINT_REGISTER_HASH` prints the installed function's hash for
+  updating the constant with the copy.
+- **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
+  which installs two packages under ry and under GNU R and compares one script's output (every
+  branch: known generics, another package's generic, an overwrite and its message, local plain and
+  S4 generics, delayed registration), and asserts the replacement is in place under R 4.3.3.
+- **Next by cost.** `methods::cacheMetaData` of the imports (about 150 ms, lubridate most of it) is
+  dominated by `.checkGroupSigLength`, which `.updateMethodsInTable` runs for every member of a
+  group generic and which rescans the whole group tree each time (1.2 ms per call on ry, 0.8 ms on
+  GNU R). The same guarded replacement would apply to it.

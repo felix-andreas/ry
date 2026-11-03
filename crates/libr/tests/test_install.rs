@@ -491,6 +491,123 @@ fn the_front_ends_run_r_code_on_ry() {
     assert!(output.contains("Says hello."), "{output}");
 }
 
+/// Loading a namespace registers its S3 methods as GNU R does, through every branch of
+/// `registerS3methods()`: a method for a base or another package's generic, one that
+/// overwrites another package's registration (with GNU R's message), one for the package's own
+/// generic, plain or made an S4 generic, and one delayed until its package loads. The runtime
+/// replaces GNU R 4.3.3's `registerS3methods()` with a native one, so this compares the two
+/// directly, and checks that the replacement is in place under that release.
+#[test]
+fn namespaces_register_s3_methods_as_gnu_r_does() {
+    if !gnu_r_available() {
+        return;
+    }
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("s3-registration");
+    drop(std::fs::remove_dir_all(&root));
+    let description = |name: &str| {
+        format!(
+            "Package: {name}\nVersion: 0.1\nTitle: S3 registration\nDescription: Registers S3 methods.\n\
+             License: UPL-1.0\nImports: methods\n"
+        )
+    };
+    let packages = [
+        (
+            "s3first",
+            "export(later)\nS3method(print, foo)\nS3method(format, foo, format_foo)\nS3method(summary, foo)\n",
+            "print.foo <- function(x, ...) cat('s3first\\n')\nformat_foo <- function(x, ...) 's3first'\n\
+             summary.foo <- function(object, ...) 's3first summary'\nlater <- function(x) UseMethod('later')\n",
+        ),
+        (
+            "s3second",
+            "import(methods)\nexport(area, volume)\nS3method(print, foo)\nS3method(area, square)\n\
+             S3method(volume, cube)\nS3method(stats::median, foo)\nS3method(s3first::later, bar)\n",
+            "print.foo <- function(x, ...) cat('s3second\\n')\narea <- function(x) UseMethod('area')\n\
+             area.square <- function(x) unclass(x)^2\nvolume <- function(x) UseMethod('volume')\n\
+             setGeneric('volume')\nvolume.cube <- function(x) unclass(x)^3\n\
+             median.foo <- function(x, na.rm = FALSE, ...) 's3second median'\n\
+             later.bar <- function(x) 'later'\n",
+        ),
+    ];
+    for (name, namespace, code) in packages {
+        let source = root.join("source").join(name);
+        std::fs::create_dir_all(source.join("R")).expect("a source directory");
+        std::fs::write(source.join("DESCRIPTION"), description(name)).expect("DESCRIPTION");
+        std::fs::write(source.join("NAMESPACE"), namespace).expect("NAMESPACE");
+        std::fs::write(source.join("R").join("code.R"), code).expect("R code");
+    }
+    let script = "loadNamespace('s3first')\nloadNamespace('s3second')\n\
+        x <- structure(1, class = 'foo')\nprint(x)\nprint(format(x))\nprint(summary(x))\n\
+        print(stats::median(x))\nprint(s3second::area(structure(3, class = 'square')))\n\
+        print(s3second::volume(structure(2, class = 'cube')))\n\
+        print(s3first::later(structure(1, class = 'bar')))\n\
+        print(ls(asNamespace('s3second')[['.__S3MethodsTable__.']], all.names = TRUE))\n\
+        print(getNamespaceInfo('s3second', 'S3methods'))\n\
+        table <- asNamespace('base')[['.__S3MethodsTable__.']]\n\
+        for (name in c('print.foo', 'format.foo', 'summary.foo'))\n\
+        cat(name, environmentName(environment(get(name, envir = table))), '\\n')\n\
+        cat(exists('median.foo', envir = asNamespace('stats')[['.__S3MethodsTable__.']]), '\\n')\n";
+    let script_path = root.join("registration.R");
+    std::fs::write(&script_path, script).expect("the script");
+    let script_path = script_path.display().to_string();
+    let run = |rscript: &Path, library: &Path| {
+        let output = Command::new(rscript)
+            .arg(&script_path)
+            .env("R_LIBS", library)
+            .current_dir(&root)
+            .output()
+            .expect("run Rscript");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let gnu_library = root.join("gnu-library");
+    std::fs::create_dir_all(&gnu_library).expect("a library");
+    let ry_library = root.join("ry-library");
+    for (name, _, _) in packages {
+        let source = root.join("source").join(name);
+        let status = Command::new("R")
+            .args(["CMD", "INSTALL", "--no-test-load", "-l"])
+            .arg(&gnu_library)
+            .arg(&source)
+            .output()
+            .expect("GNU R installs the package");
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        rcmd::install(home(), &source, &ry_library, &no_test_load()).expect("ry installs it");
+    }
+    let gnu_rscript = &gnu_r().expect("each test checks for GNU R first").rscript;
+    let expected = run(gnu_rscript, &gnu_library);
+    assert!(
+        expected.contains("Registered S3 method overwritten by 's3second'"),
+        "{expected}"
+    );
+    assert_eq!(
+        run(&home().join("bin").join("Rscript"), &ry_library),
+        expected
+    );
+    let version = run_home(
+        "Rscript",
+        &[
+            "-e",
+            "cat(format(getRversion()), any(grepl('ryRegisterS3Methods', deparse(registerS3methods))))",
+        ],
+        &root,
+    );
+    if version.starts_with("4.3.3 ") {
+        assert_eq!(version, "4.3.3 TRUE");
+    }
+}
+
 /// The headers, `R.version` and `R --version` present the version of the base R the
 /// interpreter runs, so a package's C code and its R code take the same version branches.
 #[test]

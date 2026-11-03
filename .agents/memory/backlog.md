@@ -91,21 +91,21 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   exports would keep the search path identical and load testthat on first use.
 - **Start-up and imports are the floor of a warm `ry load`.** With the S4 unit restored lazily, a
   warm `ry load` of the generated S4 package (`just bench-s4-first-use target/s4heavy
-  lubridate,data.table,xts`) spends about 140 ms reaching the load and 220 to 300 ms importing,
-  against under 60 ms for the first `new()`. Measured pieces, so the next attempt starts from data:
-  - Process start: base alone about 30 ms (`R_DEFAULT_PACKAGES=NULL`), then methods 21 to 31 ms,
-    utils about 40 ms, stats about 30 ms, the rest about 20 ms. `registerS3methods` is 19 ms of
-    utils and 15 ms of stats: GNU R's loop calls `tryCatch` (7.3 us on ry, 5.2 us on GNU R) and
-    `methods::is` (11.5 us against 9.2 us) per method. All of it is GNU R's own R code read from
-    the installed R home, so the fixes are interpreter speed, or the preloaded base image of
-    "bundle base R into the `ry` binary" above, which could carry the default packages already
-    loaded.
-  - Imports: lubridate about 140 ms (its `cacheMetaData` about 70 ms), data.table about 40 ms
-    (`cacheMetaData` about 30 ms), zoo, xts, lattice and grid 10 to 13 ms each; GNU R takes about
-    325 ms for the same set. The lazy class and generic tables the S4 restore uses
-    (`.ry_cache_restored_s4`) would apply to an installed package's `cacheMetaData` too, but
-    `loadNamespace` is GNU R's code, so it needs a hook in the runtime. Deferring an import's
-    `loadNamespace` until a name is used is not exact: `.onLoad` side effects (options, S3
+  lubridate,data.table,xts`) spends about 130 ms reaching the load and about 200 ms importing,
+  against under 60 ms for the first `new()`. `registerS3methods` runs natively (`decisions.md`,
+  "start-up and imports run GNU R's code"), so what remains is GNU R's other R code:
+  - Process start, best of five: base alone 33 ms (`R_DEFAULT_PACKAGES=NULL`), with methods 74 ms,
+    with utils 93 ms, with stats 119 ms, all defaults 130 ms (GNU R's `Rscript`: 153 ms). The levers
+    are interpreter speed, or the preloaded base image of "bundle base R into the `ry` binary"
+    above, which could carry the default packages already loaded.
+  - Imports: `methods::cacheMetaData` is about 150 ms of them, and `.checkGroupSigLength` about
+    70 ms of that (an upper bound measured by stubbing it out): `.updateMethodsInTable` runs it for
+    every member of a group generic, and each call rescans the whole group tree through
+    `getGeneric` (1.2 ms per call on ry, 0.8 ms on GNU R; 67 calls for lubridate, data.table and
+    xts, none of which reset anything). A replacement guarded like `registerS3methods` could skip a
+    rescan whose generics and `.SigLength` values cannot have changed, but proving that cheaply needs
+    an invalidation signal for `.genericTable` and every `.SigLength` assignment. Deferring an
+    import's `loadNamespace` until a name is used is not exact: `.onLoad` side effects (options, S3
     registrations that dispatch on objects read back with `readRDS`) would move.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.

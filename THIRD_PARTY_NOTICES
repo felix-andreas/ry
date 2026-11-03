@@ -10,10 +10,10 @@ own licence files and the provenance headers in ry's sources; do not edit it by 
 1. Code translated from GNU R
 =============================
 
-These files of ry's runtime are modified translations into Rust of parts of GNU R's C
-sources, distributed under the GNU General Public License, version 2 or later, as GNU R
-is. GNU R is Copyright (C) The R Core Team and the authors named below; its sources are
-at https://www.r-project.org.
+These files of ry's runtime are modified translations into Rust, or modified copies, of
+parts of GNU R's sources, distributed under the GNU General Public License, version 2 or
+later, as GNU R is. GNU R is Copyright (C) The R Core Team and the authors named below;
+its sources are at https://www.r-project.org.
 
 crates/interp/src/arith.rs
     GNU R src/main/complex.c (complex_asin, complex_acos, complex_atan)
@@ -79,6 +79,10 @@ crates/interp/src/random.rs
         Copyright (C) 1997--2022 The R Core Team
         Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
         Copyright (C) 2003--2018 The R Foundation
+
+crates/interp/src/register_s3_methods.R
+    GNU R src/library/base/R/namespace.R (registerS3methods)
+        Copyright (C) 1995-2023 The R Core Team
 
 crates/interp/src/rmath.rs
     GNU R src/nmath/toms708.c (bratio and its helpers, grat_r)
@@ -271,13 +275,13 @@ jpeg-encoder crate, whose IJG terms are listed with it below).
 3. Rust crates and the C libraries they bundle
 ==============================================
 
-482 crates from crates.io are built into ry. Each crate is listed under
+483 crates from crates.io are built into ry. Each crate is listed under
 the licence it is used under (for a choice such as `MIT OR Apache-2.0`, the first
 permissive licence of the choice), with the copyright lines from its licence files.
 The licence texts follow each list; a crate that ships no text of its own is covered
 by the text shown for its licence.
 
-MIT (407 crates)
+MIT (408 crates)
 ----------------
 
 - addr2line 0.25.1 <https://github.com/gimli-rs/addr2line>
@@ -667,6 +671,7 @@ MIT (407 crates)
 - num-traits 0.2.19 <https://github.com/rust-num/num-traits>
     Copyright (c) 2014 The Rust Project Developers
 - objc2-core-foundation 0.3.2 <https://github.com/madsmtm/objc2> (no licence text in its package)
+- objc2-core-services 0.3.2 <https://github.com/madsmtm/objc2> (no licence text in its package)
 - objc2-io-kit 0.3.2 <https://github.com/madsmtm/objc2> (no licence text in its package)
 - object 0.37.3 <https://github.com/gimli-rs/object>
     Copyright (c) 2015 The Gimli Developers
