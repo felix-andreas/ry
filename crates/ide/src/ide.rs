@@ -1877,7 +1877,10 @@ pub fn signature_help_with(
                 name
             }
         });
-        let schemes = name.and_then(|name| stubs(db)?.schemes.get(&name));
+        let bare = matches!(hir.kind(*callee), ExpressionKind::NameRef(_));
+        let schemes = name
+            .filter(|name| !(bare && hidden_by_prelude(db, name)))
+            .and_then(|name| stubs(db)?.schemes.get(&name));
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));

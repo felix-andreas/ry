@@ -199,3 +199,10 @@ hint @51list =
 # [check] prelude = false
 doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
 #++++
+hover 37..45: List.map
+hover-definition: installed List.map from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed List.map from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion: none

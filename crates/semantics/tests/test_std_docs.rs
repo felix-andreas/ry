@@ -273,8 +273,9 @@ fn render_item(page: &mut String, item: &Item) {
     page.push_str(&format!("\n[Source]({SOURCE_URL}#L{})\n", item.line));
 }
 
-/// The declaration as an inline function header, or `None` when it has an optional parameter,
-/// which inline syntax writes with a default value the declaration does not state.
+/// The declaration as an inline function header, or `None` for a constant or a function with an
+/// optional parameter, which inline syntax writes with a default value the declaration does not
+/// state.
 fn inline_signature(name: &str, signature: &str) -> Option<String> {
     let (generics, function) = match signature.strip_prefix('<') {
         Some(rest) => {
@@ -286,9 +287,8 @@ fn inline_signature(name: &str, signature: &str) -> Option<String> {
         }
         None => (String::new(), signature),
     };
-    let Some(rest) = function.strip_prefix("fn(") else {
-        return Some(format!("{name}: {signature}"));
-    };
+    // A constant has no inline header: `Num.pi: double` alone is an expression, not a declaration.
+    let rest = function.strip_prefix("fn(")?;
     let end = matching_close(rest, '(', ')')?;
     let parameters = rest.get(..end)?;
     if parameters.contains('[') && parameters.contains("]:") {
