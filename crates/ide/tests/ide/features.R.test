@@ -77,7 +77,7 @@ action: Add inferred type annotations for the whole file
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 43..43 -> " -> double"
-completion (29): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
+completion (25): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, DataFrame.columns
 hint @18<T: numeric>
 hint @20: T
 hint @21 -> T

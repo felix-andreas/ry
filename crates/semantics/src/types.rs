@@ -188,6 +188,9 @@ pub enum TyKind<'db> {
     Unknown,
     Null,
     Scalar(Atomic),
+    /// One of ry's own scalars: a number type, `Bool` or `Str`. None holds `NA`, and none fits
+    /// another; only `F64`, `Bool` and `Str` fit an R type, the one whose representation they share.
+    Native(NativeScalar),
     Vector(Ty<'db>),
     NamedVector(Ty<'db>),
     List(Ty<'db>),
@@ -277,6 +280,206 @@ pub enum Atomic {
     Complex,
     Character,
     Raw,
+}
+
+/// ry's own scalar types, in the order the standard library documents them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum NativeScalar {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    F32,
+    F64,
+    Dec,
+    Bool,
+    Str,
+}
+
+impl NativeScalar {
+    pub const ALL: [NativeScalar; 15] = [
+        NativeScalar::I8,
+        NativeScalar::I16,
+        NativeScalar::I32,
+        NativeScalar::I64,
+        NativeScalar::I128,
+        NativeScalar::U8,
+        NativeScalar::U16,
+        NativeScalar::U32,
+        NativeScalar::U64,
+        NativeScalar::U128,
+        NativeScalar::F32,
+        NativeScalar::F64,
+        NativeScalar::Dec,
+        NativeScalar::Bool,
+        NativeScalar::Str,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            NativeScalar::I8 => "I8",
+            NativeScalar::I16 => "I16",
+            NativeScalar::I32 => "I32",
+            NativeScalar::I64 => "I64",
+            NativeScalar::I128 => "I128",
+            NativeScalar::U8 => "U8",
+            NativeScalar::U16 => "U16",
+            NativeScalar::U32 => "U32",
+            NativeScalar::U64 => "U64",
+            NativeScalar::U128 => "U128",
+            NativeScalar::F32 => "F32",
+            NativeScalar::F64 => "F64",
+            NativeScalar::Dec => "Dec",
+            NativeScalar::Bool => "Bool",
+            NativeScalar::Str => "Str",
+        }
+    }
+
+    pub fn from_name(text: &str) -> Option<NativeScalar> {
+        NativeScalar::ALL
+            .into_iter()
+            .find(|scalar| scalar.name() == text)
+    }
+
+    /// The type a literal suffix names: `i64` in `5i64`, `dec` in `1.5dec`.
+    pub fn from_suffix(suffix: &str) -> Option<NativeScalar> {
+        NativeScalar::ALL
+            .into_iter()
+            .take(13)
+            .find(|scalar| scalar.name().eq_ignore_ascii_case(suffix))
+    }
+
+    pub fn is_number(self) -> bool {
+        !matches!(self, NativeScalar::Bool | NativeScalar::Str)
+    }
+
+    pub fn is_integer(self) -> bool {
+        self.integer_range().is_some()
+    }
+
+    pub fn is_fraction(self) -> bool {
+        matches!(
+            self,
+            NativeScalar::F32 | NativeScalar::F64 | NativeScalar::Dec
+        )
+    }
+
+    /// The R type whose representation this type shares, which it therefore fits.
+    pub fn shared_atomic(self) -> Option<Atomic> {
+        match self {
+            NativeScalar::F64 => Some(Atomic::Double),
+            NativeScalar::Bool => Some(Atomic::Logical),
+            NativeScalar::Str => Some(Atomic::Character),
+            _ => None,
+        }
+    }
+
+    /// The smallest and largest value of an integer type. `U128`'s maximum does not fit an
+    /// `i128`, so the upper bound is a `u128`.
+    pub fn integer_range(self) -> Option<(i128, u128)> {
+        Some(match self {
+            NativeScalar::I8 => (i8::MIN.into(), i8::MAX as u128),
+            NativeScalar::I16 => (i16::MIN.into(), i16::MAX as u128),
+            NativeScalar::I32 => (i32::MIN.into(), i32::MAX as u128),
+            NativeScalar::I64 => (i64::MIN.into(), i64::MAX as u128),
+            NativeScalar::I128 => (i128::MIN, i128::MAX as u128),
+            NativeScalar::U8 => (0, u8::MAX.into()),
+            NativeScalar::U16 => (0, u16::MAX.into()),
+            NativeScalar::U32 => (0, u32::MAX.into()),
+            NativeScalar::U64 => (0, u64::MAX.into()),
+            NativeScalar::U128 => (0, u128::MAX),
+            _ => return None,
+        })
+    }
+
+    /// Whether this number type holds `literal` exactly: an integer type holds a whole number in
+    /// its range, `F32` and `F64` a finite value in theirs, and `Dec` one with at most 18 decimal
+    /// places in its range.
+    pub fn holds(self, literal: &NumberLiteral) -> bool {
+        if let Some((low, high)) = self.integer_range() {
+            return match literal.whole {
+                Some(magnitude) if literal.negative => {
+                    magnitude <= low.unsigned_abs() && (magnitude == 0 || low < 0)
+                }
+                Some(magnitude) => magnitude <= high,
+                None => false,
+            };
+        }
+        match self {
+            NativeScalar::F32 => literal.value.abs() <= f64::from(f32::MAX),
+            NativeScalar::F64 => literal.value.is_finite(),
+            NativeScalar::Dec => {
+                literal.value.abs() < 1.7e20
+                    && literal.decimal_places.is_none_or(|places| places <= 18)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A number literal's value as written, with a `-` written directly before it folded in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NumberLiteral {
+    pub negative: bool,
+    /// The exact magnitude when the literal is a whole number, written as digits, hex or with an
+    /// exponent that leaves no fraction.
+    pub whole: Option<u128>,
+    pub value: f64,
+    /// The digits after the decimal point, `None` when the literal has an exponent.
+    pub decimal_places: Option<u32>,
+    /// Written with R's `L` suffix, so its R type is `integer`.
+    pub integer: bool,
+}
+
+impl NumberLiteral {
+    /// Parses an unsuffixed R number literal (`5`, `5L`, `0x1F`, `1.5`, `1e3`).
+    pub fn parse(text: &str, negative: bool) -> Option<NumberLiteral> {
+        let integer = text.ends_with('L');
+        let digits = text.trim_end_matches('L');
+        let (whole, value, decimal_places) = if let Some(hex) = digits
+            .strip_prefix("0x")
+            .or_else(|| digits.strip_prefix("0X"))
+        {
+            let whole = u128::from_str_radix(hex, 16).ok()?;
+            (Some(whole), whole as f64, Some(0))
+        } else {
+            let value: f64 = digits.parse().ok()?;
+            let has_exponent = digits.contains(['e', 'E']);
+            let decimal_places = match digits.split_once('.') {
+                _ if has_exponent => None,
+                Some((_, fraction)) => Some(fraction.trim_end_matches('0').len() as u32),
+                None => Some(0),
+            };
+            let whole = if !has_exponent && decimal_places == Some(0) {
+                digits
+                    .split('.')
+                    .next()
+                    .and_then(|integral| integral.parse::<u128>().ok())
+            } else if value.fract() == 0.0 && value.abs() < 2f64.powi(53) {
+                Some(value.abs() as u128)
+            } else {
+                None
+            };
+            (whole, value, decimal_places)
+        };
+        Some(NumberLiteral {
+            negative,
+            whole,
+            value: if negative { -value } else { value },
+            decimal_places,
+            integer,
+        })
+    }
+
+    pub fn is_fraction(&self) -> bool {
+        self.whole.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::SalsaValue)]
@@ -406,20 +609,39 @@ pub enum Constraint {
     /// runtime's collections use.
     Key,
     ScalarNumeric,
-    /// What an Array can hold: a `logical`, `integer`, `double` or `character` scalar, or a ry
-    /// value (a record, tuple, tag, Array, `Dict` or `Set`).
+    /// What a `List` can hold: a ry value (a ry scalar, record, tuple, tag, `List`, `Dict` or
+    /// `Set`).
     ArrayItem,
+    /// Every ry number type.
+    Number,
+    /// The ry integer types.
+    Int,
+    /// `F32`, `F64` and `Dec`.
+    Frac,
+    /// Every ry type but a function, the values `==` compares structurally.
+    Eq,
+    /// The type of a variable written with a whole-number literal (`total <- 0`), decided by its
+    /// first use: a ry integer or fraction type, or R's `double` (`integer` for `0L`).
+    WholeLiteral {
+        integer: bool,
+    },
+    /// Like `WholeLiteral`, for a literal with a fraction (`1.5`): a ry fraction type or `double`.
+    FracLiteral,
 }
 
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 5] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 9] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
         ("item", Constraint::ArrayItem),
+        ("number", Constraint::Number),
+        ("int", Constraint::Int),
+        ("frac", Constraint::Frac),
+        ("eq", Constraint::Eq),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -436,17 +658,60 @@ impl Constraint {
             .map(|(_, constraint)| *constraint)
     }
 
-    pub fn join(self, other: Constraint) -> Constraint {
+    /// The constraint a type must meet to satisfy both, or `None` when no type can: an R number
+    /// is never a ry number, and an integer type is never a fraction type.
+    pub fn join(self, other: Constraint) -> Option<Constraint> {
         use Constraint::*;
-        match (self, other) {
+        Some(match (self, other) {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,
+            (Eq, c) | (c, Eq) => c,
+            (WholeLiteral { integer: left }, WholeLiteral { integer: right }) => WholeLiteral {
+                integer: left && right,
+            },
+            (WholeLiteral { .. }, FracLiteral) | (FracLiteral, WholeLiteral { .. }) => FracLiteral,
+            (WholeLiteral { .. } | Number | ArrayItem | Key, Int)
+            | (Int, WholeLiteral { .. } | Number | ArrayItem | Key) => Int,
+            (FracLiteral | WholeLiteral { .. } | Number | ArrayItem | Key, Frac)
+            | (Frac, FracLiteral | WholeLiteral { .. } | Number | ArrayItem | Key) => Frac,
+            (WholeLiteral { .. } | FracLiteral | ArrayItem | Key, Number)
+            | (Number, WholeLiteral { .. } | FracLiteral | ArrayItem | Key) => Number,
+            (FracLiteral, Int) | (Int, FracLiteral) | (Int, Frac) | (Frac, Int) => return None,
+            // A literal used where R's number constraints apply is an R number.
+            (WholeLiteral { .. } | FracLiteral, c) | (c, WholeLiteral { .. } | FracLiteral) => c,
+            (Number | Int | Frac, _) | (_, Number | Int | Frac) => return None,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
-            (Key, AtomicElement | ArrayItem) | (AtomicElement | ArrayItem, Key) => Key,
-            (ArrayItem, AtomicElement) | (AtomicElement, ArrayItem) => Key,
-            (ArrayItem, Numeric) | (Numeric, ArrayItem) => ScalarNumeric,
+            (Key, AtomicElement) | (AtomicElement, Key) => Key,
+            (Key, ArrayItem) | (ArrayItem, Key) => ArrayItem,
+            (ArrayItem, AtomicElement | Numeric) | (AtomicElement | Numeric, ArrayItem) => {
+                return None;
+            }
             _ => unreachable!("all constraint pairs are covered"),
+        })
+    }
+
+    /// The R type a literal constraint defaults to when nothing decided it.
+    pub fn literal_default(self) -> Option<Atomic> {
+        match self {
+            Constraint::WholeLiteral { integer: true } => Some(Atomic::Integer),
+            Constraint::WholeLiteral { integer: false } | Constraint::FracLiteral => {
+                Some(Atomic::Double)
+            }
+            _ => None,
+        }
+    }
+
+    /// The ry type a literal constraint defaults to where only a ry value fits, such as a `List`
+    /// item.
+    pub fn native_default(self) -> Option<NativeScalar> {
+        match self {
+            Constraint::WholeLiteral { integer: true } => Some(NativeScalar::I32),
+            Constraint::WholeLiteral { integer: false } | Constraint::Int => {
+                Some(NativeScalar::I64)
+            }
+            Constraint::FracLiteral | Constraint::Frac => Some(NativeScalar::F64),
+            _ => None,
         }
     }
 }
@@ -487,19 +752,23 @@ pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
 }
 
-/// `Array<element>`, ry's strict typed vector.
-pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
-    Ty::new(db, TyKind::Named(Name::new(db, "Array"), vec![element]))
+pub fn native_scalar(db: &dyn Db, native: NativeScalar) -> Ty<'_> {
+    Ty::new(db, TyKind::Native(native))
 }
 
-/// The item type of the standard library's `Array<T>`, and `None` for any other type, including a
-/// project's own type that happens to be called `Array`.
+/// `List<element>`, ry's list.
+pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
+    Ty::new(db, TyKind::Named(Name::new(db, "List"), vec![element]))
+}
+
+/// The item type of the standard library's `List<T>`, and `None` for any other type, including a
+/// project's own type that happens to be called `List`.
 pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
     match ty.kind(db) {
         TyKind::Named(name, arguments)
             if arguments.len() == 1
-                && name.text(db) == "Array"
-                && crate::stubs::is_ry_type(db, "Array") =>
+                && name.text(db) == "List"
+                && crate::stubs::is_ry_type(db, "List") =>
         {
             Some(arguments[0])
         }
@@ -517,14 +786,16 @@ pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 /// Whether every value of `ty` is one of ry's own values (a record, tuple, tag, or a standard
-/// library collection), which an Array stores boxed in a list rather than unboxed.
+/// library collection, or one of its scalars), the values a `List` holds.
 pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {
-        TyKind::NativeRecord(_) | TyKind::NativeTuple(_) | TyKind::Tag(..) | TyKind::OtherTags => {
-            true
-        }
+        TyKind::NativeRecord(_)
+        | TyKind::NativeTuple(_)
+        | TyKind::Tag(..)
+        | TyKind::OtherTags
+        | TyKind::Native(_) => true,
         TyKind::Named(name, _) => {
-            matches!(name.text(db), "Array" | "Dict" | "Set")
+            matches!(name.text(db), "List" | "Dict" | "Set")
                 && crate::stubs::is_ry_type(db, name.text(db))
         }
         TyKind::Union(members) => {
@@ -591,11 +862,13 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     match ty.kind(db) {
         TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
-        // A frame stores an Array column as the plain R vector underneath it.
-        _ => match array_element(db, ty) {
-            Some(element) if matches!(element.kind(db), TyKind::Scalar(_)) => {
-                Ty::new(db, TyKind::Vector(element))
-            }
+        // A frame stores a `List` column of `F64`, `Bool` or `Str` as the R vector that shares
+        // its representation.
+        _ => match array_element(db, ty).map(|element| element.kind(db)) {
+            Some(TyKind::Native(native)) => match native.shared_atomic() {
+                Some(atomic) => Ty::new(db, TyKind::Vector(scalar(db, atomic))),
+                None => ty,
+            },
             _ => ty,
         },
     }
@@ -765,6 +1038,7 @@ fn mapped_kind<'db>(
         | TyKind::Unknown
         | TyKind::Null
         | TyKind::Scalar(_)
+        | TyKind::Native(_)
         | TyKind::OtherTags
         | TyKind::Var(_)
         | TyKind::Rigid(_) => None,
@@ -857,6 +1131,7 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         | TyKind::Unknown
         | TyKind::Null
         | TyKind::Scalar(_)
+        | TyKind::Native(_)
         | TyKind::OtherTags
         | TyKind::Var(_)
         | TyKind::Rigid(_) => {}
@@ -1216,11 +1491,17 @@ mod tests {
     #[test]
     fn constraint_lattice_joins() {
         use Constraint::*;
-        assert_eq!(Unconstrained.join(Numeric), Numeric);
-        assert_eq!(Numeric.join(AtomicElement), ScalarNumeric);
-        assert_eq!(ScalarNumeric.join(Numeric), ScalarNumeric);
-        assert_eq!(AtomicElement.join(AtomicElement), AtomicElement);
-        assert_eq!(Key.join(AtomicElement), Key);
-        assert_eq!(Key.join(Numeric), ScalarNumeric);
+        assert_eq!(Unconstrained.join(Numeric), Some(Numeric));
+        assert_eq!(Numeric.join(AtomicElement), Some(ScalarNumeric));
+        assert_eq!(ScalarNumeric.join(Numeric), Some(ScalarNumeric));
+        assert_eq!(AtomicElement.join(AtomicElement), Some(AtomicElement));
+        assert_eq!(Key.join(AtomicElement), Some(Key));
+        assert_eq!(Key.join(Numeric), Some(ScalarNumeric));
+        assert_eq!(Number.join(Int), Some(Int));
+        assert_eq!(Int.join(Frac), None);
+        assert_eq!(Number.join(Numeric), None);
+        assert_eq!(WholeLiteral { integer: false }.join(Frac), Some(Frac));
+        assert_eq!(FracLiteral.join(Int), None);
+        assert_eq!(FracLiteral.join(Numeric), Some(Numeric));
     }
 }
