@@ -238,10 +238,6 @@ bump-version version:
     git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml
     git commit -m "chore: release {{ version }}"
 
-# Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) embedded in it,
-# LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
-# an LLVM mingw toolchain (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages
-# share the UCRT.
 # Build ry's base R from GNU R's pinned source release (tools/base-r) into target/base-r, where
 # every ry and test binary of this checkout finds it. `profile` picks the runtime that runs the build.
 base-r profile="release" target="":
@@ -267,6 +263,10 @@ base-r profile="release" target="":
     esac
     tools/base-r/build.sh "$output" "$build/$rcmd" "$build/$library"
 
+# Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) and base R
+# embedded in it, LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with
+# an LLVM mingw toolchain (r-runtime.md, section 11), so `ry.exe`, `R.dll` and Rtools-built packages
+# share the UCRT.
 package version target="":
     #!/usr/bin/env bash
     set -euo pipefail

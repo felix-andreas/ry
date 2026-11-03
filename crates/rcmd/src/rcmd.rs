@@ -617,11 +617,20 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
             metadata.len()
         ))
     };
+    // A base rebuilt in place keeps its path, so its manifest tells the builds apart. A GNU R
+    // installation has none.
+    let manifest_path = base.join(base::MANIFEST);
+    let manifest = match fs::read_to_string(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(io_error(&manifest_path)(error)),
+    };
     let key = [
         env!("CARGO_PKG_VERSION").to_owned(),
         stamp(libr)?,
         stamp(rcmd)?,
         base.display().to_string(),
+        manifest,
     ]
     .join("\n");
     let home = cache.join(format!("{:016x}", fnv1a(key.as_bytes())));

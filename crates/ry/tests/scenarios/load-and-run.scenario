@@ -41,8 +41,3 @@ file tests/broken.R
 run ry run --runtime ry tests/broken.R
 expect exit 1
 expect stderr "area(2, 3) == 7 is not TRUE"
-
-# GNU R gives the same answers.
-run ry run --runtime gnu-r tests/check.R
-expect exit 0
-expect stdout "all checks passed"

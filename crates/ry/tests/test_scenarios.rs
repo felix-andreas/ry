@@ -204,7 +204,7 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                 }
             }
             "ry-runtime" => {
-                if base_r().is_none() {
+                if ry_base().is_none() {
                     return Some(
                         "ry's base R is not built; build it with `just base-r`".to_owned(),
                     );
@@ -238,14 +238,20 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
 }
 
 /// The base R tree ry's runtime loads in scenarios: the one `R_HOME` names, which emulates that
-/// GNU R, else ry's own build (`just base-r`) where the `ry` under test finds it. Cargo puts
-/// test binaries in a different directory from `ry`, so the lookup starts from `ry`'s.
+/// GNU R, else ry's own ([`ry_base`]).
 fn base_r() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("R_HOME").filter(|home| !home.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
+    std::env::var_os("R_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(ry_base)
+}
+
+/// ry's own base R tree (`just base-r`) where the `ry` under test finds it, which scenarios that
+/// hide GNU R or embed the tree need even when `R_HOME` names a GNU R. Cargo puts test binaries
+/// in a different directory from `ry`, so the lookup starts from `ry`'s.
+fn ry_base() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("RY_BASE_R").filter(|base| !base.is_empty()) {
-        return Some(PathBuf::from(base));
+        return Some(PathBuf::from(base)).filter(|base| rcmd::base::holds_base_r(base));
     }
     let directory = Path::new(env!("CARGO_BIN_EXE_ry")).parent()?;
     [directory.join("base-r"), directory.join("../base-r")]
@@ -328,8 +334,9 @@ fn r_home() -> Result<&'static PathBuf, String> {
                 libr: libr_path()?,
                 rcmd: &profile_directory.join("ry-rcmd"),
                 base: &base,
-                toolchain: rcmd::Toolchain::for_base(&base)
-                    .map_err(|error| format!("reading the toolchain of {}: {error}", base.display()))?,
+                toolchain: rcmd::Toolchain::for_base(&base).map_err(|error| {
+                    format!("reading the toolchain of {}: {error}", base.display())
+                })?,
             },
         )
         .map_err(|error| format!("assembling ry's R home: {error}"))?;
@@ -356,7 +363,7 @@ fn single_ry() -> Result<&'static PathBuf, String> {
             let release = profile_directory
                 .file_name()
                 .is_some_and(|name| name == "release");
-            let base = base_r().ok_or("ry's base R is not built; build it with `just base-r`")?;
+            let base = ry_base().ok_or("ry's base R is not built; build it with `just base-r`")?;
             let build = |embed: Option<(&Path, &Path)>| -> Result<(), String> {
                 let mut command = Command::new(env!("CARGO"));
                 command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
@@ -383,7 +390,8 @@ fn single_ry() -> Result<&'static PathBuf, String> {
             build(Some((libr, &base)))?;
             // Two levels below `single-ry`, so that no `base-r` of the checkout is where `ry`
             // looks beside itself (`rcmd::base::installed`).
-            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry/bin/release");
+            let directory =
+                PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("single-ry/bin/release");
             fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
             let single = directory.join("ry");
             let copied = fs::copy(env!("CARGO_BIN_EXE_ry"), &single)
@@ -944,7 +952,9 @@ impl Journey {
                     command.env_remove("RY_BASE_R");
                 }
                 if self.hide_gnu_r {
-                    command.env("PATH", path_without_gnu_r()).env_remove("R_HOME");
+                    command
+                        .env("PATH", path_without_gnu_r())
+                        .env_remove("R_HOME");
                 }
                 let output = command
                     .output()

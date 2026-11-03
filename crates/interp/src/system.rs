@@ -373,7 +373,7 @@ fn located_r_home() -> &'static Result<String, String> {
 /// GNU R installation is used only when `R_HOME` names it, which is how a session emulates an
 /// older R.
 fn find_r_home() -> Result<String, String> {
-    let usable = |home: &Path| home.join("library/base/R/base").exists();
+    let usable = |home: &Path| rcmd::base::holds_base_r(home);
     // An exported but empty R_HOME, as some env files leave it, names no directory.
     if let Some(home) = std::env::var("R_HOME").ok().filter(|home| !home.is_empty()) {
         if usable(Path::new(&home)) {
@@ -392,10 +392,12 @@ fn find_r_home() -> Result<String, String> {
              with `just base-r`\n",
             base.display()
         )),
-        None => Err("ry: ry's base R was not found: R_HOME and RY_BASE_R are not set, and no \
+        None => Err(
+            "ry: ry's base R was not found: R_HOME and RY_BASE_R are not set, and no \
              base-r directory is beside the executable\n  fix: build it with `just base-r`, \
              or set R_HOME to a GNU R installation\n"
-            .to_owned()),
+                .to_owned(),
+        ),
     }
 }
 

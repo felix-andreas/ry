@@ -123,7 +123,7 @@ when started under such a name.
 ry looks for its runtime in `RY_LIBR`, then beside the executable, then in `deps/` and
 `../lib/ry/` next to it, and only then falls back to the built-in one, so an installer may still
 place `ry` in `bin/` and the library in `lib/ry/`. Base R is looked up the same way: `RY_BASE_R`,
-then `base-r/` beside the executable, one directory up, or in `../lib/ry/`, then the built-in
+then `base-r/` beside the executable, one or two directories up, or in `../lib/ry/`, then the built-in
 copy. Only `ry R` needs a GNU R installation.
 
 The Linux archive is built on Ubuntu 22.04, so it needs glibc 2.35 or newer. On macOS, `libR.dylib`

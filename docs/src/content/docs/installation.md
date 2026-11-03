@@ -80,7 +80,7 @@ names the version it found. An `R_HOME` that holds no base R is an error rather 
 fall back to the bundled copy.
 
 `RY_BASE_R` names a base R tree built by `just base-r` to use instead of the built-in one. Without
-it, a tree in `base-r/` beside `ry`, one directory up, or in `../lib/ry/base-r` takes precedence,
+it, a tree in `base-r/` beside `ry`, one or two directories up, or in `../lib/ry/base-r` takes precedence,
 which is how a development build and a distribution's package find theirs.
 
 Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) runs in the system's BLAS and LAPACK,

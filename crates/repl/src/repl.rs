@@ -347,7 +347,7 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
             built_from.as_deref(),
         )));
     }
-    export_r_home();
+    export_r_home()?;
     Ok(library)
 }
 
@@ -396,7 +396,7 @@ pub fn base_r() -> Result<PathBuf, ReplError> {
     match std::env::var_os("R_HOME").filter(|home| !home.is_empty()) {
         Some(home) => {
             let home = PathBuf::from(home);
-            if !home.join("library/base").is_dir() {
+            if !rcmd::base::holds_base_r(&home) {
                 return Err(ReplError(format!(
                     "R_HOME is set to {}, which holds no base R; unset it to use ry's own base R",
                     home.display()
@@ -412,6 +412,13 @@ pub fn base_r() -> Result<PathBuf, ReplError> {
 /// the copy a release embeds, extracted into the user's cache ([`extract_base`]).
 pub fn bundled_base() -> Result<PathBuf, ReplError> {
     if let Some(base) = rcmd::base::installed() {
+        if !rcmd::base::holds_base_r(&base) {
+            return Err(ReplError(format!(
+                "ry's base R at {} is incomplete (no library/base/R/base); rebuild it with \
+                 `just base-r`, or point RY_BASE_R at a complete one",
+                base.display()
+            )));
+        }
         return Ok(base);
     }
     match &EMBEDDED_BASE {
@@ -427,16 +434,16 @@ pub fn bundled_base() -> Result<PathBuf, ReplError> {
 
 /// Points the runtime's session at ry's R home when `R_HOME` names none, so that `R.home()`,
 /// `R.home("bin")/R` (which callr and `R CMD` run) and the base packages all come from it.
-/// Without a home the variable stays unset, and the session reports the missing base R itself.
-fn export_r_home() {
+fn export_r_home() -> Result<(), ReplError> {
     if std::env::var_os("R_HOME").is_some_and(|home| !home.is_empty()) {
-        return;
+        return Ok(());
     }
-    match ry_r_home() {
-        // SAFETY: the host sets the variable before the runtime starts any thread.
-        Ok(home) => unsafe { std::env::set_var("R_HOME", home) },
-        Err(error) => eprintln!("ry: {error}"),
-    }
+    let home = ry_r_home()?;
+    // SAFETY: ry's host threads (the LSP server's, the CLI's) never read the environment while
+    // a runtime starts, and the runtime starts none of its own until its session is up; the
+    // session's `read_renviron` relies on the same.
+    unsafe { std::env::set_var("R_HOME", home) };
+    Ok(())
 }
 
 /// ry's runtime library, and whether it was extracted from this executable. `RY_LIBR` wins,
@@ -532,10 +539,15 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
     let written = unpack_base(base, &staging);
     if let Err(error) = written {
         // A partial tree, say from a full disk, would otherwise stay in the cache for good.
+        let mut message = failed(&staging, error).0;
         if staging.exists() {
-            fs::remove_dir_all(&staging).map_err(|error| failed(&staging, error))?;
+            if let Err(cleanup) = fs::remove_dir_all(&staging) {
+                message.push_str(&format!(
+                    ", and removing the partial copy failed: {cleanup}"
+                ));
+            }
         }
-        return Err(failed(&staging, error));
+        return Err(ReplError(message));
     }
     if let Err(error) = fs::rename(&staging, &directory) {
         // Another process renamed its copy into place first.
@@ -578,7 +590,10 @@ fn unpack_base(base: &EmbeddedBase, root: &Path) -> io::Result<()> {
         let length = u32::from_le_bytes(take_array(&archive, &mut position)?) as usize;
         let relative = std::str::from_utf8(take(&archive, &mut position, length)?)
             .map_err(|_| corrupt_archive())?;
-        if relative.split('/').any(|part| part.is_empty() || part == "..") {
+        if relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "..")
+        {
             return Err(corrupt_archive());
         }
         let path = root.join(relative);
