@@ -789,8 +789,8 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::Jump => {
                 let target = jump_target(inst).ok_or(Refusal("a jump without a target"))?;
                 if target <= pc {
-                    // A pending interrupt hands the activation to tier 0 at this jump, which
-                    // raises it.
+                    // A raised interrupt flag hands the activation to tier 0 at this jump, whose
+                    // poll decides whether to deliver a pending interrupt.
                     let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
                     let address = self.builder.ins().iconst(I64, flag);
                     let requested = self.builder.ins().uload8(I32, flags(), address, 0);

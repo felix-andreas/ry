@@ -281,6 +281,9 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The evaluator polls left before the next one that delivers a pending user interrupt
+    /// (see [`crate::unwind::poll_interrupt`]).
+    pub interrupt_countdown: u32,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
     pub forks: fork::Forks,
@@ -394,6 +397,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         object_systems: true,
         prelude: true,
         parked_unwind: None,
+        interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
         #[cfg(unix)]
         forks: fork::Forks::default(),
     });

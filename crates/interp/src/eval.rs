@@ -1893,6 +1893,8 @@ unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
 
 /// Runs one loop iteration and reports whether the loop goes on: `Ok(false)` after `break`.
 unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
+    // Every iteration polls, so even `repeat NULL`, whose body makes no call, can be interrupted.
+    crate::unwind::poll_interrupt()?;
     let result = scope(|| eval(body, env).map(|_| ()));
     match result {
         Ok(()) => Ok(true),

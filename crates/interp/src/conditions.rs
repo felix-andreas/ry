@@ -8,7 +8,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         deparse, eval, interp,
-        unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
+        unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
         values::{
             self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
         },
@@ -18,7 +18,7 @@ use {
         Marker,
         object::{NA_INTEGER, Sexp, SexpType},
     },
-    std::rc::Rc,
+    std::{rc::Rc, sync::atomic::Ordering},
 };
 
 pub type HandlerStack = Option<Rc<Handler>>;
@@ -606,9 +606,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| Ok(nil())).invisible(),
     internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
-    internal("interruptsSuspended", -1, |_| unsafe {
-        values::scalar_bool(false)
-    }),
+    internal("interruptsSuspended", -1, do_interrupts_suspended),
 ];
 
 unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
@@ -846,6 +844,17 @@ unsafe fn do_invoke_restart(call: &Call<'_>) -> R<Sexp> {
         entry = candidate.next.clone();
     }
     Err(error("restart not on stack"))
+}
+
+/// `.Internal(interruptsSuspended(value))`: returns whether interrupts are suspended and, given
+/// `value`, sets it. Lifting the suspension delivers nothing by itself: a pending interrupt waits
+/// for the next check, as in GNU R.
+unsafe fn do_interrupts_suspended(call: &Call<'_>) -> R<Sexp> {
+    let previous = INTERRUPTS_SUSPENDED.load(Ordering::Relaxed);
+    if !call.is_empty() {
+        INTERRUPTS_SUSPENDED.store(values::as_logical_scalar(call.arg(0)), Ordering::Relaxed);
+    }
+    values::scalar_logical(previous)
 }
 
 /// The text of a condition's message, for printing.

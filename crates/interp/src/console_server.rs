@@ -383,7 +383,7 @@ mod platform {
         crate::{
             debugger::evaluate_text,
             graphics_engine, help_server, interp,
-            unwind::INTERRUPT_REQUESTED,
+            unwind::{INTERRUPT_REQUESTED, INTERRUPTS_PENDING},
             values::{self, global_env},
         },
         serde_json::{Value, json},
@@ -696,7 +696,10 @@ mod platform {
                     // Requests answered while idle set the flag too; with nothing left to
                     // answer it would only cost the next command a spurious poll.
                     if SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
-                        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
+                        INTERRUPT_REQUESTED.store(
+                            INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0,
+                            Ordering::Relaxed,
+                        );
                     }
                     return BrowseInput::Line(input);
                 }

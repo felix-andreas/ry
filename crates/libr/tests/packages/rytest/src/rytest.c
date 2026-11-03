@@ -1,6 +1,7 @@
 #include <R.h>
 #include <Rinternals.h>
 #include <R_ext/Altrep.h>
+#include <R_ext/GraphicsEngine.h>
 #include <R_ext/Rdynload.h>
 #include <R_ext/PrtUtil.h>
 #include <R_ext/RS.h>
@@ -833,6 +834,46 @@ SEXP rytest_frame_lifetime(SEXP count)
     return ScalarInteger(value);
 }
 
+/* Interrupts. */
+
+/* rlang's interrupt(): GNU R's onintr, which leaves the interrupt pending while interrupts are
+   suspended. */
+SEXP rytest_interrupt(void)
+{
+    Rf_onintr();
+    return R_NilValue;
+}
+
+static int suspended_progress = 0;
+
+/* An interrupt raised between BEGIN_SUSPEND_INTERRUPTS and END_SUSPEND_INTERRUPTS survives a
+   check inside the pair and is delivered by END_SUSPEND_INTERRUPTS. */
+SEXP rytest_suspended_interrupt(void)
+{
+    suspended_progress = 0;
+    BEGIN_SUSPEND_INTERRUPTS {
+        Rf_onintr();
+        R_CheckUserInterrupt();
+        suspended_progress = 1;
+    } END_SUSPEND_INTERRUPTS;
+    suspended_progress = 2;
+    return R_NilValue;
+}
+
+SEXP rytest_suspended_progress(void)
+{
+    return ScalarInteger(suspended_progress);
+}
+
+/* An error that leaves BEGIN_SUSPEND_INTERRUPTS without its END. */
+SEXP rytest_suspended_error(void)
+{
+    BEGIN_SUSPEND_INTERRUPTS {
+        error("failed while interrupts were suspended");
+    } END_SUSPEND_INTERRUPTS;
+    return R_NilValue;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -886,6 +927,10 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
     {"rytest_frame_lifetime", (DL_FUNC) &rytest_frame_lifetime, 1},
+    {"rytest_interrupt", (DL_FUNC) &rytest_interrupt, 0},
+    {"rytest_suspended_interrupt", (DL_FUNC) &rytest_suspended_interrupt, 0},
+    {"rytest_suspended_progress", (DL_FUNC) &rytest_suspended_progress, 0},
+    {"rytest_suspended_error", (DL_FUNC) &rytest_suspended_error, 0},
     {NULL, NULL, 0}
 };
 

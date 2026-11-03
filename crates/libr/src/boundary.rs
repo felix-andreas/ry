@@ -19,11 +19,13 @@ use {
         arena::{Arena, Watermark},
         object::{Sexp, SexpType},
     },
+    interp::unwind::INTERRUPTS_SUSPENDED,
     std::{
         any::Any,
         ffi::{CStr, c_char, c_int, c_void},
         io::Write,
         panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::Ordering,
     },
 };
 
@@ -560,31 +562,21 @@ pub fn default_console(text: &[u8], is_error: bool) {
     drop(written);
 }
 
-/// Set by a signal handler or an embedding host; `R_CheckUserInterrupt` acts on it.
-#[unsafe(no_mangle)]
-pub static R_interrupts_pending: Global<c_int> = Global::new(0);
-#[unsafe(no_mangle)]
-pub static R_interrupts_suspended: Global<c_int> = Global::new(0);
+// `R_interrupts_pending` and `R_interrupts_suspended` are `interp::unwind`'s
+// `INTERRUPTS_PENDING` and `INTERRUPTS_SUSPENDED`, which the interpreter defines under GNU R's
+// names because it reads them at every interrupt check.
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CheckUserInterrupt() {
-    if R_interrupts_suspended.get() != 0 {
-        return;
-    }
-    if R_interrupts_pending.get() != 0 {
-        R_interrupts_pending.set(0);
-        raise(interp::conditions::signal_interrupt());
-    }
-    if let Err(unwind) = interp::unwind::poll_interrupt() {
+    if let Err(unwind) = interp::unwind::check_user_interrupt() {
         raise(unwind);
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_onintr() {
-    if R_interrupts_suspended.get() == 0 {
-        R_interrupts_pending.set(0);
-        raise(interp::conditions::signal_interrupt());
+    if let Err(unwind) = interp::unwind::onintr() {
+        raise(unwind);
     }
 }
 
@@ -598,6 +590,7 @@ pub unsafe extern "C" fn ry_state_save(state: *mut ContextState) {
         vmax: Arena::encode(runtime.arena.watermark()),
         api_depth: runtime.api_depth as usize,
         handout_base: runtime.handout_base,
+        interrupts_suspended: INTERRUPTS_SUSPENDED.load(Ordering::Relaxed),
     };
 }
 
@@ -609,16 +602,20 @@ pub unsafe extern "C" fn ry_state_restore(state: *const ContextState) {
     runtime.arena.reset(Arena::decode(state.vmax));
     runtime.api_depth = state.api_depth as u32;
     runtime.handout_base = state.handout_base;
+    INTERRUPTS_SUSPENDED.store(state.interrupts_suspended, Ordering::Relaxed);
 }
 
 /// What a C context saves when it begins and restores when a jump lands on it. A jump may leave
-/// API entries without returning through them, so the entry depth is restored with the rest.
+/// API entries without returning through them, so the entry depth is restored with the rest, and
+/// so is the interrupt suspension, which an error raised between `BEGIN_SUSPEND_INTERRUPTS` and
+/// `END_SUSPEND_INTERRUPTS` would otherwise leave on, as GNU R's contexts restore it.
 #[repr(C)]
 pub struct ContextState {
     protect: usize,
     vmax: usize,
     api_depth: usize,
     handout_base: usize,
+    interrupts_suspended: c_int,
 }
 
 #[unsafe(no_mangle)]

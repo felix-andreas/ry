@@ -150,8 +150,7 @@ fn on_transfer_thread<T: Send>(
             if served.is_err() {
                 // The transfer cannot be cut short from here, so the Ctrl-C waits for the next
                 // interrupt check after it.
-                crate::unwind::INTERRUPT_REQUESTED
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                crate::unwind::request_interrupt();
             }
         }
         transfer.join()

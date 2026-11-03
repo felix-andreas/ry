@@ -1348,6 +1348,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
             .heap
             .update_policy(|policy| policy.stress = heap::GcStress::EveryAllocation);
     }
+    // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
+    // instead of killing the process.
+    install_interrupt_handler();
     true
 }
 
@@ -1648,14 +1651,14 @@ pub unsafe extern "C" fn ry_loader_changed() -> c_int {
     c_int::from(loader::ry_runtime::changed())
 }
 
-/// While the console reads input its terminal is raw, so Ctrl-C reaches the line editor; while
-/// code runs it arrives as SIGINT and interrupts the evaluation, not the process.
+/// SIGINT requests a user interrupt, which the evaluator delivers at its next interrupt check. At
+/// the console the terminal is raw while it reads input, so Ctrl-C reaches the line editor then.
 #[cfg(unix)]
 fn install_interrupt_handler() {
     extern "C" fn request_interrupt(_signal: c_int) {
-        interp::unwind::INTERRUPT_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        interp::unwind::request_interrupt();
     }
-    // SAFETY: the handler only performs an atomic store, which is async-signal-safe.
+    // SAFETY: the handler only performs atomic stores, which are async-signal-safe.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = request_interrupt as *const () as usize;

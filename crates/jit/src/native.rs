@@ -1583,7 +1583,8 @@ struct Emitter<'f> {
 }
 
 impl Emitter<'_> {
-    /// Fails when an interrupt is pending, which the interpreter then raises.
+    /// Fails when the interrupt flag is raised, so the interpreter runs the call and its polls
+    /// decide whether to deliver a pending interrupt.
     fn check_interrupt(&mut self) {
         let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
         let address = self.builder.ins().iconst(I64, flag);

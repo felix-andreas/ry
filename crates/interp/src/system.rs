@@ -230,11 +230,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
                     .checked_sub(start.elapsed())
                     .filter(|left| !left.is_zero())
                 {
-                    crate::unwind::poll_interrupt()?;
+                    crate::unwind::check_interrupt_while_waiting()?;
                     // GNU R answers help server requests while it sleeps.
                     crate::help_server::wait_and_serve(left.min(slice))?;
                 }
             }
+            crate::unwind::check_user_interrupt()?;
             Ok(nil())
         }
     })

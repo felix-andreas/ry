@@ -480,7 +480,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().visible = true;
     let mut value = nil();
     let result = eval::eval(expression, global_env()).and_then(|result| {
-        // A Ctrl-C that arrived after the last poll belongs to this command, not the next.
+        // An unwind parked after the last poll belongs to this command, not the next.
         crate::unwind::poll_interrupt()?;
         value = result;
         crate::heap().root(value);

@@ -65,6 +65,7 @@ typedef struct RyState {
     size_t vmax;
     size_t api_depth;
     size_t handout_base;
+    int interrupts_suspended;
 } RyState;
 
 extern void ry_state_save(RyState *state);

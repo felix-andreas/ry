@@ -616,6 +616,9 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
 - `test_native.rs` builds both against ry's headers and checks the results, collection stress, the
   handle scope, `PROTECT` imbalance, errors unwinding through C and C++ frames, `R_alloc` release,
   finalizers, coercion, and the random number generator against GNU R's output.
+- `test_interrupts.rs` checks that an interrupt raised while interrupts are suspended, from R or
+  from C, stays pending until the next interrupt check. It loads base R, which changes how a C
+  callable resolves for every later test in the session, so it runs in a process of its own.
 - `test_gnu_r_binaries.rs` builds both with GNU R's `R CMD SHLIB`, against GNU R's headers and
   linked to GNU R's `libR.so`, and runs them under ry's. It runs in a process of its own, so the two
   builds of one package never share a session.

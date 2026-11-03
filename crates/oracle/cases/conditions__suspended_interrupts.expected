@@ -1,0 +1,11 @@
+[stdout]
+| [1] "suspended block done"    "after suspendInterrupts"
+| [3] "interrupt"              
+| [1] "before Sys.sleep" "interrupt"       
+| [1] FALSE  TRUE FALSE FALSE FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(FALSE, TRUE, FALSE, FALSE, FALSE)

@@ -10,45 +10,137 @@
 use {
     crate::interp,
     heap::{Marker, object::Sexp},
-    std::sync::atomic::{AtomicBool, Ordering},
+    std::sync::atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
 pub type R<T> = Result<T, Unwind>;
 
-/// Set by a host's SIGINT handler (an atomic store is async-signal-safe). The evaluator polls it
-/// at every call and every loop back edge, so Ctrl-C stops even a tight loop.
+/// Raised whenever the evaluator has something to act on at its next poll: a pending user
+/// interrupt, an editor's request to the console, or an unwind [`park`] set aside. The evaluator
+/// polls it at every call and every loop back edge, and compiled code at its back edges, so the
+/// fast path is one load.
 pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Raises a pending user interrupt, or an unwind [`park`] set aside.
+/// GNU R's `R_interrupts_pending`: a user interrupt waits to be delivered. Native code reads and
+/// writes it under that name, so it is the one record of a pending interrupt. An atomic `i32`
+/// has the layout of the C `int` packages see.
+#[unsafe(export_name = "R_interrupts_pending")]
+pub static INTERRUPTS_PENDING: AtomicI32 = AtomicI32::new(0);
+
+/// GNU R's `R_interrupts_suspended`: while it is nonzero, an interrupt stays pending instead of
+/// being delivered. `suspendInterrupts()` sets it through `.Internal(interruptsSuspended())`, and
+/// native code sets it directly, as `BEGIN_SUSPEND_INTERRUPTS` does.
+#[unsafe(export_name = "R_interrupts_suspended")]
+pub static INTERRUPTS_SUSPENDED: AtomicI32 = AtomicI32::new(0);
+
+/// How many evaluator polls pass between two checks that deliver a pending user interrupt. GNU R's
+/// `eval` calls `R_CheckUserInterrupt` once every thousand evaluations, so an interrupt that
+/// becomes deliverable, such as one left pending when `suspendInterrupts()` returns, fires a little
+/// later in a loop rather than at the very next call.
+pub(crate) const INTERRUPT_CHECK_INTERVAL: u32 = 1000;
+
+/// Requests a user interrupt, as Ctrl-C does. It only stores to atomics, so a signal handler may
+/// call it.
+pub fn request_interrupt() {
+    INTERRUPTS_PENDING.store(1, Ordering::Relaxed);
+    INTERRUPT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// The evaluator's poll at every call and loop back edge. It answers an editor's request and
+/// raises a parked unwind at once, but it delivers a pending user interrupt only at every
+/// [`INTERRUPT_CHECK_INTERVAL`]th poll, the way GNU R's `eval` checks for one.
 #[inline]
 pub fn poll_interrupt() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
-        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
-        // An editor's request to the console shares the flag, so the fast path stays one load.
-        // A Ctrl-C that lands in the same instant as a request is lost, and the user presses it
-        // again.
-        if crate::console_server::SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
-            crate::console_server::service();
-            if interp().parked_unwind.is_none() {
-                return Ok(());
-            }
-        }
-        return Err(match interp().parked_unwind.take() {
-            Some(unwind) => unwind,
-            // SAFETY: polls happen at call boundaries and loop back edges, where R code may run.
-            None => unsafe { crate::conditions::signal_interrupt() },
-        });
+        return attend();
     }
     Ok(())
 }
 
-/// Raises an unwind [`park`] set aside, leaving a pending user interrupt for the next poll.
+#[cold]
+fn attend() -> R<()> {
+    take_requests()?;
+    if INTERRUPTS_PENDING.load(Ordering::Relaxed) == 0 {
+        return Ok(());
+    }
+    let interp = interp();
+    interp.interrupt_countdown = interp.interrupt_countdown.saturating_sub(1);
+    if interp.interrupt_countdown > 0 {
+        return Ok(());
+    }
+    interp.interrupt_countdown = INTERRUPT_CHECK_INTERVAL;
+    check_user_interrupt()
+}
+
+/// GNU R's `R_CheckUserInterrupt`: delivers a pending user interrupt now, unless interrupts are
+/// suspended. Native code and the builtins that check as they work call it.
+pub fn check_user_interrupt() -> R<()> {
+    if INTERRUPTS_SUSPENDED.load(Ordering::Relaxed) != 0 {
+        return Ok(());
+    }
+    if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        take_requests()?;
+    }
+    if INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0 {
+        return onintr();
+    }
+    Ok(())
+}
+
+/// The check of a builtin that blocks while it waits, such as `Sys.sleep()` or
+/// `socketSelect()`. GNU R waits in `R_SelectEx`, which lifts the suspension while it waits, so
+/// such a wait delivers a pending user interrupt even inside `suspendInterrupts()`.
+pub fn check_interrupt_while_waiting() -> R<()> {
+    if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        take_requests()?;
+    }
+    if INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0 {
+        return Err(deliver_interrupt());
+    }
+    Ok(())
+}
+
+/// GNU R's `onintr`: signals the pending user interrupt now, or, while interrupts are
+/// suspended, leaves it pending for the first check after the suspension ends.
+pub fn onintr() -> R<()> {
+    if INTERRUPTS_SUSPENDED.load(Ordering::Relaxed) != 0 {
+        request_interrupt();
+        return Ok(());
+    }
+    Err(deliver_interrupt())
+}
+
+fn deliver_interrupt() -> Unwind {
+    INTERRUPTS_PENDING.store(0, Ordering::Relaxed);
+    interp().interrupt_countdown = INTERRUPT_CHECK_INTERVAL;
+    // SAFETY: interrupts are delivered at calls, loop back edges and the checks of builtins and
+    // native code, where R code may run.
+    unsafe { crate::conditions::signal_interrupt() }
+}
+
+/// Clears [`INTERRUPT_REQUESTED`], answers an editor's request and raises a parked unwind. A
+/// pending user interrupt keeps the flag raised until it is delivered.
+fn take_requests() -> R<()> {
+    INTERRUPT_REQUESTED.store(
+        INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0,
+        Ordering::Relaxed,
+    );
+    if crate::console_server::SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {
+        crate::console_server::service();
+    }
+    match interp().parked_unwind.take() {
+        Some(unwind) => Err(unwind),
+        None => Ok(()),
+    }
+}
+
+/// Raises an unwind [`park`] set aside, leaving anything else that raised
+/// [`INTERRUPT_REQUESTED`] for the next poll.
 #[inline]
 pub fn raise_parked() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed)
         && let Some(unwind) = interp().parked_unwind.take()
     {
-        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
         return Err(unwind);
     }
     Ok(())

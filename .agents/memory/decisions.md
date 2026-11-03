@@ -3248,7 +3248,8 @@ first lines R had already read, leaving R mid-command.
   promotion, so this is a profile, not a proof, and the usual guards stay. Typed recursive code therefore compiles on
   the first try instead of waiting.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
-  tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+  tier 0's backward `Jump`, whose poll decides whether to raise it, so there is one place that
+  handles it.
 - **Compile latency: what was measured and rejected.** Cranelift's `opt_level = "none"` as a
   first tier did not shorten whole-process time on the why-ry programs (compiling is dominated by
   lowering and register allocation, which `none` keeps), so there is one tier. A back-edge
@@ -5870,6 +5871,26 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   `interrupt` condition to calling and exiting handlers and unwinds to top level only when none
   takes it, as GNU R's `onintr` does. Previously `Unwind::Interrupt` bypassed the handler stack,
   so `tryCatch(rlang::interrupt(), interrupt = )` halted the script (later's tests).
+- **A pending interrupt waits for the next interrupt check** (`interp::unwind`).
+  - *Previous shape.* `R_interrupts_pending` and `R_interrupts_suspended` were libr globals the
+    interpreter never read, `.Internal(interruptsSuspended())` always answered `FALSE` and set
+    nothing, and `INTERRUPT_REQUESTED` alone recorded a Ctrl-C, which the very next call raised.
+    So `suspendInterrupts(rlang::interrupt())` fired as soon as `rlang::interrupt()` ran.
+  - *Shape.* The interpreter owns both globals, exported under GNU R's names
+    (`INTERRUPTS_PENDING`, `INTERRUPTS_SUSPENDED`), so C code, `suspendInterrupts()` and the
+    evaluator share one record. `INTERRUPT_REQUESTED` only says "attend at the next poll", and stays
+    raised while an interrupt is pending. The evaluator's poll (calls, loop iterations, compiled back
+    edges through deoptimization) delivers a pending interrupt on every 1000th poll, as GNU R's
+    `eval` checks every 1000 evaluations; `R_CheckUserInterrupt` (`check_user_interrupt`) delivers
+    at once unless suspended; `Sys.sleep()` and socket waits deliver even while suspended, because
+    GNU R waits in `R_SelectEx`, which lifts the suspension. Leaving `suspendInterrupts()` delivers
+    nothing by itself. A C context saves and restores the suspension, as GNU R's contexts do, and
+    `ry run` installs the SIGINT handler, as `Rscript` does.
+  - *Known gap.* A host that sets `R_interrupts_pending` directly, without the signal handler, is
+    seen only by `R_CheckUserInterrupt`, not by the evaluator's poll, which reads the attention flag.
+  - Pinned by `crates/libr/tests/test_interrupts.rs`, which runs in its own process because it loads
+    base R, and the oracle cases `conditions__suspended_interrupts` and
+    `conditions__interrupt_handlers`.
 - **Long integer sequences are compact; short ones are plain vectors.** `:` and `seq_len` build
   sequences of 2^20 or more elements through the `compact_intseq` host hook, which libr answers
   with its `compact_intseq` ALTREP class (the interpreter cannot name libr, so a host without

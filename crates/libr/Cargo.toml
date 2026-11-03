@@ -52,6 +52,10 @@ name = "test_native"
 path = "tests/test_native.rs"
 
 [[test]]
+name = "test_interrupts"
+path = "tests/test_interrupts.rs"
+
+[[test]]
 name = "test_gnu_r_binaries"
 path = "tests/test_gnu_r_binaries.rs"
 

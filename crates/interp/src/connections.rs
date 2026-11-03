@@ -1035,7 +1035,7 @@ fn wait_sockets(
         if remaining > 0 {
             remaining -= slice;
         }
-        crate::unwind::poll_interrupt()?;
+        crate::unwind::check_interrupt_while_waiting()?;
     }
 }
 
