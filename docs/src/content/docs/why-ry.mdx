@@ -3,6 +3,7 @@ title: Why ry
 description: One toolchain for R, a type system on top of it, and a path from the R code you have to code an agent can safely change
 ---
 
+import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import Venn from '../../components/Venn.astro';
 
 R reports most mistakes only when a line runs: a misspelled name, a string where a number belongs,
@@ -23,30 +24,14 @@ code whose types are known, which we call R--.
 
 ## Speed
 
-On ry's own runtime, loops over scalars and vector elements run several times faster than on GNU
-R, with the same results:
+On ry's own runtime, most R code runs faster than on GNU R, with the same results:
 
-| program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
-| --- | ---: | ---: | ---: | ---: |
-| array_dot | 0.264 s | 0.031 s | 0.032 s | 8.5x |
-| array_filter | 0.210 s | 0.028 s | 0.029 s | 7.5x |
-| array_map | 0.330 s | 0.039 s | 0.046 s | 8.5x |
-| array_sum | 0.142 s | 0.028 s | 0.029 s | 5.1x |
-| closures | 0.799 s | 0.375 s | 0.413 s | 2.1x |
-| drawdown | 0.323 s | 0.031 s | 0.032 s | 10.4x |
-| fib | 1.020 s | 0.007 s | 0.007 s | 145.7x |
-| log_rank | 0.103 s | 0.072 s | 0.071 s | 1.4x |
-| loop_sum | 0.249 s | 0.039 s | 0.039 s | 6.4x |
-| vasicek | 0.050 s | 0.026 s | 0.027 s | 1.9x |
-| vector_arith | 0.206 s | 0.165 s | 0.164 s | 1.2x |
+<BenchmarkTable />
 
-Call-heavy code that is not plain scalar arithmetic, such as `log_rank` and `vector_arith`, is
-near parity. A recursive function over numbers, such as `fib`, compiles to machine code with no
-environment per call. Typed code runs as fast as untyped code, but not yet faster, because ry
-already learns from the running code what the types say. `drawdown`, `vasicek` and `log_rank` are
-hot paths from the typed benchmark code bases, in the same inline-typed form. The typed `array_*` programs store their values in ry's `Array` type,
-which compiles to direct item loads and stores. The runtime is still incomplete (see
-[Status](#status)), and [How it was measured](#how-it-was-measured) describes the benchmark.
+Peak memory is the peak resident set size of the whole process, R's startup included. Loops and
+recursion gain the most, while code that spends its time in vectorized builtins runs about as fast
+as on GNU R, which runs those in C too. [Benchmarks](/benchmarks) shows the code of
+each program and how it was measured, and the runtime is still incomplete (see [Status](#status)).
 
 ## From plain R to fully typed code in four steps
 
@@ -79,7 +64,7 @@ unresolved
 ```
 
 The same analysis drives [your editor](/guides/editors). `ry fmt` formats the project, and
-`ry run`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
+`ry run`, started inside a package, [reloads what you edit](/guides/running) before each
 command, so you never call `load_all()` again.
 
 ### 2. Type your code
@@ -141,7 +126,7 @@ parse the annotations, so a file with inline types needs ry.
 
 A field read from an R6 object, or from a list built at run time, has a type the checker cannot
 see. ry's own data types have one. [Records, tuples and tagged unions](/type-checking/records-and-tags)
-come with a `match` that knows every case, [`DataFrame`](/type-checking/dataframes) is a table whose
+come with a `match` that knows every case, [`DataFrame`](/guides/dataframes#types) is a table whose
 columns the checker follows through every query, and the
 [standard library](/reference/standard-library) returns `Result`, `List` and `Dict` values instead
 of `NA` or a warning:
@@ -197,7 +182,7 @@ left out on purpose:
 
 Some things it cannot model yet. S4 and R6 objects and data frame columns get a type that is
 compatible with everything, so they never cause a false error, but they are not checked either.
-Strict mode shows most of the places where that happens, and [limitations](/type-checking/limitations) lists the rest.
+Strict mode shows most of the places where that happens, and [limitations](/type-checking/unknown#limitations) lists the rest.
 
 ## Status
 
@@ -210,14 +195,3 @@ ry's own runtime is under construction. It still reads base R from your GNU R in
 script that uses something it lacks stops with an error that names it. Records, tagged unions, `DataFrame` and
 the standard library run only on it, so for production work today, run plain R and typed R on GNU R
 with `ry R`.
-
-## How it was measured
-
-ry's runtime (`ry run`) interprets R and compiles hot code to machine code. Each
-program exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked in
-[strict mode](/type-checking/strict-mode). Each time is the best of six runs (two runs of the recipe, each
-taking the best of three after one warm-up run), measured inside the script, so it leaves out startup and, for the typed column, the static
-check. The best run is reported rather than the median because other load on a machine only ever
-slows a run down. Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R
-4.3.3 with its bytecode compiler on. `just bench-why` builds ry and regenerates the table on your
-machine.

@@ -1,13 +1,14 @@
 ---
-title: Vectors and lists
-description: How ry tells a single value from a vector, and the four kinds of list
+title: Vectors, lists and NULL
+description: How ry tells a single value from a vector, the four kinds of list, and how it makes you handle a value that may be NULL
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Two of R's most common runtime errors come from shapes: a vector of length two where an `if`
-expects one value, and a misspelled list field that silently reads as `NULL`. ry's types record
-both, so it reports these before the code runs, while your code stays the same R.
+Three of R's most common runtime errors come from shapes: a vector of length two where an `if`
+expects one value, a misspelled list field that silently reads as `NULL`, and a `NULL` that nobody
+handled. ry's types record all three, so it reports them before the code runs, while your code stays
+the same R.
 
 ## Scalars and vectors
 
@@ -121,3 +122,112 @@ counts[["pears"]]   # integer | NULL
 A `list(...)` literal infers as a fixed shape, so a dictionary that starts from a literal needs an
 annotation, as `counts` does. An empty `list()` filled by computed keys, as in `d[[key]] <- value`,
 needs none.
+
+## `NULL`
+
+Many R functions return `NULL` for "nothing", and code that forgets the case fails far from where the
+`NULL` came from. A value that may be `NULL` has a union type, such as `character | NULL`.
+
+The most common case is an optional argument that defaults to `NULL`. Its type says what a caller
+may pass instead. In the `fn(...)` form, brackets around a name such as `[label]` mark an optional
+argument:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(id: integer, [label]: character | NULL) -> character
+label_for <- function(id, label = NULL) {
+  if (is.null(label)) paste("item", id) else label
+}
+label_for(1L, label = 2)
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+label_for <- function(id: integer, label: character | NULL = NULL) -> character {
+  if (is.null(label)) paste("item", id) else label
+}
+label_for(1L, label = 2)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `character | NULL`, found `double`
+```
+
+### Reading through a value that may be `NULL`
+
+A field of a value that may be `NULL` may be `NULL` too, because R reads every field of `NULL` as
+`NULL`. Returning such a field where an `integer` is declared is an error:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(config: list{retries: integer} | NULL) -> integer
+retries <- function(config) {
+  config$retries
+}
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+retries <- function(config: list{retries: integer} | NULL) -> integer {
+  config$retries
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `integer`, found `integer | NULL`
+```
+
+Check for `NULL` first, and the error goes away:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(config: list{retries: integer} | NULL) -> integer
+retries <- function(config) {
+  if (is.null(config)) return(3L)
+  config$retries
+}
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+retries <- function(config: list{retries: integer} | NULL) -> integer {
+  if (is.null(config)) return(3L)
+  config$retries
+}
+```
+
+</TabItem>
+</Tabs>
+
+The guard *narrows* `config` to the list for the rest of the function. `is.character()`,
+`is.numeric()`, `is.list()`, and the other `is.*` tests narrow the same way.
+
+Narrowing applies to variables only, so to test a field, copy it into a variable first:
+`r <- config$retries; if (is.null(r)) ...`.
+
+ry checks the `NULL` you declare. A variable that the body computes without an annotation, such as
+the result of a `switch` without a default, is passed on as its value without the `NULL`, because the
+code presumably never reaches the call on the `NULL` path. The same holds for the `NULL` of an
+unannotated parameter, from a `NULL` default or an `is.null()` test. To have such a value checked, annotate the assignment or the function.

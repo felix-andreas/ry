@@ -9,15 +9,15 @@ export default defineConfig({
 	site: 'https://ry-lang.org',
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
-		'/formatter': '/guides/formatting',
+		'/formatter': '/guides/checking#formatting',
 		'/linter': '/guides/checking',
 		'/diagnostics': '/reference/diagnostic-codes',
 		'/configuration': '/reference/configuration',
 		'/language-server': '/guides/editors',
 		'/features': '/type-checking/overview',
 		'/type-checking/concepts': '/type-checking/overview',
-		'/limitations': '/type-checking/limitations',
-		'/stdlib-stubs': '/type-checking/stubs',
+		'/limitations': '/type-checking/unknown#limitations',
+		'/stdlib-stubs': '/type-checking/unknown#package-stubs',
 		'/typing': '/type-checking/overview',
 		'/typing/guide': '/type-checking/overview',
 		'/type-checking/tutorial': '/type-checking/overview',
@@ -32,7 +32,17 @@ export default defineConfig({
 		'/type-checking/tour': '/type-checking/overview',
 		'/type-checking/domain-modeling': '/type-checking/custom-types',
 		'/guides/continuous-integration': '/guides/checking#in-ci',
-		'/guides/r-console': '/guides/console',
+		'/guides/r-console': '/guides/running',
+		// Pages merged when each step of the sidebar was cut down to about three pages.
+		'/guides/formatting': '/guides/checking#formatting',
+		'/guides/console': '/guides/running',
+		'/guides/loading-packages': '/guides/running',
+		'/type-checking/annotations': '/type-checking/overview#annotations',
+		'/type-checking/functions': '/type-checking/overview#functions',
+		'/type-checking/null': '/type-checking/vectors-and-lists#null',
+		'/type-checking/stubs': '/type-checking/unknown#package-stubs',
+		'/type-checking/limitations': '/type-checking/unknown#limitations',
+		'/type-checking/dataframes': '/guides/dataframes#types',
 	},
 	integrations: [
 		starlight({
@@ -59,50 +69,43 @@ export default defineConfig({
 					items: [
 						{ slug: 'getting-started' },
 						{ slug: 'why-ry' },
+						{ slug: 'benchmarks' },
+						{ slug: 'ry' },
 						{ slug: 'installation' },
 					],
 				},
-				// The groups follow the migration story on the landing page and in why-ry.md: classic R
-				// first (steps 1 and 2), then what ry adds on top of R (steps 3 and 4).
+				// The groups follow the migration story on the landing page and in why-ry.mdx: classic R
+				// first (steps 1 and 2), then what ry adds on top of R (steps 3 and 4). Each step keeps
+				// about three pages, so a reader sees the whole step at a glance.
 				{
 					label: '1. Check the code you have',
 					items: [
 						{ slug: 'guides/checking' },
 						{ slug: 'guides/editors' },
-						{ slug: 'guides/loading-packages' },
-						{ slug: 'guides/console' },
-						{ slug: 'guides/formatting' },
+						{ slug: 'guides/running' },
 					],
 				},
 				{
 					label: '2. Type your code',
 					items: [
 						{ slug: 'type-checking/overview' },
-						{ slug: 'type-checking/annotations' },
 						{ slug: 'type-checking/vectors-and-lists' },
-						{ slug: 'type-checking/functions' },
-						{ slug: 'type-checking/null' },
-						{ slug: 'type-checking/custom-types' },
 						{ slug: 'type-checking/unknown' },
-						{ slug: 'type-checking/stubs' },
-						{ slug: 'type-checking/limitations' },
 					],
 				},
 				{
 					label: '3. Switch to inline types',
 					items: [
 						{ slug: 'type-checking/inline-annotations' },
+						{ slug: 'type-checking/custom-types' },
+						{ slug: 'type-checking/arrays' },
 					],
 				},
 				{
 					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
-						{ slug: 'type-checking/arrays' },
 						{ slug: 'guides/dataframes' },
-						{ slug: 'guides/from-data-table' },
-						{ slug: 'type-checking/dataframes' },
-						{ slug: 'reference/standard-library' },
 						{ slug: 'type-checking/strict-mode' },
 					],
 				},
@@ -111,10 +114,12 @@ export default defineConfig({
 					items: [
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
+						{ slug: 'reference/standard-library' },
+						{ slug: 'reference/type-system' },
 						{ slug: 'reference/package-loading' },
 						{ slug: 'reference/diagnostic-codes' },
 						{ slug: 'reference/formatting-rules' },
-						{ slug: 'reference/type-system' },
+						{ slug: 'guides/from-data-table' },
 						{ slug: 'reference/licensing' },
 					],
 				},
@@ -160,5 +165,7 @@ export default defineConfig({
 	],
 	vite: {
 		plugins: [tailwind()],
+		// The benchmark pages read their programs and results from tools/bench/why/.
+		server: { fs: { allow: ['..'] } },
 	},
 });

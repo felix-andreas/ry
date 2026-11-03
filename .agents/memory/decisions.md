@@ -2408,7 +2408,7 @@ primitives, and nothing built or installed packages.
 # Decision record: the package-development loader
 
 Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page
-`guides/loading-packages.md` describe the result. These choices settle architecture.
+`guides/running.md` describe the result. These choices settle architecture.
 
 - **The index lives in `semantics`, the diff in `crates/loader`, and only a backend knows the
   runtime.** `semantics::load_index` derives per-file facts (`file_items`, `file_binds`), the

@@ -1,6 +1,6 @@
 ---
-title: Overview
-description: How ry checks types in R code that has no type annotations
+title: Type checking
+description: How ry infers types in unannotated R code, and how annotations state the types of values and functions
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -36,19 +36,112 @@ type-mismatch
 `-` and `*` are arithmetic, so both parameters must be numbers. Inference runs even with type errors
 switched off, because hover, completion, and inlay hints in your editor are built on it.
 
-## Annotations where they help
+A function is as general as its body allows, and hover shows the inferred type:
 
-You can state a type in a `#:` comment above the code, which keeps the file plain R that every other
-tool can read. Or you can write it inline, after a name, with a function's return type after its
-parameters, as in `function(price: double, rate: double) -> double`. The two spellings mean the
-same, and every typed example on this site offers both in tabs, with the tab you pick remembered.
+```r
+identity2 <- function(x) x           # <T> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+```
 
-Plain `Rscript` cannot run inline annotations, so use the comments if the file must also run there.
+`T` stands for any type, and `T: numeric` for `integer` or `double`, so `increment(2.5)` is a
+`double` and `increment("a")` is an error.
 
-Inference already covers the inside of a function, so annotate where code meets other code:
-exported functions, values read from files, and anything whose contract you want enforced.
-[Annotations](/type-checking/annotations) shows every form, and
-[inline annotations](/type-checking/inline-annotations) covers using both spellings.
+## Annotations
+
+Inference cannot know what a function is meant to accept, or what a value read from a file
+contains. An annotation states that type, and ry then checks it against the value and against every
+use, so a wrong call is reported at the call instead of deep inside the function.
+
+You can write an annotation as a `#:` comment directly above the assignment, which keeps the file
+plain R that every tool can run, or inline, in the code itself. Both spellings mean the same, and
+every typed example on this site offers both in tabs, with the tab you pick remembered:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_rate <- function(price, rate) price * rate
+
+#: double
+rate <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+apply_rate <- function(price: double, rate: double) -> double price * rate
+
+rate: double <- readRDS("rate.rds")
+
+apply_rate(rate, "x")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `double`, found `character`
+```
+
+The body is checked too, so a function declared `-> double` that returns a string is an error at the
+return value. Inference already covers the inside of a function, so annotate where code meets other
+code: exported functions, values read from files, and anything whose contract you want enforced.
+Plain `Rscript` cannot run inline annotations, so use the comments while a file must also run there;
+[inline annotations](/type-checking/inline-annotations) is the step that switches.
+
+## Functions
+
+Once a function has a signature, ry checks every call against it: the types, the argument names, and
+the number of arguments. Parameter names are part of the type, because R matches arguments by name
+as often as by position. A parameter callers may omit must have a default: inline, the default
+itself marks it as optional, and in a comment you write `[greeting]`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+
+`...: character` types the extra arguments, so `fn(...: character) -> character` checks that every
+argument is a string. A function with `...` accepts any argument name, so a misspelled name is not
+reported there, just as R does not report it. A generic function names its type parameters, as in
+`#: <T> fn(condition: logical, value: T) -> T | NULL` or inline
+`function<T>(condition: logical, value: T) -> T | NULL`.
+
+Your own functions have exactly one signature. To accept several shapes, use a union such as
+`integer | character`. A long signature can be written one parameter per line, in the style of
+roxygen, with `#: @param count {integer}` and `#: @return {integer}` lines. The
+[type system reference](/reference/type-system#typing-comment-syntax) has the full grammar.
 
 ## Adopting it one file at a time
 
@@ -60,14 +153,10 @@ A comment in a file, usually at the top, overrides the project setting for that 
 
 The values are `on`, `off`, and `strict` (which also requires a type everywhere, see
 [strict mode](/type-checking/strict-mode)), so you can switch type checking on file by file, or keep
-it on for the project and switch it off where a file is not ready.
-
-To silence one type finding, name its code in a comment on the line, as in
-`# ry: allow(type-mismatch)` ([Silencing one finding](/guides/checking#silencing-one-finding)).
-
-## What is not checked
+it on for the project and switch it off where a file is not ready. To silence one type finding, name
+its code in a comment on the line, as in `# ry: allow(type-mismatch)`
+([Silencing one finding](/guides/checking#silencing-one-finding)).
 
 What ry cannot model, such as `data.frame` columns and R6 objects, gets the type `Unknown`, which is
-compatible with everything, so its checks are skipped rather than reported and a clean run proves
-less than it seems. `Any` is also compatible with everything, but marks a deliberate opt-out. [Unknown and Any](/type-checking/unknown) explains how to
-find and close these gaps.
+compatible with everything, so a clean run proves less than it seems.
+[Unknown values](/type-checking/unknown) explains how to find and close these gaps.

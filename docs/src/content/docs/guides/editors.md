@@ -111,7 +111,7 @@ Inlining adds parentheses only where R's precedence needs them: `fee * n` inline
 `total * (fee + n)`.
 
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
-[DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
+[DataFrame](/guides/dataframes#types) columns, gets the same features as plain R.
 
 ## R Markdown and Quarto
 

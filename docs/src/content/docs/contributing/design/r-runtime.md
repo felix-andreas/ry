@@ -674,7 +674,7 @@ The cost there is the install step, which is exactly what the development loop w
 ### ry's design
 
 The loader is built, ahead of the runtime, on the GNU R backend that `ry R` embeds
-([loading packages](/guides/loading-packages) is the user page). It splits into three parts, and only the
+([loading packages](/guides/running) is the user page). It splits into three parts, and only the
 last one knows which runtime runs the code:
 
 - **The item index** (`semantics::load_index`) is derived from the analysis: per item a content

@@ -50,7 +50,7 @@ The quality bar is four things.
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guides/running.md`). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -74,7 +74,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the
 behavior below truthfully, most of it under "Where correct code is reported" in
-`type-checking/limitations.md`, so fixing an item means updating that page too.
+the Limitations section of `type-checking/unknown.mdx`, so fixing an item means updating that page too.
 
 False reports on correct R, worst first:
 
@@ -124,7 +124,7 @@ gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports 
 three generated benchmark packages (`tools/bench/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
-gap, on `type-checking/limitations.md`.
+gap, in the Limitations section of `type-checking/unknown.mdx`.
 
 ### True bugs, left reported (25)
 

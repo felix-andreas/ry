@@ -35,7 +35,7 @@ that runtime runs.
   editor offers the same edit for one binding or a whole file
   ([Moving a file to strict mode](/type-checking/strict-mode#moving-a-file-to-strict-mode)).
 - **`ry fmt --range`** formats only the lines you name, the editor formats a selection or the line you
-  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/formatting#formatting-part-of-a-file)).
+  just finished, and `ry fmt` runs in parallel ([Formatting](/guides/checking#formatting)).
 - **Faster recursion and more of base R.** A function that only does scalar arithmetic, such as
   recursive `fib`, compiles to frameless machine code (`fib(30)` takes 0.005 s against 0.9 s on GNU
   R), and sockets work, so `parallel`'s PSOCK clusters run.
@@ -62,12 +62,12 @@ that runtime runs.
   saves from the operating system's file notifications, as the consoles now do. On a 308,000-line
   benchmark package with 502 test files, the first file's results arrive in about 2 s, against 62 s
   for `devtools::test()`
-  ([CLI](/reference/cli#test), [Running tests](/guides/loading-packages)).
+  ([CLI](/reference/cli#test), [Running tests](/guides/running)).
 - **`ry document` writes documentation as `devtools::document()` does.** It runs roxygen2 against
   the lazily loaded package, and its `man/*.Rd` files and `NAMESPACE` are byte for byte the same.
   It caches each file's parsed blocks and runs roxygen2's slowest steps in linear time, so on a
   benchmark package with 22,000 Rd files it takes about 2 minutes after an edit, against 21 for
-  devtools ([Writing documentation](/guides/loading-packages#writing-documentation)).
+  devtools ([Writing documentation](/guides/running#commands)).
 - **`ry load` follows `devtools::load_all()` more closely.** `system.file()` maps `inst/`, testthat
   helpers are sourced, lazily defined functions keep their source references, a package that
   imports a reloaded one sees its new bindings, `Encoding: latin1` is honored, and a declared
@@ -77,7 +77,7 @@ that runtime runs.
   evaluated as GNU R evaluates them ([package loading](/reference/package-loading)).
 - **Help works on ry's runtime.** `?mean`, `help("mean")`, `help(package = "stats")` and
   `help.start()` print or serve R's help pages, HTML help included, as GNU R does
-  ([Console](/guides/console#help)).
+  ([Console](/guides/running#the-console)).
 - **The editor follows `$` fields and installed packages.** Go-to-definition, hover, references and
   rename resolve `x$name` through the values that built `x`: lists, data frames, records and R6
   classes, including `self$` and `private$`. Rename refuses a field it cannot trace completely.
@@ -162,7 +162,7 @@ engine, and a static type checker, the first one for R.
 - **The project is renamed from Roughly to ry.** The binary is `ry`, the configuration file is
   `ry.toml`, and a suppression comment reads `# ry: allow(...)`. The crate is published as `ry-lang`.
 - **R gets a static type checker**, new and experimental: Hindley-Milner inference with numeric
-  constraints and generics, guided by [`#:` annotation comments](/type-checking/annotations). Type
+  constraints and generics, guided by [`#:` annotation comments](/type-checking/overview#annotations). Type
   errors are opt-in through `[check] typing`, but hover, completion, signature help, and inlay hints
   use the inferred types either way.
 - **The R parser is hand-written.** It builds lossless syntax trees, recovers from broken input, and

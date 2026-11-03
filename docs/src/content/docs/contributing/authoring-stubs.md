@@ -17,7 +17,7 @@ The typed declarations of R's packages that R does not attach by default (`tools
 `compiler`, `grid`, `splines`, `stats4`, `tcltk`) are gated the same way, while their export
 manifests always answer `pkg::name`. The typing rules the stubs feed are in the
 [typing reference](/reference/type-system), and the user-facing introduction is
-[Stubs](/type-checking/stubs).
+[Stubs](/type-checking/unknown#package-stubs).
 
 ## Why stubs exist
 

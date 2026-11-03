@@ -135,7 +135,7 @@ Global Options → Code → Formatting**, set **Code formatter** to **External**
 to `path/to/ry fmt`. For format-on-save, tick **Reformat documents on save** under **Code → Saving**.
 Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI. RStudio's
 console can still reload your package with ry's `load_all()`, as
-[Loading packages](/guides/loading-packages#from-rstudio-or-plain-r) shows.
+[Loading packages](/guides/running#from-rstudio-or-plain-r) shows.
 
 ## Other editors
 
