@@ -67,6 +67,10 @@ const SEEDS: &[&str] = &[
     "type <- \"a\"; alias(type = 1); type\nX <- 2",
     "a <- [1, 2, 3]; e <- []; n <- [[1L], [2L, 3L]]; a[[1L]]; a[2]\n[4]",
     "xs: Array<double> <- -[1.5, 2] * [3, 4][1L]; (x\n[1]); f([x, y],)",
+    "n <- 5i64 + 0xFFu8 * 1.5f32 - 1e3f64 / 2dec",
+    "g <- f\"Hello {name}, {{n}} {f'{n + 1}'}\"",
+    "p <- (x = try Str.to_i64(a)$v, y = try b); q <- (..p, x = 3)",
+    "match (xs) {\n  [first, .., last] as all => all\n  [] => 0u8\n  (x =, ..rest) => rest\n}",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -166,6 +170,14 @@ const ALPHABET: &[&str] = &[
     "]",
     "]]",
     "Array<",
+    "f\"",
+    "f'",
+    "\"",
+    "5i64",
+    "1.5f32",
+    "try ",
+    "..rest",
+    " as ",
 ];
 
 /// Inputs the coverage-guided `parse` target has broken. Unlike `SEEDS` these may hold syntax
