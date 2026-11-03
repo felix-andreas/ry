@@ -469,18 +469,33 @@ pub unsafe fn write_message(bytes: &[u8]) {
     }
 }
 
+/// Writes ordinary output to the current sink. As in GNU R's `Rvprintf`, a split sink passes the
+/// output on to the sink beneath it, so output reaches every level down to the first unsplit
+/// one, or the console.
 pub unsafe fn write_output(bytes: &[u8]) {
-    let Some(sink) = interp().connections.sinks.last() else {
-        write_terminal(bytes, false);
-        return;
-    };
-    let (slot, split) = (sink.slot, sink.split);
-    if split || slot == 1 {
-        write_terminal(bytes, false);
+    let mut level = interp().connections.sinks.len();
+    loop {
+        let Some(sink) = level
+            .checked_sub(1)
+            .and_then(|index| interp().connections.sinks.get(index))
+        else {
+            write_terminal(bytes, false);
+            return;
+        };
+        let (slot, split) = (sink.slot, sink.split);
+        if slot == 1 {
+            write_terminal(bytes, false);
+        } else {
+            write_sink(slot, bytes);
+        }
+        if !split || slot == 1 {
+            return;
+        }
+        level -= 1;
     }
-    if slot == 1 {
-        return;
-    }
+}
+
+unsafe fn write_sink(slot: usize, bytes: &[u8]) {
     // GNU R's `Rvprintf` flushes after every write, so the file a sink writes to can be read
     // before the sink ends.
     let written = match entry(slot) {
