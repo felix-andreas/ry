@@ -35,26 +35,36 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4SetMethod", 1, do_set_method),
 ];
 
-/// GNU R 4.3.3's functions that get a fast path, with the [`stable_hash`] of the formals and
-/// body each was made from. `initialize` is the default method of the `initialize` generic.
-/// Setting `RY_PRINT_METHODS_HASHES` prints the hashes of the loaded ones, for updating this
-/// together with `methods_core.R` and the fast paths.
-const FAST_PATHS: &[(&str, u64)] = &[
-    ("new", 0xed04_11d7_4c52_3b14),
-    ("initialize", 0x0cbc_a8bc_242d_4840),
-    ("validObject", 0xcfec_1557_eba8_fe90),
-    ("is", 0xa975_8041_9461_37c4),
-    ("extends", 0x2df8_66a4_f3b4_1f5e),
+/// The methods package's functions that get a fast path, with the [`stable_hash`] of the formals
+/// and body each was made from, one per supported version of the package (ry's bundled base R
+/// and the GNU R versions `R_HOME` may name). `initialize` is the default method of the
+/// `initialize` generic. Setting `RY_PRINT_METHODS_HASHES` prints the hashes of the loaded ones,
+/// for updating this together with `methods_core.R` and the fast paths.
+const FAST_PATHS: &[(&str, &[u64])] = &[
+    ("new", &[0xed04_11d7_4c52_3b14]),
+    ("initialize", &[0x0cbc_a8bc_242d_4840]),
+    ("validObject", &[0xcfec_1557_eba8_fe90]),
+    ("is", &[0xa975_8041_9461_37c4, 0x4826_09db_60cf_b7e5]),
+    ("extends", &[0x2df8_66a4_f3b4_1f5e]),
 ];
+
+/// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
+/// every fast path must match, so a fast path that does not install there is an error rather
+/// than a silent loss of speed.
+const BUNDLED_VERSION: &str = include_str!("../../../tools/base-r/VERSION");
 
 /// Puts the fast paths of `methods_core.R` in front of the functions of the methods namespace
 /// `namespace` they were made for, changing each closure in place so that every reference to it
-/// gets the fast path.
+/// gets the fast path. On the bundled version of the package every fast path must install.
 pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
     let prologues = eval_text(include_str!("methods_core.R"), namespace)?;
     crate::heap().root(prologues);
+    let version = eval_text(".__NAMESPACE__.$spec[[\"version\"]]", namespace)?;
+    let bundled = values::first_string(version)
+        .is_some_and(|version| version == BUNDLED_VERSION.trim());
     let names = values::names(prologues);
     let print = std::env::var_os("RY_PRINT_METHODS_HASHES").is_some();
+    let mut missed = Vec::new();
     for index in 0..length(prologues) {
         let Some(name) = values::string_at(names, index) else {
             continue;
@@ -68,7 +78,8 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
         let expected = FAST_PATHS
             .iter()
             .find(|(known, _)| *known == name)
-            .map(|&(_, hash)| hash);
+            .map_or(&[][..], |&(_, hashes)| hashes);
+        let mut installed = false;
         for closure in closures {
             if closure.kind() != SexpType::Closure {
                 continue;
@@ -80,7 +91,7 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
             if print {
                 eprintln!("{name} {hash:#018x}");
             }
-            if Some(hash) != expected {
+            if !expected.contains(&hash) {
                 continue;
             }
             let block = lcons(
@@ -88,7 +99,18 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
                 cons(prologues.element(index), cons(body, nil())?)?,
             )?;
             crate::heap().set_cdr(closure, block);
+            installed = true;
         }
+        if !installed {
+            missed.push(name);
+        }
+    }
+    if bundled && !missed.is_empty() {
+        return Err(crate::unwind::error(format!(
+            "the native fast paths for {} do not match ry's bundled methods package; update \
+             FAST_PATHS in methods_core.rs (RY_PRINT_METHODS_HASHES=1 prints the hashes)",
+            missed.join(", ")
+        )));
     }
     Ok(())
 }
