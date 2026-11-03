@@ -19,6 +19,7 @@ use {
         strings::Encoding,
     },
     std::{
+        borrow::Cow,
         path::{Path, PathBuf},
         time::{Duration, Instant},
     },
@@ -554,9 +555,19 @@ fn find_program(name: &str) -> Option<PathBuf> {
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default()
     };
+    first_program_file(&directories, name, &extensions)
+}
+
+/// The first file `name` with one of `extensions` added names in one of `directories`, trying
+/// every extension in a directory before the next directory.
+fn first_program_file(
+    directories: &[PathBuf],
+    name: &str,
+    extensions: &[impl AsRef<str>],
+) -> Option<PathBuf> {
     directories.iter().find_map(|directory| {
         extensions.iter().find_map(|extension| {
-            let path = directory.join(format!("{name}{extension}"));
+            let path = directory.join(format!("{name}{}", extension.as_ref()));
             path.is_file().then_some(path)
         })
     })
@@ -3381,7 +3392,13 @@ unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     std::process::exit(if status == NA_INTEGER { 0 } else { status });
 }
 
+/// `.Internal(system())`. Base R calls it differently per platform: Unix base R passes
+/// `(command, intern, timeout)` and expects a shell to run the command line, while Windows base R
+/// passes seven arguments and expects no shell at all, so the argument count picks the contract.
 unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
+    if call.len() == 7 {
+        return do_windows_system(call);
+    }
     use std::io::Write;
     let command = values::require_string(call.arg(0), "command")?;
     let intern = values::as_logical_scalar(call.arg(1)) == 1;
@@ -3416,6 +3433,402 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
     interp().visible = false;
     scalar_integer(status.code().unwrap_or(127))
+}
+
+/// `.Internal(system(command, flag, stdin, stdout, stderr, timeout, receive.console.signals))`
+/// as base R's Windows `system()` and `system2()` call it, following GNU R's `do_system` in
+/// `src/gnuwin32/sys-win32.c` for a console session.
+///
+/// `flag` is 0 to start the command without waiting, 1 or 2 to wait for it, and 3 to return what
+/// it printed (`intern = TRUE`); 10 or 20 is added to ask for a minimized or hidden window, which
+/// a console program does not have. `stdin` is a file to read input from, or "" for the
+/// session's own. `stdout` and `stderr` are each a file name to write to, "" for the session's
+/// own stream, `FALSE` to discard, or `TRUE` to capture into the result when `flag` is 3, where
+/// both captured streams share one pipe, as in GNU R. `tools:::.system_with_capture`, which
+/// `R CMD build` uses, reads back the files it names here.
+unsafe fn do_windows_system(call: &Call<'_>) -> R<Sexp> {
+    let command_value = call.arg(0);
+    if command_value.kind() != SexpType::String || length(command_value) != 1 {
+        return Err(call.error("character string expected as first argument"));
+    }
+    let command =
+        values::string_at(command_value, 0).map_or_else(|| "NA".to_owned(), Cow::into_owned);
+    let mut flag = values::as_integer_scalar(call.arg(1));
+    if flag >= 20 {
+        flag -= 20;
+    } else if flag >= 10 {
+        flag -= 10;
+    }
+    let input = call.arg(2);
+    if input.kind() != SexpType::String {
+        return Err(call.error("character string expected as third argument"));
+    }
+    let input = values::string_at(input, 0).map_or_else(|| "NA".to_owned(), Cow::into_owned);
+    let timeout = values::as_integer_scalar(call.arg(5));
+    if timeout == NA_INTEGER || !(0..=2_000_000).contains(&timeout) {
+        return Err(call.error("invalid 'timeout' argument"));
+    }
+    if timeout > 0 && flag == 0 {
+        return Err(call.error("Timeout with background running processes is not supported."));
+    }
+    if values::as_logical_scalar(call.arg(6)) == NA_LOGICAL {
+        return Err(call.error("invalid 'receive.console.signals' argument"));
+    }
+    let intern = flag == 3;
+    let mut stdout = system_output(call.arg(3));
+    let mut stderr = system_output(call.arg(4));
+    if intern {
+        if stdout != SystemOutput::Capture && stderr != SystemOutput::Capture {
+            return Err(call.error("invalid flag argument"));
+        }
+    } else {
+        // Only `intern = TRUE` captures; otherwise a `TRUE` stream is the session's own.
+        for stream in [&mut stdout, &mut stderr] {
+            if *stream == SystemOutput::Capture {
+                *stream = SystemOutput::Inherit;
+            }
+        }
+    }
+    let request = SystemRequest {
+        stdin: (!input.is_empty()).then(|| PathBuf::from(&*input)),
+        stdout,
+        stderr,
+        wait: flag != 0,
+        timeout: (timeout > 0).then(|| Duration::from_secs(timeout as u64)),
+    };
+    if request.stdout == SystemOutput::Inherit || request.stderr == SystemOutput::Inherit {
+        // The child writes straight to the terminal, so earlier output must be out first.
+        use std::io::Write;
+        std::io::stdout()
+            .flush()
+            .map_err(|failure| call.error(format!("cannot flush stdout: {failure}")))?;
+    }
+    let outcome = match windows_command(&command) {
+        Ok(process) => run_system(process, &request),
+        Err(message) => SystemOutcome::NotLaunched(message),
+    };
+    let (status, timed_out, captured) = match outcome {
+        SystemOutcome::Finished {
+            status,
+            timed_out,
+            captured,
+        } => (status, timed_out, captured),
+        SystemOutcome::NotLaunched(message) if intern => return Err(call.error(message)),
+        SystemOutcome::NotLaunched(message) => {
+            crate::conditions::warning_call(call.call, message)?;
+            (SYSTEM_NOT_LAUNCHED, false, Vec::new())
+        }
+        // GNU R gives up on a file it cannot open before starting anything, with status 1.
+        SystemOutcome::NotRedirected(message) if intern => return Err(call.error(message)),
+        SystemOutcome::NotRedirected(_) => (1, false, Vec::new()),
+    };
+    let status = if timed_out {
+        crate::conditions::warning_call(
+            call.call,
+            format!("command '{command}' timed out after {timeout}s"),
+        )?;
+        SYSTEM_TIMED_OUT
+    } else {
+        if intern && status != 0 {
+            crate::conditions::warning_call(
+                call.call,
+                format!("running command '{command}' had status {status}"),
+            )?;
+        }
+        status
+    };
+    if !intern {
+        interp().visible = false;
+        return scalar_integer(status);
+    }
+    let text = String::from_utf8_lossy(&captured);
+    let result = string_vector(&captured_lines(&text))?;
+    if status != 0 {
+        crate::heap().root(result);
+        values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
+    }
+    interp().visible = true;
+    Ok(result)
+}
+
+/// GNU R's `NOLAUNCH`: the status of a command that could not be started.
+const SYSTEM_NOT_LAUNCHED: i32 = 127;
+
+/// The status of a command stopped at its timeout, as GNU R and the `timeout` utility report it.
+const SYSTEM_TIMED_OUT: i32 = 124;
+
+/// Where a command started by [`run_system`] writes one of its output streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SystemOutput {
+    /// The session's own stream.
+    Inherit,
+    Discard,
+    /// Created, or truncated, before the command starts.
+    File(PathBuf),
+    /// Into the bytes [`run_system`] returns.
+    Capture,
+}
+
+/// How [`run_system`] runs a command.
+#[derive(Debug)]
+struct SystemRequest {
+    /// A file to read input from, or `None` for the session's own.
+    stdin: Option<PathBuf>,
+    stdout: SystemOutput,
+    stderr: SystemOutput,
+    wait: bool,
+    /// How long to wait before stopping the command.
+    timeout: Option<Duration>,
+}
+
+#[derive(Debug)]
+enum SystemOutcome {
+    /// The command ran, or started when the request does not wait (status 0).
+    Finished {
+        status: i32,
+        timed_out: bool,
+        captured: Vec<u8>,
+    },
+    /// The command could not be found or started; the message says why.
+    NotLaunched(String),
+    /// An input or output file could not be opened, so nothing started.
+    NotRedirected(String),
+}
+
+/// A `stdout` or `stderr` argument of the Windows `.Internal(system())`, read as GNU R's
+/// `do_system` reads it: a file name ("" is the session's own stream), `FALSE` to discard, or a
+/// logical `TRUE` to capture.
+unsafe fn system_output(value: Sexp) -> SystemOutput {
+    if value.kind() == SexpType::String {
+        return match values::string_at(value, 0) {
+            Some(name) if name.is_empty() => SystemOutput::Inherit,
+            Some(name) => SystemOutput::File(PathBuf::from(&*name)),
+            None => SystemOutput::File(PathBuf::from("NA")),
+        };
+    }
+    match values::as_logical_scalar(value) {
+        0 => SystemOutput::Discard,
+        1 if value.kind() == SexpType::Logical => SystemOutput::Capture,
+        _ => SystemOutput::Inherit,
+    }
+}
+
+/// The process a Windows command line starts, found as GNU R's `expandcmd` in
+/// `src/gnuwin32/run.c` finds it. Windows runs a command line without a shell: its first word,
+/// which may be double-quoted, names the program, and the rest goes to the program unparsed.
+/// A program named without an extension is looked for with `.exe`, `.com`, `.cmd` and `.bat`
+/// added, as `SearchPath` does: in the directory of this executable, then the working
+/// directory, then `PATH`.
+fn windows_command(line: &str) -> Result<std::process::Command, String> {
+    let (program, arguments) = split_command_line(line)?;
+    let extensions: &[&str] = if cfg!(windows) {
+        &[".exe", ".com", ".cmd", ".bat"]
+    } else {
+        // Elsewhere a program file has no extension to add.
+        &[""]
+    };
+    let unquoted = program.replace('"', "");
+    let has_extension = unquoted
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name.contains('.'));
+    let extensions = if has_extension { &[""] } else { extensions };
+    let directories: Vec<PathBuf> = if unquoted.contains(['/', '\\']) {
+        vec![PathBuf::new()]
+    } else {
+        let executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        executable
+            .into_iter()
+            .chain([PathBuf::from(".")])
+            .chain(
+                std::env::var_os("PATH")
+                    .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .collect()
+    };
+    let path = first_program_file(&directories, &unquoted, extensions)
+        .ok_or_else(|| format!("'{program}' not found"))?;
+    let mut command = std::process::Command::new(path);
+    if !arguments.is_empty() {
+        append_command_line(&mut command, arguments);
+    }
+    Ok(command)
+}
+
+/// Splits a Windows command line into its program, as written (quotes kept), and the rest, with
+/// the spaces between them removed.
+fn split_command_line(line: &str) -> Result<(&str, &str), String> {
+    let line = line.trim_start();
+    let mut quoted = false;
+    let end = line
+        .char_indices()
+        .find(|&(_, character)| {
+            if character == '"' {
+                quoted = !quoted;
+            }
+            !quoted && character.is_whitespace()
+        })
+        .map_or(line.len(), |(index, _)| index);
+    if quoted {
+        return Err("A \" is missing (expandcmd)".to_owned());
+    }
+    let (program, arguments) = line.split_at(end);
+    Ok((program, arguments.trim_start()))
+}
+
+/// Hands the arguments part of a command line to the program exactly as written, since a Windows
+/// program parses its own command line.
+#[cfg(windows)]
+fn append_command_line(command: &mut std::process::Command, arguments: &str) {
+    use std::os::windows::process::CommandExt;
+    command.raw_arg(arguments);
+}
+
+/// Other platforms pass a program a list of words, not a line, so only the Windows calling
+/// convention reaches this; the line is split at whitespace without any quoting rules.
+#[cfg(not(windows))]
+fn append_command_line(command: &mut std::process::Command, arguments: &str) {
+    command.args(arguments.split_whitespace());
+}
+
+/// Runs `command` with the streams and waiting `request` asks for. Captured stdout and stderr
+/// share one pipe, which a separate thread drains so that a command printing more than the pipe
+/// holds cannot block while it is waited for.
+fn run_system(mut command: std::process::Command, request: &SystemRequest) -> SystemOutcome {
+    use std::{fs::File, io::Read, process::Stdio};
+    if let Some(input) = &request.stdin {
+        let Ok(file) = File::open(input) else {
+            return SystemOutcome::NotRedirected(format!(
+                "unable to redirect input from '{}'",
+                input.display()
+            ));
+        };
+        command.stdin(file);
+    }
+    let captures = [&request.stdout, &request.stderr].contains(&&SystemOutput::Capture);
+    let pipe = match captures.then(std::io::pipe).transpose() {
+        Ok(pipe) => pipe,
+        Err(failure) => return SystemOutcome::NotLaunched(format!("CreatePipe failed: {failure}")),
+    };
+    let not_redirected = |path: &Path| {
+        SystemOutcome::NotRedirected(format!("unable to redirect output to '{}'", path.display()))
+    };
+    let mut stdout_file = None;
+    let stdout = match &request.stdout {
+        SystemOutput::File(path) => match File::create(path) {
+            Ok(file) => {
+                stdout_file = file.try_clone().ok();
+                Stdio::from(file)
+            }
+            Err(_) => return not_redirected(path),
+        },
+        output => stream_stdio(output, pipe.as_ref().map(|(_, writer)| writer)),
+    };
+    let stderr = match &request.stderr {
+        // GNU R gives both streams one handle when they name the same file, so that neither
+        // overwrites what the other wrote.
+        SystemOutput::File(path) if request.stdout == request.stderr => match stdout_file.take() {
+            Some(file) => Stdio::from(file),
+            None => return not_redirected(path),
+        },
+        SystemOutput::File(path) => match File::create(path) {
+            Ok(file) => Stdio::from(file),
+            Err(_) => return not_redirected(path),
+        },
+        output => stream_stdio(output, pipe.as_ref().map(|(_, writer)| writer)),
+    };
+    command.stdout(stdout).stderr(stderr);
+    let spawned = command.spawn();
+    // The reader sees the end of the output only once every copy of the pipe's write end
+    // outside the child is closed, and the command holds copies too.
+    drop(command);
+    let reader = pipe.map(|(reader, writer)| {
+        drop(writer);
+        reader
+    });
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(failure) => return SystemOutcome::NotLaunched(failure.to_string()),
+    };
+    if !request.wait {
+        return SystemOutcome::Finished {
+            status: 0,
+            timed_out: false,
+            captured: Vec::new(),
+        };
+    }
+    let reading = reader.map(|mut reader| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    });
+    let (status, timed_out) = match wait_for(&mut child, request.timeout) {
+        Ok(waited) => waited,
+        Err(failure) => return SystemOutcome::NotLaunched(failure.to_string()),
+    };
+    let captured = match reading.map(std::thread::JoinHandle::join) {
+        None => Vec::new(),
+        Some(Ok(Ok(bytes))) => bytes,
+        Some(Ok(Err(failure))) => {
+            return SystemOutcome::NotLaunched(format!("cannot read the output: {failure}"));
+        }
+        Some(Err(_)) => return SystemOutcome::NotLaunched("cannot read the output".to_owned()),
+    };
+    SystemOutcome::Finished {
+        // GNU R keeps the low 16 bits of a Windows exit code.
+        status: status
+            .code()
+            .map_or(SYSTEM_NOT_LAUNCHED, |code| code & 0xffff),
+        timed_out,
+        captured,
+    }
+}
+
+/// A stream that is not a file: the session's own, nothing, or the write end of the capturing
+/// `pipe`, which exists whenever a stream is captured.
+fn stream_stdio(output: &SystemOutput, pipe: Option<&std::io::PipeWriter>) -> std::process::Stdio {
+    use std::process::Stdio;
+    match (output, pipe.map(std::io::PipeWriter::try_clone)) {
+        (SystemOutput::Capture, Some(Ok(writer))) => Stdio::from(writer),
+        (SystemOutput::Inherit, _) => Stdio::inherit(),
+        _ => Stdio::null(),
+    }
+}
+
+/// Waits for `child`, stopping it once `timeout` has passed. Says whether it was stopped.
+fn wait_for(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+) -> std::io::Result<(std::process::ExitStatus, bool)> {
+    let Some(timeout) = timeout else {
+        return Ok((child.wait()?, false));
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, false));
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            return Ok((child.wait()?, true));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The lines of a command's captured output, as GNU R's `rpipeGets` reads them: each without its
+/// `\n` or `\r\n`, and a last line without a newline kept.
+fn captured_lines(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n')
+        .map(|line| {
+            line.strip_suffix('\n')
+                .map_or(line, |line| line.strip_suffix('\r').unwrap_or(line))
+        })
+        .collect()
 }
 
 /// `enc2native`: the session's native encoding is UTF-8, so it translates latin1 strings to
@@ -4228,9 +4641,37 @@ unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
 #[cfg(test)]
 mod tests {
     use {
-        super::{base_name, dir_name, directory_outside},
+        super::{base_name, captured_lines, dir_name, directory_outside, split_command_line},
         std::path::Path,
     };
+
+    #[test]
+    fn a_windows_command_line_splits_at_its_first_unquoted_space() {
+        // What `system2(file.path(R.home("bin"), "Rterm.exe"), "--vanilla")` passes on Windows.
+        assert_eq!(
+            split_command_line(r#"  "C:/Program Files/R/bin/x64/Rterm.exe"   --vanilla "a b""#),
+            Ok((
+                r#""C:/Program Files/R/bin/x64/Rterm.exe""#,
+                r#"--vanilla "a b""#
+            ))
+        );
+        assert_eq!(
+            split_command_line(r"C:\Windows\system32\cmd.exe /c dir"),
+            Ok((r"C:\Windows\system32\cmd.exe", "/c dir"))
+        );
+        assert_eq!(split_command_line("make"), Ok(("make", "")));
+        assert_eq!(
+            split_command_line(r#""make -f x"#),
+            Err("A \" is missing (expandcmd)".to_owned())
+        );
+    }
+
+    #[test]
+    fn captured_output_loses_line_ends_but_keeps_a_last_partial_line() {
+        assert_eq!(captured_lines("a\r\nb\n\nc"), ["a", "b", "", "c"]);
+        assert_eq!(captured_lines("a\n"), ["a"]);
+        assert!(captured_lines("").is_empty());
+    }
 
     #[test]
     fn windows_paths_split_at_either_separator() {
