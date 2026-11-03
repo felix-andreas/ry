@@ -1746,6 +1746,15 @@ unsafe fn rapply_one(
     how: &str,
     env: Sexp,
 ) -> R<Sexp> {
+    // GNU R walks `NULL` as an empty list, so `FUN` never sees it: replace mode keeps it and
+    // the other modes give an empty list.
+    if object == nil() {
+        return if how == "replace" {
+            Ok(nil())
+        } else {
+            alloc(SexpType::List, 0)
+        };
+    }
     if object.kind() == SexpType::List && !values::inherits(object, "data.frame")
         || object.kind() == SexpType::List
             && how != "unlist"
