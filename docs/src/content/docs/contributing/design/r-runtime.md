@@ -386,6 +386,24 @@ through Cranelift's stack maps. A minor collection marks only the root-stack ent
 the previous collection, because marks stay set until the next major one, so the cost of a minor
 collection does not grow with the roots that lazy-loading base leaves behind.
 
+Collections run on GNU R's schedule, so a script's peak memory follows GNU R's. A minor collection
+promotes everything it marks, which means a temporary that was live when it ran dies only in a
+major collection. A major collection therefore runs when the heap reaches one limit on all of its
+bytes, or when a minor one leaves less than a fifth of the smallest limit (64 MB) free. After each
+major collection the limit moves with GNU R's fractions: it grows by a fifth when the survivors fill
+more than 70% of it and shrinks by a fifth when they fill less than 30%. GNU R's `R_GC_MEM_GROW`
+and its fraction variables set the same numbers ([CLI reference](/reference/cli#memory)). The
+nursery's budget for small objects scales with the old small objects only, as GNU R's cons-cell
+trigger ignores vector memory, so a few big live vectors do not let as many bytes of small garbage
+pile up.
+
+Vectors of a megabyte or more get an anonymous mapping each (`crates/heap/src/large.rs`), which
+goes back to the kernel when the vector dies, as glibc's `mmap` threshold returns GNU R's large
+vectors. libR's global allocator does the same for its own blocks of that size, so the buffers a
+builtin fills before copying them into a vector go back too. A small cache of freed mappings,
+resized with `mremap`, saves the next vector's page faults; it empties whenever a vector must add
+pages, so it never raises the peak.
+
 The JIT recovers what a moving nursery would buy in other VMs by not allocating in the first place:
 unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (section 5). If
 profiling later shows fragmentation, Immix-style regions with opportunistic, pinning-aware compaction
