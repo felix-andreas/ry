@@ -2906,7 +2906,13 @@ impl Flattener {
 
     unsafe fn add_in(&mut self, value: Sexp, scope: &mut NameScope) -> R<()> {
         let count = length(value);
-        let element_names = values::names(value);
+        // A call is one element, so its argument tags do not name the result, as GNU R's
+        // `HasNames` counts tags only on a pairlist.
+        let element_names = if value.kind() == SexpType::Language {
+            nil()
+        } else {
+            values::names(value)
+        };
         if !scope.base.is_empty() || element_names != nil() {
             self.any_names = true;
         }
