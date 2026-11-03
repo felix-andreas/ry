@@ -22,6 +22,12 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: `test_linalg` library cases fail on some OpenBLAS kernels
+
+- On CI (ubuntu runner, OpenBLAS, probably an AMD Zen CPU) `linear_algebra_matches_gnu_r` fails on `dtrco` by one ulp against a live GNU R on the same libraries. It reproduces locally with `OPENBLAS_CORETYPE=Zen`, `Sandybridge` or `Nehalem` (and `Prescott` fails on `dqrcf`); the default, Haswell and SkylakeX kernels pass.
+- Cause: ry's vector data starts on a 16-byte boundary (`VECTOR_DATA_OFFSET == 32` in `crates/heap/src/object.rs`), GNU R's 8 bytes past one. Those OpenBLAS kernels peel a misaligned first element, so the summation order differs. Copying `dtrco`'s buffers to an 8-byte offset made it match exactly; `La_dtrcon` then failed the same way.
+- Options: (a) pass BLAS/LAPACK buffers at GNU R's alignment (matches GNU R bit for bit on every kernel; heap layout or copy cost), (b) compare live only on kernels that ignore alignment, (c) install `libblas3 liblapack3` in ci.yml so CI uses the reference libraries and the pinned bits (workflow edit, human only). (c) is the quick unblock; (a) is the faithful fix.
+
 ## Open: bundle base R into the `ry` binary
 
 - Today `ry run` reads the R code of the base packages (base, stats, utils, methods, graphics, grDevices, datasets, tools, grid, splines, stats4, parallel, compiler) from an installed GNU R (`rcmd::runtime_home`), which is the only reason a user needs GNU R for it. Both are GPL-2.0-or-later, so bundling is licence-clean.
