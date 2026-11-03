@@ -1,19 +1,14 @@
 ---
 title: Getting started
-description: What ry is, the three things that set it apart, and how to try it
+description: Type errors in plain R, a faster runtime, and tagged unions, with how to try them
 ---
 
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
-ry is a toolchain for R: a type checker, a language server for your editor, a formatter, and a
-runtime, all configured by one `ry.toml`. It works on the R code you already have, and it adds what
-R lacks. Three things set it apart.
+## Type checking
 
-## Type checking for plain R
-
-R reports a string where a number belongs only when the line runs, which may be in production. ry
-infers types from how values are used, so it reports the mistake in unannotated code, before
-anything runs:
+`ry check` finds type errors in plain R before it runs, once `ry.toml` sets `typing = true` under
+`[check]`.
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
@@ -22,33 +17,21 @@ apply_discount(100, "0.2")
 
 ```text ry check typing
 type-mismatch
-
   x expected a numeric value (`integer` or `double`), found `character`
-   --[R/discount.R:2:21]
- 1 | apply_discount <- function(price, rate) price * (1 - rate)
- 2 | apply_discount(100, "0.2")
-   |                     ^^^^^
 ```
 
-Where you want a contract, a `#:` comment or an inline annotation states the type, as in
-`function(price: double, rate: double) -> double`. [Type checking](/type-checking/overview) shows
-how.
+## Speed
 
-## Fast R
-
-ry's own runtime compiles hot code to machine code, so unannotated loops and recursion run several
-times faster than on GNU R, and typed code in strict mode runs just as fast. Code that spends its
-time in vectorized builtins gains little, because GNU R runs those in C too:
+Loops and recursion run several times faster on ry's runtime than on GNU R, and vectorized code runs
+about as fast.
 
 <BenchmarkTable programs={["fib", "drawdown", "vector_arith", "log_rank"]} />
 
-Peak memory is the peak resident set size of the whole process, R's startup included.
-[Benchmarks](/benchmarks) has every program, its code, and how it was measured.
+[All benchmarks](/benchmarks)
 
 ## Tagged unions and `match`
 
-ry adds its own records, tuples and tagged unions, and a `match` that knows every case, so a
-forgotten case is an error instead of a silent `NULL`:
+A `match` must handle every case of a tagged union.
 
 ```r
 alias Payment =
@@ -66,39 +49,16 @@ balance <- function(payment: Payment) -> double {
 
 ```text ry check typing
 non-exhaustive-match
-
   x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
 ```
 
-GNU R cannot parse this syntax, so code that uses it runs on ry's runtime with `ry run`.
-[Records and tags](/type-checking/records-and-tags) covers the rest.
-
 ## Try it
 
-Install the [VS Code extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry),
-which bundles the binary and shows every finding as you type, or download the `ry` binary for your
-platform from [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta).
-[Installation](/installation) covers the other editors and how to build ry's runtime, which
-0.3.2-beta does not ship yet. Then, in any R project:
-
 ```sh
-ry check     # report mistakes, with no configuration
-ry fmt       # format every file
-ry run       # an R console that reloads your package as you edit it
+cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang
+ry check   # report mistakes
+ry fmt     # format every file
 ```
 
-Type errors are opt-in, because an existing code base can have many. Turn them on in a `ry.toml` at
-the project root:
-
-```toml
-[check]
-typing = true
-```
-
-## Next
-
-- [ry at a glance](/ry): every feature, command and annotation on one page, also as
-  [Markdown](/ry.md) for agents and other tools
-- [Why ry](/why-ry): the four steps from plain R to fully typed code
-- [Checking and formatting](/guides/checking): what `ry check` finds without configuration
-- [Running and reloading](/guides/running): the console and package loading
+[Installation](/installation) · [Type checking](/type-checking/overview) ·
+[Records and tags](/type-checking/records-and-tags) · [ry at a glance](/ry) · [Why ry](/why-ry)

@@ -19,14 +19,33 @@ export type BenchmarkRow = {
   peak: { gnuR: number; ry: number; ryTyped: number };
 };
 export type BenchmarkProgram = { description: string; untyped: string; typed: string };
+// One view of the measurement, shown as one tab of every benchmark table.
+export type BenchmarkView = { label: string; columns: string[]; cells: (row: BenchmarkRow) => string[]; note?: string };
 
 export const benchmarkMachine = `${results.machine}, against GNU R ${/\d+\.\d+\.\d+/.exec(results.r)?.[0] ?? results.r}`;
-export const benchmarkEngines = ['GNU R, untyped', 'ry, untyped', 'ry, typed and strict'];
-export const benchmarkColumns = [
-  'program',
-  ...benchmarkEngines,
-  'ry vs GNU R',
-  ...benchmarkEngines.map((engine) => `${engine}, peak memory`),
+
+const engines = ['GNU R', 'ry', 'ry, typed and strict'];
+
+// Time with ry's speed-up over GNU R, and peak memory with ry's ratio to GNU R, where above 1x means
+// ry uses more.
+export const benchmarkViews: BenchmarkView[] = [
+  {
+    label: 'CPU',
+    columns: ['program', ...engines, 'speed-up'],
+    cells: (row) => [row.program, seconds(row.gnuR), seconds(row.ry), seconds(row.ryTyped), `${row.speedup.toFixed(1)}x`],
+  },
+  {
+    label: 'Memory',
+    columns: ['program', ...engines, 'ry / GNU R'],
+    cells: (row) => [
+      row.program,
+      mebibytes(row.peak.gnuR),
+      mebibytes(row.peak.ry),
+      mebibytes(row.peak.ryTyped),
+      `${(row.peak.ry / row.peak.gnuR).toFixed(1)}x`,
+    ],
+    note: "Peak memory is the peak resident set size of the whole process, R's startup included.",
+  },
 ];
 
 // The rows in the results' order, or only the named programs in the order given.
@@ -47,19 +66,6 @@ export function benchmarkRows(programs?: string[]): BenchmarkRow[] {
   });
 }
 
-export function benchmarkCells(row: BenchmarkRow): string[] {
-  return [
-    row.program,
-    seconds(row.gnuR),
-    seconds(row.ry),
-    seconds(row.ryTyped),
-    `${row.speedup.toFixed(1)}x`,
-    mebibytes(row.peak.gnuR),
-    mebibytes(row.peak.ry),
-    mebibytes(row.peak.ryTyped),
-  ];
-}
-
 // A program's leading comment describes it, so it becomes the prose and the code starts after it.
 export function benchmarkProgram(program: string): BenchmarkProgram {
   const untyped = source('untyped', program);
@@ -72,13 +78,20 @@ export function benchmarkProgram(program: string): BenchmarkProgram {
   };
 }
 
-export function benchmarkTableMarkdown(programs?: string[]): string {
-  const lines = [
-    `| ${benchmarkColumns.join(' | ')} |`,
-    `| --- | ${benchmarkColumns.slice(1).map(() => '---:').join(' | ')} |`,
-    ...benchmarkRows(programs).map((row) => `| ${benchmarkCells(row).join(' | ')} |`),
-  ];
-  return lines.join('\n');
+// Each view as a table under its own heading, the way a page's tabs become subheadings.
+export function benchmarkTableMarkdown(headingLevel: number, programs?: string[]): string {
+  const rows = benchmarkRows(programs);
+  const parts = benchmarkViews.map((view) =>
+    [
+      `${'#'.repeat(Math.min(headingLevel, 6))} ${view.label}`,
+      '',
+      `| ${view.columns.join(' | ')} |`,
+      `| --- | ${view.columns.slice(1).map(() => '---:').join(' | ')} |`,
+      ...rows.map((row) => `| \`${row.program}\` | ${view.cells(row).slice(1).join(' | ')} |`),
+      ...(view.note === undefined ? [] : ['', view.note]),
+    ].join('\n'),
+  );
+  return parts.join('\n\n');
 }
 
 export function benchmarkProgramsMarkdown(headingLevel: number): string {

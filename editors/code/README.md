@@ -29,10 +29,9 @@ R project and it works, with no configuration and no R session needed for the ed
 R Markdown, Quarto and Sweave chunks get the same features. The
 [editor guide](https://ry-lang.org/guides/editors) lists everything.
 
-## Type checking for plain R
+## Type checking
 
-ry infers types from how values are used, so it finds this mistake in unannotated code before
-anything runs:
+Type errors in plain R show up before it runs, once `ry.toml` sets `typing = true` under `[check]`.
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
@@ -41,35 +40,27 @@ apply_discount(100, "0.2")
 
 ```
 type-mismatch
-
   x expected a numeric value (`integer` or `double`), found `character`
-   --[R/discount.R:2:21]
- 1 | apply_discount <- function(price, rate) price * (1 - rate)
- 2 | apply_discount(100, "0.2")
-   |                     ^^^^^
 ```
 
-Type errors are opt-in: add a `ry.toml` with `typing = true` under `[check]` at the project root.
+## Speed
 
-## Fast R
-
-ry's own runtime compiles hot code to machine code. Seconds per program, and peak memory of the
-whole process, R's startup included:
+Seconds per program, and the peak memory of the whole process, R's startup included:
 
 <!-- bench-why -->
-| program | GNU R | ry | ry, typed and strict | peak memory, GNU R / ry / typed |
-| --- | ---: | ---: | ---: | ---: |
-| `fib` | 1.312 s | 0.010 s (131.2x) | 0.010 s | 54 / 43 / 43 MiB |
-| `drawdown` | 0.335 s | 0.074 s (4.5x) | 0.079 s | 73 / 133 / 140 MiB |
-| `vector_arith` | 0.290 s | 0.242 s (1.2x) | 0.249 s | 109 / 157 / 164 MiB |
-| `log_rank` | 0.128 s | 0.137 s (0.9x) | 0.136 s | 107 / 56 / 58 MiB |
+| program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `fib` | 1.312 s | 0.010 s | 0.010 s | 131.2x | 54 / 43 / 43 MiB |
+| `drawdown` | 0.335 s | 0.074 s | 0.079 s | 4.5x | 73 / 133 / 141 MiB |
+| `vector_arith` | 0.290 s | 0.242 s | 0.249 s | 1.2x | 109 / 157 / 164 MiB |
+| `log_rank` | 0.128 s | 0.137 s | 0.136 s | 0.9x | 107 / 56 / 58 MiB |
 <!-- /bench-why -->
 
-[Benchmarks](https://ry-lang.org/benchmarks) has every program, its code, and how it was measured.
+[All benchmarks](https://ry-lang.org/benchmarks)
 
 ## Tagged unions and `match`
 
-ry adds records, tuples and tagged unions, and a `match` that knows every case:
+A `match` must handle every case of a tagged union.
 
 ```r
 alias Payment =
@@ -87,7 +78,6 @@ balance <- function(payment: Payment) -> double {
 
 ```
 non-exhaustive-match
-
   x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
 ```
 
