@@ -960,7 +960,13 @@ impl Formatter<'_> {
             MATCH_ARM => self.match_arm(node, level),
             MATCH_GUARD => self.match_guard(node, level),
             PATTERN_WILDCARD | PATTERN_BIND | PATTERN_LITERAL | PATTERN_TAG | PATTERN_LIST
-            | PATTERN_REST | PATTERN_OR | PATTERN_PAREN => self.pattern(node),
+            | PATTERN_REST | PATTERN_OR | PATTERN_PAREN | PATTERN_ARRAY | PATTERN_AS => {
+                self.pattern(node)
+            }
+            FSTRING if self.keeps_verbatim(node) => {
+                self.out.push_str(&self.source[node.text_range()]);
+            }
+            TRY_EXPR => self.try_expression(node, level),
             ANNOTATION => {
                 self.annotation(node, level);
                 // Nothing may follow an annotation on its line either.
@@ -1347,7 +1353,7 @@ impl Formatter<'_> {
         let is_multiline = self.line(list_range.start()) != self.line(list_range.end());
         let arguments: Vec<&SyntaxElement> = elements
             .iter()
-            .filter(|element| matches!(element.kind(), ARGUMENT | PARAMETER))
+            .filter(|element| matches!(element.kind(), ARGUMENT | PARAMETER | RECORD_SPREAD))
             .collect();
         let is_empty = arguments
             .iter()
@@ -1431,7 +1437,7 @@ impl Formatter<'_> {
                     }
                     self.out.push(',');
                 }
-                ARGUMENT | PARAMETER => {
+                ARGUMENT | PARAMETER | RECORD_SPREAD => {
                     if let Some(argument) = element
                         .as_node()
                         .filter(|argument| !argument.text_range().is_empty())
@@ -1573,9 +1579,15 @@ impl Formatter<'_> {
             .filter_map(SyntaxElement::into_token)
             .filter(|token| !token.kind().is_trivia())
         {
+            let is_as = token.kind() == IDENT
+                && token
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == PATTERN_AS);
             match token.kind() {
-                R_PAREN => pending_space = false,
+                // A punned field, `(x =, y =)`, keeps its comma hugged.
+                R_PAREN | R_BRACKET | COMMA => pending_space = false,
                 EQ | PIPE => pending_space = true,
+                _ if is_as => pending_space = true,
                 _ => {}
             }
             if pending_space {
@@ -1585,7 +1597,20 @@ impl Formatter<'_> {
                 STRING => self.string(&token),
                 _ => self.out.push_str(token.text()),
             }
-            pending_space = matches!(token.kind(), COMMA | EQ | PIPE);
+            pending_space = is_as || matches!(token.kind(), COMMA | EQ | PIPE);
+        }
+    }
+
+    fn try_expression(&mut self, node: &SyntaxNode, level: usize) {
+        if self.keeps_verbatim(node) {
+            self.out.push_str(&self.source[node.text_range()]);
+            return;
+        }
+        for (index, element) in child_elements(node).iter().enumerate() {
+            if index > 0 {
+                self.space();
+            }
+            self.element(element, level, false);
         }
     }
 

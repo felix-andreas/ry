@@ -1,0 +1,56 @@
+#==== native_types
+#---- number_suffixes_stay_as_written
+x <- 5i64+0xFFu8
+y <- c( 1.5f32 , 2dec )
+#++++
+x <- 5i64 + 0xFFu8
+y <- c(1.5f32, 2dec)
+
+#---- fstrings_hug_their_interpolations
+s <- f"{ name } is {age+1}"
+t <- f'{{literal}} {x}'
+#++++
+s <- f"{name} is {age + 1}"
+t <- f'{{literal}} {x}'
+
+#---- fstring_with_a_comment_stays_verbatim
+s <- f"{x # note
+}"
+#++++
+s <- f"{x # note
+}"
+
+#---- try_takes_one_space
+r <- try   parse(x)
+v <- try  read(path)$value
+#++++
+r <- try parse(x)
+v <- try read(path)$value
+
+#---- record_spread_spaces_like_an_argument
+q <- ( ..point ,x=3 )
+w <- (..point,)
+#++++
+q <- (..point, x = 3)
+w <- (..point,)
+
+#---- list_and_as_patterns
+r <- match(xs){
+[]=>0
+[first,..]=>first
+[first,..,last]=>last
+[_ ,..rest]=>rest
+:Some(v)as whole=>whole
+(x=,y=)=>x
+(x=a,..rest)=>rest
+}
+#++++
+r <- match (xs) {
+  [] => 0
+  [first, ..] => first
+  [first, .., last] => last
+  [_, ..rest] => rest
+  :Some(v) as whole => whole
+  (x =, y =) => x
+  (x = a, ..rest) => rest
+}
