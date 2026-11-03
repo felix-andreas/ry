@@ -64,5 +64,16 @@ from a state where every per-run structure is empty.
   native code caches (`DATAPTR` results, `CHARSXP` addresses handed to C).
 - How `ry load`'s S4 start-up cache (`crates/loader`) composes with an image that already holds
   methods' tables.
+
+## The methods package
+
+The image is written after methods' `.onLoad`, so it already holds the closures that
+`interp::methods_core::install_fast_paths` patched (`new`, `validObject`, `is`, `extends` and the
+default `initialize` copies) and the class and generic tables they read. The native core keeps no
+state outside those R objects, so nothing reruns when the image loads; only the `ryS4*` builtins
+need to resolve by name, which the rebuilt builtin table guarantees. The fast paths install only
+where a closure's hash matches the methods source they were written for, so an image built from a
+newer base R silently loses one whose source changed (the bundled 4.6.2's `is` is one); the image
+writer should report each fast path that did not install.
 - Whether one image per platform is enough, or whether `R_DEFAULT_PACKAGES` other than the default
   should fall back to the slow path.
