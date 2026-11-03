@@ -1,0 +1,10 @@
+[stdout]
+| [1] FALSE FALSE FALSE  TRUE FALSE FALSE FALSE FALSE
+| [1] "a]"
+| [1] FALSE FALSE FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(FALSE, FALSE, FALSE)

@@ -93,12 +93,13 @@ pub const MAX_DEVICES: usize = 64;
 
 pub const MAX_SYSTEMS: usize = 24;
 
-/// `R_GE_deviceClip`, `R_GE_group` and `R_GE_glyphs`: the device versions that introduced
-/// device clipping, groups and paths, and glyphs. Patterns, clipping paths and masks arrived
+/// `R_GE_deviceClip`, `R_GE_group`, `R_GE_glyphs` and `R_GE_fontVar`: the device versions that
+/// introduced device clipping, groups and paths, glyphs, and variable fonts. Patterns, clipping paths and masks arrived
 /// in version 13, older than any device the engine accepts, so they need no check.
 const VERSION_DEVICE_CLIP: c_int = 14;
 pub const VERSION_GROUP: c_int = 15;
 pub const VERSION_GLYPHS: c_int = 16;
+pub const VERSION_FONT_VARIATIONS: c_int = 17;
 
 pub const NULL_DEVICE_NAME: &str = "null device";
 

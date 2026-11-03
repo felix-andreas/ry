@@ -702,9 +702,16 @@ impl<'a> Builder<'a> {
             copy_files(&source.join("man/figures"), &library.join("help/figures"))?;
         }
         if package.name == "utils" {
-            // `iconvlist()` reads the encodings the C library supports from this file, and an
-            // empty one makes it ask iconv itself.
-            write(&library.join("iconvlist"), "")?;
+            // glibc cannot list its encodings through the iconv API, so `iconvlist()` reads
+            // this file. GNU R's Makefile writes it from `iconv -l` and leaves it empty when
+            // that command is missing, which makes `iconvlist()` say it is not available.
+            let encodings = Command::new("iconv")
+                .arg("-l")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map_or_else(String::new, |output| String::from_utf8_lossy(&output.stdout).into_owned());
+            write(&library.join("iconvlist"), &encodings)?;
         }
         self.install_native(package.name, package.native)?;
         if source.join("R/sysdata.rda").exists() {

@@ -7,8 +7,9 @@
 | [6] "\\dontdiff" "TEXT"      
 [messages]
 [warnings]
-- <connection>:2: unknown macro '\nosuchmacro' (in tools::parse_Rd(textConnection(text), fragment = TRUE))
+- <connection>:2: unknown macro '\\nosuchmacro' (in tools::parse_Rd(textConnection(text), fragment = TRUE))
 [errors]
 [value]
 character
-| c("\\code", "TEXT", "UNKNOWN", "LIST", "TEXT", "\\dontdiff", "TEXT")
+| c("\\code", "TEXT", "UNKNOWN", "LIST", "TEXT", "\\dontdiff", 
+| "TEXT")
