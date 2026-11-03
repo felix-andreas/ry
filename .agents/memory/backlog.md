@@ -32,12 +32,14 @@ The quality bar is four things.
 - Cause: ry's vector data starts on a 16-byte boundary (`VECTOR_DATA_OFFSET == 32` in `crates/heap/src/object.rs`), GNU R's 8 bytes past one. Those OpenBLAS kernels peel a misaligned first element, so the summation order differs. Copying `dtrco`'s buffers to an 8-byte offset made it match exactly; `La_dtrcon` then failed the same way.
 - Options: (a) pass BLAS/LAPACK buffers at GNU R's alignment (matches GNU R bit for bit on every kernel; heap layout or copy cost), (b) compare live only on kernels that ignore alignment, (c) install `libblas3 liblapack3` in ci.yml so CI uses the reference libraries and the pinned bits (workflow edit, human only). (c) is the quick unblock; (a) is the faithful fix.
 
-## Open: bundle base R into the `ry` binary
+## Open: what bundling base R left undone
 
-- Today `ry run` reads the R code of the base packages (base, stats, utils, methods, graphics, grDevices, datasets, tools, grid, splines, stats4, parallel, compiler) from an installed GNU R (`rcmd::runtime_home`), which is the only reason a user needs GNU R for it. Both are GPL-2.0-or-later, so bundling is licence-clean.
-- Plan: a build step, not vendored sources. Download one pinned R source tarball (SHA-256 in the repo; patches as files in git), parse `src/library/*/R` per platform (base selects unix/windows code at build time), and write one preloaded base image in ry's own format, which can also start faster than R's lazy-load DBs (relevant to S4 first load). Embed it zstd-compressed and extract it to the cache like libR. Nix fetches the tarball as a fixed-output derivation.
-- About 25 MB on disk for those packages on Linux, roughly 8-10 MB compressed (estimate). Check whether ry loads any of their compiled `.so` files.
-- Unchanged: compiled packages still need a C/Fortran toolchain, and `ry R` still needs GNU R.
+- **Preloaded base image.** Start-up still sources the baseloader and lazy-loads base, then attaches the default packages (about 140 ms for an empty script). The design draft is `docs/src/content/docs/contributing/design/base-image.md`.
+- **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
+- **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
+- **Oracle expectations are GNU R 4.3.3 output**, while ry's default base is 4.6.2. Without `R_HOME`, `oracle compare --engine ry` therefore reports version differences as well as ry bugs. Re-record under GNU R 4.6.2 (`RY_BLESS=1`, needs GNU R) and move CI to it, or keep CI on 4.3.3 through `R_HOME`.
+- **Nix.** `flake.nix` should fetch the tarball as a fixed-output derivation (`pkgs.fetchurl` with the SHA-256 from `tools/base-r/SHA256SUMS`) and pass it as `R_SOURCE_TARBALL` to `just base-r`.
+- **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
 ## Open: the benchmark packages under ry's runtime
 

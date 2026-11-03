@@ -1,8 +1,6 @@
-//! Where a GNU R installation lives when neither `R_HOME` nor `R RHOME` names one.
-//!
-//! ry's runtime reads base R from GNU R (`system::r_home`) and `ry R` embeds GNU R
-//! (`repl::libr`), and both search the same places, so the list lives here once; `repl`
-//! includes this file by path because it does not link the interpreter. The order is the
+//! Where a GNU R installation lives when neither `R_HOME` nor `R RHOME` names one, for `ry R`,
+//! which embeds GNU R (`libr`). ry's own runtime never searches for GNU R: it loads ry's base R
+//! unless `R_HOME` names another. The order is the
 //! platform's usual installers first: the distribution package on Linux, CRAN's framework and
 //! then Homebrew on macOS, and on Windows the installer's registry key and then its default
 //! directories.

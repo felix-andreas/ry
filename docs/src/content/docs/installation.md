@@ -65,40 +65,33 @@ nix profile install github:felix-andreas/ry
 
 ## R
 
-`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`,
-`ry load`, `ry test` and `ry document` need a GNU R installation built as a shared library (see the
-[CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
-R's R sources and the default packages from your GNU R installation instead of shipping them.
+`ry check`, `ry fmt` and `ry server` run no R, and `ry run`, `ry load`, `ry test` and `ry
+document` need no GNU R either: ry ships its own build of base R 4.6.2 inside the `ry` binary.
+The first command that runs R extracts it into `~/.cache/ry/base/`, once per release, and from
+then on `R.version`, `getRversion()` and `R.home()` describe that copy. Only `ry R`, which runs
+your code on GNU R itself, needs a GNU R installation (see the [CLI reference](/reference/cli)).
 
-ry's runtime supports GNU R 4.3 and every later release, and has been checked against R 4.3.3
-and 4.6.1. It emulates the version it finds: `R.version`, `getRversion()` and the check that a
-package was built under a compatible R all report the installation's version, and where R changed
-behavior between releases (how complex numbers print, `is.atomic(NULL)`, and so on), ry behaves
-like that release. An older R stops `ry run` with an error that names the version it found.
+To emulate an older R, set `R_HOME` to a GNU R installation built as a shared library. ry's
+runtime then loads base R from it and behaves like that release: `R.version`, `getRversion()` and
+the check that a package was built under a compatible R report its version, and where R changed
+behavior between releases (how complex numbers print, `is.atomic(NULL)`, and so on), ry follows
+it. GNU R 4.3 and every later release work, and an older one stops `ry run` with an error that
+names the version it found. An `R_HOME` that holds no base R is an error rather than a reason to
+fall back to the bundled copy.
 
-ry finds that installation through `R_HOME` when it is set. Otherwise `ry run` looks in the
-usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it runs the R on your
-`PATH`. The usual places are:
+`RY_BASE_R` names a base R tree built by `just base-r` to use instead of the built-in one. Without
+it, a tree in `base-r/` beside `ry`, one directory up, or in `../lib/ry/base-r` takes precedence,
+which is how a development build and a distribution's package find theirs.
 
-| Platform | Searched |
-| --- | --- |
-| Linux | `/usr/lib/R`, `/usr/local/lib/R`, `/opt/R/lib/R`, `/usr/lib64/R` |
-| macOS | `/Library/Frameworks/R.framework/Resources` (CRAN's installer), `/opt/homebrew/opt/r/lib/R` and `/usr/local/opt/r/lib/R` (Homebrew), `/opt/R/lib/R` |
-| Windows | the `InstallPath` registry entry R's installer writes, then `R\R-x.y.z` under Program Files, newest first |
-
-If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
-searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
-
-Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) runs in the BLAS and LAPACK your GNU R
-uses, loaded the first time code needs them. ry looks for `libblas.so.3` and `liblapack.so.3` on
-the system's library path first, then in the directories GNU R's `etc/Makeconf` records in
-`BLAS_LIBS` and `LAPACK_LIBS` (which is how it finds them on NixOS), then for GNU R's own
-`lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every place it searched;
-start ry with `LD_LIBRARY_PATH` set to a directory that holds `liblapack.so.3` and
-`libblas.so.3`. On macOS, Accelerate is tried right after the system's library path, and on
-Windows the libraries are R's own `bin/x64/Rblas.dll` and `Rlapack.dll`. On Linux and macOS, the compiled code of packages that ry
-installs links the same libraries, because ry's R home takes `BLAS_LIBS` and `LAPACK_LIBS` from
-GNU R's `Makeconf`.
+Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) runs in the system's BLAS and LAPACK,
+loaded the first time code needs them: `libblas.so.3` and `liblapack.so.3` on Linux, and
+Accelerate on macOS. With `R_HOME` set, ry also looks in the directories GNU R's `etc/Makeconf`
+records in `BLAS_LIBS` and `LAPACK_LIBS` (which is how it finds them on NixOS), then for GNU R's
+own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every place it
+searched; start ry with `LD_LIBRARY_PATH` set to a directory that holds `liblapack.so.3` and
+`libblas.so.3`. On Windows, linear algebra needs GNU R's `bin/x64/Rblas.dll` and `Rlapack.dll`,
+so it works only with `R_HOME` set. The compiled code of packages that ry installs links the same
+libraries.
 
 From 0.4.0-beta on, a release archive holds `ry` alone: ry's runtime (`libR.so`, `libR.dylib` or
 `R.dll`) is built into it. The first command that needs the runtime extracts it into

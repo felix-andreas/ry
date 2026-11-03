@@ -74,3 +74,8 @@ A Roc-style standard library of `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` a
 `Module.function` as plain R identifiers. It covers which of Roc's functions ry takes and why, how
 the names avoid every base R and recommended-package name, how the functions are typed as generic
 stubs, and why they are native builtins that are always available on ry's runtime.
+
+### [Preloaded base image](/contributing/design/base-image/)
+
+How ry's runtime could start from one mapped image of base R with the default packages already
+loaded, and which interpreter state lives outside the heap and how each piece is restored.

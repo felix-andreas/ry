@@ -20,11 +20,12 @@ ry debug COMMAND               # developer aids for working on ry itself
 ```
 
 `format` and `lsp` are aliases for `fmt` and `server`. Only `run`, `R`, `load`, `test`, `document`,
-`build`, `install` and `debug-adapter` need R. They use
+`build`, `install` and `debug-adapter` run R, and all of them except `R` run it on ry's runtime with
+the base R 4.6.2 built into `ry`, so they need no GNU R. `R_HOME`, when set, names a GNU R
+installation for ry's runtime to load base R from instead, which emulates that release
+([installation](/installation#r) has the details). `ry R` and `--runtime gnu-r` run GNU R itself:
 the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
-built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer. ry's
-own runtime needs that installation too, because it still reads base R's R code and the default
-packages from it.
+built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
 
 ## check
 

@@ -4413,6 +4413,14 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let mut other_names = nil();
     for (position, &(value, count, is_matrix)) in pieces.iter().enumerate() {
         let source_length = length(value);
+        // A matrix names the other dimension even when it adds no line, as a zero-row matrix
+        // of column names does in `rbind(template, ...)`.
+        if is_matrix && other_names == nil() {
+            let dimnames = get_attr(value, symbols().dimnames);
+            if dimnames != nil() {
+                other_names = dimnames.element(if by_row { 1 } else { 0 });
+            }
+        }
         for line in 0..count {
             for along in 0..extent {
                 let target = if by_row {
@@ -4451,9 +4459,6 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 } else {
                     String::new()
                 });
-                if other_names == nil() && dimnames != nil() {
-                    other_names = dimnames.element(if by_row { 1 } else { 0 });
-                }
             } else {
                 // Positions count from 1 over the call's arguments, which `expressions` mirrors.
                 let expression = expressions[positions[position] - 1];

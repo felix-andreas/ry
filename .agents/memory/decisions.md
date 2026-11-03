@@ -5140,8 +5140,49 @@ check` releases its trees once, and memoized records are compact" below).
   artifact: it edited a digit inside an identifier, which renamed an item, and it entered the
   stubs at `LOW` durability, which made every keystroke deep-verify about 51,000 memos.
 
+## ry ships its own base R, and GNU R through `R_HOME` is the opt-in
+
+- **Before.** `ry run` loaded the base packages' R code, lazy-load databases, help and `share/`
+  files from an installed GNU R (found through `R_HOME`, the usual install paths, then `R RHOME`),
+  which was the only reason a user needed GNU R for ry's runtime.
+- **Now.** ry pins one GNU R release, R 4.6.2 (`tools/base-r/VERSION`, SHA-256 in
+  `tools/base-r/SHA256SUMS`, patches in `tools/base-r/patches/`). `just base-r` downloads the
+  tarball, checks it and runs `ry-rcmd build-base` (`crates/rcmd/src/base.rs`), which replays GNU
+  R's `src/library/Makefile` on ry's own interpreter: each step is a separate `ry-rcmd R --vanilla`
+  process against the staging tree, as GNU R's make runs `R_EXE`. The output (`target/base-r`, about
+  23 MB) is GNU R's layout, so `system.file`, `R.home()`, help and `tools:::` code work unchanged.
+  `just package` embeds it zstd-compressed (`RY_EMBED_BASE`, `crates/repl/build.rs`) and `ry`
+  extracts it to `cache/ry/base/<key>` on first use, like libR.
+- **Lookup order** (`repl::base_r`, `interp::system::find_r_home`): a non-empty `R_HOME` is
+  authoritative and must hold base R (no fallback, so a typo is an error, not silent R 4.6.2);
+  then `RY_BASE_R`; then a complete tree (`ry-base.txt` present) at `base-r/`, `../base-r`,
+  `../../base-r` or `../lib/ry/base-r` beside the executable; then the embedded copy. The GNU R
+  search paths and `R RHOME` are only for `ry R` (`crates/repl/src/gnu_r_home.rs`).
+- **No GNU R compiled code.** The default packages' routines are ry's (`builtin_libraries.rs`), so
+  those packages get a placeholder `libs/<pkg>.so` for `library.dynam` to find. grid and splines
+  are compiled from the tarball's C sources against ry's headers (`compile_native`), as before.
+- **No precompiled bytecode** in the lazy-load databases (coordinated with the bytecode work):
+  ry's interpreter compiles on its own terms.
+- **The makebasedb check is rewritten,** because every ry session has `tools:ry`, `package:std`
+  and `package:ry` attached: the step ignores them instead of demanding a bare search path.
+- **BLAS/LAPACK** come from the system (Linux `libblas.so.3`/`liblapack.so.3`, macOS
+  Accelerate). Windows has no system LAPACK and no bundled reference build yet, so linear algebra
+  there needs `R_HOME` naming GNU R (`backlog.md`).
+- **Embedded archive format:** sorted entries of a kind byte (0 directory, 1 file, 2 executable),
+  a u32 LE path length and path, and for files a u64 LE length and the bytes, zstd-compressed as a
+  whole and keyed by the FNV hash of the compressed bytes. Paths with empty or `..` parts are
+  rejected on unpack.
+- **Version emulation is kept for the opt-in:** `R_HOME` naming GNU R 4.3 or later makes ry
+  behave like that release ("The runtime emulates the GNU R version it loads base R from" below).
+  The oracle's expectations are GNU R 4.3.3 output, so CI sets `R_HOME` to 4.3.3.
+- **Impact.** One source of truth for the R version a user gets; start-up is unchanged (about
+  140 ms for an empty script, the same tree shape as GNU R's). The preloaded heap image that
+  would cut start-up further is a design draft (`docs/.../contributing/design/base-image.md`).
+
 ## The runtime emulates the GNU R version it loads base R from
 
+- **Status:** the default is ry's own base R 4.6.2 ("ry ships its own base R" above); this
+  applies when `R_HOME` names a GNU R installation.
 - **Before.** ry's runtime always presented as R 4.6 at the R level, while its internals followed
   R 4.3's behavior, so base R 4.6's own R code failed its `Built:` check or called internals that
   had changed or did not exist yet.

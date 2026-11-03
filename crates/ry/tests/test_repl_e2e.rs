@@ -1246,9 +1246,9 @@ fn an_unusable_r_home_stops_ry_s_runtime_with_one_actionable_message() {
         assert_eq!(
             stderr,
             format!(
-                "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {missing}, \
-                 which holds none (no library/base/R/base)\n  fix: install GNU R, or set R_HOME to \
-                 the directory `R RHOME` prints; see https://ry-lang.org/installation/\n"
+                "ry: R_HOME is {missing}, which holds no base R (no library/base/R/base)\n  fix: \
+                 unset R_HOME to use ry's own base R, or set it to the directory a GNU R's \
+                 `R RHOME` prints\n"
             ),
             "{arguments:?}"
         );

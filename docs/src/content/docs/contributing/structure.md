@@ -155,6 +155,9 @@ with no R installed.
 - **`libr.rs`**: the binding to R's shared library, resolved at runtime with no build-time link,
   including the registration of `.Call` routines that live in the ry process.
 - **`console.rs`**: the terminal front end.
+- **`gnu_r_home.rs`**: where a GNU R installation lives, for `ry R`, when `R_HOME` names none.
+
+`repl.rs` also finds ry's base R (`base_r`) and extracts the copy built into `ry` into the cache.
 
 ## `heap`
 
@@ -212,10 +215,9 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   implement them.
 - **`platform.rs`**: every operating-system call the interpreter makes, with a Unix and a Windows
   implementation of the same functions, so a libc use outside it is a Windows build error.
-  **`gnu_r_home.rs`**: where a GNU R installation lives when `R_HOME` and `R RHOME` name none.
 - **`graphics_engine.rs`**: R's graphics engine, with the device table, the graphics systems
   registered with every device, and the `DevDesc` layout that device packages fill in.
-- **`session.rs`**: start-up (base R from the GNU R installation, the profiles, the default
+- **`session.rs`**: start-up (the base R tree `system.rs` finds, the profiles, the default
   packages) and running a script.
 - **`stats.rs`** and its `stats_*.rs` siblings (`stats_models`, `stats_optimize`, `stats_nlm`,
   `stats_lbfgsb`, `stats_port`, `stats_arima`, `stats_cluster`, `stats_deriv`, `stats_tests`): the
@@ -331,8 +333,13 @@ literal `fread("prices.csv")` is typed as exactly the columns that read produces
 
 The library root is `src/rcmd.rs`, and the binary `ry-rcmd` (`src/main.rs`) is what `bin/R`,
 `bin/Rscript` and `bin/Rcmd` in ry's R home run. `assemble` creates the R home (headers,
-`libR.so`, `etc/Makeconf`, `share/make/shlib.mk`, links to GNU R's packages, `share/`, `etc/`
-and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble` is its command line.
+`libR.so`, `etc/Makeconf`, `share/make/shlib.mk`, links to the base tree's packages, `share/`,
+`etc/` and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble --base DIR` is its
+command line. The base tree is ry's own or a GNU R installation. **`base.rs`** builds ry's own
+from GNU R's source release (`ry-rcmd build-base`, behind `just base-r`): it replays GNU R's
+`src/library/Makefile` on ry's interpreter, one `ry-rcmd R` process per step, writes the
+lazy-load databases and help, and compiles grid's and splines' C code. `runtime_home` links that
+tree into an R home as it does a GNU R installation.
 `install`, `shlib` and `config` are `R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`.
 `r_command_line` and `rscript_command_line` parse GNU R's front-end arguments into a `Session`
 that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level

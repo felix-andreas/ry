@@ -1821,6 +1821,7 @@ dependencies = [
  "lzma-rust2",
  "memchr",
  "pcre2",
+ "rcmd",
  "regex",
  "regex-automata",
  "regex-syntax",
