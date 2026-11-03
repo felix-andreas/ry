@@ -679,6 +679,23 @@ unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(1), "envir")?;
     let mode = values::require_string(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
+    if mode == "any" {
+        // As in GNU R, an active binding exists without its function being called.
+        let heap = crate::heap();
+        let mut frame = env;
+        while frame != empty_env() {
+            if let Some(cell) = heap.frame_cell(frame, symbol)
+                && (cell.has_gp(gp::ACTIVE_BINDING) || cell.cdr() != unbound())
+            {
+                return scalar_bool(true);
+            }
+            if !inherits {
+                break;
+            }
+            frame = frame.enclosure();
+        }
+        return scalar_bool(false);
+    }
     scalar_bool(lookup(symbol, env, &mode, inherits)?.is_some())
 }
 
