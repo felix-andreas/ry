@@ -189,10 +189,8 @@ unsafe fn compiled_for<'a>(
         let constants = machine.code.cdr();
         // A body that compiled only for its loop would spend each call handing its instructions
         // back to tier 0, so calls keep running in tier 0 and only the loop enters compiled code.
-        if !in_loop
-            && values::ints(constants.element(PROFILE))[profile::TIER_STATE] & runtime::LOOPS_ONLY
-                != 0
-        {
+        let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
+        if !in_loop && state >= 0 && state & runtime::LOOPS_ONLY != 0 {
             return None;
         }
         let tier1 = constants.element(TIER1);

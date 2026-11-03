@@ -272,11 +272,18 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.add_global_root(tier1);
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
+    let state = counters[profile::TIER_STATE];
     // Halfway to the threshold, tier 0 keeps recording type feedback, so the activation that
     // just deoptimized records the type that broke the speculation and the recompile sees it.
-    counters[profile::ENTRIES] = bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2);
+    // A body that compiles only for its loop records through its loop anyway, and its calls
+    // must never ask the tier again, so it keeps the entry count that stops them asking.
+    counters[profile::ENTRIES] = if state >= 0 && state & LOOPS_ONLY != 0 {
+        NEVER_HOT
+    } else {
+        bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2)
+    };
     counters[profile::BACK_EDGES] = 0;
-    if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
+    if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
     }
 }

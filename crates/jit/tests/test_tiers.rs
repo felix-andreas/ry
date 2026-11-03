@@ -554,7 +554,7 @@ fn native_functions_agree_across_tiers() {
         ),
         // `x[TRUE]` recycles the logical over the whole vector; `x[[TRUE]]` is the first element.
         (
-            "lg <- function(x) sum(x[TRUE]) + x[[TRUE]]",
+            "lg <- function(x) length(x[TRUE]) * 10 + x[[TRUE]]",
             "p <- c(0.5, 1.5, 2)\ns <- 0\nfor (i in 1:n) s <- s + lg(p)\ns",
             "(n = 600L)",
             false,
@@ -903,7 +903,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 Some(false),
             ),
             (
-                "fl <- function(v: double[]) -> double { s <- 0; for (e in v) s <- s + e; s }",
+                "fl <- function(v: double[]) -> double { s <- 0; for (i in seq_along(v)) s <- s + v[i]; s }",
                 "fl(c(1, 2.5))",
                 "3.5",
                 Some(true),
@@ -917,7 +917,11 @@ fn fully_typed_closure_compiles_at_its_first_call() {
             let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
+        // A straight-line body the first call left alone still compiles once it is hot.
+        run("for (i in 1:5000) ft(2, 3)");
+        let hot = has_compiled_code("ft");
         jit::install_mode(Mode::Off);
+        assert!(hot, "ft never compiled after 5000 calls");
         for ((definition, call, expected, eager), (outcome, compiled)) in cases.iter().zip(outcomes)
         {
             let agrees = if *expected == "error" {
@@ -1036,7 +1040,7 @@ const RETURNS: &[(&str, &str)] = &[
     ("", "@"),
 ];
 
-/// Random fully typed closures, which compile at their first call, called with arguments that
+/// Random fully typed closures, half of which loop and so compile at their first call, called with arguments that
 /// pass and fail their checks, too many and too few, and returning values that may fail the
 /// return check, against the same calls with the JIT off. The calls repeat, so compiled code
 /// that deoptimizes after its first call is exercised too.
