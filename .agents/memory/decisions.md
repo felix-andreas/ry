@@ -7457,6 +7457,6 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `#starlight__sidebar`, which never scrolls. `docs/src/components/Sidebar.astro` wraps the theme's
   sidebar and saves `.sidebar-content`'s `scrollTop` to sessionStorage on click and `pagehide`, and
   restores it in an inline script right after the sidebar markup, so it applies before first paint.
-- **Impact.** User-facing pages shrink from about 3,100 lines to about 900, a reader finds one page
+- **Impact.** The introduction and tutorial pages shrink from about 3,000 lines to about 1,300, a reader finds one page
   per step, and the sidebar keeps its place across navigation.
 
