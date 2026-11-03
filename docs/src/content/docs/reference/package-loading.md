@@ -123,15 +123,14 @@ A load holds them back only when all of these hold, and otherwise runs every one
   method for the `coerce` generic (and for `coerce<-` with `replace =`), so it is held back like the
   methods above when it names one of the package's classes, and `as()` runs the held-back
   definitions when it looks for it.
-- A class union that names one of the package's classes is held back too, even when it also names
-  other packages' classes, as `setClassUnion("QuantityOrNull", c("Quantity", "NULL"))` does. Asking
-  whether `NULL` belongs to the union, with `is(NULL, "QuantityOrNull")`, `extends()` or a method for
-  the union, names the union and so runs the held-back definitions. A method for such a union on
-  another package's generic, such as `show`, keeps every definition in place, because dispatch on
-  `NULL` would not look for it.
-- A class union or a coercion that names only other packages' classes, such as
-  `setClassUnion("NumOrNull", c("numeric", "NULL"))`, is not held back but runs in place, because it
-  changes what `numeric` and `NULL` extend for every later lookup of them.
+- A class union is held back too, even when it names other packages' classes, as
+  `setClassUnion("QuantityOrNull", c("Quantity", "NULL"))` and
+  `setClassUnion("NumOrNull", c("numeric", "NULL"))` do. Asking whether `NULL` belongs to the
+  union, with `is(NULL, "NumOrNull")`, `extends()` or a method for the union, names the union and so
+  runs the held-back definitions. A method for such a union on another package's generic, such as
+  `show`, keeps every definition in place, because dispatch on `NULL` would not look for it.
+- A coercion that names only other packages' classes, such as `setAs("numeric", "character", ...)`,
+  is not held back but runs in place.
 - Every name the definitions read is written once, by a statement placed before them, so running them
   later reads the same values.
 - Every name the definitions bind is written by them alone.
@@ -224,8 +223,9 @@ load of a process also prints `process start`, the time the process took to reac
 ## Limits
 
 - Until held-back S4 definitions run, listing everything another package's class extends, as
-  `extends("NULL")` or `is(NULL)` do, leaves out a held-back union that names that class. Asking
-  about the union itself is exact.
+  `extends("NULL")`, `extends("numeric")` or `is(NULL)` do, leaves out a held-back union that names
+  that class. Asking about the union itself is exact, and so is the listing once the definitions
+  have run.
 - Compressed dataset tables (`.csv.gz`, `.tab.bz2`, `.txt.xz` and so on) are not read. When one
   dataset name has files in several formats, such as `x.R` and `x.rda`, every file is read in name
   order, where `data()` reads only one.

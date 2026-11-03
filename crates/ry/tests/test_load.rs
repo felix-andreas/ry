@@ -615,14 +615,14 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         format!("{read}; cat(x[1], '\\n')"),
         format!("{read}; cat(unlist(as.list(x)), toString(x), '\\n')"),
         "cat('probe: '); print(Sq(side = 2))".to_owned(),
-        "cat('probe:', extends('numeric'), is(1, 'NumOrNull'), isVirtualClass('Shape'), '\\n')"
+        "cat('probe:', is(1, 'NumOrNull'), extends('numeric'), isVirtualClass('Shape'), '\\n')"
             .to_owned(),
         "cat('probe:', new('Sq')@side, length(Sq(side = 5)), '\\n')".to_owned(),
     ] {
         let lazy = load("TRUE", &probe);
         let eager = load("FALSE", &probe);
         assert!(
-            lazy.contains("8 S4 definitions held back until first use"),
+            lazy.contains("9 S4 definitions held back until first use"),
             "{lazy}"
         );
         let line = |text: &str| {
@@ -635,10 +635,12 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
 }
 
-/// A union that also names a basic class, and coercions with `setAs()`, are held back with the
-/// classes they name, and each first use, in a process of its own, sees what an eager load
-/// shows: union membership of the basic class, coercions in both directions and their
-/// replacement form, method lookups, validity, and dispatch on an object read back from disk.
+/// Unions that name basic classes, with or without one of the package's classes, and coercions
+/// with `setAs()`, are held back with the classes they name, and each first use, in a process of
+/// its own, sees what an eager load shows: union membership of the basic classes, everything a
+/// basic class extends once a union was named, in the order the unions were defined, coercions
+/// in both directions and their replacement form, method lookups, validity, and dispatch on an
+/// object read back from disk.
 /// The second round restores the definitions from the S4 metadata cache.
 #[test]
 fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_eagerly() {
@@ -656,8 +658,10 @@ fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_ea
             "Coin <- setClass(\"Coin\", representation(value = \"numeric\"))\n\
              setClass(\"Purse\", representation(coins = \"list\"))\n\
              setClassUnion(\"CoinOrNull\", c(\"Coin\", \"NULL\"))\n\
+             setClassUnion(\"AmountOrNull\", c(\"numeric\", \"NULL\"))\n\
              setGeneric(\"worth\", function(x) standardGeneric(\"worth\"))\n\
              setMethod(\"worth\", \"CoinOrNull\", function(x) if (is.null(x)) 0 else x@value)\n\
+             setMethod(\"worth\", \"AmountOrNull\", function(x) if (is.null(x)) 0 else sum(x))\n\
              setAs(\"Coin\", \"character\", function(from) paste(from@value, \"coins\"))\n\
              setAs(\"numeric\", \"Coin\", function(from) new(\"Coin\", value = from))\n\
              setAs(\"Coin\", \"Purse\", function(from) new(\"Purse\", coins = list(from)),\n\
@@ -692,6 +696,8 @@ fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_ea
     let probes = [
         "cat('probe:', is(NULL, 'CoinOrNull'), extends('NULL', 'CoinOrNull'), isVirtualClass('CoinOrNull'), '\\n')".to_owned(),
         "cat('probe:', worth(NULL), worth(Coin(value = 2)), is(Coin(value = 1), 'CoinOrNull'), '\\n')".to_owned(),
+        "cat('probe:', is(1, 'AmountOrNull'), is('a', 'AmountOrNull'), extends('integer', 'AmountOrNull'), worth(c(1, 2)), '\\n')".to_owned(),
+        "cat('probe:', is(NULL, 'CoinOrNull'), is(1, 'AmountOrNull'), extends('NULL'), is(1), '\\n')".to_owned(),
         "cat('probe:', as(3, 'Coin')@value, '\\n')".to_owned(),
         "cat('probe:', as(Coin(value = 2), 'character'), '\\n')".to_owned(),
         "cat('probe:', existsMethod('coerce', c('numeric', 'Coin')), existsMethod('coerce<-', c('Coin', 'Purse')), '\\n')".to_owned(),
@@ -709,7 +715,7 @@ fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_ea
             let lazy = load("TRUE", probe);
             let eager = load("FALSE", probe);
             assert!(
-                lazy.contains("9 S4 definitions held back until first use"),
+                lazy.contains("11 S4 definitions held back until first use"),
                 "{round}: {lazy}"
             );
             assert_eq!(

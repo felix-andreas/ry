@@ -89,6 +89,24 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   pays for loading testthat on every cold load (about 0.2 s on GNU R; a tiny package's load went
   from 14 ms to 1.2 s on a debug build of ry's runtime). A `package:testthat` of promises over its
   exports would keep the search path identical and load testthat on first use.
+- **Start-up and imports are the floor of a warm `ry load`.** With the S4 unit restored lazily, a
+  warm `ry load` of the generated S4 package (`just bench-s4-first-use target/s4heavy
+  lubridate,data.table,xts`) spends about 140 ms reaching the load and 220 to 300 ms importing,
+  against under 60 ms for the first `new()`. Measured pieces, so the next attempt starts from data:
+  - Process start: base alone about 30 ms (`R_DEFAULT_PACKAGES=NULL`), then methods 21 to 31 ms,
+    utils about 40 ms, stats about 30 ms, the rest about 20 ms. `registerS3methods` is 19 ms of
+    utils and 15 ms of stats: GNU R's loop calls `tryCatch` (7.3 us on ry, 5.2 us on GNU R) and
+    `methods::is` (11.5 us against 9.2 us) per method. All of it is GNU R's own R code read from
+    the installed R home, so the fixes are interpreter speed, or the preloaded base image of
+    "bundle base R into the `ry` binary" above, which could carry the default packages already
+    loaded.
+  - Imports: lubridate about 140 ms (its `cacheMetaData` about 70 ms), data.table about 40 ms
+    (`cacheMetaData` about 30 ms), zoo, xts, lattice and grid 10 to 13 ms each; GNU R takes about
+    325 ms for the same set. The lazy class and generic tables the S4 restore uses
+    (`.ry_cache_restored_s4`) would apply to an installed package's `cacheMetaData` too, but
+    `loadNamespace` is GNU R's code, so it needs a hook in the runtime. Deferring an import's
+    `loadNamespace` until a name is used is not exact: `.onLoad` side effects (options, S3
+    registrations that dispatch on objects read back with `readRDS`) would move.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 

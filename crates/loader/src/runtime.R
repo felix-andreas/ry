@@ -697,7 +697,7 @@ View <- function(x, title) {
   })
   if (!is.null(restored)) {
     step("S4 restore")
-    .ry_cache_restored_s4(ns, restored$metadata)
+    .ry_cache_restored_s4(ns, restored$metadata, deferred$classes)
     step("S4 caches")
   } else {
     step("S4 lookup")
@@ -779,20 +779,27 @@ View <- function(x, title) {
   }), error = function(error) NULL)
 }
 
-# What `methods::cacheMetaData()` does for the package's classes and generics, so that a
-# restore can do the same without reading every definition. When every class is plain
-# (`.ry_s4_metadata()`) and the class table has none of their names yet, each goes into the
-# table as a binding that shares the namespace's promise, and only a union's members from other
-# packages have their cached definitions updated, in the order `cacheMetaData()` updates them.
-# Otherwise the order of the updates decides what the table ends up holding, so every class runs
-# what `cacheMetaData()` runs for it. A plain generic goes into the generic table as a shared
-# binding too, and every other generic, such as one from another package with methods for the
-# package's classes, runs the steps `cacheMetaData()` runs for it.
-.ry_cache_restored_s4 <- function(ns, metadata) {
+# What running the definitions and then `methods::cacheMetaData()` does to the methods
+# package's tables, so that a restore can do the same without reading every definition.
+# Running a union adds it to what each member from another package contains, in the cached
+# definition of that member, and the unions run in the order the package defines them
+# (`defined`), which is then the order that member lists them in; `cacheMetaData()` replaces
+# those entries in place. When every class is plain (`.ry_s4_metadata()`) and the class table
+# has none of their names yet, each goes into the table as a binding that shares the
+# namespace's promise, and only a union's members from other packages have their cached
+# definitions updated, in definition order. Otherwise the order of the updates decides what the
+# table ends up holding, so the unions first update their members from other packages as they
+# did when they ran, and then every class runs what `cacheMetaData()` runs for it. A plain
+# generic goes into the generic table as a shared binding too, and every other generic, such as
+# one from another package with methods for the package's classes, runs the steps
+# `cacheMetaData()` runs for it.
+.ry_cache_restored_s4 <- function(ns, metadata, defined) {
+  ordered <- order(match(metadata$classes, defined))
   classes <- methods:::.classTable
   taken <- vapply(metadata$classes, exists, NA, envir = classes, inherits = FALSE)
-  # A union of other packages' classes runs in place during the load, so its name is taken by
-  # the very definition the namespace holds, and caching it again only recaches its members.
+  # A class that ran in place during the load, as one whose definitions a reload kept does, has
+  # its name taken by the very definition the namespace holds, and caching it again only
+  # recaches a union's members, which are then all other packages' classes.
   in_place <- vapply(metadata$classes[taken], function(class) {
     definition <- get(paste0(".__C__", class), envir = ns)
     identical(get(class, envir = classes), definition) &&
@@ -803,7 +810,7 @@ View <- function(x, title) {
   if (all(metadata$plain_classes) && all(in_place)) {
     fresh <- metadata$classes[!taken]
     .ry_internal("importIntoEnv", classes, fresh, ns, paste0(".__C__", fresh))
-    for (k in which(taken | lengths(metadata$recache) > 0L)) {
+    for (k in intersect(ordered, which(taken | lengths(metadata$recache) > 0L))) {
       definition <- get(paste0(".__C__", metadata$classes[[k]]), envir = ns)
       if (taken[[k]] && methods::is(definition, "ClassUnionRepresentation")) {
         .ry_recache_members(definition, names(definition@subclasses), ns)
@@ -812,6 +819,15 @@ View <- function(x, title) {
       }
     }
   } else {
+    for (class in metadata$classes[ordered]) {
+      definition <- get(paste0(".__C__", class), envir = ns)
+      if (methods::is(definition, "ClassUnionRepresentation")) {
+        members <- names(definition@subclasses)
+        .ry_recache_members(definition, members[!vapply(
+          paste0(".__C__", members), exists, NA, envir = ns, inherits = FALSE
+        )], ns)
+      }
+    }
     for (class in metadata$classes) {
       definition <- get(paste0(".__C__", class), envir = ns)
       if (methods::is(definition, "classRepresentation")) {

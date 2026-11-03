@@ -282,11 +282,11 @@ pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
 /// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`,
 ///   `setValidity`, `setClassUnion` and `setAs`, each with literal names, as [`S4Definition`]
 ///   describes. Any other S4 registration, such as `setRefClass`, keeps them all eager.
-/// - A class union or a coercion that names none of the held-back classes, as
-///   `setClassUnion("NumOrNull", c("numeric", "NULL"))` does, is not held back but runs in
-///   place, because a union changes what its members extend in the process-wide class cache.
-///   A union that names both kinds, as `c("Quantity", "NULL")` does, is held back: code that
-///   asks whether `NULL` belongs to it names the union, whose lookup runs the definitions.
+/// - A class union is held back, even one that names other packages' classes, as
+///   `c("Quantity", "NULL")` and `c("numeric", "NULL")` do: code that asks whether `NULL`
+///   belongs to it names the union, whose lookup runs the definitions. Until then, the
+///   process-wide class cache does not list the union among what `NULL` extends. A coercion
+///   that names none of the held-back classes is not held back but runs in place.
 /// - Each method belongs to a generic the package defines, so nothing reaches it except
 ///   through that generic, or its signature names a class the package defines, so it applies
 ///   only to objects of that class. A method of the second kind on another package's generic,
@@ -1920,11 +1920,13 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     if definitions.is_empty() {
         return None;
     }
-    // A union, or a coercion, that names none of the classes held back reads nothing held back
-    // and runs in place: a union of other packages' classes changes what its members extend in
-    // the process-wide class cache, which no placeholder in this namespace could stand in for.
-    // A union that also names other packages' classes, as `c("Quantity", "NULL")` does, is held
-    // back with the rest; see `mixed` below for what that leaves to watch.
+    // A coercion that names none of the classes held back reads nothing held back and runs in
+    // place. A union that names other packages' classes, as `c("Quantity", "NULL")` and
+    // `c("numeric", "NULL")` do, is held back with the rest even though it changes what those
+    // classes extend in the process-wide class cache: every question about membership names the
+    // union and so forces the definitions. Forcing them on a lookup of `NULL` itself would run
+    // them at once, because the methods package asks `is(NULL, ...)` all the time. See `mixed`
+    // below for what that leaves to watch.
     let mut held: FxHashSet<&str> = definitions
         .iter()
         .filter_map(|(_, _, _, definition)| match definition {
@@ -1937,14 +1939,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     for definition in definitions {
         match definition.3 {
             S4Definition::Union { class, members } => {
-                let held_members = members
-                    .iter()
-                    .filter(|member| held.contains(member.as_str()))
-                    .count();
-                if held_members == 0 {
-                    continue;
-                }
-                if held_members < members.len() {
+                if !members.iter().all(|member| held.contains(member.as_str())) {
                     mixed.insert(class);
                 }
                 held.insert(class);

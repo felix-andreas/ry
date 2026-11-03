@@ -5828,16 +5828,23 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - Group generics keep the unit eager: a group member dispatches through the group's table,
     which no per-name placeholder covers.
 - **Class unions** (`S4Definition::Union`). A union of only the package's held-back classes is
-  held back with them. A union of only other packages' classes (`c("numeric", "NULL")`) runs in
-  place, because it edits the global class-cache entry of each member (GNU R changes
-  `.getClassesFromCache("numeric")@contains`, not `methods::.__C__numeric`), so no placeholder
-  in the package's namespace could stand in for it. A mixed union (`c("Cls", "NULL")`) used to keep
-  the unit eager, which on a real S4 package meant no deferral at all; it is now held back, because
-  every membership question names the union (`is(NULL, "U")`, a method for `U`) and so forces the
-  unit, and `possibleExtends` falls back on the union definition's `@subclasses`. What stays wrong
-  until the force is the reverse listing (`extends("NULL")`, `is(NULL)`), documented under Limits.
-  A method on another package's generic for a mixed union keeps the unit eager, because dispatch
-  on `NULL` would never read the label placeholder.
+  held back with them. A union that names other packages' classes edits the global class-cache
+  entry of each such member (GNU R changes `.getClassesFromCache("numeric")@contains`, not
+  `methods::.__C__numeric`), which no placeholder can stand in for, so a mixed union
+  (`c("Cls", "NULL")`) used to keep the unit eager and a union of only other packages' classes
+  (`c("numeric", "NULL")`) ran in place at about 10 ms each, which on a real S4 package meant no
+  deferral at all or 150 ms of load for 15 such unions. Both are held back, because every
+  membership question names the union (`is(NULL, "U")`, a method for `U`) and so forces the unit,
+  and `possibleExtends` falls back on the union definition's `@subclasses`. What stays wrong until
+  the force is the reverse listing (`extends("NULL")`, `is(NULL)`), documented under Limits.
+  Forcing on any lookup of a member class (a hook in `R_getClassFromCache`) would make the
+  listing exact but was tried and rejected: the methods package itself calls `is(NULL, ...)`
+  constantly (`setOldClass()` does at load), so the unit ran at once and nothing stayed deferred.
+  A method on another package's generic
+  for a mixed union keeps the unit eager, because dispatch on `NULL` can hit the generic's table
+  without any class lookup. A restore must add the unions to those members in definition order,
+  because that is the order `extends("NULL")` lists them in after an eager load
+  (`cacheMetaData()` only replaces the entries in place), not `getClasses()` order.
 - **Coercions** (`S4Definition::Coerce`). `setAs(from, to, def)` is a method on `coerce` (and on
   `coerce<-` with `replace`), so it is held back as a foreign method with signature `(from, to)`
   when either side is a held-back class; `as()` reaches it through `.quickCoerceSelect`, which

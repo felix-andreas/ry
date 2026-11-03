@@ -161,16 +161,16 @@ placeholders .__C__Circle .__C__Shape .__C__Sq .__T__area:demo area
 sync exports
 run .onLoad
 
-#---- a_class_union_of_other_packages_classes_runs_in_place
+#---- a_class_union_of_other_packages_classes_is_held_back_too
 #~~~~ R/a.R
 setClassUnion("NumOrNull", c("numeric", "NULL"))
 setClass("Sq", representation(side = "NumOrNull"))
 #++++
 rebuild imports (0 directives)
 source R/a.R
-run R/a.R:1 setClassUnion("NumOrNull", c("numeric", "NULL"))
+hold back R/a.R:1 setClassUnion("NumOrNull", c("numeric", "NULL"))
 hold back R/a.R:2 setClass("Sq", representation(side = "NumOrNull"))
-placeholders .__C__Sq
+placeholders .__C__NumOrNull .__C__Sq
 sync exports
 run .onLoad
 
