@@ -361,6 +361,10 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
+- Under GNU R (`ry load`, `crates/ry/src/load.rs`), `std::List.map` fails with R's "there is no
+  package called 'std'" instead of the explanation bare names get, bare names are stubbed whatever
+  `[check] prelude` says, and the stub message calls every `ry.exports` name (DataFrame, Arrays) part
+  of the standard library.
 - Qualified library calls are not fast-pathed: `library_function`/`library_call` in
   `crates/interp/src/bytecode.rs` recognize only a bare symbol, so `std::List.map` (the only spelling
   with `[check] prelude = false`) misses the compile-time leaf resolution and the JIT loops.
