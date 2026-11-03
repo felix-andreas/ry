@@ -923,16 +923,31 @@ fn analyze_project_with(
     // interface edges follow for the same reason, and because the walk that finds the project's
     // cyclic groups reads every item's edges on one thread.
     in_parallel(&db, workers, &checked_order, |db, index| {
-        if !checked(index) {
-            return;
+        if checked(index) {
+            for &item in semantics::item_tree(db, files[index]) {
+                semantics::item_naming(db, item);
+            }
         }
-        let file = files[index];
-        let items = semantics::item_tree(db, file);
-        for &item in items {
-            semantics::item_naming(db, item);
-        }
-        for &item in items {
-            semantics::item_interface_edges(db, item);
+    });
+    // The edges read the project-wide name maps, which read every item. Built inside one item's
+    // edges, a map would run on one core while the others wait on it, and leave that handle's
+    // reused query-stack frame sized for the whole project, which every later query at the same
+    // depth would clear. So each layer's maps are built first, on a throwaway handle of its own.
+    if let Some(project) = ProjectFiles::try_get(&db) {
+        thread::scope(|scope| {
+            for test in [false, true] {
+                let db = db.clone();
+                scope.spawn(move || {
+                    semantics::NameLookup::new(&db, project, test);
+                });
+            }
+        });
+    }
+    in_parallel(&db, workers, &checked_order, |db, index| {
+        if checked(index) {
+            for &item in semantics::item_tree(db, files[index]) {
+                semantics::item_interface_edges(db, item);
+            }
         }
     });
     // Whether the file's findings are known, from the record or from this run.
