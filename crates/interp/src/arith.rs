@@ -918,6 +918,13 @@ unsafe fn strict(
 }
 
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| arg.value.kind() == SexpType::Record)
+    {
+        return crate::numbers::arithmetic(call, op);
+    }
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
@@ -1703,6 +1710,17 @@ unsafe fn comparable(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| arg.value.kind() == SexpType::Record)
+    {
+        // Unordered `F32` operands (a `NaN`) are unequal and in no order, as R's doubles are.
+        return crate::numbers::comparison(call, |ordering| match ordering {
+            Some(ordering) => comparison.holds(ordering),
+            None => comparison == Comparison::NotEqual,
+        });
+    }
     if call.len() != 2 {
         return Err(call.error("comparison is possible only for atomic and list types"));
     }

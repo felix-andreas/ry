@@ -531,8 +531,11 @@ unsafe fn call_builtin_reusing(
     let result = if !definition.accepts_native
         && (matches!(definition.kind, Kind::Builtin | Kind::Internal)
             || definition.is_dispatch_or_eval())
-        && let Err(refused) = crate::records::check_native_args(call, args)
-    {
+        && let Err(refused) = crate::records::check_native_args(
+            call,
+            args,
+            crate::numbers::takes_numbers(definition.name),
+        ) {
         Err(refused)
     } else {
         // An ALTREP method's error, parked by the element accessor the builtin went through,

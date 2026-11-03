@@ -637,11 +637,11 @@ fn traversals_agree_across_tiers() {
     // A library traversal whose callback inlines runs as a compiled loop. A list or an element
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
-    let definitions = "xs <- List.from_vector(1:50 + 0)\nys <- List.from_vector(1:50)\nflip <- 0L\n\
+    let definitions = "xs <- List.from_r(1:50 + 0)\nys <- List.from_r(1:50)\nflip <- 0L\n\
                        add <- function(acc, x) acc + x\nstep <- add\n\
                        ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
                        sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
-                       st <- Set.from_list(List.from_vector(1:20 + 0.5))";
+                       st <- Set.from_list(List.from_r(1:20 + 0.5))";
     let cases = [
         ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
         ("List.walk(ys, 0L, function(acc, x) acc + x)", false),

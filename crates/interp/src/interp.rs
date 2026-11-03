@@ -60,6 +60,7 @@ mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
+pub mod numbers;
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;

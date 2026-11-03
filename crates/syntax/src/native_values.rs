@@ -36,6 +36,8 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "format.ry_set",
     "all.equal.ry_dict",
     "all.equal.ry_set",
+    "format.ry_number",
+    "all.equal.ry_number",
     "print.default",
     "deparse",
     "dput",
@@ -97,9 +99,16 @@ pub fn accepts_native(name: &str) -> bool {
     // Asked on every call the checker sees, so the list is indexed once.
     static ACCEPTING: LazyLock<HashSet<&str>> = LazyLock::new(|| {
         let generics = ACCEPTS_NATIVE.iter().filter_map(|accepted| {
-            [".ry_record", ".ry_tuple", ".ry_tag", ".ry_dict", ".ry_set"]
-                .iter()
-                .find_map(|suffix| accepted.strip_suffix(suffix))
+            [
+                ".ry_record",
+                ".ry_tuple",
+                ".ry_tag",
+                ".ry_dict",
+                ".ry_set",
+                ".ry_number",
+            ]
+            .iter()
+            .find_map(|suffix| accepted.strip_suffix(suffix))
         });
         ACCEPTS_NATIVE
             .iter()

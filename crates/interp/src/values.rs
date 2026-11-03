@@ -635,6 +635,7 @@ unsafe fn other_length(object: Sexp) -> usize {
         SexpType::Record => match records::native_kind(object) {
             NativeKind::Dict | NativeKind::Set => standard_library::entry_count(object),
             NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => object.record_slot_count(),
+            NativeKind::Number(_) => 1,
         },
         _ if object.kind().is_vector() => {
             if object.is_altrep() {

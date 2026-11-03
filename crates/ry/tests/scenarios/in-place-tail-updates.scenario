@@ -13,7 +13,7 @@ file updates.R
 | print(f2())
 | e <- quote(List.append(d, k))
 | shared <- eval(bquote(function(d, k) if (length(.(e)) > 100L) d else .(e)))
-| f3 <- function() { d <- list(); for (i in 1:6) d <- shared(d, i); List.to_vector(d) }
+| f3 <- function() { d <- list(); for (i in 1:6) d <- shared(d, i); List.to_r(d) }
 | print(f3())
 
 run ry run --runtime ry updates.R

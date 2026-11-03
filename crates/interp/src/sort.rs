@@ -2555,6 +2555,12 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
             x.record_layout() == y.record_layout()
                 && standard_library::collections_identical(x, y, flags)
         }
+        SexpType::Record if matches!(records::native_kind(x), NativeKind::Number(_)) => {
+            match (crate::numbers::read(x), crate::numbers::read(y)) {
+                (Some(left), Some(right)) => crate::numbers::identical(left, right),
+                _ => false,
+            }
+        }
         SexpType::Record => {
             x.record_layout() == y.record_layout()
                 && (0..x.record_slot_count()).all(|index| {

@@ -9,7 +9,7 @@
 use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, builtin, special},
-        deparse, eval, interp,
+        deparse, eval, interp, numbers,
         sort::IdenticalFlags,
         standard_library,
         unwind::{R, Unwind, error, error_in},
@@ -44,6 +44,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("format.ry_set", -1, do_format),
     builtin("all.equal.ry_dict", -1, do_all_equal),
     builtin("all.equal.ry_set", -1, do_all_equal),
+    builtin("format.ry_number", -1, do_format),
+    builtin("all.equal.ry_number", -1, do_all_equal),
 ];
 
 /// The kind of a record object.
@@ -87,17 +89,24 @@ pub unsafe fn slot_value(object: Sexp, index: usize) -> R<Sexp> {
 /// The error a builtin that does not understand native values raises for one, naming the
 /// argument (`point`) and the conversion that fixes it.
 pub fn boundary_message(subject: &str, kind: NativeKind) -> String {
+    let conversion = match kind {
+        NativeKind::Number(_) => "Num.to_r()",
+        _ => "as.list()",
+    };
     format!(
-        "{subject} is a ry {}, not an R object; convert it with `as.list()`",
+        "{subject} is a ry {}, not an R object; convert it with `{conversion}`",
         kind.type_name()
     )
 }
 
 /// Refuses a native value among `args`, for a builtin that is not in [`ACCEPTS_NATIVE`]. Only
-/// the top-level arguments are scanned, so the check costs one type test per argument.
-pub unsafe fn check_native_args(call: Sexp, args: &[Arg]) -> R<()> {
+/// the top-level arguments are scanned, so the check costs one type test per argument. With
+/// `skip_numbers`, for the operators that compute on native numbers, those pass through.
+pub unsafe fn check_native_args(call: Sexp, args: &[Arg], skip_numbers: bool) -> R<()> {
     for (position, arg) in args.iter().enumerate() {
-        if arg.value.kind() == SexpType::Record {
+        if arg.value.kind() == SexpType::Record
+            && !(skip_numbers && crate::numbers::number_type(arg.value).is_some())
+        {
             let subject = argument_text(call, position)
                 .unwrap_or_else(|| format!("argument {}", position + 1));
             return Err(error_in(
@@ -454,6 +463,10 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
             call,
             "a set has no fields; test an element with `Set.contains(set, element)`",
         )),
+        NativeKind::Number(ty) => Err(error_in(
+            call,
+            format!("{} is a number and has no field `{}`", ty.name(), text()),
+        )),
         NativeKind::Tuple => Err(error_in(
             call,
             format!(
@@ -506,6 +519,12 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
             return Err(error_in(
                 call,
                 "a set cannot be indexed; test an element with `Set.contains(set, element)`",
+            ));
+        }
+        NativeKind::Number(ty) => {
+            return Err(error_in(
+                call,
+                format!("{} is a number and cannot be indexed", ty.name()),
             ));
         }
         NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => {}
@@ -784,7 +803,7 @@ unsafe fn payload_matches(
     };
     let named = items.iter().any(|(tag, _)| *tag != nil());
     match &layout.fields {
-        Fields::Dict | Fields::Set => Ok(false),
+        Fields::Dict | Fields::Set | Fields::Number(_) => Ok(false),
         Fields::Positional(count) => {
             if named || rest || items.len() != *count as usize {
                 return Ok(false);
@@ -824,6 +843,9 @@ unsafe fn payload_matches(
 pub unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
     if pattern == nil() || value == nil() {
         return pattern == value;
+    }
+    if let Some(number) = numbers::read(value) {
+        return numbers::literal_matches(pattern, number);
     }
     if length(value) != 1 || value.is_object() || length(pattern) != 1 {
         return false;
@@ -1065,6 +1087,18 @@ unsafe fn compare(
             kind_phrase(target),
             kind_phrase(current)
         ));
+        return Ok(());
+    }
+    if let NativeKind::Number(_) = left.kind() {
+        if let (Some(left), Some(right)) = (numbers::read(target), numbers::read(current))
+            && !numbers::identical(left, right)
+        {
+            messages.push(format!(
+                "{prefix}target is {}, current is {}",
+                numbers::literal(left),
+                numbers::literal(right)
+            ));
+        }
         return Ok(());
     }
     if matches!(left.kind(), NativeKind::Dict | NativeKind::Set) {

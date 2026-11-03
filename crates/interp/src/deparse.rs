@@ -821,6 +821,10 @@ impl Deparser {
     /// A record, tuple or tag value, in the syntax that builds it: `(x = 1, y = 2)`, `(1L,)`,
     /// `()`, `:None` or `:Circle(radius = 2)`.
     unsafe fn native(&mut self, object: Sexp) {
+        if let Some(number) = crate::numbers::read(object) {
+            self.print(&crate::numbers::literal(number));
+            return;
+        }
         let layout = records::layout(object);
         if matches!(layout.kind(), NativeKind::Dict | NativeKind::Set) {
             self.collection(object, layout.kind() == NativeKind::Dict);

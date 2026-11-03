@@ -57,26 +57,26 @@ const PRINTS: &[(&str, &str)] = &[
         ":Ok(0L)\n",
     ),
     // List: construction and access.
-    ("List.to_vector(List.from_vector(c(1, 2)))", "[1] 1 2\n"),
-    ("List.to_vector(list())", "logical(0)\n"),
+    ("List.to_r(List.from_r(c(1, 2)))", "[1] 1 2\n"),
+    ("List.to_r(list())", "logical(0)\n"),
     ("List.len(xs)", "[1] 3\n"),
     ("List.is_empty(list())", "[1] TRUE\n"),
     ("List.get(xs, 2L)", ":Ok(1L)\n"),
     ("List.get(xs, 4L)", ":Err(:OutOfBounds)\n"),
     ("List.get(xs, 0L)", ":Err(:OutOfBounds)\n"),
-    ("List.to_vector(List.set(xs, 1L, 9L))", "[1] 9 1 2\n"),
-    ("List.to_vector(List.set(xs, 9L, 9L))", "[1] 3 1 2\n"),
+    ("List.to_r(List.set(xs, 1L, 9L))", "[1] 9 1 2\n"),
+    ("List.to_r(List.set(xs, 9L, 9L))", "[1] 3 1 2\n"),
     (
-        "List.to_vector(List.update(xs, 2L, function(x) x + 1L))",
+        "List.to_r(List.update(xs, 2L, function(x) x + 1L))",
         "[1] 3 2 2\n",
     ),
-    ("List.to_vector(List.append(xs, 4L))", "[1] 3 1 2 4\n"),
-    ("List.to_vector(List.prepend(xs, 0L))", "[1] 0 3 1 2\n"),
-    ("List.to_vector(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
+    ("List.to_r(List.append(xs, 4L))", "[1] 3 1 2 4\n"),
+    ("List.to_r(List.prepend(xs, 0L))", "[1] 0 3 1 2\n"),
+    ("List.to_r(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
     ("List.single(\"a\")", "[[1]]\n[1] \"a\"\n\n"),
-    ("List.to_vector(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
-    ("List.to_vector(List.range(2L, 5L))", "[1] 2 3 4 5\n"),
-    ("List.to_vector(List.range(-1, 1))", "[1] -1  0  1\n"),
+    ("List.to_r(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
+    ("List.to_r(List.range(2L, 5L))", "[1] 2 3 4 5\n"),
+    ("List.to_r(List.range(-1, 1))", "[1] -1  0  1\n"),
     ("List.range(3L, 2L)", "list()\n"),
     (
         "List.keep_if_try(xs, function(x) :Ok(x > 1L))",
@@ -86,50 +86,44 @@ const PRINTS: &[(&str, &str)] = &[
         "List.keep_if_try(xs, function(x) if (x == 1L) :Err(:One) else :Ok(TRUE))",
         ":Err(:One)\n",
     ),
-    ("List.to_vector(List.reverse(xs))", "[1] 2 1 3\n"),
+    ("List.to_r(List.reverse(xs))", "[1] 2 1 3\n"),
     (
-        "List.to_vector(List.join(list(list(1L), list(), list(2L, 3L))))",
+        "List.to_r(List.join(list(list(1L), list(), list(2L, 3L))))",
         "[1] 1 2 3\n",
     ),
     // List: transformations.
+    ("List.to_r(List.map(xs, function(x) x * 2L))", "[1] 6 2 4\n"),
     (
-        "List.to_vector(List.map(xs, function(x) x * 2L))",
-        "[1] 6 2 4\n",
-    ),
-    (
-        "List.to_vector(List.map_with_index(xs, function(x, i) x * i))",
+        "List.to_r(List.map_with_index(xs, function(x, i) x * i))",
         "[1] 3 2 6\n",
     ),
     (
-        "List.to_vector(List.map2(xs, list(10L, 20L), function(a, b) a + b))",
+        "List.to_r(List.map2(xs, list(10L, 20L), function(a, b) a + b))",
         "[1] 13 21\n",
     ),
     (
-        "List.to_vector(List.join_map(xs, function(x) list(x, x)))",
+        "List.to_r(List.join_map(xs, function(x) list(x, x)))",
         "[1] 3 3 1 1 2 2\n",
     ),
     (
-        "List.to_vector(List.keep_if(xs, function(x) x > 1L))",
+        "List.to_r(List.keep_if(xs, function(x) x > 1L))",
         "[1] 3 2\n",
     ),
+    ("List.to_r(List.drop_if(xs, function(x) x > 1L))", "[1] 1\n"),
     (
-        "List.to_vector(List.drop_if(xs, function(x) x > 1L))",
-        "[1] 1\n",
-    ),
-    (
-        "List.to_vector(List.keep_oks(list(\"1\", \"x\", \"3\"), Str.to_integer))",
+        "List.to_r(List.keep_oks(list(\"1\", \"x\", \"3\"), Str.to_i64))",
         "[1] 1 3\n",
     ),
     (
-        "List.keep_errs(list(\"1\", \"x\"), Str.to_integer)",
+        "List.keep_errs(list(\"1\", \"x\"), Str.to_i64)",
         "[[1]]\n:InvalidNumStr\n\n",
     ),
     (
-        "List.map_try(list(\"1\", \"x\"), Str.to_integer)",
+        "List.map_try(list(\"1\", \"x\"), Str.to_i64)",
         ":Err(:InvalidNumStr)\n",
     ),
     (
-        "Result.map(List.map_try(list(\"1\", \"2\"), Str.to_integer), List.to_vector)",
+        "Result.map(List.map_try(list(\"1\", \"2\"), Str.to_i64), List.to_r)",
         ":Ok(1:2)\n",
     ),
     // List: folds and searches.
@@ -161,12 +155,12 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.first(xs)", ":Ok(3L)\n"),
     ("List.last(list())", ":Err(:ListWasEmpty)\n"),
     // List: slices.
-    ("List.to_vector(List.take_first(xs, 2L))", "[1] 3 1\n"),
-    ("List.to_vector(List.take_last(xs, 5L))", "[1] 3 1 2\n"),
-    ("List.to_vector(List.drop_first(xs, 1L))", "[1] 1 2\n"),
-    ("List.to_vector(List.drop_last(xs, 1L))", "[1] 3 1\n"),
-    ("List.to_vector(List.drop_at(xs, 1L))", "[1] 1 2\n"),
-    ("List.to_vector(List.sublist(xs, 2L, 5L))", "[1] 1 2\n"),
+    ("List.to_r(List.take_first(xs, 2L))", "[1] 3 1\n"),
+    ("List.to_r(List.take_last(xs, 5L))", "[1] 3 1 2\n"),
+    ("List.to_r(List.drop_first(xs, 1L))", "[1] 1 2\n"),
+    ("List.to_r(List.drop_last(xs, 1L))", "[1] 3 1\n"),
+    ("List.to_r(List.drop_at(xs, 1L))", "[1] 1 2\n"),
+    ("List.to_r(List.sublist(xs, 2L, 5L))", "[1] 1 2\n"),
     (
         "List.split_at(xs, 1L)",
         "(before = list(3L), others = list(1L, 2L))\n",
@@ -175,16 +169,10 @@ const PRINTS: &[(&str, &str)] = &[
         "List.chunks_of(xs, 2L)",
         "[[1]]\n[[1]][[1]]\n[1] 3\n\n[[1]][[2]]\n[1] 1\n\n\n[[2]]\n[[2]][[1]]\n[1] 2\n\n\n",
     ),
+    ("List.to_r(List.intersperse(xs, 0L))", "[1] 3 0 1 0 2\n"),
+    ("List.to_r(List.sort_with(xs, Num.compare))", "[1] 1 2 3\n"),
     (
-        "List.to_vector(List.intersperse(xs, 0L))",
-        "[1] 3 0 1 0 2\n",
-    ),
-    (
-        "List.to_vector(List.sort_with(xs, Num.compare))",
-        "[1] 1 2 3\n",
-    ),
-    (
-        "List.to_vector(List.sort_with(words, function(a, b) Num.compare(Str.count_utf8_bytes(a), Str.count_utf8_bytes(b))))",
+        "List.to_r(List.sort_with(words, function(a, b) Num.compare(Str.count_utf8_bytes(a), Str.count_utf8_bytes(b))))",
         "[1] \"fig\"   \"pear\"  \"apple\"\n",
     ),
     ("List.sum(xs)", "[1] 6\n"),
@@ -206,7 +194,7 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] \"a, b, c\"\n",
     ),
     (
-        "List.to_vector(Str.split_on(\"a,b,,c\", \",\"))",
+        "List.to_r(Str.split_on(\"a,b,,c\", \",\"))",
         "[1] \"a\" \"b\" \"\"  \"c\"\n",
     ),
     ("Str.repeat(\"ab\", 3L)", "[1] \"ababab\"\n"),
@@ -244,17 +232,17 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("Str.split_first(\"kv\", \"=\")", ":Err(:NotFound)\n"),
     ("Str.count_utf8_bytes(\"h\u{e9}\")", "[1] 3\n"),
-    (
-        "List.to_vector(Str.to_utf8(\"h\u{e9}\"))",
-        "[1] 104 195 169\n",
-    ),
+    ("List.to_r(Str.to_utf8(\"h\u{e9}\"))", "[1] 104 195 169\n"),
     ("Str.from_utf8(list(104L, 105L))", ":Ok(\"hi\")\n"),
     ("Str.from_utf8(list(255L))", ":Err(:BadUtf8)\n"),
-    ("Str.to_integer(\"42\")", ":Ok(42L)\n"),
-    ("Str.to_integer(\"4.2\")", ":Err(:InvalidNumStr)\n"),
-    ("Str.to_integer(\"99999999999\")", ":Err(:InvalidNumStr)\n"),
-    ("Str.to_double(\"4.5e1\")", ":Ok(45)\n"),
-    ("Str.to_double(\"NA\")", ":Err(:InvalidNumStr)\n"),
+    ("Str.to_i64(\"42\")", ":Ok(42i64)\n"),
+    ("Str.to_i64(\"4.2\")", ":Err(:InvalidNumStr)\n"),
+    (
+        "Str.to_i64(\"99999999999999999999\")",
+        ":Err(:InvalidNumStr)\n",
+    ),
+    ("Str.to_f64(\"4.5e1\")", ":Ok(45)\n"),
+    ("Str.to_f64(\"NA\")", ":Err(:InvalidNumStr)\n"),
     ("Str.with_ascii_lowercased(\"MiXeD\")", "[1] \"mixed\"\n"),
     ("Str.with_ascii_uppercased(\"MiXeD\")", "[1] \"MIXED\"\n"),
     // Num.
@@ -428,7 +416,7 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 3 4 4\n",
     ),
     (
-        "{ h <- function(xs, k) { for (i in 1:2) if (i == k) return(List.append(xs, i)); xs }; f <- function() { for (i in 1) NULL; xs <- list(); for (k in c(1L, 2L, 3L, 1L)) xs <- h(xs, k); keep <- xs; xs <- h(xs, 2L); c(length(keep), length(xs), List.to_vector(xs)) }; f() }",
+        "{ h <- function(xs, k) { for (i in 1:2) if (i == k) return(List.append(xs, i)); xs }; f <- function() { for (i in 1) NULL; xs <- list(); for (k in c(1L, 2L, 3L, 1L)) xs <- h(xs, k); keep <- xs; xs <- h(xs, 2L); c(length(keep), length(xs), List.to_r(xs)) }; f() }",
         "[1] 3 4 1 2 1 2\n",
     ),
     (
@@ -475,8 +463,8 @@ const PRINTS: &[(&str, &str)] = &[
         "Dict.update(d, \"a\", function(r) :Err(:Missing))",
         "Dict.from_list(list((\"b\", 2)))\n",
     ),
-    ("List.to_vector(Dict.keys(d))", "[1] \"a\" \"b\"\n"),
-    ("List.to_vector(Dict.values(d))", "[1] 1 2\n"),
+    ("List.to_r(Dict.keys(d))", "[1] \"a\" \"b\"\n"),
+    ("List.to_r(Dict.values(d))", "[1] 1 2\n"),
     ("Dict.walk(d, 0, function(s, k, v) s + v)", "[1] 3\n"),
     (
         "Dict.map(d, function(k, v) Str.concat(k, Num.to_str(v)))",
@@ -529,7 +517,7 @@ const PRINTS: &[(&str, &str)] = &[
         "Set.from_list(list(2L, 1L, 2L))",
         "Set.from_list(list(2L, 1L))\n",
     ),
-    ("List.to_vector(Set.to_list(s))", "[1] 1 2 3\n"),
+    ("List.to_r(Set.to_list(s))", "[1] 1 2 3\n"),
     ("Set.len(s)", "[1] 3\n"),
     ("Set.is_empty(Set.empty())", "[1] TRUE\n"),
     ("Set.contains(s, 2L)", "[1] TRUE\n"),
@@ -609,7 +597,7 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 9 1\n",
     ),
     (
-        "{ p <- list(1L); for (i in 1:3) p <- List.concat(p, list(i, i)); List.to_vector(p) }",
+        "{ p <- list(1L); for (i in 1:3) p <- List.concat(p, list(i, i)); List.to_r(p) }",
         "[1] 1 1 1 2 2 3 3\n",
     ),
     (
@@ -629,11 +617,11 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 2 1\n",
     ),
     (
-        "{ e <- Dict.single(1L, \"a\"); e <- Dict.insert(e, 2L, \"b\"); e <- Dict.insert(e, 2.5, \"c\"); List.to_vector(Dict.keys(e)) }",
+        "{ e <- Dict.single(1L, \"a\"); e <- Dict.insert(e, 2L, \"b\"); e <- Dict.insert(e, 2.5, \"c\"); List.to_r(Dict.keys(e)) }",
         "[1] 1.0 2.0 2.5\n",
     ),
     (
-        "{ m <- Dict.empty(); for (i in 1:100) m <- Dict.insert(m, i %% 10L, i); List.to_vector(Dict.values(m)) }",
+        "{ m <- Dict.empty(); for (i in 1:100) m <- Dict.insert(m, i %% 10L, i); List.to_r(Dict.values(m)) }",
         " [1]  91  92  93  94  95  96  97  98  99 100\n",
     ), // Breadth: Result.
     (
@@ -689,22 +677,22 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.for_each_try(xs, function(x) :Ok(x))", ":Ok(NULL)\n"),
     // Breadth: List mapping, sorting and reshaping.
     (
-        "List.to_vector(List.map3(xs, xs, list(1L, 1L), function(a, b, c) a + b + c))",
+        "List.to_r(List.map3(xs, xs, list(1L, 1L), function(a, b, c) a + b + c))",
         "[1] 7 3\n",
     ),
     (
-        "List.to_vector(List.map4(xs, xs, xs, xs, function(a, b, c, d) a + b + c + d))",
+        "List.to_r(List.map4(xs, xs, xs, xs, function(a, b, c, d) a + b + c + d))",
         "[1] 12  4  8\n",
     ),
-    ("List.to_vector(List.sort_asc(xs))", "[1] 1 2 3\n"),
+    ("List.to_r(List.sort_asc(xs))", "[1] 1 2 3\n"),
     (
-        "List.to_vector(List.sort_desc(list(2, 10L, 1.5)))",
+        "List.to_r(List.sort_desc(list(2, 10L, 1.5)))",
         "[1] 10.0  2.0  1.5\n",
     ),
-    ("List.to_vector(List.swap(xs, 1L, 3L))", "[1] 2 1 3\n"),
-    ("List.to_vector(List.swap(xs, 1L, 4L))", "[1] 3 1 2\n"),
+    ("List.to_r(List.swap(xs, 1L, 3L))", "[1] 2 1 3\n"),
+    ("List.to_r(List.swap(xs, 1L, 4L))", "[1] 3 1 2\n"),
     (
-        "{ r <- List.replace(xs, 2L, 9L); c(List.to_vector(r$list), r$value) }",
+        "{ r <- List.replace(xs, 2L, 9L); c(List.to_r(r$list), r$value) }",
         "[1] 3 9 2 1\n",
     ),
     ("List.replace(xs, 5L, 9L)$value", "[1] 9\n"),
@@ -719,39 +707,33 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.split_first(xs, 9L)", ":Err(:NotFound)\n"),
     ("length(List.split_on(list(1L, 0L, 2L, 0L), 0L))", "[1] 3\n"),
     (
-        "List.to_vector(List.split_on(list(1L, 0L, 2L, 3L), 0L)[[2]])",
+        "List.to_r(List.split_on(list(1L, 0L, 2L, 3L), 0L)[[2]])",
         "[1] 2 3\n",
     ),
     ("length(List.split_on(list(), 0L))", "[1] 1\n"),
     (
-        "List.to_vector(List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))[[2]])",
+        "List.to_r(List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))[[2]])",
         "[1] 2 0 3\n",
     ),
     ("length(List.split_on_list(xs, list()))", "[1] 1\n"),
+    ("List.to_r(List.append_if_ok(xs, :Ok(4L)))", "[1] 3 1 2 4\n"),
+    ("List.to_r(List.append_if_ok(xs, :Err(:No)))", "[1] 3 1 2\n"),
     (
-        "List.to_vector(List.append_if_ok(xs, :Ok(4L)))",
-        "[1] 3 1 2 4\n",
-    ),
-    (
-        "List.to_vector(List.append_if_ok(xs, :Err(:No)))",
-        "[1] 3 1 2\n",
-    ),
-    (
-        "List.to_vector(List.prepend_if_ok(xs, :Ok(0L)))",
+        "List.to_r(List.prepend_if_ok(xs, :Ok(0L)))",
         "[1] 0 3 1 2\n",
     ),
     (
-        "List.to_vector(List.concat_utf8(list(104L), \"i!\"))",
+        "List.to_r(List.concat_utf8(list(104L), \"i!\"))",
         "[1] 104 105  33\n",
     ),
     ("List.len(List.with_capacity(10L))", "[1] 0\n"),
     (
-        "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_vector(p) }",
+        "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_r(p) }",
         "[1] 1 2 3 4 5 6\n",
     ),
-    ("List.to_vector(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
+    ("List.to_r(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
     (
-        "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_vector(p), List.to_vector(q)) }",
+        "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_r(p), List.to_r(q)) }",
         "[1] 2 1 1 2\n",
     ),
     // Breadth: Str.
@@ -798,10 +780,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.abs_diff(3L, 10L)", "[1] 7\n"),
     ("Num.neg(4L)", "[1] -4\n"),
     (
-        "c(Num.ceiling(1.2), Num.floor(-1.2), Num.round(2.5), Num.round(-2.5))",
+        "List.to_r(list(Num.ceiling(1.2), Num.floor(-1.2), Num.round(2.5), Num.round(-2.5)))",
         "[1]  2 -2  3 -3\n",
     ),
-    ("typeof(Num.floor(3L))", "[1] \"integer\"\n"),
+    ("typeof(Num.floor(3L))", "[1] \"I64\"\n"),
     ("Num.pow(2L, 10L)", "[1] 1024\n"),
     (
         "c(Num.sin(0), Num.cos(0), Num.tan(0), Num.atan(1) * 4)",
@@ -815,10 +797,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.div_ceil_checked(-7L, 2L)", ":Ok(-3L)\n"),
     ("Num.div_ceil_checked(7, 2)", ":Ok(4)\n"),
     ("Num.div_ceil_checked(7L, 0L)", ":Err(:DivByZero)\n"),
-    ("Num.to_double(3L)", "[1] 3\n"),
-    ("typeof(Num.to_double(3L))", "[1] \"double\"\n"),
-    ("Num.to_integer_checked(-3.7)", ":Ok(-3L)\n"),
-    ("Num.to_integer_checked(1e10)", ":Err(:OutOfBounds)\n"),
+    ("Num.to_f64(3L)", "[1] 3\n"),
+    ("typeof(Num.to_f64(3L))", "[1] \"double\"\n"),
+    ("Num.to_i64_checked(-3.7)", ":Err(:OutOfBounds)\n"),
+    ("Num.to_i64_checked(1e10)", ":Ok(10000000000i64)\n"),
     ("Num.add(2L, 3L)", "[1] 5\n"),
     ("Num.sub(2.5, 1L)", "[1] 1.5\n"),
     ("Num.mul(6L, 7L)", "[1] 42\n"),
@@ -863,18 +845,15 @@ const PRINTS: &[(&str, &str)] = &[
         "c(Num.pi, Num.tau / 2, Num.e)",
         "[1] 3.141593 3.141593 2.718282\n",
     ),
+    ("Num.to_str(Num.max_i64)", "[1] \"9223372036854775807\"\n"),
     (
-        "c(Num.max_integer, Num.min_integer)",
-        "[1]  2147483647 -2147483647\n",
-    ),
-    (
-        "c(Num.max_double, Num.min_double)",
+        "c(Num.max_f64, Num.min_f64)",
         "[1]  1.797693e+308 -1.797693e+308\n",
     ),
-    ("Num.to_integer(-3.7)", "[1] -3\n"),
-    ("c(Num.infinity, -Num.infinity)", "[1]  Inf -Inf\n"),
+    ("Num.truncate(-3.7)", "-3i64\n"),
+    ("c(Num.infinity_f64, -Num.infinity_f64)", "[1]  Inf -Inf\n"),
     (
-        "(function() { xs <- List.reserve(list(1L, 2L), 10L); ys <- List.release_excess_capacity(xs); List.to_vector(ys) })()",
+        "(function() { xs <- List.reserve(list(1L, 2L), 10L); ys <- List.release_excess_capacity(xs); List.to_r(ys) })()",
         "[1] 1 2\n",
     ),
     (
@@ -890,7 +869,7 @@ const PRINTS: &[(&str, &str)] = &[
         "(function() { s <- Set.reserve(Set.from_list(list(1L, 2L)), 5L); r <- Set.release_excess_capacity(s); c(Set.capacity(s), Set.capacity(r), Set.contains(r, 2L)) })()",
         "[1] 7 2 1\n",
     ),
-    ("Num.to_integer(7L)", "[1] 7\n"),
+    ("Num.to_i64(7L)", "7i64\n"),
     // Bool.
     ("c(Bool.true, Bool.false)", "[1]  TRUE FALSE\n"),
     (
@@ -906,12 +885,12 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] TRUE\n",
     ),
     (
-        "List.to_vector(List.keep_if(xs, function(x) Bool.not(Num.is_even(x))))",
+        "List.to_r(List.keep_if(xs, function(x) Bool.not(Num.is_even(x))))",
         "[1] 3 1\n",
     ),
     // Str: UTF-16 and UTF-32.
     (
-        "List.to_vector(Str.to_utf16(\"h\\u00e9\\U0001F600\"))",
+        "List.to_r(Str.to_utf16(\"h\\u00e9\\U0001F600\"))",
         "[1]   104   233 55357 56832\n",
     ),
     (
@@ -924,10 +903,7 @@ const PRINTS: &[(&str, &str)] = &[
         "Str.from_utf16_lossy(list(104L, 56832L, 105L)) == \"h\\uFFFDi\"",
         "[1] TRUE\n",
     ),
-    (
-        "List.to_vector(Str.to_utf32(\"h\\u00e9\"))",
-        "[1] 104 233\n",
-    ),
+    ("List.to_r(Str.to_utf32(\"h\\u00e9\"))", "[1] 104 233\n"),
     ("Str.from_utf32(list(104L, 105L))", ":Ok(\"hi\")\n"),
     (
         "List.all(list(55296L, 1114112L, -1L, 0L), function(c) Result.is_err(Str.from_utf32(list(c))))",
@@ -1009,12 +985,12 @@ const ERRORS: &[(&str, &str)] = &[
         "`f` must be a function, not a double value",
     ),
     (
-        "Num.to_integer(1e10)",
-        "`number` must fit an integer, not 1e+10; `Num.to_integer_checked()` returns `:Err(:OutOfBounds)` instead",
+        "Num.to_i64(1e30)",
+        "1e30 does not fit I64; `Num.to_i64_checked()` returns `:Err(:OutOfBounds)` instead",
     ),
     (
         "List.range(1L, NA)",
-        "`end` must be a whole number, not `NA`",
+        "`end` must be an I64 or a plain R number, not `NA`",
     ),
     (
         "List.range(-2147483647L, 2147483647L)",
@@ -1034,7 +1010,7 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     ("List.sum(list(1, \"a\"))", "must be a single number"),
     (
-        "List.to_vector(list(1L, \"a\"))",
+        "List.to_r(list(1L, \"a\"))",
         "`list` must hold elements of one atomic type, and it mixes integer and character",
     ),
     (
@@ -1099,10 +1075,7 @@ const ERRORS: &[(&str, &str)] = &[
         "c(s, 1)",
         "`s` is a ry set, not an R object; convert it with `as.list()`",
     ),
-    (
-        "Num.to_integer_checked(NaN)",
-        "`number` must be a single number, not `NaN`",
-    ),
+    ("Num.to_i64(NaN)", "NaN does not fit I64"),
     (
         "List.walk_from(xs, 0L, 0L, function(s, x) s)",
         "`index` must be a position of 1 or more",

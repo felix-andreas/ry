@@ -12,7 +12,9 @@
 //! - a weak reference stores its key, value and finalizer;
 //! - a primitive stores its index in the primitive table;
 //! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
-//!   slots that hold raw numbers, and then its eight-byte slots.
+//!   slots that hold raw numbers, and then its eight-byte slots. A ry native number is a record
+//!   object too, whose layout names its number type and whose two raw slots hold its 16-byte
+//!   payload.
 //!
 //! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
@@ -950,6 +952,13 @@ impl Sexp {
         }
     }
 
+    /// The raw eight bytes of slot `index`, whatever the slot holds. A native number's two
+    /// slots are raw words that only [`Sexp::record_layout`]'s number type gives a meaning, so
+    /// they are read with this rather than [`Sexp::record_slot`].
+    pub unsafe fn record_bits(self, index: usize) -> u64 {
+        unsafe { *(self.record_slots() as *const u64).add(index) }
+    }
+
     /// The handle in slot `index`, if the slot holds one.
     pub unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
         match unsafe { self.record_slot(index) } {
@@ -990,6 +999,21 @@ impl Sexp {
                     unboxed |= 1 << index;
                 }
                 *(self.record_slots() as *mut u64).add(index) = slot.encode();
+            }
+            payload.unboxed.set(unboxed);
+        }
+    }
+
+    /// Fills a fresh record whose slots are all raw words. Nothing may read the record before.
+    pub(crate) unsafe fn init_record_bits(self, layout: u32, words: &[u64]) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            payload.layout.set(layout);
+            payload.slot_count.set(words.len() as u32);
+            let mut unboxed = 0u64;
+            for (index, &word) in words.iter().enumerate() {
+                unboxed |= 1 << index;
+                *(self.record_slots() as *mut u64).add(index) = word;
             }
             payload.unboxed.set(unboxed);
         }

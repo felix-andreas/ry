@@ -1085,6 +1085,16 @@ impl Heap {
         }
     }
 
+    /// A ry native number of the interned number `layout` (see [`crate::records::NumberType`]),
+    /// whose payload is stored in two raw slots, low word first.
+    pub unsafe fn alloc_number(&mut self, layout: u32, payload: u128) -> HeapResult<Sexp> {
+        let size = object_size(SexpType::Record, 2).ok_or(HeapError::TooLong)?;
+        let object = self.allocate(SexpType::Record, size, &[])?;
+        object.init_record_bits(layout, &[payload as u64, (payload >> 64) as u64]);
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
     /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
     /// decides.
     pub unsafe fn set_record_slot(&mut self, record: Sexp, index: usize, value: Sexp) {
