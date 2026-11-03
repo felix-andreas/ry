@@ -184,18 +184,30 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
+    select_positions(vector, indices.iter().copied(), indices.len())
+}
+
+/// A vector of the `count` elements at `positions` (`usize::MAX` gives NA). Taking an iterator
+/// lets a caller whose positions follow a rule, such as `rep`, gather without first writing
+/// eight bytes per result element into a position list.
+pub unsafe fn select_positions(
+    vector: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let positions = positions.take(count);
     // An ALTREP string or list reads only the selected elements through its class's `Elt`
     // method, so `as.character(x)[1:5]` converts five numbers, not all of `x`.
     if vector.is_altrep() && matches!(vector.kind(), SexpType::String | SexpType::List) {
-        let count = length(vector);
-        let result = alloc(vector.kind(), indices.len())?;
+        let extent = length(vector);
+        let result = alloc(vector.kind(), count)?;
         crate::heap().root(result);
-        for (position, &index) in indices.iter().enumerate() {
-            if index < count {
-                values::set_elt(result, position, vector.element(index));
+        for (slot, index) in positions.enumerate() {
+            if index < extent {
+                values::set_elt(result, slot, vector.element(index));
                 crate::unwind::raise_parked()?;
             } else {
-                set_na(result, position);
+                set_na(result, slot);
             }
         }
         return Ok(result);
@@ -209,35 +221,36 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     if kind == SexpType::Nil {
         return Ok(nil());
     }
-    if matches!(kind, SexpType::Pairlist | SexpType::Language) {
-        let list = values::pairlist_to_list(vector)?;
-        return select_elements(list, indices);
-    }
-    let count = length(vector);
+    let (vector, kind) = if matches!(kind, SexpType::Pairlist | SexpType::Language) {
+        (values::pairlist_to_list(vector)?, SexpType::List)
+    } else {
+        (vector, kind)
+    };
+    let extent = length(vector);
     match kind {
         SexpType::Logical | SexpType::Integer => {
-            return gather(kind, values::ints(vector), indices, NA_INTEGER, |result| {
+            return gather(kind, values::ints(vector), positions, count, NA_INTEGER, |result| {
                 values::ints_mut(result)
             });
         }
         SexpType::Real => {
-            return gather(kind, values::reals(vector), indices, NA_REAL, |result| {
+            return gather(kind, values::reals(vector), positions, count, NA_REAL, |result| {
                 values::reals_mut(result)
             });
         }
         SexpType::Raw => {
-            return gather(kind, values::raws(vector), indices, 0, |result| {
+            return gather(kind, values::raws(vector), positions, count, 0, |result| {
                 values::raws_mut(result)
             });
         }
         _ => {}
     }
-    let result = alloc(kind, indices.len())?;
-    for (position, &index) in indices.iter().enumerate() {
-        if index < count {
-            copy_element(vector, index, result, position)?;
+    let result = alloc(kind, count)?;
+    for (slot, index) in positions.enumerate() {
+        if index < extent {
+            copy_element(vector, index, result, slot)?;
         } else {
-            set_na(result, position);
+            set_na(result, slot);
         }
     }
     Ok(result)
@@ -356,16 +369,17 @@ unsafe fn gather_kind(
     Ok(result)
 }
 
-/// `source[indices]` for an atomic vector of plain elements, with NA past the end.
+/// `source[positions]` for an atomic vector of plain elements, with NA past the end.
 unsafe fn gather<T: Copy + 'static>(
     kind: SexpType,
     source: &[T],
-    indices: &[usize],
+    positions: impl Iterator<Item = usize>,
+    count: usize,
     missing: T,
     output: impl Fn(Sexp) -> &'static mut [T],
 ) -> R<Sexp> {
-    let result = values::alloc_uninit(kind, indices.len())?;
-    for (slot, &index) in output(result).iter_mut().zip(indices) {
+    let result = values::alloc_uninit(kind, count)?;
+    for (slot, index) in output(result).iter_mut().zip(positions) {
         *slot = source.get(index).copied().unwrap_or(missing);
     }
     Ok(result)

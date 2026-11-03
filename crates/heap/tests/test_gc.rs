@@ -885,3 +885,127 @@ fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
         }
     }
 }
+
+/// Large vectors that live across a minor collection are promoted, and in a loop like
+/// `keep <- v > 0.5; s <- v[keep]; rm(s, keep)` they die right after. The heap must not let them
+/// pile up past GNU R's bound: a limit that grows by a fifth once the live data fills 70% of it.
+#[test]
+fn dead_large_vectors_stay_within_the_heap_limit() {
+    const MEGABYTE: isize = 1 << 20;
+    let mut heap = Heap::new();
+    unsafe {
+        let live = heap
+            .alloc_vector(SexpType::Real, 48 * MEGABYTE / 8)
+            .expect("alloc");
+        heap.add_global_root(live);
+        let mut peak = 0;
+        for round in 0..40 {
+            let mark = heap.handle_mark();
+            // A mask, then two selections of it, each rooted while the round runs.
+            for megabytes in [8, 4, 8] {
+                let length = (megabytes + (round % 3)) * MEGABYTE / 8;
+                let vector = heap.alloc_vector(SexpType::Real, length).expect("alloc");
+                heap.root(vector);
+                peak = peak.max(heap.allocated_bytes());
+            }
+            heap.release_handles(mark);
+        }
+        let live_peak = (48 + 22) << 20;
+        assert!(
+            peak <= live_peak * 2,
+            "the heap reached {} MB for at most {} MB of live data",
+            peak >> 20,
+            live_peak >> 20
+        );
+    }
+}
+
+/// Vectors large enough for a mapping of their own reuse the mappings of dead ones, which hold
+/// the dead vector's elements: a zeroed allocation must read as zero and every live vector
+/// must keep its elements however the mappings are resized and recycled.
+#[test]
+fn fuzz_mapped_vectors_keep_their_elements() {
+    for_each_seed(fuzz_iterations(8), |seed| {
+        let mut rng = SplitMix64(seed);
+        let mut heap = Heap::new();
+        let mut live: Vec<(Sexp, i32)> = Vec::new();
+        unsafe {
+            for _ in 0..60 {
+                let length = (1 << 18) + rng.below(3 << 18);
+                let vector = heap
+                    .alloc_vector(SexpType::Integer, length as isize)
+                    .expect("alloc");
+                assert!(
+                    vector.slice::<i32>().iter().all(|&value| value == 0),
+                    "seed {seed}: a vector of {length} integers was not zeroed"
+                );
+                let fill = rng.next_u64() as i32;
+                vector.slice_mut::<i32>().fill(fill);
+                live.push((vector, fill));
+                if rng.chance(1, 2) && !live.is_empty() {
+                    live.swap_remove(rng.below(live.len()));
+                }
+                heap.release_handles(0);
+                for &(vector, _) in &live {
+                    heap.root(vector);
+                }
+                if rng.chance(1, 4) {
+                    let kind = if rng.chance(1, 2) {
+                        Collection::Major
+                    } else {
+                        Collection::Minor
+                    };
+                    heap.collect(kind);
+                }
+                for &(vector, fill) in &live {
+                    assert!(
+                        vector.slice::<i32>().iter().all(|&value| value == fill),
+                        "seed {seed}: a live mapped vector changed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn heap_growth_follows_gnu_r_variables() {
+    use heap::HeapGrowth;
+    let growth = |pairs: &[(&str, &str)]| {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        HeapGrowth::from_environment(move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+    };
+    assert_eq!(growth(&[]), HeapGrowth::DEFAULT);
+    assert_eq!(growth(&[("R_GC_MEM_GROW", "0")]).grow_increment, 0.0);
+    let aggressive = growth(&[("R_GC_MEM_GROW", "3")]);
+    assert_eq!((aggressive.grow_fraction, aggressive.grow_increment), (0.5, 0.4));
+    // Out of range, as GNU R ignores it.
+    assert_eq!(growth(&[("R_GC_GROWFRAC", "0.9")]), HeapGrowth::DEFAULT);
+    assert_eq!(growth(&[("R_GC_GROWFRAC", "0.4")]).grow_fraction, 0.4);
+    let specific = growth(&[("R_GC_GROWINCRFRAC", "0.1"), ("R_GC_VGROWINCRFRAC", "0.6")]);
+    assert_eq!(specific.grow_increment, 0.6);
+
+    const MEGABYTE: usize = 1 << 20;
+    let minimum = 64 * MEGABYTE;
+    let default = HeapGrowth::DEFAULT;
+    // A need past the limit raises it to the need, then by a fifth plus GNU R's smallest step.
+    let grown = default.next_limit(minimum, 100 * MEGABYTE, minimum);
+    assert_eq!(grown, 120 * MEGABYTE + 640_000);
+    // Between 30% and 70% full, the limit holds.
+    assert_eq!(default.next_limit(200 * MEGABYTE, 100 * MEGABYTE, minimum), 200 * MEGABYTE);
+    // Below 30% it shrinks by a fifth, never below the minimum.
+    assert_eq!(default.next_limit(500 * MEGABYTE, 100 * MEGABYTE, minimum), 400 * MEGABYTE);
+    assert_eq!(default.next_limit(70 * MEGABYTE, MEGABYTE, minimum), minimum);
+    // Without growth, the limit stays a fifth of the minimum above the need, the headroom below
+    // which a minor collection escalates to a major one.
+    let tight = growth(&[("R_GC_MEM_GROW", "0")]);
+    assert_eq!(tight.next_limit(minimum, 100 * MEGABYTE, minimum), 100 * MEGABYTE + minimum / 5);
+}
