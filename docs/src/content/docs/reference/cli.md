@@ -194,10 +194,13 @@ No feature is experimental right now, so `--experimental-features` ignores every
 ## test
 
 `ry test` loads the package at `PATH` the way `ry load` does and runs its `tests/testthat` files
-with testthat, as `devtools::test()` does. testthat must be installed. The output is testthat's own
-reporter's, and the command exits with `1` when a test fails or errors.
+with testthat, as `devtools::test()` does. testthat must be installed. A test file is one whose name
+starts with `test` and ends in `.R` or `.r`, so `test-parse.R` and `test_parse.R` both count. The
+output is testthat's own reporter's, and the command exits with `1` when a test fails or errors.
 
 - `--filter REGEX` runs only the test files whose names match, as `devtools::test(filter =)` does.
+  The pattern matches the name without a leading `test-` or `test_` and without the extension, so
+  `--filter '^parse$'` selects `test-parse.R` and `test_parse.R`.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
 - `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
   `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a

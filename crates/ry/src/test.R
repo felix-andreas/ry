@@ -9,9 +9,12 @@ local({
     sort(list.files(test_directory(root), pattern = "^test.*\\.[rR]$", full.names = TRUE))
   }
 
-  # testthat filters files by their name without `test-` and the extension.
+  # testthat's name for a test file, which a filter matches: the file name without a leading
+  # `test-` or `test_` and without the extension.
+  context_name <- function(files) sub("[.][Rr]$", "", sub("^test[-_]", "", basename(files)))
+
   file_filter <- function(files) {
-    stems <- sub("\\.[rR]$", "", sub("^test-?", "", basename(files)))
+    stems <- context_name(files)
     paste0("^(", paste(gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", stems), collapse = "|"), ")$")
   }
 
@@ -64,7 +67,7 @@ local({
     if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
     selected <- function() {
       files <- test_files(root)
-      if (is.null(filter)) files else files[grepl(filter, basename(files))]
+      if (is.null(filter)) files else files[grepl(filter, context_name(files))]
     }
     # Watching starts before the first run, so an edit made during it is not missed.
     if (watch) .ry_wait_edits(root, 0)

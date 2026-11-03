@@ -1,0 +1,33 @@
+# A package author names some test files `test_*.R` and others `test-*.R`, as testthat allows,
+# and runs them with `ry test`. Both kinds run, and `--filter` matches the name without the
+# `test_` or `test-` prefix, as `devtools::test(filter =)` does.
+
+requires ry-runtime r-package:testthat
+
+file DESCRIPTION
+| Package: notes
+| Version: 0.1.0
+file NAMESPACE
+| export(parse_note, format_note)
+file R/notes.R
+| parse_note <- function(text) strsplit(text, ":", fixed = TRUE)[[1]]
+| format_note <- function(parts) paste(parts, collapse = ": ")
+file tests/testthat/test_parse.R
+| test_that("a note splits at the colon", expect_equal(parse_note("a:b"), c("a", "b")))
+file tests/testthat/test-format.R
+| test_that("a note joins with a colon", expect_equal(format_note(c("a", "b")), "a: b"))
+
+run ry test --reporter summary --runtime ry
+expect exit 0
+expect stdout "parse: ."
+expect stdout "format: ."
+
+run ry test --reporter summary --runtime ry --filter "^parse$"
+expect exit 0
+expect stdout "parse: ."
+expect stdout lacks "format"
+
+run ry test --reporter summary --runtime gnu-r --filter "^(parse|format)$"
+expect exit 0
+expect stdout "parse: ."
+expect stdout "format: ."
