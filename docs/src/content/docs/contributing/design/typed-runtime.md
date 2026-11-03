@@ -3,10 +3,11 @@ title: The typed runtime
 description: "Design draft for how typed ry runs: a typed core IR compiled ahead of time, Rust-like layouts and calls, uniqueness-based updates, and boxing only at the R boundary"
 ---
 
-This draft designs how the typed core of ry runs, to the [runtime contract](/contributing/design/native-types/#runtime-contract)
-of the native-types design. The bar is the typed benchmark programs within 1.5 to 2 times the time
-of equivalent Rust programs, which means Rust-shaped data and calls: values in registers, flat
-structs, direct calls, no per-value type checks, and no allocation that the program did not ask for.
+This draft designs how the typed core of ry runs, built to the runtime contract of the
+native-types design (`native-types.md` in this folder, section "Runtime contract"). The bar is the
+typed benchmark programs within 1.5 to 2 times the time of equivalent Rust programs. That calls for
+Rust-shaped data and calls: values in registers, flat structs, direct calls, no per-value type
+checks, and no allocation the program did not ask for.
 
 ## The shape in one example
 
@@ -22,175 +23,206 @@ evaluate <- function(node: Node) -> F64 {
 }
 ```
 
-`evaluate` compiles, when its file loads, to one machine function `evaluate(node: *Node) -> f64`.
-`Node` is a heap object of three words, a tag word and two payload words, so `match` is a load of
-the tag and a jump table, `v` is a load of an unboxed double, and the recursive calls are direct
-calls with the pointer in a register. Nothing checks a type, nothing allocates, and no R frame
-exists. The interpreter sees `evaluate` as an ordinary closure: when untyped R code calls it, an
-entry stub checks the argument against `Node` once and calls the same machine function.
+`evaluate` compiles to one machine function that takes a `Node` pointer in a register and returns
+a double in a register. `match` loads the layout id and jumps through a table, `v` is a load of an
+unboxed double, and the recursive calls are direct calls. Nothing checks a type, nothing allocates,
+and no R frame exists. The interpreter sees `evaluate` as an ordinary closure: when untyped R code
+calls it, an entry stub checks the argument against `Node` once and calls the same machine function.
 
-## What exists, and why it is not the end shape
+## Why the native path is not the end shape
 
-Typed closures already run as native functions (`decisions.md`, "Typed closures run as native
-functions over records, tags and match"), and typed `orders` and `expr_tree` run 13 and 80 times
-faster than GNU R. That path compiles R syntax with types it infers itself from the first call's
-argument values, and it treats the types as speculation:
+Typed closures run as native functions from their first call (`decisions.md`, "Typed closures run
+as native functions over records, tags and match"), and typed `orders` and `expr_tree` run 13 and
+80 times faster than GNU R. That path compiles R syntax with types it infers from the first call's
+argument values, and it treats those types as speculation:
 
 - Every field read checks the slot's representation, because a record's slot kinds come from
   allocation profiles, not from its type.
 - Every native returns a status word, and a failure reruns the whole call in tier 0.
-- Every record allocation goes through a runtime call that pushes a handle, and every loop back
-  edge releases handles.
-- Records live in the generic record object: 16-byte slots with a per-object unboxed mask.
+- Every record allocation goes through a runtime call that pushes a handle, and loop back edges
+  release handles.
 - Strings, lists and the standard library are refused, so a typed program that builds a list runs
   at untyped speed.
 
 The native-types contract makes the typed core sound: no `NA`, no attributes, no promises, no
-dynamic scoping, exhaustive `match`, value semantics. With a sound type there is nothing to
-speculate on, so the end shape compiles from the checker's types, not from runtime profiles, and
-the checks above disappear instead of getting cheaper.
+dynamic scoping, exhaustive `match` and value semantics. A sound type leaves nothing to speculate
+on, so the end shape compiles from the checker's types, and the checks above disappear instead of
+getting cheaper.
 
 ## Compilation pipeline
 
-**The typed core IR.** For each strict-clean typed function, `semantics` lowers the body to a
-typed core IR: a control-flow graph in SSA form over ry types, with every name resolved, every
-generic instantiated and every `match` compiled to a decision tree (Maranget's algorithm, which
-the exhaustiveness checker already runs). Standard library calls such as `List.map` and
-`List.walk` are IR operations, not calls, so the backend can fuse and inline them. The IR is a
-salsa query per function and instantiation, so an edit recompiles only the functions whose IR
-changed. The runtime never reads the checker's internal structures (`r-runtime.md`, section 5);
-the IR is the summary it reads.
+**The typed core IR.** For each strict-clean typed function, the analysis lowers the body to a
+typed core IR: a control-flow graph in SSA form over ry types, with every name resolved and every
+`match` compiled to a decision tree. The exhaustiveness checker runs Maranget's usefulness
+algorithm; the IR adds the matching compilation from the same paper. Standard library calls such
+as `List.map` and `List.walk` are IR operations, not calls, so the backend can fuse and inline them.
 
-**Ahead of time, cached.** `ry run` and `ry load` already check a strict file before it runs, so
-they lower and compile every typed function in it before the first call, in parallel across
-functions. The machine code is cached on disk under a hash of the IR and the target, which is the
-one place [prior art](/contributing/design/prior-art/#vx) adopts content hashes. A cache hit costs
-a map and a relocation; a miss costs Cranelift's compile time, about a millisecond per function,
-paid once per edit.
+**Where the IR lives.** The runtime cannot link the analysis: the loader runs inside `libR` on ry's
+runtime (`decisions.md`, "A strict reload re-checks through a persistent salsa database"), and the
+JIT never reads the checker's structures (`r-runtime.md`, section 5). So the IR is a serialized
+per-function summary that the analysis computes, as a salsa query per function, and stores with the
+function's bytecode. A generic function's summary is its generic IR, which the runtime instantiates
+when untyped R code calls it with an instantiation the checker never saw.
 
-**Generics.** Each instantiation the checker sees is compiled once, as Roc does. A generic function
-called from untyped R code with an instantiation the checker never saw compiles at that call, from
-the argument types the entry stub checked.
+**Ahead of time, cached.** `ry run` and `ry load` check a strict file before it runs, so they can
+compile every typed function in it before the first call. The machine code is cached on disk under
+a hash of the IR and the target, which is the one place [prior art](/contributing/design/prior-art/#vx)
+adopts content hashes. A cache hit costs a map and a relocation, and a miss costs Cranelift's
+compile time, about a millisecond per function, once per edit. Each instantiation the checker sees
+is compiled once, as Roc does.
 
-**Backend.** Cranelift, as for the existing JIT tier (`r-runtime.md`, section 5). LLVM would win
-some throughput on numeric loops, but the bar is set on programs that call functions and walk
-data, where layout and calls dominate.
+**Backend.** Cranelift, as for the JIT tier (`r-runtime.md`, section 5). LLVM would win some
+throughput on numeric loops, but the bar is set on programs that call functions and walk data,
+where layout and calls dominate.
 
 ## Representations
 
 Each ry type has one machine representation in compiled code and one boxed form, the form the
-interpreter and R code see. The boxed forms are the contract's; this section fixes the machine
-side.
+interpreter and R code see. The boxed forms are the contract's; this section fixes the machine side.
 
 | Type | In registers and stack slots | Boxed |
 | --- | --- | --- |
-| `F64`, `F32` | one float register | length-one `double` (`F64`); native number object |
+| `F64`, `F32` | one float register | length-one `double` (`F64`), or a native number object |
 | `I8` to `I64`, `U8` to `U64` | one integer register | native number object |
 | `I128`, `U128`, `Dec` | two integer registers | native number object |
 | `Bool` | one byte | length-one `logical` |
 | `Str` | pointer to a UTF-8 `CHARSXP` | length-one `character` |
 | `List<T>` | pointer to a vector | the same vector |
-| record, tuple | its fields, flattened, when it fits in four words; otherwise a pointer | a heap record |
-| tag union | a tag word plus the largest payload, when that fits in four words; otherwise a pointer | a heap record |
-| function | a code pointer and a captures pointer | a closure |
+| record, tuple | its fields, flattened, when they fit in four words, else a pointer | heap record |
+| tag union | a layout id plus the largest payload, when that fits in four words, else a pointer | heap record |
+| function | a code pointer and a captures pointer | closure |
 
-**Strings.** A `Str` is a `CHARSXP` pointer, which R already interns, so equality of two strings
-from the same session is usually a pointer compare and the byte compare runs only when the
-pointers differ. The bytes are UTF-8 by the contract, so `Str.count_utf8_bytes` is the stored
-length. Building a string (`Str.concat`, `Str.join_with`) writes into a growable byte buffer and
-interns once at the end, so a loop that appends to a string does not intern each step.
+**Strings.** A `Str` is a `CHARSXP` in canonical UTF-8. `Str.from_r` and `List.from_r` translate
+latin1, native and bytes-encoded strings to UTF-8 (copying when the bytes change) and refuse a
+string that has no UTF-8 form, so every `Str` is interned by its UTF-8 bytes alone. Equality of two
+`Str`s is then exactly a pointer compare. A `CHARSXP` is shared through the intern table, so it is
+never written in place: `Str.concat`, `Str.join_with` and interpolation write into a growable byte
+buffer that is not a `Str`, and intern once at the end. A loop that appends to a string interns
+once per finished string, not once per step.
 
-**Lists.** A `List<T>` is an R vector header followed by contiguous items at their natural width:
-`REALSXP` for `F64`, `LGLSXP` for `Bool`, `STRSXP` for `Str` (as the contract requires, so those
-pass to R and C without a copy), and a new vector kind per other number width, whose `TYPEOF` is
-the native number code. A list of records or tags holds pointers, one per item, in a `VECSXP`. The
-header's length and capacity fields make `List.append` amortized constant time, using the same
-growable flag R's own vectors use.
+**Lists.** A `List<T>` is an R vector header followed by its items. `List<F64>`, `List<Bool>` and
+`List<Str>` are `REALSXP`, `LGLSXP` and `STRSXP` vectors, as the contract requires, so they pass to
+R and C without a copy. A list of another number type is a native number vector at the item's
+natural width, a vector kind whose `TYPEOF` is the native number code. C code sees that code and
+none of R's accessors accept it, so such a list reaches C only through a conversion. A list of
+records, tags, lists or functions is a `VECSXP` of pointers. `List.append` grows in place through
+the growable flag and true length R's own vectors use (`gp::GROWABLE`).
 
-**Records and tags on the heap.** A boxed record or tag is a new heap object kind with a static
-layout: a header, the layout id, and the fields at their natural width, in an order the layout
-fixes (pointers first, so the collector traces a prefix). The layout's pointer count is all the
-collector needs, so the object carries no per-slot mask. This replaces the generic 16-byte-slot
-record object for values whose type is a ry type; a record built by untyped R code keeps the
-generic object, because its slots can hold any R value. The two kinds share the layout table, so
-`match` on either reads the same layout id, and the typed entry stub converts a generic record to
-the static form when a typed parameter receives one.
+**Records and tags.** A record, tuple or tag on the heap is the record object, whose layout id
+names the field names, the tag and each slot's representation: an unboxed `F64`, an R integer, an R
+logical, a ry number of a given width, or a pointer. The layout fixes the slot order, pointers
+first, so the collector traces a prefix and the object carries no per-slot mask. Untyped R code
+gets the same layout as typed code when its values have the same representations, so
+`(x = 1, y = 2)` built by R and a `Record{x: F64, y: F64}` built by ry are one layout. A typed
+parameter therefore checks a record from R by comparing its layout id with the type's, in constant
+time and with no conversion. A record whose layout differs is refused with the type-mismatch error
+the contract promises. Every builtin that reads records (`$`, `[[`, `identical`, printing,
+`as.list`) works on that one object kind.
 
 **Flattening.** A record or tag that never escapes a function is never allocated: its fields are
 SSA values. An escaping one that fits in four words is passed and returned in registers, as Rust's
-ABI does for small structs. A recursive type such as `Node` is always a pointer, because its size
-is unbounded; its `:Num` case still costs one allocation of three words, not a record object of
-16-byte slots.
+ABI does for small structs. A recursive type such as `Node` is always a pointer, and each `:Num`
+costs one 32-byte object: the 16-byte header, the layout id, and the double.
 
 ## Calling convention
 
 A compiled typed function takes its arguments flattened by the table above and returns its result
-the same way, with Cranelift's multi-value returns for up to four words and a caller-provided
-destination for anything larger (destination passing, as in goose and Roc's reuse analysis). It
-has no environment parameter, no promise, no argument matching and no status word.
+the same way, using Cranelift's multi-value returns for up to four words. A larger result is
+written to a destination the caller passes as a hidden first parameter, which is destination
+passing as in goose and Roc's reuse analysis. The function takes no environment, no promise and no
+argument list.
 
-**Errors.** Integer overflow, a list index out of range, and an error raised by an R call at the
-boundary are the only failures in typed code. Each jumps to a cold block that calls the runtime's
-error routine, which unwinds to the nearest R context exactly as an R error does. The unwind
-crosses no Rust frame, because compiled code calls only `extern "C"` runtime entries that are
-themselves boundaries (`r-runtime.md`, "Errors across the boundary"). There is no retry in tier 0,
-because a sound type cannot be wrong.
+**Errors are values.** An R error is a value inside Rust, and a `longjmp` across a Rust frame is
+undefined behavior (`r-runtime.md`, "Errors across the boundary"). Compiled code sits between
+Rust frames, both under it (the interpreter that called the entry stub) and above it (an R function
+that typed code calls). So a function that can fail (overflow-checked arithmetic, a bounds-checked
+read, or a call of an R function or of another fallible function) returns a failure flag in an
+extra register, and its caller tests it after the call and branches to a cold block that returns
+the failure in turn. The entry stub turns it into the R error. A function the IR proves infallible
+returns no flag, and Cranelift's exception edges (`try_call`, in the pinned version) can replace the
+flag test once measured.
 
-**Interrupts and recursion depth.** A loop back edge tests one flag, and a function entry compares
-the stack pointer against a limit the runtime sets from R's `expressions` option and the thread's
-stack size, so deep recursion raises R's error instead of overflowing the machine stack.
+**Redefinition.** R code can rebind any name at any time (`r-runtime.md`, section 5). A typed call
+is a direct call when its callee is a binding in a locked namespace, which is every function of a
+loaded package. In a script, where globals can be rebound, the call loads the code pointer from the
+callee's binding cell, so it is one load and an indirect call, and rebinding the name clears the
+cell's code pointer, which sends the next call through the interpreter.
 
-**Closures.** A typed closure that captures by value (the contract's rule) is a code pointer and a
-heap block of its captured values at their natural width. Where the checker knows the exact
+**Entry and exit stubs.** A call from untyped R code into typed code goes through an entry stub,
+and a call from typed code to an R function boxes the arguments, calls the interpreter, and checks
+the result against the call's declared type. The typed core has no lazy evaluation, so an entry
+stub forces each argument promise at entry, in order, and checks it once: a type code, a length of
+one, no attributes and not `NA` for a scalar, a layout id for a record, and a scan for a list from
+R. This differs from checking an annotated argument when it is forced, which is the rule for typed
+R code, and the change is recorded in `decisions.md` when it is built. A function-typed parameter
+cannot be checked at entry: an untyped closure passed to it gets a wrapper that checks each call's
+arguments and result, and a typed closure passes as its code pointer and captures.
+
+**One call machinery.** A typed call from typed code needs no frame. A call that crosses into or
+out of typed code uses the frame machinery of the untyped call-path redesign (stack-arena frames
+with lazily materialized environments), so typed code adds stubs to that machinery, not a second
+call path.
+
+**Closures.** A typed closure that captures by value under the contract's rule is a code pointer
+and a heap block of its captured values at their natural width. Where the checker knows the exact
 closure at a call site, as for a lambda passed to `List.map` in the same function, the call is
 direct and the lambda inlines, which is Roc's lambda-set specialization restricted to what one
 function can see. A closure that fails the capture rule keeps R's environment semantics and is
 called through the interpreter.
 
-**One call machinery.** A typed call from typed code is a direct machine call and needs no frame
-at all. A call that crosses into or out of typed code uses the frame machinery the untyped
-call-path redesign builds (stack-arena frames with lazily materialized environments), so typed
-code adds entry and exit stubs to that machinery, not a second call path. An entry stub checks each
-argument against its ry type once (a type code, a length of one, no attributes, not `NA` for a
-scalar; a scan for a list from R), unboxes it, and calls the machine function. An exit stub boxes
-the result.
+**Loops.** Interrupts are tested at loop back edges with one load. A list read is a bounds check
+and a load, and the IR removes bounds checks it proves redundant, with goose's difference
+constraints over loop indices (`prior-art.md`, goose). Recursion depth is checked at function
+entry against a stack limit the runtime derives from R's `expressions` option and the thread's
+stack size.
 
 ## Memory
 
-**Allocation.** A typed allocation is a bump in a thread-local nursery page of the heap's
-size-segregated pages, inlined into compiled code, with a call into the runtime only when the page
-is full. The collector stays non-moving (`r-runtime.md`, "Memory management"), because a `List<F64>`
-handed to C must not move.
+**Allocation.** The heap is one `&mut Heap`, a non-moving mark-sweep collector with sticky marks
+and size-class pages (`r-runtime.md`, "Memory management"). Compiled code allocates by an inlined
+pop from the size class's free list, with a runtime call only when the list is empty, and it never
+moves an object, because a `List<F64>` handed to C must stay put. An in-place store of a pointer
+into an existing object goes through the write barrier (`Heap::write_barrier`), because an old
+object that gains a young child must be rescanned by the next minor collection.
 
-**Roots.** Compiled frames publish their live pointers through Cranelift's stack maps at
-safepoints (calls and allocations), which the collector reads when it walks the machine stack. This
-replaces the handle stack that natives push and release today, so a loop that allocates pays
-nothing per iteration for rooting.
+**Roots.** Compiled code publishes its live pointers through Cranelift's user stack maps, which
+spill each live pointer to a stack slot at each safepoint (a call, including an allocation that
+calls the runtime). A loop with no call in its body spills nothing. An entry stub pushes an
+activation record (the frame pointer and the return address) onto a list the collector walks, so
+it finds compiled frames between Rust frames. Every collection, minor ones included, scans every
+live compiled frame. This replaces the handle stack that natives push and release.
 
-**Uniqueness.** `xs[[i]] <- v`, `List.set`, `List.append`, a record update `(..r, x = 1)` and the
-string builders reuse their argument's storage when its reference count is one, and copy
-otherwise, as the contract requires. The IR makes counts precise the way Roc's Zig compiler does
-(`prior-art.md`, Roc): it infers which parameters are only borrowed, so passing a list to a function
-that reads it changes no count, and it moves the last use of a variable instead of copying it, so a
-loop `xs <- List.append(xs, x)` holds the only reference and appends in place. Where the IR proves
-a value unique, the count check disappears; elsewhere it is one load and compare. Crossing to R
-marks the value shared, so a ry update after R has seen a list copies it.
+**Uniqueness.** `xs[[i]] <- v`, `List.set`, `List.append` and a record update `(..r, x = 1)` reuse
+their argument's storage when it is uniquely held, and copy otherwise, as the contract requires
+(`decisions.md`, "Standard library updates reuse a uniquely held value"). The heap's reference
+count is a `u16` that counts references from heap objects and bindings, and registers and stack
+slots hold uncounted references. A value is uniquely held when its count is zero and the IR proves
+the update is the last use of the only register reference. The IR maintains the counts:
 
-**Reference counts and the collector together.** Counts decide only whether an update may reuse
-storage; the tracing collector frees memory. A typed program therefore never frees on a count
-reaching zero, which keeps decrements off the hot path, and the collector reclaims dead nursery
-pages in bulk.
+- Storing a pointer into an object or a binding increments its count, and overwriting or removing
+  one decrements the old value's count.
+- Reading a field out of a record that dies at that point moves the field: the record's slot is
+  cleared and the field's count drops. So
+  `state <- (..state, items = List.append(state$items, x))` holds `items` uniquely and appends in
+  place, instead of copying the list each iteration.
+- A parameter the callee only reads is borrowed: passing it changes no count. A variable's last use
+  is a move, not a copy.
+- A count that reaches its maximum stays there, so the value is shared for good and every later
+  update copies.
+
+Counts never free memory: the collector does. Decrements stay on the paths where a container is
+overwritten or dies, but no compiled code ever runs a free.
+
+Crossing to R marks the value shared, so a ry update after R has seen a list copies it, and R's
+copy-on-modify contract holds for C code that writes into a list it was given.
 
 ## The R boundary
 
-A typed function's entry and exit stubs are the boundary for calls; `Num.from_r`, `List.from_r`,
-`List.to_r`, `Str.from_r` and `as.record` are the boundary for data. `F64`, `Bool` and `Str` cross
-in constant time, because their boxed form is R's own scalar. `List<F64>`, `List<Bool>` and
-`List<Str>` cross from ry to R without a copy, and from R to ry with one scan for `NA` and
-attributes. Every other value crosses by conversion. A typed function that calls an R function
-boxes its arguments, calls through the interpreter, and checks the result against the declared type
-of the call, which is where an R function's wrong return surfaces as an error at a precise source
-range.
+The entry and exit stubs are the boundary for calls, and `Num.from_r`, `List.from_r`, `List.to_r`,
+`Str.from_r` and `as.record` are the boundary for data. `F64` and `Bool` cross in constant time,
+because their boxed form is R's own scalar, and so does a `Str` already in UTF-8. `List<F64>`,
+`List<Bool>` and `List<Str>` cross from ry to R without a copy, and from R to ry with one scan for
+`NA`, attributes and encoding. Every other value crosses by conversion.
 
 ## Measuring against the bar
 
@@ -198,28 +230,31 @@ range.
   `just bench-why` reports the typed time against it. The language session's hill climb runs on
   these.
 - **Differential checks.** The oracle compares typed against untyped against GNU R on every typed
-  benchmark program and on a typed oracle suite, and a fuzzer generates typed programs (records,
-  tags, lists, strings, closures) and compares the compiled result with the interpreter's
-  correct-but-slow implementation of the same IR.
+  benchmark program and on a typed oracle suite. A fuzzer generates typed programs (records, tags,
+  lists, strings, closures) and compares the compiled result with the interpreter's implementation
+  of the same program.
 - **Collector stress.** The same fuzzer runs under `RY_GC_STRESS`, which collects at every
-  safepoint, to check the stack maps.
+  allocation, to check the stack maps and the activation list.
 
 ## What is built in one change
 
-The typed core IR and its lowering from `semantics`, the Cranelift backend over it, the static
-record and tag object kind, the native number vector kinds, stack-map rooting, the entry and exit
-stubs, uniqueness inference, the disk cache, and the Rust twins. The existing native path in
-`crates/jit/src/native.rs` keeps serving typed code that is not strict-clean, which still has
-`#:`-annotated R types and speculation, and shrinks as more code is written in ry's own types.
+The typed core IR and its lowering in the analysis, its serialized form beside the bytecode, the
+Cranelift backend over it, layouts with slot representations in place of per-object masks, the
+native number vector kinds, stack-map rooting with the activation list, the entry and exit stubs,
+uniqueness inference, the disk cache and the Rust twins. The native path in
+`crates/jit/src/native.rs` keeps serving typed code over R types that is not strict-clean.
 
 ## Open questions
 
 - **Dropping the profile-driven native path.** Once the typed core compiles ahead of time, the
   native path from R syntax serves only typed code over R types. Whether that is worth keeping
   depends on how much of the benchmark code bases is rewritten in ry's types.
-- **Where `List` capacity lives.** R vectors carry a true length for growable vectors, which gives
-  `List.append` its capacity for free; a `List` handed to C then shows only its length, which is
-  what C expects. To verify against data.table's use of `TRUELENGTH`.
-- **Parallel compile at load.** Compiling a 300,000-line code base's typed functions takes seconds
-  on a cold cache. Compiling lazily at first call with the cache filled in the background may be
-  the better default for `ry run`, with the eager form for `ry load` and test runs.
+- **Growable lists handed to C.** `List.append` capacity lives in the true length, which
+  data.table also reads and writes on vectors it is given. To verify that a list reaching
+  data.table through the boundary cannot be corrupted by that use.
+- **Eager or lazy compilation at load.** Compiling a 300,000-line code base's typed functions takes
+  seconds on a cold cache. Compiling at first call and filling the cache in the background may be
+  the better default for `ry run`, with eager compilation for `ry load` and test runs.
+- **Untyped records with a mixed layout.** Untyped code may build records of one field set whose
+  slots take different representations from call to call, which multiplies layouts. Whether that
+  needs a cap with a fallback to all-pointer slots is to be measured on the benchmark code bases.
