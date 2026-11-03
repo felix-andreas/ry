@@ -338,5 +338,7 @@ and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble` is its
 that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level
 half of `R CMD INSTALL`, embedded and run on ry after the compile. `Platform::of_home` reads
 the home's `etc/Makeconf` to choose the Unix or Windows (Rtools) conventions; on Windows the
-front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` and `Rterm.exe`. The package
+front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` and `Rterm.exe`,
+and because Windows has no `bin/` scripts, the front end itself starts the R session behind
+`R CMD build`, `check`, `Rprof`, `Rdconv`, `Sweave` and `Stangle`, as GNU R's `Rcmd.exe` does. The package
 uses `crates/ry/build.rs` as its build script, for the Windows stack size and manifest.

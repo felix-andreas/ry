@@ -490,7 +490,9 @@ impl std::error::Error for LoadError {}
 
 /// The directory holding `DESCRIPTION`, at or above `path`.
 pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
-    let absolute = fs::canonicalize(path).map_err(|error| LoadError::Io(path.into(), error))?;
+    let absolute = fs::canonicalize(path)
+        .map(without_verbatim_prefix)
+        .map_err(|error| LoadError::Io(path.into(), error))?;
     let mut current = Some(absolute.as_path());
     while let Some(directory) = current {
         if directory.join("DESCRIPTION").is_file() {
@@ -499,6 +501,23 @@ pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
         current = directory.parent();
     }
     Err(LoadError::NotAPackage(absolute))
+}
+
+/// `path` without the `\\?\` prefix that `fs::canonicalize` puts on every Windows path. The root
+/// reaches R and the tools it starts, and R takes neither a verbatim path nor the forward
+/// slashes `file.path()` joins onto one. Only a drive or UNC path loses the prefix; any other
+/// verbatim path, such as a device path, comes back unchanged.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 impl Loader {
@@ -2523,4 +2542,24 @@ pub fn is_build_product(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "o" | "so" | "dll" | "dylib"))
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::without_verbatim_prefix, std::path::PathBuf};
+
+    #[test]
+    fn verbatim_prefix_is_stripped_from_drive_and_unc_paths_only() {
+        let strip = |text: &str| without_verbatim_prefix(PathBuf::from(text));
+        assert_eq!(strip(r"\\?\C:\tmp\pkg"), PathBuf::from(r"C:\tmp\pkg"));
+        assert_eq!(
+            strip(r"\\?\UNC\server\share\pkg"),
+            PathBuf::from(r"\\server\share\pkg")
+        );
+        assert_eq!(
+            strip(r"\\?\GLOBALROOT\Device"),
+            PathBuf::from(r"\\?\GLOBALROOT\Device")
+        );
+        assert_eq!(strip("/home/user/pkg"), PathBuf::from("/home/user/pkg"));
+    }
 }

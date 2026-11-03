@@ -1,6 +1,7 @@
 //! The R front end that `bin/R` and `bin/Rscript` in ry's R home run. `CMD INSTALL|SHLIB|config`
 //! and `RHOME` are answered in Rust; `R ...` and `Rscript ...` run R code on ry's interpreter,
-//! taking GNU R's command lines. The R home is the directory `R_HOME` names. `assemble ROOT
+//! taking GNU R's command lines, and so do the `R CMD` commands that are R functions of the
+//! tools and utils packages, such as `R CMD build`. The R home is the directory `R_HOME` names. `assemble ROOT
 //! --include DIR --libr FILE [--gnu-r-home DIR]` creates such a home.
 //!
 //! The `ry-rcmd` binary is this front end alone, and `ry` is it too when started under one of
@@ -67,11 +68,16 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         Some("Rcmd") => [vec!["CMD".to_owned()], arguments].concat(),
         _ => arguments,
     };
-    let result = match arguments.split_first() {
-        Some((front, rest)) if front == "R" => {
+    let tools = match arguments.split_first() {
+        Some((front, rest)) if front == "CMD" => tools_command(rest),
+        _ => None,
+    };
+    let result = match (arguments.split_first(), tools) {
+        (_, Some(session)) => run_r(&home, &session),
+        (Some((front, rest)), None) if front == "R" => {
             crate::r_command_line(rest).and_then(|session| run_r(&home, &session))
         }
-        Some((front, rest)) if front == "Rscript" => {
+        (Some((front, rest)), None) if front == "Rscript" => {
             crate::rscript_command_line(rest).and_then(|session| run_r(&home, &session))
         }
         _ => crate::run(&home, &arguments).map(|output| {
@@ -86,6 +92,43 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The session GNU R's `R CMD <command>` starts for a command its tools or utils package
+/// implements. Unix reaches these through GNU R's `bin/` scripts, which run R through ry's
+/// `bin/R`; Windows has no such scripts, because GNU R's `Rcmd.exe` dispatches them itself, so
+/// the front end starts the session those scripts would. Each script passes its arguments as
+/// one string, every argument after the separator `nextArg`, because the R function splits
+/// `commandArgs(TRUE)` on it.
+fn tools_command(arguments: &[String]) -> Option<crate::Session> {
+    let (command, rest) = arguments.split_first()?;
+    // The function, `R_DEFAULT_PACKAGES`, whether `--vanilla` skips the profiles, and whether
+    // the script collates in the C locale.
+    let (entry, default_packages, vanilla, c_collation) = match command.as_str() {
+        "build" => ("tools:::.build_packages()", Some(""), false, true),
+        "check" => ("tools:::.check_packages()", Some(""), false, true),
+        "Rprof" => ("tools:::.Rprof()", Some("utils"), true, true),
+        "Rdconv" => ("tools:::.Rdconv()", Some(""), true, true),
+        "Sweave" => ("utils:::.Sweave()", None, false, false),
+        "Stangle" => ("utils:::.Stangle()", None, false, false),
+        _ => return None,
+    };
+    if c_collation {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("LC_COLLATE", "C") };
+    }
+    Some(crate::Session::Run {
+        file: None,
+        expressions: Some(entry.to_owned()),
+        arguments: vec![
+            rest.iter()
+                .map(|argument| format!("nextArg{argument}"))
+                .collect(),
+        ],
+        default_packages: default_packages.map(str::to_owned),
+        site_profile: !vanilla,
+        user_profile: !vanilla,
+    })
 }
 
 /// On Windows, `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (what
