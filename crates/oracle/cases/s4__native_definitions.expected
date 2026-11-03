@@ -1,0 +1,126 @@
+[stdout]
+| classGeneratorFunction A 
+| An object of class "A"
+| Slot "a":
+| [1] 3
+| 
+| Slot "f":
+| [1] "x"
+| 
+| Slot "z":
+| logical(0)
+| 
+| An object of class "B"
+| Slot "b":
+| [1] 2
+| 
+| Slot "o":
+| An object of class "A"
+| Slot "a":
+| [1] 0
+| 
+| Slot "f":
+| character(0)
+| 
+| Slot "z":
+| logical(0)
+| 
+| 
+| Slot "a":
+| [1] 0
+| 
+| Slot "f":
+| character(0)
+| 
+| Slot "z":
+| logical(0)
+| 
+| [1] 7
+| [1] "dee"
+| An object of class "E"
+| Slot "e":
+| integer(0)
+| 
+| B A 
+| G D W V 
+| 1 2 2 3 
+| $G
+| character(0)
+| 
+| $D
+| [1] "G"
+| attr(,"package")
+| [1] "s4core"
+| 
+| $W
+| [1] "G"
+| attr(,"package")
+| [1] "s4core"
+| 
+| $V
+| [1] "G"
+| attr(,"package")
+| [1] "s4core"
+| 
+| B C 
+| D F G H 
+| G H 
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| Class "G" [package "s4core"]
+| 
+| Slots:
+|                           
+| Name:          h         d
+| Class:   numeric character
+| 
+| Extends: 
+| Class "D", directly
+| Class "W", directly
+| Class "V", by class "D", distance 2
+| 
+| Known Subclasses: "H"
+| An object of class "A"
+| Slot "a":
+| [1] 1
+| 
+| Slot "f":
+| [1] "c"
+| 
+| Slot "z":
+| logical(0)
+| 
+| [1] 3
+| [1] 9
+| [1] "replaced"
+| [1] 3
+| An object of class "D"
+| Slot "d":
+| [1] "dee"
+| 
+| [1] "new d"
+| [1] "area"
+| [1] 42
+| [1] 3
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] "no definition was found for superclass “Nope” in the specification of class “Bad”"
+| [1] "undefined slot classes in definition of \"Bad2\": x(class \"NoSuchClass\")"
+| [1] "The prototype for class “Bad4” has undefined slot(s): 'y'"
+| [1] "trying to generate an object from a virtual class (\"V\")"
+| [1] "lMx"   "spMx"  "CspMx" "lspMx" "lgCMx" "indMx" "pMx"  
+| [1] "CspMx" "lspMx" "indMx" "lgCMx" "lgCMx" "pMx"  
+| [1] "lgCMx"
+| [1] "pMx"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

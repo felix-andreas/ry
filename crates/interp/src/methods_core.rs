@@ -1582,14 +1582,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     if !native_definitions() {
         bail!(skip);
     }
-    for name in [
-        "validity",
-        "access",
-        "version",
-        "sealed",
-        "package",
-        "S3methods",
-    ] {
+    for name in ["access", "version", "sealed", "package", "S3methods"] {
         if !eval::is_missing(install(name)?, frame)? {
             bail!(skip);
         }
@@ -1677,6 +1670,23 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             None => bail!(skip),
         }
     };
+    // `.makeValidityMethod()` keeps a function whose one argument is `object` as it is.
+    let validity = if eval::is_missing(install("validity")?, frame)? {
+        nil()
+    } else {
+        match forced_arg(frame, "validity")? {
+            Some(value) if value == nil() => value,
+            Some(value)
+                if value.kind() == SexpType::Closure
+                    && value.car().kind() == SexpType::Pairlist
+                    && value.car().cdr() == nil()
+                    && value.car().tag() == install("object")? =>
+            {
+                value
+            }
+            _ => bail!(skip),
+        }
+    };
     let prototype_names = match prototype {
         None => Vec::new(),
         Some(list) => {
@@ -1755,8 +1765,12 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     let mut lineage: Vec<Sexp> = supers.iter().map(|known| known.name).collect();
     lineage.extend(ancestors.iter().map(|known| known.name));
     for known in supers.iter().chain(&ancestors) {
-        let subclasses = slot(known.definition, "subclasses")?;
-        if element(subclasses, name.bytes()).is_some() || !closed_subclasses(subclasses)? {
+        if element(slot(known.definition, "subclasses")?, name.bytes()).is_some() {
+            bail!(skip);
+        }
+    }
+    for known in &supers {
+        if !walk_keeps_subclasses(slot(known.definition, "subclasses")?, name)? {
             bail!(skip);
         }
     }
@@ -1964,7 +1978,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         ("contains", contains_list),
         ("prototype", prototype_object),
         ("virtual", values::scalar_bool(virtual_class)?),
-        ("validity", nil()),
+        ("validity", validity),
         ("access", values::alloc(SexpType::List, 0)?),
         ("package", package),
         ("versionKey", version),
@@ -2005,6 +2019,12 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(generator, install(attribute)?, value)?;
     }
     generator.set_gp_bits(gp::S4_OBJECT, true);
+    if trace_bails() {
+        eprintln!(
+            "methods fast path completes setClass(\"{}\")",
+            String::from_utf8_lossy(name.bytes())
+        );
+    }
     Ok(generator)
 }
 
@@ -2058,9 +2078,13 @@ unsafe fn plain_extension(extension: Sexp) -> R<bool> {
         && is_false(slot(extension, "dataPart")?))
 }
 
-/// Whether `.walkClassGraph()` over a class's `subclasses` finds nothing to add: every
-/// subclass of a direct subclass is already listed.
-unsafe fn closed_subclasses(subclasses: Sexp) -> R<bool> {
+/// Whether adding the class `name` as a direct subclass leaves the same list of names that
+/// `setIs()` builds. Adding the class appends it and orders the list by distance, but
+/// `setIs()` rebuilds the list with `completeSubclasses()`: it drops the indirect entries, then
+/// `.walkClassGraph()` adds each direct subclass's own subclasses that are not direct ones, so a
+/// class reached through two direct subclasses appears twice.
+unsafe fn walk_keeps_subclasses(subclasses: Sexp, name: Sexp) -> R<bool> {
+    let mut entries = Vec::with_capacity(length(subclasses) + 1);
     let names = values::names(subclasses);
     for index in 0..length(subclasses) {
         let extension = subclasses.element(index);
@@ -2068,21 +2092,51 @@ unsafe fn closed_subclasses(subclasses: Sexp) -> R<bool> {
         if length(class) != 1 || class.element(0).bytes() != b"SClassExtension" {
             return Ok(false);
         }
-        if length(slot(extension, "by")?) > 0 {
+        let distance = values::as_real_scalar(slot(extension, "distance")?);
+        let direct = length(slot(extension, "by")?) == 0;
+        entries.push((names.element(index), distance, direct));
+    }
+    entries.push((name, 1.0, true));
+    let mut appended: Vec<(Sexp, f64)> = entries
+        .iter()
+        .map(|&(name, distance, _)| (name, distance))
+        .collect();
+    appended.sort_by(|left, right| left.1.total_cmp(&right.1));
+
+    let directs: Vec<(Sexp, f64)> = entries
+        .iter()
+        .filter(|entry| entry.2)
+        .map(|&(name, distance, _)| (name, distance))
+        .collect();
+    let mut walked = directs.clone();
+    for &(direct, distance) in &directs {
+        if direct.bytes() == name.bytes() {
             continue;
         }
-        let Some(definition) = cached_class(values::scalar_string_charsxp(names.element(index))?)?
-        else {
+        let Some(definition) = cached_class(values::scalar_string_charsxp(direct)?)? else {
             return Ok(false);
         };
-        let deeper = values::names(slot(definition, "subclasses")?);
+        let deeper = slot(definition, "subclasses")?;
+        let deeper_names = values::names(deeper);
         for inner in 0..length(deeper) {
-            if position_of(names, deeper.element(inner).bytes()).is_none() {
-                return Ok(false);
+            let deeper_name = deeper_names.element(inner);
+            if directs
+                .iter()
+                .any(|known| known.0.bytes() == deeper_name.bytes())
+            {
+                continue;
             }
+            let extension = deeper.element(inner);
+            let deeper_distance = values::as_real_scalar(slot(extension, "distance")?);
+            walked.push((deeper_name, distance + deeper_distance));
         }
     }
-    Ok(true)
+    walked.sort_by(|left, right| left.1.total_cmp(&right.1));
+    Ok(walked.len() == appended.len()
+        && walked
+            .iter()
+            .zip(&appended)
+            .all(|(left, right)| left.0.bytes() == right.0.bytes()))
 }
 
 /// Whether the dispatch caches the R code fills while defining the class are full already,

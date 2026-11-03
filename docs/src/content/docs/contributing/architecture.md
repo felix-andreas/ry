@@ -475,7 +475,10 @@ loads, `install_fast_paths` puts a native prologue from `methods_core.R` in fron
 function it covers, but only if the function's hash matches the GNU R version the prologue was
 written against. A prologue either does the function's whole work, with the same result and
 effects, or returns without observable effect and lets GNU R's body run, so a case the core does
-not handle stays exact.
+not handle stays exact. On the bundled base R every prologue must install, so a mismatch there
+stops start-up with an error; on a base from `R_HOME` a mismatch only leaves GNU R's body in place.
+The covered functions are the object operations (`new`, the default `initialize`, `validObject`,
+`is`, `extends`) and the definitions (`setGeneric`, `setMethod`, `setClass`).
 
 ### Diagnostics
 

@@ -7432,10 +7432,33 @@ Each one trades a narrow class of missed errors for a class of false reports see
   path completes, the R function's frame-local temporaries are not bound; only code that inspects
   that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
   calls) could see it.
+- **Versions.** `FAST_PATHS` lists the hashes each function may have, one per `methods` version the
+  fast path was checked against; the bundled GNU R 4.6.2 is the primary target. A miss against
+  the bundled base is an error at start-up, because it means the base changed under the core; a
+  miss against an `R_HOME` base silently keeps the R code. Functions whose fast path needs R-level helpers keep them as R text in
+  `methods_core.R` (`METHODS_TEMPLATES`), parsed once at install time.
+- **Definitions.** `setGeneric`, `setMethod` and `setClass` are native for the shapes a package
+  usually writes: local supers only, no `setClassUnion` member classes passed as a
+  classRepresentation, a `validity` that is `NULL` or a function of `object`. Anything else bails
+  to the R code before any effect. The native results are byte-identical to the R path (classes,
+  generics, method tables and `serialize()` output, compared on the generated S4 packages, the
+  Matrix sources and the methods package's own tests).
+- **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  prints the hashes of the installed functions, for adding a version.
+- **The S4 cache stays.** Restoring the cache is about 10 times faster than running the definitions,
+  even natively (s4plain: 61 ms restored against about 900 ms run), so it survives, and incremental
+  reload of it is not needed while that ratio holds. It is saved uncompressed: the save fell from
+  344 to 219 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
+  exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
+  during a session and the saved state would depend on what ran. Revisit when running the
+  definitions is about as fast as restoring them.
 - **Order.** Object creation and class queries came first because they are the run-time hot path
-  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). The
-  definition functions (`setMethod`, `setClass`, `cacheMetaData`) follow (`backlog.md`, "Open:
-  native methods core"). Whether the S4 metadata cache survives is decided once they are native.
-- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
-  94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
-  functions, including their error messages and calls, against GNU R.
+  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
+  the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
+  (`backlog.md`, "Open: native methods core").
+- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s with the native
+  queries, and native definitions bring the generated `target/s4plain` package (2,877 definitions)
+  from about 2.2 s of S4 work to about 0.9 s. `crates/oracle/cases/s4__native_core_queries.R` and
+  `s4__native_definitions.R` pin the covered functions, including their error messages and calls,
+  against GNU R.
