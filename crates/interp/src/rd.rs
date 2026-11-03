@@ -397,15 +397,11 @@ struct Parser {
 const MAX_EXPANSIONS: usize = 100_000;
 
 impl Parser {
-    /// Reports a syntax error, which GNU R follows the parser's recovery from.
+    /// Reports a syntax error or an unknown macro, which GNU R follows the parser's recovery
+    /// from. Both go through GNU R's `yyerror`, which repeats the warning about the first
+    /// multi-line string seen anywhere in the file.
     fn warn(&mut self, message: impl std::fmt::Display) {
         self.warn_newline_in_string();
-        self.note(message);
-    }
-
-    /// Reports a lexer warning, which unlike a syntax error does not mention an earlier
-    /// multi-line string.
-    fn note(&mut self, message: impl std::fmt::Display) {
         let line = self.input.next_position.line;
         self.warnings
             .push(format!("{}:{line}: {message}", self.basename));
@@ -792,7 +788,7 @@ impl Parser {
                 if top && !self.fragment {
                     self.warn(format!("unexpected UNKNOWN '{tag}'"));
                 } else {
-                    self.note(format!("unknown macro '{tag}'"));
+                    self.warn(format!("unknown macro '{tag}'"));
                 }
                 self.last_text.clone_from(&tag);
                 Ok(Some(Node {

@@ -8,6 +8,7 @@
 set -euo pipefail
 
 archive=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+tools=$(cd "$(dirname "$0")" && pwd)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/ry-smoke.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
@@ -99,7 +100,7 @@ else
 fi
 printf 'cat(as.character(getRversion()), file.exists(file.path(R.home(), "library", "stats", "help")), "\\n")\n' >base.R
 output=$(run_ry run base.R 2>&1 | tr -d '\r') || true
-expected="$(cat "$(dirname "$0")/base-r/VERSION") TRUE "
+expected="$(cat "$tools/base-r/VERSION") TRUE "
 if [ "$output" = "$expected" ] && ls -d "$scratch/cache/ry/base/"*/library/base >/dev/null 2>&1; then
 	pass "ry run uses the base R built into ry"
 else

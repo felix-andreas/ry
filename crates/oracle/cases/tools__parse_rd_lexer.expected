@@ -7,6 +7,7 @@
 | [6] "\\dontdiff" "TEXT"      
 [messages]
 [warnings]
+- newline within quoted string at <connection>:1 (in tools::parse_Rd(textConnection(text), fragment = TRUE))
 - <connection>:2: unknown macro '\\nosuchmacro' (in tools::parse_Rd(textConnection(text), fragment = TRUE))
 [errors]
 [value]
