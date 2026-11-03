@@ -1,0 +1,14 @@
+[stdout]
+| a 
+| 1 
+| [1] 7 3
+| [1] "'x' must be a list or atomic vector"
+| [1] 1 2 3 1 2
+| [1] "* FALSE"
+| [1] "+ FALSE"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "+ FALSE"

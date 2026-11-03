@@ -896,8 +896,8 @@ fn link(target: &Path, link_path: &Path) -> Result<()> {
 pub enum Session {
     /// `--help`: text to print, with no session.
     Print(String),
-    /// `--version`, which prints [`version_text`].
-    Version,
+    /// `--version`, which prints [`version_text`]; `rscript` is `Rscript --version`.
+    Version { rscript: bool },
     /// A session that runs `file`, or `expressions` (`-e`), or else R code read from stdin.
     Run {
         file: Option<String>,
@@ -935,9 +935,17 @@ impl Profiles {
     }
 }
 
-/// What `R --version` prints for the R home at `home`.
-pub fn version_text(home: &Path) -> Result<String> {
+/// What `R --version`, or with `rscript` `Rscript --version`, prints for the R home at `home`.
+pub fn version_text(home: &Path, rscript: bool) -> Result<String> {
     let version = BaseVersion::read(&home.join("library/base/DESCRIPTION"))?;
+    // Scripts check this line for the R version (parallelly runs it before starting workers), so
+    // it is GNU R's exactly.
+    if rscript {
+        return Ok(format!(
+            "Rscript (R) version {} ({}-{}-{})\n",
+            version.version, version.year, version.month, version.day
+        ));
+    }
     Ok(format!(
         "R version {} ({}-{}-{}) (ry {})\nry's runtime: R code runs on ry's interpreter.\n",
         version.version,
@@ -1043,7 +1051,7 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
             "--args" => {
                 trailing.extend(rest.by_ref().cloned());
             }
-            "--version" => return Ok(Session::Version),
+            "--version" => return Ok(Session::Version { rscript: false }),
             "-h" | "--help" => {
                 return Ok(Session::Print(
                     "Usage: R [options] [< infile] [> outfile]\n   or: R CMD command [arguments]\n\n\
@@ -1104,7 +1112,7 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
             expressions.push(expression.clone());
             index += 2;
         } else if argument == "--version" {
-            return Ok(Session::Version);
+            return Ok(Session::Version { rscript: true });
         } else if let Some(packages) = argument.strip_prefix("--default-packages=") {
             default_packages = Some(packages.to_owned());
             index += 1;
@@ -2315,6 +2323,25 @@ mod tests {
         assert_eq!(description.get("Package"), Some("demo"));
         assert_eq!(description.packages("LinkingTo"), ["Rcpp", "cpp11"]);
         assert_eq!(description.packages("Imports"), ["utils"]);
+    }
+
+    #[test]
+    fn rscript_version_is_one_line_like_gnu_r() -> Result<()> {
+        let home = std::env::temp_dir().join(format!("ry-version-{}", std::process::id()));
+        let base = home.join("library/base");
+        fs::create_dir_all(&base).map_err(io_error(&base))?;
+        let description = base.join("DESCRIPTION");
+        fs::write(
+            &description,
+            "Package: base\nVersion: 4.5.1\nBuilt: R 4.5.1; ; 2025-06-13; unix\n",
+        )
+        .map_err(io_error(&description))?;
+        let text = version_text(&home, true);
+        fs::remove_dir_all(&home).map_err(io_error(&home))?;
+        let text = text?;
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with("Rscript (R) version 4.5.1 ("), "{text}");
+        Ok(())
     }
 
     #[test]

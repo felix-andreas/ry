@@ -290,6 +290,23 @@ SEXP rytest_setcdr_any(void)
     return tail;
 }
 
+/* Removing dim through setAttrib drops dimnames too (tibble's matrixToDataFrame relies on it):
+   returns the number of attributes left on a 2 x 2 matrix with dimnames. */
+SEXP rytest_remove_dim(void)
+{
+    SEXP matrix = PROTECT(allocMatrix(INTSXP, 2, 2));
+    for (int i = 0; i < 4; i++) INTEGER(matrix)[i] = i;
+    SEXP dimnames = PROTECT(allocVector(VECSXP, 2));
+    SEXP column = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(column, 0, mkChar("c"));
+    SET_STRING_ELT(column, 1, mkChar("d"));
+    SET_VECTOR_ELT(dimnames, 1, column);
+    setAttrib(matrix, R_DimNamesSymbol, dimnames);
+    setAttrib(matrix, R_DimSymbol, R_NilValue);
+    UNPROTECT(3);
+    return ScalarInteger(length(ATTRIB(matrix)));
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -934,6 +951,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_escaped_temporary", (DL_FUNC) &rytest_escaped_temporary, 0},
     {"rytest_return_null", (DL_FUNC) &rytest_return_null, 0},
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
+    {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},

@@ -232,8 +232,8 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
             print!("{text}");
             return Ok(0);
         }
-        crate::Session::Version => {
-            print!("{}", crate::version_text(home)?);
+        crate::Session::Version { rscript } => {
+            print!("{}", crate::version_text(home, *rscript)?);
             return Ok(0);
         }
         crate::Session::Run {

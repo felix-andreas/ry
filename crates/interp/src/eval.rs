@@ -2770,6 +2770,10 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
     let env = match env.kind() {
         SexpType::Environment => env,
         SexpType::List => crate::envir::list_to_env(env, values::empty_env())?,
+        SexpType::Pairlist => crate::envir::list_to_env(
+            crate::coerce::coerce_vector(env, SexpType::List)?,
+            values::empty_env(),
+        )?,
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };

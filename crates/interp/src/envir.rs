@@ -1722,7 +1722,13 @@ unsafe fn rapply_one(
             || (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
     });
     if matches {
-        call_function(function, &eval::value_args(&[object]), env, nil())
+        // GNU R binds the element to `X` in the `rapply` closure's frame and evaluates
+        // `FUN(X, ...)` there, so the extra arguments reach `FUN`.
+        let x_symbol = values::install("X")?;
+        define(x_symbol, object, env)?;
+        let fun_call = values::call(function, &[x_symbol, symbols().dots])?;
+        crate::heap().root(fun_call);
+        eval::force_and_call(fun_call, 1, env)
     } else if how == "replace" {
         Ok(object)
     } else {
@@ -1732,16 +1738,27 @@ unsafe fn rapply_one(
 
 unsafe fn do_eapply(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "env")?;
-    let function = call.arg(1);
     let all = values::as_logical_scalar(call.arg(2)) == 1;
+    let use_names = values::as_logical_scalar(call.arg(3)) != 0;
     let bound = env_symbols(env, all, false);
     let result = alloc(SexpType::List, bound.len())?;
+    crate::heap().root(result);
+    // GNU R evaluates `FUN(quote(value), ...)` in the `eapply` closure's frame, so the extra
+    // arguments reach `FUN`.
+    let fun_symbol = values::install("FUN")?;
+    let quote_symbol = values::install("quote")?;
     for (index, &symbol) in bound.iter().enumerate() {
-        let value = value_of(find_var_in_frame(symbol, env)?)?;
-        let value = call_function(function, &eval::value_args(&[value]), call.env, nil())?;
+        let value = crate::scope(|| {
+            let value = value_of(find_var_in_frame(symbol, env)?)?;
+            let quoted = values::call(quote_symbol, &[value])?;
+            let fun_call = values::call(fun_symbol, &[quoted, symbols().dots])?;
+            eval::force_and_call(fun_call, 1, call.env)
+        })?;
         values::set_elt(result, index, value);
     }
-    values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+    if use_names {
+        values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+    }
     Ok(result)
 }
 
