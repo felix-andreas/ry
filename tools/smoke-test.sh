@@ -101,8 +101,8 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 	else
 		fail "ry extracted no runtime into $scratch/cache/ry/runtime"
 	fi
-	# A matrix product goes through BLAS and solve() through LAPACK, which on Windows are the
-	# R installation's Rblas.dll and Rlapack.dll bound to ry's R.dll.
+	# A matrix product runs in ry's own kernels, and solve() goes through LAPACK and the BLAS it
+	# calls, which on Windows are the R installation's Rlapack.dll and Rblas.dll bound to ry's R.dll.
 	printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
 	output=$("$ry" run linalg.R 2>&1 | tr -d '\r') || true
 	if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi

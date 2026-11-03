@@ -199,7 +199,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
 - **`arith.rs`**, **`coerce.rs`**, **`subset.rs`**, **`strings.rs`**, **`sort.rs`**: base's
   vector internals: arithmetic and math, coercion, subsetting and assignment, strings and regular
   expressions, sorting and matching.
-- **`linalg.rs`**: BLAS and LAPACK (opened at runtime) and base's LINPACK routines.
+- **`linalg.rs`**: the matrix products (ry's own kernels, in reference BLAS's summation order), BLAS and LAPACK (opened at runtime), and base's LINPACK routines.
   **`distributions.rs`**: the probability distributions. **`random.rs`**: the random number
   generators.
 - **`connections.rs`**, **`serialize.rs`**, **`system.rs`**: the connection table (the `Rconn`
