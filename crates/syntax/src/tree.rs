@@ -1467,6 +1467,29 @@ impl<'a> NodeRef<'a> {
             .map(move |index| NodeRef { tree, index })
     }
 
+    /// This node and every node under it whose kind `wanted` accepts, in preorder. One scan of
+    /// the kind column, so a walk after a few sparse kinds pays only a kind test per element.
+    pub fn descendants_of_kind<F: Fn(SyntaxKind) -> bool>(
+        self,
+        wanted: F,
+    ) -> impl Iterator<Item = NodeRef<'a>> + use<'a, F> {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        let first = self.index;
+        tree.columns
+            .kinds
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(move |&(_, &kind)| kind.is_node() && wanted(kind))
+            .map(move |(offset, _)| NodeRef {
+                tree,
+                index: first + offset as u32,
+            })
+    }
+
     /// Whether any element under this one, this one included, has a kind `wanted` accepts.
     /// One scan of the kind column, so it is far cheaper than a walk and suits a test that
     /// lets a walk be skipped.

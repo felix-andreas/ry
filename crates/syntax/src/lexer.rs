@@ -110,7 +110,10 @@ impl Lexer<'_> {
         let first = self.bump().expect("next_token called at end of input");
         match first {
             ' ' | '\t' | '\u{c}' => {
-                self.eat_while(|c| c == ' ' || c == '\t' || c == '\u{c}');
+                self.pos += self.text.as_bytes()[self.pos..]
+                    .iter()
+                    .position(|&byte| !matches!(byte, b' ' | b'\t' | b'\x0c'))
+                    .unwrap_or(self.text.len() - self.pos);
                 WHITESPACE
             }
             '\n' => NEWLINE,
@@ -133,7 +136,7 @@ impl Lexer<'_> {
             }
             '\'' | '"' => self.quoted(
                 start,
-                first,
+                first as u8,
                 STRING,
                 "unterminated string; expected a closing quote",
             ),
@@ -142,7 +145,7 @@ impl Lexer<'_> {
             c if c.is_ascii_digit() => self.number(start),
             '`' => self.quoted(
                 start,
-                '`',
+                b'`',
                 IDENT,
                 "unterminated backtick name; expected a closing `` ` ``",
             ),
@@ -283,22 +286,32 @@ impl Lexer<'_> {
     }
 
     /// Backtick names follow string escape rules: `` \` `` does not end the name.
+    ///
+    /// The quote, the backslash and the line breaks are ASCII, so a byte scan for them never
+    /// stops inside a character.
     fn quoted(
         &mut self,
         start: usize,
-        quote: char,
+        quote: u8,
         kind: SyntaxKind,
         unterminated: &str,
     ) -> SyntaxKind {
+        let bytes = self.text.as_bytes();
+        let annotation = self.in_annotation;
         loop {
-            match self.bump() {
-                Some('\\') => {
+            let Some(offset) = bytes[self.pos..].iter().position(|&byte| {
+                byte == quote || byte == b'\\' || (annotation && matches!(byte, b'\n' | b'\r'))
+            }) else {
+                self.pos = self.text.len();
+                break;
+            };
+            self.pos += offset + 1;
+            match bytes[self.pos - 1] {
+                b'\\' => {
                     self.bump();
                 }
-                Some(c) if c == quote => return kind,
-                Some('\n' | '\r') if self.in_annotation => break,
-                Some(_) => {}
-                None => break,
+                byte if byte == quote => return kind,
+                _ => break,
             }
         }
         self.end_unterminated_at_line_break(start);

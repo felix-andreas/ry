@@ -359,6 +359,8 @@ fn item_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax>
 pub struct ItemSpan<'db> {
     pub item: Item<'db>,
     pub range: TextRange,
+    /// The defined name's range, read with the item's identity from the same walk.
+    pub name_range: Option<TextRange>,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
@@ -372,9 +374,13 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
-        let (kind, name) = match top_level_definition(&node) {
-            Some(definition) => (definition.kind, Some(definition.name)),
-            None => (ItemKind::Statement, None),
+        let (kind, name, name_range) = match top_level_definition(&node) {
+            Some(definition) => (
+                definition.kind,
+                Some(definition.name),
+                Some(definition.name_range),
+            ),
+            None => (ItemKind::Statement, None, None),
         };
         let disambiguator = {
             let counter = counts.entry((kind, name.clone())).or_insert(0);
@@ -385,6 +391,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
         spans.push(ItemSpan {
             item: Item::new(db, file, kind, name, None, disambiguator),
             range: node.text_range(),
+            name_range,
         });
     }
     spans
@@ -479,9 +486,31 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let parse = parse(db, file);
     let root = parse.tree().root();
     let mut sites = Vec::new();
-    // Every node of the file passes through here, and almost none is a site, so each role is
-    // tested only on the few kinds that can carry it.
-    for node in root.descendants() {
+    // Almost no node is a site, so the walk visits only the kinds that can carry a role, and
+    // a kind that needs a child to qualify only in a file that has such a child somewhere.
+    // An untyped file then visits little more than its calls.
+    let typed = root.any_kind(|kind| {
+        matches!(
+            kind,
+            SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::TYPE_BINDER_LIST | SyntaxKind::RETURN_TYPE
+        )
+    });
+    let annotated = root.any_kind(|kind| kind == SyntaxKind::ANNOTATION);
+    let candidate = |kind: SyntaxKind| match kind {
+        SyntaxKind::BINARY_EXPR | SyntaxKind::FUNCTION_DEF => typed,
+        SyntaxKind::BRACE_EXPR | SyntaxKind::SOURCE_FILE => annotated,
+        SyntaxKind::TYPE_DEFINITION
+        | SyntaxKind::NEW_EXPR
+        | SyntaxKind::CALL_EXPR
+        | SyntaxKind::ANNOTATION
+        | SyntaxKind::TYPE_ASCRIPTION
+        | SyntaxKind::RETURN_TYPE
+        | SyntaxKind::NEW_TYPE
+        | SyntaxKind::PURE_MARKER
+        | SyntaxKind::TYPE_BINDER_LIST => true,
+        _ => is_ry_syntax(kind),
+    };
+    for node in root.descendants_of_kind(candidate) {
         let kind = node.kind();
         let mut roles = 0;
         let site = match kind {
@@ -3282,12 +3311,13 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string. Memoized so that a check reads it from another file without
-/// walking that file's tree.
+/// `setGeneric` name string, recorded by [`item_spans`]. Memoized so that a check reading
+/// it from another file depends on this one range, not on every span of that file.
 #[salsa::tracked(returns(copy))]
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
-    let node = item_node(db, item)?;
-    top_level_definition(&node).map(|definition| definition.name_range)
+    let file = *item.file(db);
+    let index = *item_span_positions(db, file).get(&item)?;
+    item_spans(db, file).get(index)?.name_range
 }
 
 /// The single reading of a statement's shape for both item identity and name range.
