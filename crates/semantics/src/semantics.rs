@@ -1949,13 +1949,15 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     );
     // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
     // would intern a query name per read only to turn it back into a symbol.
-    let frame_binders = item_frame_binders(db, item);
+    // A one-shot host reads the file's binders directly rather than keeping a memo per item
+    // that nothing will ever revalidate.
+    let frame_binders = (!db.one_shot()).then(|| item_frame_binders(db, item));
     let frame = OnceCell::new();
     let frame_definition = |name: Symbol, deferred: bool| {
         if deferred && package {
             return None;
         }
-        match frame_binders.get(&name) {
+        match frame_binders.and_then(|binders| binders.get(&name)) {
             Some(&(immediate, later)) => match deferred {
                 true => later,
                 false => immediate,
@@ -3003,10 +3005,11 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         if deferred && self.kind == DocumentKind::Package {
             return None;
         }
-        if let Some(&(immediate, later)) = self
-            .item_frame_binders
-            .get_or_init(|| item_frame_binders(self.db, self.item))
-            .get(&name.symbol())
+        if !self.db.one_shot()
+            && let Some(&(immediate, later)) = self
+                .item_frame_binders
+                .get_or_init(|| item_frame_binders(self.db, self.item))
+                .get(&name.symbol())
         {
             return if deferred { later } else { immediate };
         }
