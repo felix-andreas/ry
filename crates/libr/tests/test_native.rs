@@ -717,6 +717,13 @@ fn edge_cases_gnu_r_accepts() {
     assert_eq!(r.integers(tail), vec![2]);
     let left = r.call("rytest_remove_dim", &[]).expect("remove dim");
     assert_eq!(r.integers(left), vec![0], "removing dim drops dimnames");
+    let late = r
+        .call("rytest_dimnames_filled_late", &[])
+        .expect("dimnames filled after setAttrib");
+    assert_eq!(
+        r.strings(late),
+        vec![Some("c".to_owned()), Some("d".to_owned())]
+    );
 
     let message = r.string("inner");
     let inner = r.call_expression(

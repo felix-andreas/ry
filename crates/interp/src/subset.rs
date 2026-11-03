@@ -451,7 +451,8 @@ unsafe fn resolve(
             let mut any_na = false;
             for position in 0..count {
                 let value = numeric_element(index, position);
-                if value.is_nan() {
+                // An infinite subscript selects nothing real, so it counts as NA, as in GNU R.
+                if !value.is_finite() {
                     any_na = true;
                 } else if value < 0.0 && value.trunc() != 0.0 {
                     any_negative = true;
@@ -480,7 +481,7 @@ unsafe fn resolve(
             let mut positions = Vec::with_capacity(count);
             for position in 0..count {
                 let value = numeric_element(index, position);
-                if value.is_nan() {
+                if !value.is_finite() {
                     positions.push(NA_POSITION);
                 } else if value >= 1.0 {
                     positions.push(value.trunc() as usize - 1);
@@ -2290,14 +2291,8 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
             set_na(result, position);
         }
     }
-    let mut cell = vector.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        let tag = cell.tag();
-        if tag != symbols().dim && tag != symbols().dimnames && tag != symbols().names {
-            values::set_attr(result, tag, cell.car())?;
-        }
-        cell = cell.cdr();
-    }
+    // Names go first and the other attributes follow in order, as GNU R's `EnlargeVector`
+    // lays them out; code such as the globals package checks the attribute order.
     let names = values::names(vector);
     if names != nil() {
         let grown = alloc(SexpType::String, new_length)?;
@@ -2305,6 +2300,14 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
             values::set_elt(grown, position, names.element(position));
         }
         values::set_attr(result, symbols().names, grown)?;
+    }
+    let mut cell = vector.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        let tag = cell.tag();
+        if tag != symbols().dim && tag != symbols().dimnames && tag != symbols().names {
+            values::set_attr(result, tag, cell.car())?;
+        }
+        cell = cell.cdr();
     }
     Ok(result)
 }
@@ -3540,11 +3543,19 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
             ),
         ));
     }
-    let result = alloc(SexpType::List, dims.len())?;
+    // An unreferenced list of the right length is installed itself, as GNU R's `dimnamesgets`
+    // does, so C code that sets the attribute and then fills the list sees its writes kept.
+    let reuse = length(dimnames) == dims.len() && dimnames.refcount() == 0;
+    let result = if reuse {
+        dimnames
+    } else {
+        alloc(SexpType::List, dims.len())?
+    };
     for (dimension, &extent) in dims.iter().enumerate().take(length(dimnames)) {
         let component = dimnames.element(dimension);
         // A zero-length component means no names for that dimension, whatever its extent.
         if component == nil() || length(component) == 0 {
+            values::set_elt(result, dimension, nil());
             continue;
         }
         let component = if values::inherits(component, "factor") {
@@ -3568,7 +3579,7 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         values::set_elt(result, dimension, component);
     }
     let names = values::names(dimnames);
-    if names != nil() {
+    if names != nil() && !reuse {
         let padded = alloc(SexpType::String, dims.len())?;
         for index in 0..dims.len() {
             let name = if index < length(names) {

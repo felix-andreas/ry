@@ -307,6 +307,20 @@ SEXP rytest_remove_dim(void)
     return ScalarInteger(length(ATTRIB(matrix)));
 }
 
+/* GNU R installs an unreferenced dimnames list itself, so filling it afterwards shows. */
+SEXP rytest_dimnames_filled_late(void)
+{
+    SEXP array = PROTECT(allocMatrix(INTSXP, 1, 2));
+    SEXP dimnames = PROTECT(allocVector(VECSXP, 2));
+    setAttrib(array, R_DimNamesSymbol, dimnames);
+    SEXP column = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(column, 0, mkChar("c"));
+    SET_STRING_ELT(column, 1, mkChar("d"));
+    SET_VECTOR_ELT(dimnames, 1, column);
+    UNPROTECT(3);
+    return VECTOR_ELT(getAttrib(array, R_DimNamesSymbol), 1);
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -952,6 +966,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_return_null", (DL_FUNC) &rytest_return_null, 0},
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
+    {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
