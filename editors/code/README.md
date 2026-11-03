@@ -1,81 +1,116 @@
-# ry
+# ry for VS Code
 
-This extension provides support for the [R programming language](https://www.r-project.org/), including workspace symbol search, code formatting, and syntax diagnostics.
+R support from [ry](https://ry-lang.org), a type checker, linter, formatter and runtime for R. Open an
+R project and it works, with no configuration and no R session needed for the editor features.
 
 > **Note**
-> The VS Code extension from the marketplace includes a bundled version of the ry CLI for **Linux x86_64, macOS aarch64 and Windows x86_64**. If you are using a different architecture, you will need to install the ry CLI manually.
+> The extension bundles the `ry` binary for **Linux x86_64, macOS aarch64 and Windows x86_64**. On
+> another platform, install `ry` yourself and set `ry.path`.
 
-## Features
+## What you get
 
-ry aims to support the following language server features (some are experimental or in progress):
+- **Diagnostics as you type**: syntax errors that say what is missing, unresolved names, unused
+  variables, lints, and type errors once you turn them on, the same findings as `ry check`
+- **Hover** with the inferred type of any expression, parameter or loop variable, and the help page
+  of a function from an installed package
+- **Completion** of variables, list fields after `$`, `pkg::` exports and argument names, ranked
+  by the type the code expects
+- **Navigation**: go to definition, find references, rename, call hierarchy, document and
+  workspace symbols, also into installed packages
+- **Signature help** and **inlay hints** for inferred types and parameter names
+- **Quick fixes** for misspelled names and lints, and refactorings: extract variable or function,
+  inline, and convert between `#:` comments and inline types
+- **Formatting** of the document, a selection, or as you type, with the rules of `ry fmt`
+- **Semantic highlighting**, folding and an outline with RStudio-style sections
+- **Running and debugging**: "Run file", "Run test" and "Debug test" lenses, a console that reloads
+  your package as you edit it (`Ctrl+Enter` sends the line or selection), breakpoints and stepping,
+  a data viewer for `View()`, and an "R Plot" panel for plots drawn in the console
 
-- **Formatting**
-  - Format entire document
-  - Format selected code range, and format as you type
+R Markdown, Quarto and Sweave chunks get the same features. The
+[editor guide](https://ry-lang.org/guides/editors) lists everything.
 
-- **Navigation**
-  - Index global variables, S4 and R6 classes/methods
-  - Search current document - <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> *in VS Code*
-  - Search global workspace - <kbd>Ctrl</kbd> + <kbd>T</kbd> *in VS Code*
-  - Go to definition
-  - Find all references *(🧪 experimental)*
+## Type checking for plain R
 
-- **Diagnostics**
-  - Syntax errors - *including missing or trailing commas*
-  - Basic linting rules - *[full list here](https://ry-lang.org/reference/diagnostic-codes)*
-  - Warning for unused variables *(🧪 experimental)*
-  - Error for undefined variable *(⚠️ missing)*
-  - Argument validation for function calls *(⚠️ missing)*
-  - Type checking *([💡 early design phase](../../crates/analysis/README.md))*
+ry infers types from how values are used, so it finds this mistake in unannotated code before
+anything runs:
 
-- **Editing**
-  - Autocomplete local and global variables
-  - Autocomplete variables from other packages *(⚠️ missing)*
-  - Rename local variables *(🧪 experimental)*
-  - Rename global variables *(⚠️ missing)*
-  - Signature help *(🔨 work in progress)*
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
 
-- **Highlighting**
-  - Distinct, theme-respecting colors inside `#:` type annotations — types, type parameters,
-    parameter names, operators, and `@`-directives (via semantic tokens, with a bundled TextMate
-    fallback for when semantic highlighting is off)
+```
+type-mismatch
 
-## Usage
+  x expected a numeric value (`integer` or `double`), found `character`
+   --[R/discount.R:2:21]
+ 1 | apply_discount <- function(price, rate) price * (1 - rate)
+ 2 | apply_discount(100, "0.2")
+   |                     ^^^^^
+```
 
-The extension will automatically start the ry language server for R files. You can also use the built-in commands to start, stop, or restart the server, or open logs.
+Type errors are opt-in: add a `ry.toml` with `typing = true` under `[check]` at the project root.
 
-## Configuration
+## Fast R
 
-You can customize the ry extension in VS Code through the following settings:
+ry's own runtime compiles hot code to machine code. Seconds per program, and peak memory of the
+whole process, R's startup included:
+
+<!-- bench-why -->
+| program | GNU R | ry | ry, typed and strict | peak memory, GNU R / ry / typed |
+| --- | ---: | ---: | ---: | ---: |
+| `fib` | 1.312 s | 0.010 s (131.2x) | 0.010 s | 54 / 43 / 43 MiB |
+| `drawdown` | 0.335 s | 0.074 s (4.5x) | 0.079 s | 73 / 133 / 140 MiB |
+| `vector_arith` | 0.290 s | 0.242 s (1.2x) | 0.249 s | 109 / 157 / 164 MiB |
+| `log_rank` | 0.128 s | 0.137 s (0.9x) | 0.136 s | 107 / 56 / 58 MiB |
+<!-- /bench-why -->
+
+[Benchmarks](https://ry-lang.org/benchmarks) has every program, its code, and how it was measured.
+
+## Tagged unions and `match`
+
+ry adds records, tuples and tagged unions, and a `match` that knows every case:
+
+```r
+alias Payment =
+  | :Paid(amount: double)
+  | :Refunded(amount: double)
+  | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+    :Refunded(amount = a) => -a
+  }
+}
+```
+
+```
+non-exhaustive-match
+
+  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+## Settings
 
 ```jsonc
 {
   // Use a custom binary instead of the bundled one
   "ry.path": "/path/to/ry",
-  // Pass custom arguments; defaults to ["server"]
-  "ry.args": ["server", "--verbose"],
+  // Arguments for the binary; the default is ["server"]
+  "ry.args": ["server"]
 }
 ```
 
-## Highlights
-
-### Format Document
-
-![Format Document](https://assets-felixandreas-me.pages.dev/roughly/format.gif)
-
-### Workspace Symbol Search <kbd>Ctrl</kbd> + <kbd>T</kbd>
-
-![Workspace Symbol Search](https://assets-felixandreas-me.pages.dev/roughly/workspace-symbols.gif)
-
-### Document Symbol Search  <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd>
-
-![Document Symbol Search](https://assets-felixandreas-me.pages.dev/roughly/document-symbols.gif)
-
-### Syntax Errors
-
-![Syntax Errors](https://assets-felixandreas-me.pages.dev/roughly/syntax-errors.gif)
+Project settings, such as turning on type errors or choosing lints, live in `ry.toml`
+([configuration](https://ry-lang.org/reference/configuration)).
 
 ## Links
 
-* [📦 Source Code](https://github.com/felix-andreas/ry)
-* [📚 Documentation](https://ry-lang.org/)
+- [Documentation](https://ry-lang.org)
+- [Source code](https://github.com/felix-andreas/ry)
+
+## License
+
+The extension's own code is MIT. The bundled `ry` binary is GPL-2.0-or-later, the same terms as
+GNU R; [licensing](https://ry-lang.org/reference/licensing/) has the details.
