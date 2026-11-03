@@ -21,6 +21,7 @@
 
 pub mod arena;
 pub mod env;
+pub mod large;
 pub mod object;
 pub mod records;
 mod space;
@@ -29,6 +30,7 @@ pub mod strings;
 use {
     crate::{
         env::Frame,
+        large::{MAPPED_BYTES, MappedCache, cache_limit},
         object::{
             EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
             TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
@@ -67,6 +69,8 @@ pub struct Heap {
     /// The largest single allocation the heap attempts (`memory_ceiling`).
     allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
+    /// Freed mappings of large vectors kept for the next one.
+    mapped: MappedCache,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
@@ -92,7 +96,7 @@ pub struct Heap {
     /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
     /// The `young_bytes` past which a small allocation takes the slow path, which runs a minor
-    /// collection when one is due. It is derived from the policy and `old_bytes`, and stored
+    /// collection when one is due. It is derived from the policy and `old_small_bytes`, and stored
     /// because the allocation fast path then needs one compare against it; it is zero under
     /// collection stress, so every allocation takes the slow path. It changes only where its
     /// inputs do: a collection and [`Heap::update_policy`].
@@ -100,7 +104,10 @@ pub struct Heap {
     /// Bytes of large vectors allocated since the last collection, kept apart from
     /// `young_bytes` because they have their own budget.
     young_large_bytes: usize,
-    old_bytes: usize,
+    /// Bytes of old small objects and of old large vectors, apart because the nursery's budget
+    /// scales with the first alone.
+    old_small_bytes: usize,
+    old_large_bytes: usize,
     stats: GcStats,
     inhibit: u32,
     stress_counter: u64,
@@ -259,9 +266,13 @@ pub struct GcPolicy {
     /// Bytes of young large vectors that trigger a minor collection, which also grows to half
     /// the old generation.
     pub young_large_limit: usize,
-    /// Old-generation bytes that trigger a major collection after a minor one.
-    pub old_limit: usize,
-    pub min_old_limit: usize,
+    /// GNU R's `R_VSize` in bytes: a large vector that would take the whole heap past it runs a
+    /// collection, and a major one when the old generation alone would still pass it. It is
+    /// adjusted after each major collection by [`HeapGrowth`], and never drops below
+    /// `min_heap_limit`.
+    pub heap_limit: usize,
+    pub min_heap_limit: usize,
+    pub growth: HeapGrowth,
     pub stress: GcStress,
     /// Checks the write barrier's invariant before every minor collection (`RY_GC_VERIFY`).
     pub verify: bool,
@@ -273,6 +284,76 @@ pub struct GcPolicy {
     /// under an allocation that was in progress.
     pub reporter: Option<unsafe fn(&str)>,
 }
+
+/// How [`GcPolicy::heap_limit`] follows the live data, with GNU R's fractions for its vector
+/// heap. After a major collection the limit rises to what is needed (the survivors plus the
+/// allocation that ran the collection); when that need fills more than `grow_fraction` of it,
+/// it grows by `grow_increment` of itself, and when it fills less than `shrink_fraction`, it
+/// shrinks by `shrink_increment` of itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeapGrowth {
+    pub grow_fraction: f64,
+    pub grow_increment: f64,
+    pub shrink_fraction: f64,
+    pub shrink_increment: f64,
+}
+
+impl HeapGrowth {
+    pub const DEFAULT: HeapGrowth = HeapGrowth {
+        grow_fraction: 0.70,
+        grow_increment: 0.20,
+        shrink_fraction: 0.30,
+        shrink_increment: 0.20,
+    };
+
+    /// GNU R's settings from its environment variables: `R_GC_MEM_GROW` picks a preset (0
+    /// never grows by more than the need, 1 is the default, 2 grows by 30%, 3 by 40% from half
+    /// full), then `R_GC_GROWFRAC` (0.35 to 0.75), `R_GC_GROWINCRFRAC` and
+    /// `R_GC_VGROWINCRFRAC` (0.05 to 0.80) override single fractions. A value outside its
+    /// range is ignored, as in GNU R.
+    pub fn from_environment(variable: impl Fn(&str) -> Option<String>) -> HeapGrowth {
+        let number = |name: &str| variable(name).and_then(|value| value.trim().parse::<f64>().ok());
+        let mut growth = HeapGrowth::DEFAULT;
+        match number("R_GC_MEM_GROW").map(|level| level.trunc() as i64) {
+            Some(0) => growth.grow_increment = 0.0,
+            Some(2) => growth.grow_increment = 0.3,
+            Some(3) => {
+                growth.grow_increment = 0.4;
+                growth.grow_fraction = 0.5;
+            }
+            _ => {}
+        }
+        if let Some(fraction) = number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
+        {
+            growth.grow_fraction = fraction;
+        }
+        for name in ["R_GC_GROWINCRFRAC", "R_GC_VGROWINCRFRAC"] {
+            if let Some(fraction) = number(name).filter(|value| (0.05..=0.80).contains(value)) {
+                growth.grow_increment = fraction;
+            }
+        }
+        growth
+    }
+
+    /// The limit after a major collection that left `needed` bytes to hold.
+    pub fn next_limit(&self, limit: usize, needed: usize, minimum: usize) -> usize {
+        let mut limit = limit.max(needed) as f64;
+        let occupancy = needed as f64 / limit;
+        if occupancy > self.grow_fraction {
+            // GNU R's smallest step, 80,000 cells of 8 bytes, keeps a zero increment from
+            // collecting on every allocation once the need reaches the limit.
+            limit += GROW_STEP_MIN + self.grow_increment * limit;
+        } else if occupancy < self.shrink_fraction {
+            limit -= self.shrink_increment * limit;
+        }
+        // A minor collection escalates to a major one when less than a fifth of the smallest
+        // limit is left (`Heap::maybe_collect`), so a limit closer to the need than that would
+        // turn every following minor collection into a major one.
+        (limit as usize).max(needed + minimum / 5).max(minimum)
+    }
+}
+
+const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
@@ -444,6 +525,7 @@ impl Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
+            mapped: MappedCache::new(),
             young_large: Vec::new(),
             remembered: Vec::new(),
             escaped: Vec::new(),
@@ -476,7 +558,8 @@ impl Heap {
             young_bytes: 0,
             small_trigger: 0,
             young_large_bytes: 0,
-            old_bytes: 0,
+            old_small_bytes: 0,
+            old_large_bytes: 0,
             stats: GcStats::default(),
             inhibit: 1,
             stress_counter: 0,
@@ -504,13 +587,23 @@ impl Heap {
         self.stats
     }
 
+    /// The bytes of every object allocated and not yet freed, garbage included: what the heap
+    /// occupies now, which the collection limit bounds.
+    pub fn allocated_bytes(&self) -> usize {
+        self.old_bytes() + self.young_bytes + self.young_large_bytes
+    }
+
+    fn old_bytes(&self) -> usize {
+        self.old_small_bytes + self.old_large_bytes
+    }
+
     /// The live objects as of the last collection, in `gc()`'s units.
     pub fn usage(&self) -> Usage {
         const MEGABYTE: f64 = 1024.0 * 1024.0;
         let stats = &self.stats;
         let vector_bytes = stats.live_vector_cells * 8;
         let object_bytes = stats.live_bytes.saturating_sub(vector_bytes);
-        let scale = self.policy.old_limit as f64 / (stats.live_bytes.max(1) as f64);
+        let scale = self.policy.heap_limit as f64 / (stats.live_bytes.max(1) as f64);
         let scale = scale.max(1.0);
         let megabytes = |bytes: f64| (bytes / MEGABYTE * 10.0).ceil() / 10.0;
         // Each object's share of the bytes beside its vector data, for the peak's megabytes.
@@ -581,11 +674,14 @@ impl Heap {
 
     /// Recomputes [`Heap::small_trigger`] from the policy and the old generation's size.
     fn refresh_small_trigger(&mut self) {
-        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
-        // every large vector a big session allocates, rescanning the young ones each time.
+        // Like GNU R's trigger for cons cells, the budget grows with the old small objects: a
+        // fixed one would collect every few allocations in a session that loaded many packages,
+        // rescanning the young objects each time. Old large vectors do not count, as GNU R's
+        // cell trigger ignores vector memory, because a session holding a few big vectors would
+        // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
             GcStress::EveryAllocation => 0,
-            GcStress::Off => self.policy.young_limit.max(self.old_bytes / 2),
+            GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
         };
     }
 
@@ -1844,7 +1940,9 @@ impl Heap {
         }
         let layout = Layout::from_size_align(size, 16)
             .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-        let memory = if zeroed >= size {
+        let memory = if size >= MAPPED_BYTES {
+            self.mapped.allocate(size, zeroed)
+        } else if zeroed >= size {
             NonNull::new(std::alloc::alloc_zeroed(layout))
         } else {
             NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
@@ -1879,13 +1977,20 @@ impl Heap {
                 } else {
                     Collection::Minor
                 };
-                self.collect_keeping(kind, keep);
+                self.collect_keeping(kind, keep, request);
             }
             GcStress::Off => {
                 if self.collection_due(request, large) {
-                    self.collect_keeping(Collection::Minor, keep);
-                    if self.old_bytes > self.policy.old_limit {
-                        self.collect_keeping(Collection::Major, keep);
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    // A minor collection keeps every old object, so the temporaries it found
+                    // live and promoted stay until a major one. Escalate, as GNU R does, when
+                    // what is left would not hold the request and a fifth of the smallest
+                    // limit; without that margin, every large vector allocated just below the
+                    // limit would run a minor collection that frees nothing, and only a major
+                    // one moves the limit.
+                    let margin = request + self.policy.min_heap_limit / 5;
+                    if self.old_bytes() + margin > self.policy.heap_limit {
+                        self.collect_keeping(Collection::Major, keep, request);
                     }
                 }
             }
@@ -1906,18 +2011,27 @@ impl Heap {
         // them to the nursery would buy a collection per column that rescans the columns
         // already allocated.
         if large {
-            self.young_large_bytes + request > self.policy.young_large_limit.max(self.old_bytes / 2)
+            let old_bytes = self.old_bytes();
+            self.young_large_bytes + request > self.policy.young_large_limit.max(old_bytes / 2)
+                || self.allocated_bytes() + request > self.policy.heap_limit
         } else {
             self.young_bytes + request > self.small_trigger
         }
     }
 
     /// Runs a collection now. Every live object must be reachable from a root.
+    /// A major collection asked for this way also returns the freed large vectors' kept memory
+    /// to the kernel, as GNU R's `gc()` returns free memory.
     pub unsafe fn collect(&mut self, kind: Collection) {
-        self.collect_keeping(kind, &[]);
+        self.collect_keeping(kind, &[], 0);
+        if kind == Collection::Major && self.inhibit == 0 {
+            self.mapped.flush();
+        }
     }
 
-    unsafe fn collect_keeping(&mut self, kind: Collection, keep: &[Sexp]) {
+    /// Runs a collection for an allocation of `request` bytes, which a major collection counts
+    /// as needed when it adjusts the heap limit.
+    unsafe fn collect_keeping(&mut self, kind: Collection, keep: &[Sexp], request: usize) {
         if self.inhibit > 0 {
             return;
         }
@@ -1989,13 +2103,18 @@ impl Heap {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
                 self.stats.major_collections += 1;
-                // The limit falls back towards twice what survived by an eighth per major
-                // collection rather than at once, as GNU R shrinks its trigger. Otherwise every
-                // explicit `gc()` between two large operations would drop the limit below the
-                // next one's peak and buy a full collection in the middle of it.
-                self.policy.old_limit = (self.old_bytes * 2)
-                    .max(self.policy.old_limit / 8 * 7)
-                    .max(self.policy.min_old_limit);
+                // The limit shrinks by a fifth at most per major collection rather than to what
+                // survived, so an explicit `gc()` between two large operations does not drop it
+                // below the next one's peak and buy a full collection in the middle of it.
+                let needed = self.old_bytes() + request;
+                let policy = &mut self.policy;
+                policy.heap_limit = policy.growth.next_limit(
+                    policy.heap_limit,
+                    needed,
+                    policy.min_heap_limit,
+                );
+                self.mapped.limit = cache_limit(policy.heap_limit);
+                self.mapped.trim();
             }
         }
         for parent in self.remembered.drain(..) {
@@ -2017,6 +2136,7 @@ impl Heap {
             stats.system_time += system_now.saturating_sub(system);
             stats.elapsed_time += elapsed.elapsed();
         }
+        let old_bytes = self.old_bytes();
         if let (Some((started, young, young_large)), Some(log)) = (logged, &mut self.pause_log) {
             let kind = match kind {
                 Collection::Minor => "minor",
@@ -2025,7 +2145,7 @@ impl Heap {
             let line = format!(
                 "{kind} {} {young} {young_large} {}\n",
                 started.elapsed().as_nanos(),
-                self.old_bytes
+                old_bytes
             );
             if let Err(error) = log.write_all(line.as_bytes()) {
                 panic!("cannot write the collection log RY_GC_LOG names: {error}");
@@ -2331,11 +2451,11 @@ impl Heap {
     unsafe fn sweep_young(&mut self) {
         let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);
-        self.old_bytes = self.old_bytes.saturating_add_signed(change);
+        self.old_small_bytes = self.old_small_bytes.saturating_add_signed(change);
         let young_large = std::mem::take(&mut self.young_large);
         for &object in &young_large {
             if object.gc_bits() & gc_bits::MARK != 0 {
-                self.old_bytes += self.size_of(object);
+                self.old_large_bytes += self.size_of(object);
             } else {
                 self.free_large(object);
                 swept.freed += 1;
@@ -2349,25 +2469,26 @@ impl Heap {
 
     unsafe fn sweep_all(&mut self) {
         let mut swept = Swept::default();
-        let mut old_bytes = self.space.sweep_all(&mut swept);
+        self.old_small_bytes = self.space.sweep_all(&mut swept);
+        let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
         for object in large {
             if object.gc_bits() & gc_bits::MARK != 0 {
-                old_bytes += self.size_of(object);
+                old_large_bytes += self.size_of(object);
             } else {
                 self.free_large(object);
                 swept.freed += 1;
             }
         }
         self.young_large.clear();
-        self.old_bytes = old_bytes;
+        self.old_large_bytes = old_large_bytes;
         self.stats.objects_freed += swept.freed;
         self.refresh_live_stats();
     }
 
     fn refresh_live_stats(&mut self) {
         self.stats.live_objects = (self.space.live_slots() + self.large.len()) as u64;
-        self.stats.live_bytes = self.old_bytes as u64;
+        self.stats.live_bytes = self.old_bytes() as u64;
         self.stats.large_objects = self.large.len() as u64;
         self.stats.pages = self.space.page_count() as u64;
     }
@@ -2388,10 +2509,12 @@ impl Heap {
     unsafe fn free_large(&mut self, object: Sexp) {
         let size = self.size_of(object);
         self.large.remove(&object);
-        std::alloc::dealloc(
-            object.as_ptr().cast(),
-            Layout::from_size_align_unchecked(size, 16),
-        );
+        let memory = object.as_ptr().cast::<u8>();
+        if size >= MAPPED_BYTES {
+            self.mapped.release(NonNull::new_unchecked(memory), size);
+        } else {
+            std::alloc::dealloc(memory, Layout::from_size_align_unchecked(size, 16));
+        }
     }
 
     unsafe fn create_well_known(&mut self) {
@@ -2475,11 +2598,7 @@ impl Drop for Heap {
         unsafe {
             let large: Vec<Sexp> = self.large.iter().copied().collect();
             for object in large {
-                let size = self.size_of(object);
-                std::alloc::dealloc(
-                    object.as_ptr().cast(),
-                    Layout::from_size_align_unchecked(size, 16),
-                );
+                self.free_large(object);
             }
         }
     }
@@ -2555,8 +2674,10 @@ impl Default for GcPolicy {
             // 64 MB `R_VSIZE`, which also counts live data. A 64 MB budget let dead temporaries
             // of vectorized kernels pile up to about 50 MB above GNU R's peak at a million rows.
             young_large_limit: 16 * 1024 * 1024,
-            old_limit: 64 * 1024 * 1024,
-            min_old_limit: 64 * 1024 * 1024,
+            // GNU R's default `R_VSIZE`.
+            heap_limit: 64 * 1024 * 1024,
+            min_heap_limit: 64 * 1024 * 1024,
+            growth: HeapGrowth::from_environment(|name| std::env::var(name).ok()),
             stress: match gc_stress_requested() {
                 Some(GcStressStart::Startup) => GcStress::EveryAllocation,
                 _ => GcStress::Off,

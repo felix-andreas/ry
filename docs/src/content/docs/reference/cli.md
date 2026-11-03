@@ -179,6 +179,32 @@ like `R --no-echo`, except that it keeps going after an error.
 `ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),
 and it keeps its `-f FILE`, which is `ry R -i FILE`.
 
+### Memory
+
+ry's runtime collects garbage on GNU R's schedule, and vectors of a megabyte or more go back to the
+kernel when they are collected, so a script's peak memory is close to GNU R's. These scripts from a
+CI machine that ran out of memory peak at (in MiB):
+
+| Script | GNU R 4.3.3 | ry |
+| --- | --- | --- |
+| `id <- rep(1:1000, 50000)` | 239 | 242 |
+| 20 rounds of `keep <- v > 0.5; s <- list(id[keep], v[keep])` over `runif(5e7)` | 1386 | 1386 |
+| 20 rounds of `dt[v > 0.5]` on a 5e6-row data.table | 330 | 329 |
+
+To trade time for a lower peak, for example to fit more test processes into a CI machine, set GNU
+R's own variables, which ry's runtime reads at startup:
+
+| Variable | Effect |
+| --- | --- |
+| `R_GC_MEM_GROW` | `0` to `3`, default `1`: how much headroom the heap keeps above the live data after a full collection. `0` keeps the least and `3` the most. |
+| `R_GC_GROWFRAC` | `0.35` to `0.75`, default `0.70`: the share of the heap the live data must fill before the heap grows. |
+| `R_GC_VGROWINCRFRAC`, `R_GC_GROWINCRFRAC` | `0.05` to `0.80`, default `0.2`: the share by which the heap grows. |
+
+`R_GC_MEM_GROW=0` lowers the subset script's peak from 1386 to 1100 MiB (GNU R: 1195 MiB). It costs
+time where many objects outlive a collection: on a generated package's 1,907 testthat tests it
+runs 66 full collections instead of 5, and collecting takes 4.8 s of the 25 s instead of 0.7 s.
+A value outside a variable's range is ignored, as on GNU R.
+
 ## load and server
 
 `ry load` [loads the package](/guides/running) at `PATH` (default: the one containing the

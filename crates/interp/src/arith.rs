@@ -3849,24 +3849,12 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     if count == 0 && length_out.is_none() {
         return values::duplicate(object);
     }
-    // Expand `each` first.
-    let mut indices: Vec<usize> = Vec::with_capacity(count * each);
-    for index in 0..count {
-        for _ in 0..each {
-            indices.push(index);
-        }
-    }
-    let base_count = indices.len();
-    let indices: Vec<usize> = match (length_out, times) {
-        (Some(out), _) => (0..out as usize)
-            .map(|position| {
-                if base_count == 0 {
-                    usize::MAX
-                } else {
-                    indices[position % base_count]
-                }
-            })
-            .collect(),
+    let too_long = || call.error("invalid 'times' argument");
+    let base_count = count.checked_mul(each).ok_or_else(too_long)?;
+    let plan = match (length_out, times) {
+        (Some(out), _) => RepPlan::Cycle {
+            total: out as usize,
+        },
         (None, Some(times)) => {
             let times_count = length(times);
             if times_count == 1 {
@@ -3874,34 +3862,44 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
                 if repeat.is_nan() || repeat < 0.0 {
                     return Err(call.error("invalid 'times' argument"));
                 }
-                let repeat = repeat as usize;
-                let mut result = Vec::with_capacity(base_count * repeat);
-                for _ in 0..repeat {
-                    result.extend_from_slice(&indices);
+                RepPlan::Cycle {
+                    total: base_count
+                        .checked_mul(repeat as usize)
+                        .filter(|&total| total <= LONGEST_REPETITION)
+                        .ok_or_else(too_long)?,
                 }
-                result
             } else if times_count == base_count {
-                let mut result = Vec::new();
-                for (position, &index) in indices.iter().enumerate() {
+                let mut counts = Vec::with_capacity(base_count);
+                let mut total = 0usize;
+                for position in 0..base_count {
                     let repeat = crate::subset::numeric_element(times, position);
                     if repeat.is_nan() || repeat < 0.0 {
                         return Err(call.error("invalid 'times' argument"));
                     }
-                    for _ in 0..repeat as usize {
-                        result.push(index);
-                    }
+                    total = total
+                        .checked_add(repeat as usize)
+                        .filter(|&total| total <= LONGEST_REPETITION)
+                        .ok_or_else(too_long)?;
+                    counts.push(repeat as usize);
                 }
-                result
+                RepPlan::Counts { counts, total }
             } else {
                 return Err(call.error("invalid 'times' argument"));
             }
         }
-        (None, None) => indices,
+        (None, None) => RepPlan::Cycle { total: base_count },
     };
-    let result = crate::subset::select_elements(object, &indices)?;
+    let result = match plan {
+        RepPlan::Cycle { total } if each == 1 => match repeat_plain(object, total)? {
+            Some(result) => result,
+            None => select_repeated(object, &plan, base_count, each)?,
+        },
+        _ => select_repeated(object, &plan, base_count, each)?,
+    };
     let names = values::names(object);
     if names != nil() {
-        let new_names = crate::subset::select_elements(names, &indices)?;
+        crate::heap().root(result);
+        let new_names = select_repeated(names, &plan, base_count, each)?;
         values::set_attr(result, symbols().names, new_names)?;
     }
     // GNU R keeps the class of an S4 object that extends a basic type, such as
@@ -3917,6 +3915,43 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// Which element of `x` each element of `rep`'s result repeats, before `each` is applied:
+/// `Cycle` recycles the `each`-expanded elements to `total`, and `Counts` repeats each of them
+/// its own number of times.
+enum RepPlan {
+    Cycle { total: usize },
+    Counts { counts: Vec<usize>, total: usize },
+}
+
+/// GNU R's `R_XLEN_T_MAX`: `rep` reports a longer result as an invalid `times`, before any
+/// allocation is attempted.
+const LONGEST_REPETITION: usize = 1 << 52;
+
+/// `object` repeated by `plan`, where `base_count` is its length times `each`. The positions are
+/// generated as they are gathered, because a position list costs eight bytes per result element,
+/// twice an integer result's own size.
+unsafe fn select_repeated(object: Sexp, plan: &RepPlan, base_count: usize, each: usize) -> R<Sexp> {
+    match plan {
+        RepPlan::Cycle { total } => {
+            let positions = (0..*total).map(|position| {
+                if base_count == 0 {
+                    usize::MAX
+                } else {
+                    position % base_count / each
+                }
+            });
+            crate::subset::select_positions(object, positions, *total)
+        }
+        RepPlan::Counts { counts, total } => {
+            let positions = counts
+                .iter()
+                .enumerate()
+                .flat_map(|(position, &repeat)| std::iter::repeat_n(position / each, repeat));
+            crate::subset::select_positions(object, positions, *total)
+        }
+    }
+}
+
 unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     if let Some(value) = rep_classed(call, "times", false)? {
         return Ok(value);
@@ -3930,30 +3965,38 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     }
     let times = coerce_vector(call.arg(1), SexpType::Real)?;
     let count = length(object);
-    let mut indices = Vec::new();
-    if length(times) == 1 {
+    let plan = if length(times) == 1 {
         let repeat = values::as_real_scalar(times);
         if repeat.is_nan() || repeat < 0.0 {
             return Err(call.error("invalid 'times' value"));
         }
-        if let Some(total) = count.checked_mul(repeat as usize)
-            && let Some(result) = repeat_plain(object, total)?
-        {
+        let total = count
+            .checked_mul(repeat as usize)
+            .filter(|&total| total <= LONGEST_REPETITION)
+            .ok_or_else(|| call.error("invalid 'times' value"))?;
+        if let Some(result) = repeat_plain(object, total)? {
             return keep_factor(object, result);
         }
-        for _ in 0..repeat as usize {
-            indices.extend(0..count);
-        }
+        RepPlan::Cycle { total }
     } else if length(times) == count {
+        let mut counts = Vec::with_capacity(count);
+        let mut total = 0usize;
         for index in 0..count {
-            for _ in 0..crate::subset::numeric_element(times, index) as usize {
-                indices.push(index);
+            let repeat = crate::subset::numeric_element(times, index);
+            if repeat.is_nan() || repeat < 0.0 {
+                return Err(call.error("invalid 'times' value"));
             }
+            total = total
+                .checked_add(repeat as usize)
+                .filter(|&total| total <= LONGEST_REPETITION)
+                .ok_or_else(|| call.error("invalid 'times' value"))?;
+            counts.push(repeat as usize);
         }
+        RepPlan::Counts { counts, total }
     } else {
         return Err(call.error("invalid 'times' value"));
-    }
-    keep_factor(object, crate::subset::select_elements(object, &indices)?)
+    };
+    keep_factor(object, select_repeated(object, &plan, count, 1)?)
 }
 
 /// GNU R's `isVector`, the objects `rep` and `rep_len` replicate.
@@ -4009,16 +4052,8 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     {
         return keep_factor(object, result);
     }
-    let indices: Vec<usize> = (0..out as usize)
-        .map(|position| {
-            if count == 0 {
-                usize::MAX
-            } else {
-                position % count
-            }
-        })
-        .collect();
-    keep_factor(object, crate::subset::select_elements(object, &indices)?)
+    let plan = RepPlan::Cycle { total: out as usize };
+    keep_factor(object, select_repeated(object, &plan, count, 1)?)
 }
 
 /// Whether `rep` can repeat `object`: GNU R's vectors and `NULL`, so a function or an S4

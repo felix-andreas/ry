@@ -1,0 +1,21 @@
+[stdout]
+| [1] 30 40 50
+| [1] 20 30 40 50
+| [1] 10 20 30 40
+| numeric(0)
+| numeric(0)
+| [1] 20 30 40 50
+| [1] "a" "b" "d" "e"
+| List of 2
+|  $ : num 1
+|  $ : logi TRUE
+| [1] 20 30 40 50
+| integer(0)
+| [1] "only 0's may be mixed with negative subscripts"
+| numeric(0)
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| numeric(0)

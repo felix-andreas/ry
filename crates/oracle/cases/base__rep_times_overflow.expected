@@ -1,0 +1,15 @@
+[stdout]
+| [1] "invalid 'times' argument"
+| [1] "invalid 'times' value"
+| [1] "invalid 'times' argument"
+| [1] "invalid 'times' value"
+| [1] "invalid 'times' value"
+| [1] "invalid 'times' value"
+| a a b 
+| 1 1 2 
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(a = 1, a = 1, b = 2)

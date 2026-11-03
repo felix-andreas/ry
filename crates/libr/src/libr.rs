@@ -18,9 +18,10 @@
 // The runtime allocates and frees vectors at a high rate. glibc's malloc returns freed memory
 // above its trim threshold to the kernel and zeroes calloc'd memory by hand, so every fresh large
 // vector paid for page faults and a memset. The binary's allocator does not reach this library,
-// which is a separate shared object, so the library declares its own.
+// which is a separate shared object, so the library declares its own. Blocks of a megabyte and
+// more get mappings of their own, which go back to the kernel when freed (`heap::large::Mapped`).
 #[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOCATOR: heap::large::Mapped<mimalloc::MiMalloc> = heap::large::Mapped(mimalloc::MiMalloc);
 
 /// `mi_option_arena_eager_commit` and `mi_option_purge_delay` in mimalloc's `mi_option_e`, which
 /// `libmimalloc-sys` does not export as constants.
