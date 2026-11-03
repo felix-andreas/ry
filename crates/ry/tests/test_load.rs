@@ -564,11 +564,25 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
     let root = package(&[
         ("DESCRIPTION", "Package: squares\nVersion: 1.0\n"),
-        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "NAMESPACE",
+            "exportPattern(\".\")\nexportMethods(as.list, toString)\n",
+        ),
         (
             "R/a.R",
             "Sq <- setClass(\"Sq\", representation(side = \"numeric\"))\n\
-             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n",
+             setMethod(\"show\", \"Sq\", function(object) cat(\"square\", object@side, \"\\n\"))\n\
+             setMethod(\"length\", \"Sq\", function(x) 4L)\n\
+             setMethod(\"[\", \"Sq\", function(x, i, ...) x@side[i])\n\
+             setMethod(\"as.list\", \"Sq\", function(x, ...) list(side = x@side))\n\
+             setMethod(\"toString\", \"Sq\", function(x, ...) paste(\"Sq\", x@side))\n\
+             setMethod(\"initialize\", \"Sq\", function(.Object, ...) {\n\
+               .Object <- callNextMethod(.Object, ...)\n\
+               if (length(.Object@side) == 0) .Object@side <- 1\n\
+               .Object\n\
+             })\n\
+             setClassUnion(\"Shape\", \"Sq\")\n\
+             setClassUnion(\"NumOrNull\", c(\"numeric\", \"NULL\"))\n",
         ),
     ]);
     let saved = root.path().join("sq.rds");
@@ -589,17 +603,25 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
         text
     };
     load("FALSE", &format!("saveRDS(Sq(side = 3), {saved:?})"));
-    // Each probe reaches the method first through a different door: a lookup of the generic,
-    // a dispatch on an object read back from disk, which needs no class lookup, and printing.
+    // Each probe reaches the definitions first through a different door: a lookup of a
+    // generic, dispatch on an object read back from disk (which needs no class lookup) through
+    // a standard generic, a primitive, or a function the methods made generic, printing, a
+    // union, and a new object whose initializer calls the default one.
+    let read = format!("x <- readRDS({saved:?}); cat('probe: ')");
     for probe in [
-        "cat('probe:', existsMethod('show', 'Sq'), '\\n')".to_owned(),
-        format!("x <- readRDS({saved:?}); cat('probe: '); show(x)"),
+        "cat('probe:', existsMethod('show', 'Sq'), existsMethod('length', 'Sq'), '\\n')".to_owned(),
+        format!("{read}; show(x)"),
+        format!("{read}; cat(length(x), x[1], '\\n')"),
+        format!("{read}; cat(unlist(as.list(x)), toString(x), '\\n')"),
         "cat('probe: '); print(Sq(side = 2))".to_owned(),
+        "cat('probe:', extends('numeric'), is(1, 'NumOrNull'), isVirtualClass('Shape'), '\\n')"
+            .to_owned(),
+        "cat('probe:', new('Sq')@side, length(Sq(side = 5)), '\\n')".to_owned(),
     ] {
         let lazy = load("TRUE", &probe);
         let eager = load("FALSE", &probe);
         assert!(
-            lazy.contains("2 S4 definitions held back until first use"),
+            lazy.contains("8 S4 definitions held back until first use"),
             "{lazy}"
         );
         let line = |text: &str| {

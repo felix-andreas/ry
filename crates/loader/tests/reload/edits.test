@@ -193,6 +193,7 @@ source R/a.R
 bind print.money from R/a.R:1:15
 register S3 print.money as print.money
 keeps names
+affects callers print
 
 #---- a_new_s3method_directive_registers_and_a_dropped_one_unregisters
 #~~~~ before NAMESPACE
@@ -246,6 +247,7 @@ describe_widget <- function(object, ...) "description"
 source R/a.R
 bind summarise_widget from R/a.R:1:20
 keeps names
+affects callers summary
 
 #---- a_rerun_statement_writing_only_known_names_keeps_them
 #~~~~ R/a.R

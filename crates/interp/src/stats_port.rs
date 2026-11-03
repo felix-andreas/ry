@@ -20,7 +20,7 @@ use {
         coerce::coerce_vector,
         eval,
         stats::real_values,
-        stats_port_minimizer::{print_trace, Derivatives, Minimizer, Settings},
+        stats_port_minimizer::{Derivatives, Minimizer, Settings, print_trace},
         unwind::R,
         values::{self, length},
     },

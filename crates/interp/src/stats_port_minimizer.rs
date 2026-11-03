@@ -1162,10 +1162,7 @@ fn da7sst(iv: &mut Counters, v: &mut Scalars) {
                 if v.flstgd >= v.f0 {
                     At::L110
                 } else {
-                    if iv.stage < iv.stglim
-                        || nfc < iv.nfgcal + iv.stglim + 2
-                        || iv.switch != 0
-                    {
+                    if iv.stage < iv.stglim || nfc < iv.nfgcal + iv.stglim + 2 || iv.switch != 0 {
                         goodx = false;
                     }
                     iv.restor = 3;
@@ -1251,8 +1248,7 @@ fn da7sst(iv: &mut Counters, v: &mut Scalars) {
                     }
                     iv.irc = 4;
                     if v.stppar == 0.0
-                        || (v.dst0 >= 0.0
-                            && (v.dst0 < 2.0 * v.dstnrm || v.nreduc < 1.2 * v.fdif))
+                        || (v.dst0 >= 0.0 && (v.dst0 < 2.0 * v.dstnrm || v.nreduc < 1.2 * v.fdif))
                     {
                         At::L230
                     } else {
@@ -1307,8 +1303,7 @@ fn da7sst(iv: &mut Counters, v: &mut Scalars) {
                 }
                 if !(v.dst0 < 0.0) {
                     let mut i = 0;
-                    if (v.nreduc > 0.0 && v.nreduc <= emax)
-                        || (v.nreduc == 0.0 && v.preduc == 0.0)
+                    if (v.nreduc > 0.0 && v.nreduc <= emax) || (v.nreduc == 0.0 && v.preduc == 0.0)
                     {
                         i = 2;
                     }
@@ -1685,8 +1680,8 @@ fn dg7qts(
     let phimax = v.phmxfc * rad;
     let phimin = v.phmnfc * rad;
     let mut psifac = big;
-    let mut t1 = 2.0 * v.epslon
-        / (3.0 * (4.0 * (v.phmnfc + 1.0) * (KAPPA + 1.0) + KAPPA + 2.0) * rad);
+    let mut t1 =
+        2.0 * v.epslon / (3.0 * (4.0 * (v.phmnfc + 1.0) * (KAPPA + 1.0) + KAPPA + 2.0) * rad);
     if t1 < big * dmin1(rad, 1.0) {
         psifac = t1 / rad;
     }
@@ -2180,8 +2175,8 @@ fn dg7qsb(
             v.radius = rad;
             let p10 = p1;
             let ns = ds7bqn(
-                lower, upper, d, dst, ipiv, ipiv1, ipiv2, &mut kb, l, p, &mut p1, step, td, tg,
-                v, w, x, x0,
+                lower, upper, d, dst, ipiv, ipiv1, ipiv2, &mut kb, l, p, &mut p1, step, td, tg, v,
+                w, x, x0,
             );
             if ns > 0 {
                 ds7ipr(p10, ipiv1, dihdi);
@@ -2295,8 +2290,8 @@ fn ds7bqn(
                 tg[i] = t * alpha * w[i] + tg[i];
             }
         }
-        v.preduc = v.preduc
-            + t * ((1.0 - 0.5 * t) * gts + 0.5 * alpha * t * dd7tpr(&w[..*p1], &w[..*p1]));
+        v.preduc =
+            v.preduc + t * ((1.0 - 0.5 * t) * gts + 0.5 * alpha * t * dd7tpr(&w[..*p1], &w[..*p1]));
         if k == 0 {
             break;
         }
@@ -3067,7 +3062,11 @@ fn dv2nrm(x: &[f64]) -> f64 {
         if amed > 0.0 || amed.is_nan() {
             let amed = amed.sqrt();
             let asml = asml.sqrt() / ssml;
-            let (ymin, ymax) = if asml > amed { (amed, asml) } else { (asml, amed) };
+            let (ymin, ymax) = if asml > amed {
+                (amed, asml)
+            } else {
+                (asml, amed)
+            };
             (1.0, ymax * ymax * (1.0 + square(ymin / ymax)))
         } else {
             (1.0 / ssml, asml)

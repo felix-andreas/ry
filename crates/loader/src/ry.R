@@ -34,15 +34,51 @@
 .ry_run <- function(state, plan, i, keep) .Internal(ryLoaderRun(state$root, state$ns, i))
 
 # Holding back S4 definitions relies on the interpreter running them when the methods package
-# looks up one of their classes or generics, or a standard generic dispatches. A generic over an
-# existing function announces itself as it is created, which must happen at load, so a load with
-# one keeps them all eager. So does a method for another package's generic that dispatches
-# without `standardGeneric()`: a primitive or a group generic, or a function that is not yet
-# generic, which the method would turn into one.
+# looks up one of their classes or generics, or a primitive dispatches on an object of one of
+# their classes. A generic over an existing function announces itself as it is created, which
+# must happen at load, so a load with one keeps them all eager. So does a method for a group
+# generic such as `Arith`, which its members dispatch to without any lookup the interpreter
+# sees, or a method whose signature is longer than its generic's method tables, which adding
+# it would rebuild.
 .ry_may_defer_s4 <- function(state, deferred) {
   isTRUE(getOption("ry.load.lazy_s4", TRUE)) && isNamespaceLoaded("methods") &&
     !any(vapply(deferred$generics, exists, NA, envir = state$ns, mode = "function")) &&
-    all(vapply(deferred$foreign_generics, function(name) {
-      methods::is(get0(name, envir = state$ns, mode = "function"), "standardGeneric")
+    all(vapply(deferred$foreign_methods, function(method) {
+      generic <- get0(method$generic, envir = state$ns, mode = "function")
+      kind <- .ry_foreign_generic_kind(generic)
+      !is.na(kind) && (kind != "standard" || !is.na(.ry_s4_label(generic, method$signature)))
     }, NA))
+}
+
+# How a method for another package's function `definition` is reached: through a generic that
+# calls `standardGeneric()`, as `show` and `initialize` do, through a primitive's own dispatch, or
+# through the generic that `setMethod()` makes of a plain function. A group generic such as
+# `Arith` is `NA`.
+.ry_foreign_generic_kind <- function(definition) {
+  if (is.primitive(definition)) {
+    "primitive"
+  } else if (methods::is(definition, "groupGenericFunction")) {
+    NA_character_
+  } else if (methods::is(definition, "genericFunction")) {
+    "standard"
+  } else if (is.function(definition)) {
+    "implicit"
+  } else {
+    NA_character_
+  }
+}
+
+# The label under which the method tables of `generic` hold a method for `signature` (a list
+# of classes named by argument where the source names them), or `NA` when adding it would
+# lengthen every label.
+.ry_s4_label <- function(generic, signature) {
+  classes <- tryCatch(
+    methods::matchSignature(unlist(signature), generic),
+    error = function(condition) NULL
+  )
+  length <- get0(".SigLength", envir = environment(generic), inherits = FALSE, ifnotfound = 1L)
+  if (is.null(classes) || length(classes) > length) {
+    return(NA_character_)
+  }
+  paste(c(classes, rep("ANY", length - length(classes))), collapse = "#")
 }
