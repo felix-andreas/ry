@@ -14,6 +14,7 @@
 use {
     crate::{
         arith::{self, Op},
+        arrays,
         builtins::Call,
         records,
         standard_library::{arguments, err, ok, wrong},
@@ -1178,8 +1179,32 @@ pub(crate) unsafe fn str_from_r(call: &Call<'_>) -> R<Sexp> {
 /// way. Names are dropped; `NA`, a class and other attributes are refused.
 pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
     let [vector] = arguments(call, ["vector"])?;
+    if vector.is_array() {
+        return Ok(vector);
+    }
+    let vector = values::materialize(vector)?;
+    if let SexpType::Logical | SexpType::Real | SexpType::String = vector.kind() {
+        if vector.is_object() {
+            return Err(call.error(format!(
+                "`vector` has the class {}, which a ry list cannot hold; convert it with `as.vector()` first",
+                arrays::class_text(vector)
+            )));
+        }
+        // `F64`, `Bool` and `Str` share R's representation, so a vector of them without `NA` is
+        // already the packed layout their list uses: the conversion is one copy rather than one
+        // box per item. An R integer becomes a boxed `I32`, which takes the general path.
+        if let Some(position) = arrays::first_missing(vector) {
+            return Err(call.error(format!(
+                "`vector` is `NA` at position {}, which no ry value holds",
+                position + 1
+            )));
+        }
+        let copy = values::shallow_duplicate(vector)?;
+        values::clear_attributes(copy);
+        return Ok(arrays::finish(copy));
+    }
     let items = from_r_items(call, vector)?;
-    values::list_vector(&items)
+    Ok(arrays::finish(values::list_vector(&items)?))
 }
 
 unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {

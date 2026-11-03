@@ -1601,6 +1601,8 @@ fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
             "load",
             "test",
             "document",
+            "build",
+            "install",
             "debug-adapter",
             "server",
             "debug",

@@ -21,8 +21,7 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".ry_array", -1, do_array),
-    builtin("as.Array", 1, do_as_array),
-    builtin("is.Array", 1, do_is_array),
+    builtin(".ry_is_list", 1, do_is_list),
 ];
 
 /// What an Array holds, which is also what an operator or an assignment must match.
@@ -121,7 +120,7 @@ unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
     };
     if value.is_object() || length(value) != 1 {
         return Err(format!(
-            "an Array item must be a single value, not {}; convert a vector with `as.Array()`",
+            "an Array item must be a single value, not {}; convert a vector with `List.from_r()`",
             describe(value)
         ));
     }
@@ -191,51 +190,7 @@ pub unsafe fn from_items(items: &[Sexp]) -> R<Result<Sexp, String>> {
     Ok(Ok(finish(result)))
 }
 
-unsafe fn do_as_array(call: &Call<'_>) -> R<Sexp> {
-    let value = call.arg(0);
-    if value.is_array() {
-        return Ok(value);
-    }
-    let value = values::materialize(value)?;
-    if value.is_object() {
-        return Err(call.error(format!(
-            "`as.Array()` takes a plain vector, but this one has class {}; convert it with `as.vector()` first",
-            class_text(value)
-        )));
-    }
-    match value.kind() {
-        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => {
-            if let Some(position) = first_missing(value) {
-                return Err(call.error(format!(
-                    "an Array cannot hold NA, but element {} is NA",
-                    position + 1
-                )));
-            }
-        }
-        SexpType::List => {
-            for index in 0..length(value) {
-                if !is_ry_value(values::list_elt(value, index)) {
-                    return Err(call.error(format!(
-                        "`as.Array()` turns a list into an Array only when every element is a ry value, but element {} is {}; use `unlist()` for a list of single values",
-                        index + 1,
-                        describe(values::list_elt(value, index))
-                    )));
-                }
-            }
-        }
-        _ => {
-            return Err(call.error(format!(
-                "`as.Array()` takes a logical, integer, double or character vector or a list of ry values, not {}",
-                describe(value)
-            )));
-        }
-    }
-    let copy = values::shallow_duplicate(value)?;
-    values::clear_attributes(copy);
-    Ok(finish(copy))
-}
-
-unsafe fn class_text(value: Sexp) -> String {
+pub(crate) unsafe fn class_text(value: Sexp) -> String {
     values::strings(values::class_attr(value))
         .into_iter()
         .flatten()
@@ -244,7 +199,9 @@ unsafe fn class_text(value: Sexp) -> String {
         .join(", ")
 }
 
-unsafe fn do_is_array(call: &Call<'_>) -> R<Sexp> {
+/// Whether a value has the packed list layout, which tests use to observe that an operation
+/// keeps it.
+unsafe fn do_is_list(call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(call.arg(0).is_array())
 }
 

@@ -1862,17 +1862,28 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
 }
 
 /// A numeric literal: decimal, hexadecimal, or hexadecimal with a binary exponent.
-/// The R value a suffixed number such as `5i64` runs as: an integer when the type is an integer
-/// type and the value fits R's integer range, and otherwise a double.
+/// The value a suffixed number such as `5i64` runs as: an `F64` is an R double, and every other
+/// type is a native number.
 unsafe fn suffixed_number_value(text: &str) -> R<Sexp> {
-    let (number, ty) =
+    use {crate::numbers::NumberType as Native, syntax::NumberType as Suffix};
+    let (number, suffix) =
         split_number_suffix(text).ok_or_else(|| error(format!("malformed number `{text}`")))?;
-    let value = parse_number(number);
-    if ty.is_integer() && value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
-        values::scalar_integer(value as i32)
-    } else {
-        values::scalar_real(value)
-    }
+    let ty = match suffix {
+        Suffix::F64 => return values::scalar_real(parse_number(number)),
+        Suffix::I8 => Native::I8,
+        Suffix::I16 => Native::I16,
+        Suffix::I32 => Native::I32,
+        Suffix::I64 => Native::I64,
+        Suffix::I128 => Native::I128,
+        Suffix::U8 => Native::U8,
+        Suffix::U16 => Native::U16,
+        Suffix::U32 => Native::U32,
+        Suffix::U64 => Native::U64,
+        Suffix::U128 => Native::U128,
+        Suffix::F32 => Native::F32,
+        Suffix::Dec => Native::Dec,
+    };
+    crate::numbers::from_text(ty, number)
 }
 
 pub fn parse_number(text: &str) -> f64 {

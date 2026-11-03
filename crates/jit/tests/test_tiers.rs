@@ -297,34 +297,34 @@ fn seeds_agree_across_tiers() {
         ),
         // Reading Array items, which a double position past the last item cannot do.
         (
-            "x <- as.Array(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
+            "x <- List.from_r(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
             "(n = 600L)",
             false,
         ),
         (
-            "x <- as.Array(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
+            "x <- List.from_r(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
             "(n = 600L)",
             true,
         ),
         // Storing items keeps an Array an Array, through the copy a shared one needs.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], is.Array(out))",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], .ry_is_list(out))",
             "(n = 600L)",
             false,
         ),
         (
-            "a <- as.Array(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(is.Array(b), sum(b), is.Array(a), sum(a))",
+            "a <- List.from_r(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(.ry_is_list(b), sum(b), .ry_is_list(a), sum(a))",
             "(n = 600L)",
             false,
         ),
         // A missing value cannot be an item, so storing one leaves the Array to tier 0.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
             false,
         ),
         (
-            "out <- as.Array(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
             false,
         ),
@@ -637,11 +637,19 @@ fn traversals_agree_across_tiers() {
     // A library traversal whose callback inlines runs as a compiled loop. A list or an element
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
-    let definitions = "xs <- List.from_r(1:50 + 0)\nys <- List.from_r(1:50)\nflip <- 0L\n\
-                       add <- function(acc, x) acc + x\nstep <- add\n\
-                       ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
-                       sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
-                       st <- Set.from_list(List.from_r(1:20 + 0.5))";
+    // `List.from_r` turns R integers into boxed `I32`s, so the list of R integers the compiled
+    // integer loops read is written as a literal.
+    let integers = (1..=50)
+        .map(|item| format!("{item}L"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let definitions = format!(
+        "xs <- List.from_r(1:50 + 0)\nys <- [{integers}]\nflip <- 0L\n\
+         add <- function(acc, x) acc + x\nstep <- add\n\
+         ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
+         sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
+         st <- Set.from_list(List.from_r(1:20 + 0.5))"
+    );
     let cases = [
         ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
         ("List.walk(ys, 0L, function(acc, x) acc + x)", false),
@@ -761,7 +769,7 @@ fn traversals_agree_across_tiers() {
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
-        unsafe { run(definitions) };
+        unsafe { run(&definitions) };
         for (case, (body, fails)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(3_000_000 + case, body, "()") };

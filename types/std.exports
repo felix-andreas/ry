@@ -119,6 +119,7 @@ Num.acos
 Num.add
 Num.add_checked
 Num.add_saturated
+Num.add_wrap
 Num.asin
 Num.atan
 Num.bitwise_and
@@ -166,6 +167,7 @@ Num.min_i64
 Num.mul
 Num.mul_checked
 Num.mul_saturated
+Num.mul_wrap
 Num.nan_f64
 Num.neg
 Num.pi
@@ -183,6 +185,7 @@ Num.sqrt_checked
 Num.sub
 Num.sub_checked
 Num.sub_saturated
+Num.sub_wrap
 Num.tan
 Num.tau
 Num.to_dec

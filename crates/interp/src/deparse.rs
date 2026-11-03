@@ -873,10 +873,10 @@ impl Deparser {
         // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
         if count == 0 {
             match object.kind() {
-                SexpType::Integer => return self.print("as.Array(integer(0))"),
-                SexpType::Real => return self.print("as.Array(numeric(0))"),
-                SexpType::String => return self.print("as.Array(character(0))"),
-                SexpType::List => return self.print("as.Array(list())"),
+                SexpType::Integer => return self.print("List.from_r(integer(0))"),
+                SexpType::Real => return self.print("List.from_r(numeric(0))"),
+                SexpType::String => return self.print("List.from_r(character(0))"),
+                SexpType::List => return self.print("[]"),
                 _ => {}
             }
         }

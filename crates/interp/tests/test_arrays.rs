@@ -35,8 +35,8 @@ const PRINTS: &[(&str, &str)] = &[
     ("points", "[(x = 1, y = 2), (x = 3, y = 4)]\n"),
     ("[]", "[]\n"),
     ("[[1, 2], [3]]", "[[1, 2], [3]]\n"),
-    ("is.Array(xs)", "[1] TRUE\n"),
-    ("is.Array(c(1, 2, 3))", "[1] FALSE\n"),
+    (".ry_is_list(xs)", "[1] TRUE\n"),
+    (".ry_is_list(c(1, 2, 3))", "[1] FALSE\n"),
     ("typeof(xs)", "[1] \"double\"\n"),
     ("typeof(points)", "[1] \"list\"\n"),
     ("length(xs)", "[1] 3\n"),
@@ -46,23 +46,24 @@ const PRINTS: &[(&str, &str)] = &[
     ("as.vector(xs)", "[1] 1 2 3\n"),
     ("identical(as.vector(xs), c(1, 2, 3))", "[1] TRUE\n"),
     ("identical(xs, c(1, 2, 3))", "[1] FALSE\n"),
-    ("as.Array(c(4L, 5L))", "[4L, 5L]\n"),
-    ("as.Array(c(a = 1, b = 2))", "[1, 2]\n"),
-    ("as.Array(xs)", "[1, 2, 3]\n"),
-    ("as.Array(list((1,), (2,)))", "[(1,), (2,)]\n"),
+    ("List.from_r(c(4L, 5L))", "[4i32, 5i32]\n"),
+    ("List.from_r(list(1, 2))", "[1, 2]\n"),
+    ("List.from_r(c(a = 1, b = 2))", "[1, 2]\n"),
+    ("List.from_r(xs)", "[1, 2, 3]\n"),
+    ("List.from_r(list((1,), (2,)))", "[(1,), (2,)]\n"),
     (
-        "names(xs) <- c(\"a\", \"b\", \"c\"); is.Array(xs)",
+        "names(xs) <- c(\"a\", \"b\", \"c\"); .ry_is_list(xs)",
         "[1] FALSE\n",
     ),
-    ("xs <- [1, 2, 3]; is.Array(xs)", "[1] TRUE\n"),
+    ("xs <- [1, 2, 3]; .ry_is_list(xs)", "[1] TRUE\n"),
     // Operators.
     ("xs * 2", "[2, 4, 6]\n"),
     ("xs + [10, 20, 30]", "[11, 22, 33]\n"),
     // An operand that is not an item of the item type gives R's plain vector, as base R code
     // such as `str()` needs when it subtracts a vector it derived from an Array.
     ("xs - c(1, 1, 1)", "[1] 0 1 2\n"),
-    ("is.Array(xs + 1L)", "[1] FALSE\n"),
-    ("is.Array(xs + NA)", "[1] FALSE\n"),
+    (".ry_is_list(xs + 1L)", "[1] FALSE\n"),
+    (".ry_is_list(xs + NA)", "[1] FALSE\n"),
     ("-xs", "[-1, -2, -3]\n"),
     ("ns %/% 2L", "[0L, 1L, 1L]\n"),
     ("ns / 2L", "[0.5, 1, 1.5]\n"),
@@ -70,12 +71,12 @@ const PRINTS: &[(&str, &str)] = &[
     ("words == \"a\"", "[TRUE, FALSE]\n"),
     ("flags & [TRUE, TRUE, FALSE]", "[TRUE, FALSE, FALSE]\n"),
     ("!flags", "[FALSE, TRUE, FALSE]\n"),
-    ("is.Array(xs > 1)", "[1] TRUE\n"),
+    (".ry_is_list(xs > 1)", "[1] TRUE\n"),
     ("[1] == 1", "[TRUE]\n"),
-    ("is.Array(1 == 1)", "[1] FALSE\n"),
+    (".ry_is_list(1 == 1)", "[1] FALSE\n"),
     // Indexing.
     ("xs[[2]]", "[1] 2\n"),
-    ("is.Array(xs[[2]])", "[1] FALSE\n"),
+    (".ry_is_list(xs[[2]])", "[1] FALSE\n"),
     ("xs[2]", "[2]\n"),
     ("xs[[2.5]]", "[1] 2\n"),
     ("xs[2:3]", "[2, 3]\n"),
@@ -116,7 +117,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.join([[1], [2, 3]])", "[1, 2, 3]\n"),
     // R's own positions where they give no NA.
     ("xs[-1]", "[2, 3]\n"),
-    ("xs[0]", "as.Array(numeric(0))\n"),
+    ("xs[0]", "List.from_r(numeric(0))\n"),
     ("xs[c(0, 2)]", "[2]\n"),
     ("xs[-5]", "[1, 2, 3]\n"),
     // A value an Array cannot hold makes the result the plain R vector, so R code keeps working.
@@ -124,18 +125,21 @@ const PRINTS: &[(&str, &str)] = &[
     ("ys <- flags; ys[1:2] <- c(1, 2); ys", "[1] 1 2 1\n"),
     ("ys <- xs; ys[[1]] <- \"a\"; ys", "[1] \"a\" \"2\" \"3\"\n"),
     ("ys <- xs; ys[[1]] <- NA_real_; xs", "[1, 2, 3]\n"),
-    ("ys <- xs; ys[2] <- 9; is.Array(ys)", "[1] TRUE\n"),
+    ("ys <- xs; ys[2] <- 9; .ry_is_list(ys)", "[1] TRUE\n"),
     // A copy that a builtin writes into is a plain vector, never a stale Array.
-    ("ys <- xs; ys[[1]] <- NA_real_; is.Array(ys)", "[1] FALSE\n"),
+    (
+        "ys <- xs; ys[[1]] <- NA_real_; .ry_is_list(ys)",
+        "[1] FALSE\n",
+    ),
     // Only the collection argument makes a `List` result an Array.
     (
         "List.append(list(\"a\"), [1])",
         "[[1]]\n[1] \"a\"\n\n[[2]]\n[1]\n\n",
     ),
-    ("is.Array(List.single([1, 2]))", "[1] FALSE\n"),
+    (".ry_is_list(List.single([1, 2]))", "[1] FALSE\n"),
     // Empty Arrays deparse to text that rebuilds them with their item type.
-    ("deparse(words[0])", "[1] \"as.Array(character(0))\"\n"),
-    ("deparse(xs[0])", "[1] \"as.Array(numeric(0))\"\n"),
+    ("deparse(words[0])", "[1] \"List.from_r(character(0))\"\n"),
+    ("deparse(xs[0])", "[1] \"List.from_r(numeric(0))\"\n"),
 ];
 
 /// Each case's code and a fragment of the error it raises.
@@ -153,16 +157,16 @@ const ERRORS: &[(&str, &str)] = &[
     ("[NULL]", "not NULL"),
     ("[list(1)]", "not a list"),
     (
-        "as.Array(c(1, NA))",
-        "an Array cannot hold NA, but element 2 is NA",
+        "List.from_r(c(1, NA))",
+        "`vector` is `NA` at position 2, which no ry value holds",
     ),
     (
-        "as.Array(list(1, 2))",
-        "element 1 is a double vector of length 1",
+        "List.from_r(list(c(1, NA)))",
+        "`vector` is `NA` at position 2",
     ),
     (
-        "m <- 1; class(m) <- \"money\"; as.Array(m)",
-        "has class \"money\"",
+        "m <- 1; class(m) <- \"money\"; List.from_r(m)",
+        "has the class \"money\"",
     ),
     (
         "xs + [1, 2]",
@@ -296,8 +300,8 @@ fn arrays_at_runtime() {
     }
 }
 
-/// Properties of the conversions, over generated vectors of every item type: `as.Array` then
-/// `as.vector` gives back an identical R vector, `as.Array` of that vector gives back an identical
+/// Properties of the conversions, over generated vectors of every item type: `List.from_r` then
+/// `List.to_r` gives back an identical R vector, `List.from_r` of that vector gives back an identical
 /// Array, and evaluating an Array's deparse rebuilds it.
 unsafe fn round_trips() -> Vec<String> {
     // SAFETY: the interpreter is installed, and every handle comes from its heap.
@@ -330,11 +334,19 @@ unsafe fn round_trips() -> Vec<String> {
                 })
                 .collect();
             let vector = format!("c({})", items.join(", "));
+            // An R integer converts to a boxed `I32`, which the `i32` suffix writes.
+            let literals: Vec<String> = items
+                .iter()
+                .map(|item| match item.strip_suffix('L') {
+                    Some(digits) => format!("{digits}i32"),
+                    None => item.clone(),
+                })
+                .collect();
             let code = format!(
-                "v <- {vector}; a <- as.Array(v); \
-             identical(as.vector(a), v) && is.Array(a) && identical(as.Array(as.vector(a)), a) && \
-             identical(a, [{items}])",
-                items = items.join(", ")
+                "v <- {vector}; a <- List.from_r(v); \
+             identical(List.to_r(a), v) && .ry_is_list(a) && identical(List.from_r(List.to_r(a)), a) && \
+             identical(a, [{literals}])",
+                literals = literals.join(", ")
             );
             match evaluate(&code) {
                 Ok(value) if values::as_logical_scalar(value) == 1 => {}

@@ -178,7 +178,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.sum(xs)", "[1] 6\n"),
     ("List.sum(list())", "[1] 0\n"),
     (
-        "identical(List.sum(as.Array((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
+        "identical(List.sum(List.from_r((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
         "[1] TRUE\n",
     ),
     ("List.product(list(2, 2.5))", "[1] 5\n"),
@@ -1264,7 +1264,7 @@ fn declarations_and_runtime_bind_the_same_names() {
     let outside = |name: &str| {
         matches!(
             name,
-            "as.record" | "as.tuple" | "as.tag" | "as.Array" | "is.Array"
+            "as.record" | "as.tuple" | "as.tag" | ".ry_is_list"
         )
     };
     let exported: BTreeSet<String> = extension_manifest

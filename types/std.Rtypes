@@ -1346,6 +1346,30 @@ Num.sub_saturated : <T: number> fn(first: T, second: T) -> T
 #' ```
 Num.mul_saturated : <T: number> fn(first: T, second: T) -> T
 
+#' Adds two integers, wrapping around on overflow as two's complement arithmetic does.
+#'
+#' ```r dput
+#' Num.add_wrap(127i8, 1i8)
+#' #> -128i8
+#' ```
+Num.add_wrap : <T: int> fn(first: T, second: T) -> T
+
+#' Subtracts `second` from `first`, wrapping around on overflow.
+#'
+#' ```r dput
+#' Num.sub_wrap(0u8, 1u8)
+#' #> 255u8
+#' ```
+Num.sub_wrap : <T: int> fn(first: T, second: T) -> T
+
+#' Multiplies two integers, wrapping around on overflow.
+#'
+#' ```r dput
+#' Num.mul_wrap(16u8, 16u8)
+#' #> 0u8
+#' ```
+Num.mul_wrap : <T: int> fn(first: T, second: T) -> T
+
 #' The quotient as a double, or `:Err(:DivByZero)`.
 #'
 #' ```r dput

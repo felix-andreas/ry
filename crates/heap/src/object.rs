@@ -369,7 +369,7 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
-    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit lives
     /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
     /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
