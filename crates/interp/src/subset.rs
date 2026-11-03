@@ -4209,12 +4209,25 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             .collect();
         let dim = values::integer_vector(&dim_values)?;
         values::set_attr(result, symbols().dim, dim)?;
-        if dimnames != nil() {
-            let list: Vec<Sexp> = kept
-                .iter()
+        // As in GNU R's `DropDims`, the kept dimensions keep their dimnames and the names of
+        // those dimnames, unless none of the kept dimensions has any.
+        let list: Vec<Sexp> = if dimnames == nil() {
+            Vec::new()
+        } else {
+            kept.iter()
                 .map(|&dimension| dimnames.element(dimension))
-                .collect();
+                .collect()
+        };
+        if list.iter().any(|names| *names != nil()) {
             let list = values::list_vector(&list)?;
+            let dimension_names = get_attr(dimnames, symbols().names);
+            if dimension_names != nil() {
+                let kept_names = alloc(SexpType::String, kept.len())?;
+                for (index, &dimension) in kept.iter().enumerate() {
+                    crate::heap().set_element(kept_names, index, dimension_names.element(dimension));
+                }
+                values::set_attr(list, symbols().names, kept_names)?;
+            }
             values::set_attr(result, symbols().dimnames, list)?;
         }
     } else if dimnames != nil() {
