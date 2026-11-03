@@ -190,6 +190,8 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   warning handlers, and the traceback.
 - **`dispatch.rs`**: S3 dispatch (`UseMethod`, `NextMethod`, group and internal generics) and the
   hooks S4 dispatch uses. **`methods.rs`**: the methods package's native routines and S4 dispatch.
+  **`methods_core.rs`** with **`methods_core.R`**: the native core of the methods package, which
+  runs `new()`, the default `initialize()`, `validObject()`, `is()` and `extends()` in Rust.
 - **`envir.rs`**: environments, the `sys.*` functions, options, namespaces and the apply family.
 - **`builtins.rs`**: the builtin registry (`BuiltinDef`, `Call`) and argument matching for
   builtins. **`values.rs`**: object constructors and accessors the rest of the crate shares, and

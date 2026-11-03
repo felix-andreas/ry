@@ -48,6 +48,35 @@ The quality bar is four things.
 
 - **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
 
+## Open: native methods core
+
+The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
+methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
+`initialize()`, `validObject()`, `is()` and `extends()` are native when nothing observable would
+differ. Remaining, in the order the cold first-`new()` profile of `target/s4heavy` ranks them:
+
+- `setMethod`: `asMethodDefinition` and `new("MethodDefinition")`, `matchSignature`,
+  `isSealedMethod` (which calls `getMethod`), `.cacheMethodInTable`, `.addToMetaTable`, and
+  `.resetInheritedMethods`, which rescans the whole table on every call and so makes a package's
+  method definitions quadratic.
+- `setClass`, `setClassUnion`, `setIs` and `completeClassDefinition`; then `setGeneric`, `setAs`
+  and `setValidity`.
+- `cacheMetaData` and `.checkGroupSigLength` (the import cost, see "Start-up and imports are the
+  floor of a warm `ry load`" below).
+- `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
+  `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
+  union member, a subclass), which costs about 200 µs per `new()` (`new("Holder", value = "a",
+  point = q, n = 2L)` in the micro-benchmark below).
+- Inherited dispatch (`.findInheritedMethods`), `getMethod`, `selectMethod` and `existsMethod`.
+- The differential coverage: the methods package's own tests and the S4-heavy corpus (Matrix)
+  against GNU R for every function that turns native.
+- Then decide whether the S4 metadata cache survives native definitions. If it does, make it
+  incremental on reload (one changed definition today reruns the whole unit, about 6 to 10 s).
+
+Micro-benchmarks (release, per call): `new()` with three same-class slots 13.7 µs (GNU R 130 µs,
+ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 µs (GNU R 11.8 µs),
+`extends("Point3", "Point")` 2.1 µs (GNU R 6.7 µs).
+
 ## Open: collector throughput on the benchmark suites
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").

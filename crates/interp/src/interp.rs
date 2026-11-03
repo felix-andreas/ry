@@ -58,6 +58,7 @@ pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
 mod makeconf;
 pub mod methods;
+pub mod methods_core;
 pub mod moves;
 pub mod native;
 pub mod parallel;

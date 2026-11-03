@@ -7327,3 +7327,39 @@ Each one trades a narrow class of missed errors for a class of false reports see
   with identical output required, plus `RY_FORCE_GUESS_FAIL`, `RY_CHECK_FACTS` and an empty-pool
   leak check (from Bun's compiler, `prior-art.md`). `ry check --explain` reports slow paths worst
   first by loop depth.
+
+## The methods package's core runs natively behind hash-guarded prologues
+
+- **Previous shape.** Every S4 operation ran GNU R's methods R code on ry's interpreter, with only
+  the C routines (`methods.rs`) native. A cold first `new()` on the generated S4 package
+  (2,892 definitions) spent about 7.7 s running definitions, and `new()` itself cost about 180 µs
+  per call against GNU R's 130 µs.
+- **Target shape.** The methods package's core is Rust (`crates/interp/src/methods_core.rs`), and
+  the package's R code and metadata objects stay as they are: classRepresentation objects, the
+  `.__C__` and `.__T__` tables, generic objects, `MethodDefinition`, `.SigLength` and the method
+  tables. Those objects remain the single source of truth, and the core reads and writes them
+  directly, so there is no native mirror to drift and saved RDS objects, `methods:::` callers,
+  Reference Classes and the S4 cache keep working.
+- **Mechanism.** `R_initMethodDispatch` (methods' `.onLoad`) calls `install_fast_paths`, which, for
+  each function named in `methods_core.R`, compares a stable hash of the formals and body with
+  `FAST_PATHS` and on a match rewrites the body to `{ prologue; original body }`. The prologue calls
+  an `.Internal` that either does the whole job and returns, or returns without observable effect.
+  A hash mismatch (another GNU R version) leaves the function as it is, so the core can never
+  apply to code it was not written against. Patching the closure in place, instead of replacing the
+  binding, reaches every copy that holds the same closure; the default `initialize` method has four
+  separate copies, and all are patched. A preloaded base image carries the patched closures.
+- **Exactness rules.** A fast path reads promises only when forcing them runs no code
+  (`quiet_value`), bails before any effect wherever R code could observe the work (validity
+  functions, `as()` caching coerce methods, user `initialize` methods, `.Data` and `.S3Class`
+  slots, list entries in the class table), and evaluates the calls that may signal in the R
+  function's frame, so condition calls and `sys.calls()` match GNU R. Known difference: when a fast
+  path completes, the R function's frame-local temporaries are not bound; only code that inspects
+  that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
+  calls) could see it.
+- **Order.** Object creation and class queries came first because they are the run-time hot path
+  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). The
+  definition functions (`setMethod`, `setClass`, `cacheMetaData`) follow (`backlog.md`, "Open:
+  native methods core"). Whether the S4 metadata cache survives is decided once they are native.
+- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
+  94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
+  functions, including their error messages and calls, against GNU R.

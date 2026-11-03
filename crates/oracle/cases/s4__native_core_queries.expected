@@ -1,0 +1,85 @@
+[stdout]
+| [1] 1
+| [1] 2
+| [1] "someS3"
+| [1] 3
+| NULL
+| [1] "Point3"
+| attr(,"package")
+| [1] ".GlobalEnv"
+| [1] 1
+| [1] "invalid class “Holder” object: invalid object for slot \"n\" in class \"Holder\": got class \"numeric\", should be or extend class \"integer\""
+| [1] "invalid class “Holder” object: invalid object for slot \"value\" in class \"Holder\": got class \"logical\", should be or extend class \"NumOrChar\""
+| [1] "invalid class “Point” object: invalid object for slot \"x\" in class \"Point\": got class \"character\", should be or extend class \"numeric\""
+| [1] "invalid name for slot of class “Point”: nope"
+| [1] "duplicated slot names: ‘x’"
+| [1] "trying to generate an object from a virtual class (\"Abstract\")"
+| [1] "“NoSuchClass” is not a defined class"
+| [1] "initialize(value, ...)"
+| [1] "validObject(.Object)"
+| [1] "invalid class “Checked” object: n must be a scalar"
+| [1] "invalid class “CheckedChild” object: negative m, called from isTRUE(x)"
+| [1] 2
+| [1] "ABC"
+| [1] "NONE"
+| [1] 5
+| [1] 1 2 3
+| [1] 4
+| [1] "'initialize' method returned an object of class “Point3” instead of the required class “Point”"
+| [1] 9
+| [1] "n must be a scalar"
+| [1] "invalid class “Checked” object: n must be a scalar"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] "slots in class definition but not in object: \"y\""
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] "Point"
+| [1] "numeric"   "vector"    "NumOrChar"
+| [1] "length(class2) == 1L is not TRUE"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 1
+| [1] TRUE
+| [1] TRUE
+| [1] "Point3" "Point" 
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] "Checked"      "CheckedChild" "Holder"       "Point"        "Point3"      
+| [6] "Tagged"      
+| [1] "character#NumOrChar" "numeric#NumOrChar"   "Point3#Point"       
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("character#NumOrChar", "numeric#NumOrChar", "Point3#Point")

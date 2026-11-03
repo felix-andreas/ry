@@ -692,37 +692,42 @@ unsafe fn external_pointer_prototype(_call: &NativeCall<'_>) -> R<Sexp> {
 /// definition passed in is returned as it is.
 unsafe fn class_from_cache(call: &NativeCall<'_>) -> R<Sexp> {
     let (class, table) = (call.arg(0), call.arg(1));
-    match class.kind() {
-        SexpType::String => {
-            if length(class) == 0 {
-                return Ok(nil());
-            }
-            let symbol = values::install_charsxp(class.element(0))?;
-            let mut value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
-            if value == unbound() && force_deferred(class.element(0).bytes(), Lookup::Class)? {
-                value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
-            }
-            if value == unbound() {
-                return Ok(nil());
-            }
-            let package_symbol = values::install("package")?;
-            let package = values::get_attr(class, package_symbol);
-            if package.kind() == SexpType::String && length(package) > 0 {
-                let defined_package = values::get_attr(value, package_symbol);
-                if defined_package.kind() == SexpType::String
-                    && length(defined_package) == 1
-                    && defined_package.element(0).bytes() != package.element(0).bytes()
-                {
-                    return Ok(nil());
-                }
-            }
-            Ok(value)
-        }
-        _ if class.has_gp(gp::S4_OBJECT) => Ok(class),
-        _ => {
-            Err(call.error("class should be either a character-string name or a class definition"))
+    if class.kind() != SexpType::String && !class.has_gp(gp::S4_OBJECT) {
+        return Err(
+            call.error("class should be either a character-string name or a class definition")
+        );
+    }
+    cached_class_definition(class, table)
+}
+
+/// What `R_getClassFromCache(class, table)` returns for a string `class` or a class definition.
+pub(crate) unsafe fn cached_class_definition(class: Sexp, table: Sexp) -> R<Sexp> {
+    if class.kind() != SexpType::String {
+        return Ok(class);
+    }
+    if length(class) == 0 {
+        return Ok(nil());
+    }
+    let symbol = values::install_charsxp(class.element(0))?;
+    let mut value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
+    if value == unbound() && force_deferred(class.element(0).bytes(), Lookup::Class)? {
+        value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
+    }
+    if value == unbound() {
+        return Ok(nil());
+    }
+    let package_symbol = values::install("package")?;
+    let package = values::get_attr(class, package_symbol);
+    if package.kind() == SexpType::String && length(package) > 0 {
+        let defined_package = values::get_attr(value, package_symbol);
+        if defined_package.kind() == SexpType::String
+            && length(defined_package) == 1
+            && defined_package.element(0).bytes() != package.element(0).bytes()
+        {
+            return Ok(nil());
         }
     }
+    Ok(value)
 }
 
 unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
@@ -857,6 +862,9 @@ unsafe fn init_method_dispatch(call: &NativeCall<'_>) -> R<Sexp> {
         globals.methods_namespace = namespace;
     }
     globals.methods_dispatch = true;
+    if namespace.kind() == SexpType::Environment {
+        crate::methods_core::install_fast_paths(namespace)?;
+    }
     Ok(namespace)
 }
 

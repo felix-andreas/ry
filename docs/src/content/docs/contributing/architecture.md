@@ -467,6 +467,16 @@ read only S4 constructors and their own names, the loader gives the unit a cache
 (`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
 saved instead of running the definitions.
 
+Running the definitions and using the classes goes through the methods package's native core
+(`crates/interp/src/methods_core.rs`). The methods package keeps GNU R's R code and its metadata
+objects (class representations, the `.__C__` and `.__T__` tables, the method tables), which stay the
+only source of truth; the core reads and writes those same objects. When the methods namespace
+loads, `install_fast_paths` puts a native prologue from `methods_core.R` in front of the body of each
+function it covers, but only if the function's hash matches the GNU R version the prologue was
+written against. A prologue either does the function's whole work, with the same result and
+effects, or returns without observable effect and lets GNU R's body run, so a case the core does
+not handle stays exact.
+
 ### Diagnostics
 
 Diagnostics come in two layers over one source of truth:

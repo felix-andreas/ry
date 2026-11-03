@@ -145,11 +145,11 @@ unsafe fn install_register_s3_methods() -> R<()> {
     eval::define(symbol, replacement, base_namespace())
 }
 
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// An FNV-1a hash of code that is the same in every process, unlike a hash of object addresses:
 /// symbols and strings contribute their text, and attributes such as srcrefs are left out.
-unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
+pub(crate) unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
     let mut mix = |bytes: &[u8]| {
         for &byte in bytes {
             *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
