@@ -217,6 +217,17 @@ If the user says:
 - Do not optimize for the smallest safe fix. Bring the area you touch to its intended shape: remove dead paths and temporary seams, and pay down the nearby debt the code needs to stay coherent. You are responsible for code quality, not only for delivering the feature.
 - Avoid helper-function indirection for logic that is used once and gains no testability or readability from the extraction. Inline a small one-off solution unless that would duplicate a lot of code.
 
+# Performance principles (user directive)
+
+Apply these when writing or optimizing code in the analysis core, the runtime, the GC and the JIT.
+
+- **Redesign before you tune.** Ask how to rewrite the code to use data-oriented design, not how to make the current shape a little faster.
+- **Use flat arrays, not hash tables, wherever the keys can be numbered densely.** Make references indices into those arrays, not pointers, and pack the most often read data (a kind, a tag, a small length) into the spare upper bits of the index.
+- **Caching is a sign of a slow design.** Do not add a cache: redesign the code so the fast path needs none, and delete an existing cache once a redesign makes it unnecessary. Two mechanisms are not caches in this sense, because they are the design: salsa memoization, which is how incremental analysis works, and the JIT's inline caches and type feedback, which drive speculation.
+- **Prefer a struct of arrays to an array of structs** when hot loops read only a few fields of each item.
+- **Keep small lists on the stack.** A list that is usually short gets inline capacity on the stack (a `SmallVec`-style type) instead of a heap allocation.
+- **Use a bitset, not an array of bools.**
+
 # Design bar
 
 - Aim for world-class implementation quality, not merely passing behavior.
