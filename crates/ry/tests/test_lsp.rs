@@ -1298,7 +1298,7 @@ fn any_save_republishes_documents_that_an_edit_elsewhere_changed() {
                 Outgoing::PublishDiagnostics(params) if params.uri == analysis => Some(params),
                 _ => None,
             })
-            .last()
+            .next_back()
             .map(|params| {
                 messages(params)
                     .iter()

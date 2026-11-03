@@ -6,6 +6,8 @@
 //! `lm()` reads the pivot order and rank, so those must agree exactly, including for columns
 //! that sit right at the tolerance. The decomposition itself agrees to rounding.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

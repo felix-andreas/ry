@@ -296,8 +296,11 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
         "stats" => &[crate::stats::ROUTINES, crate::distributions::ROUTINES],
         "utils" => &[crate::utils::ROUTINES],
         "tools" => &[crate::tools::ROUTINES],
-        #[cfg(unix)]
-        "parallel" => &[crate::parallel::ROUTINES],
+        "parallel" => &[
+            crate::parallel::ROUTINES,
+            #[cfg(unix)]
+            crate::fork::ROUTINES,
+        ],
         "grDevices" => &[crate::graphics::GRDEVICES_ROUTINES],
         "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],
         _ => &[],
@@ -327,7 +330,7 @@ fn implementation_of(routine: &'static Routine) -> Option<NativeFn> {
 /// The position of `routine` in `routines()`, if it is one of its entries.
 fn routine_index(routine: *const Routine) -> Option<usize> {
     let mut offset = 0;
-    for table in [ROUTINES, if cfg!(windows) { WINDOWS_ROUTINES } else { &[] }] {
+    for table in [ROUTINES, PLATFORM_ROUTINES] {
         let range = table.as_ptr_range();
         if range.contains(&routine) {
             // In range of a slice of `Routine`s, so the byte distance is a whole number of them.
@@ -424,9 +427,40 @@ type Routine = (&'static str, RoutineKind, &'static str, i32);
 
 /// The routines the default packages register on this platform.
 fn routines() -> impl Iterator<Item = &'static Routine> {
-    let windows: &'static [Routine] = if cfg!(windows) { WINDOWS_ROUTINES } else { &[] };
-    ROUTINES.iter().chain(windows)
+    ROUTINES.iter().chain(PLATFORM_ROUTINES)
 }
+
+/// The routines only this platform's GNU R registers, beside [`ROUTINES`].
+const PLATFORM_ROUTINES: &[Routine] = if cfg!(windows) {
+    WINDOWS_ROUTINES
+} else {
+    UNIX_ROUTINES
+};
+
+/// The routines only GNU R for Unix registers: `parallel`'s fork interface. Windows has no
+/// `fork`, so GNU R for Windows neither registers them nor calls them from its `parallel` R code.
+const UNIX_ROUTINES: &[Routine] = &[
+    ("parallel", RoutineKind::Call, "mc_children", 0),
+    ("parallel", RoutineKind::Call, "mc_close_fds", 1),
+    ("parallel", RoutineKind::Call, "mc_close_stderr", 1),
+    ("parallel", RoutineKind::Call, "mc_close_stdout", 1),
+    ("parallel", RoutineKind::Call, "mc_exit", 1),
+    ("parallel", RoutineKind::Call, "mc_fds", 1),
+    ("parallel", RoutineKind::Call, "mc_fork", 1),
+    ("parallel", RoutineKind::Call, "mc_is_child", 0),
+    ("parallel", RoutineKind::Call, "mc_kill", 2),
+    ("parallel", RoutineKind::Call, "mc_master_fd", 0),
+    ("parallel", RoutineKind::Call, "mc_read_child", 1),
+    ("parallel", RoutineKind::Call, "mc_read_children", 1),
+    ("parallel", RoutineKind::Call, "mc_rm_child", 1),
+    ("parallel", RoutineKind::Call, "mc_send_master", 1),
+    ("parallel", RoutineKind::Call, "mc_select_children", 2),
+    ("parallel", RoutineKind::Call, "mc_send_child_stdin", 2),
+    ("parallel", RoutineKind::Call, "mc_affinity", 1),
+    ("parallel", RoutineKind::Call, "mc_interactive", 1),
+    ("parallel", RoutineKind::Call, "mc_cleanup", 3),
+    ("parallel", RoutineKind::Call, "mc_prepare_cleanup", 0),
+];
 
 /// The routines only GNU R for Windows registers. Its `utils` and `grDevices` R code refers to
 /// them, so they must exist for those namespaces to load there; the ones without an
@@ -470,26 +504,6 @@ const WINDOWS_ROUTINES: &[Routine] = &[
 const ROUTINES: &[Routine] = &[
     ("parallel", RoutineKind::Call, "nextStream", 1),
     ("parallel", RoutineKind::Call, "nextSubStream", 1),
-    ("parallel", RoutineKind::Call, "mc_children", 0),
-    ("parallel", RoutineKind::Call, "mc_close_fds", 1),
-    ("parallel", RoutineKind::Call, "mc_close_stderr", 1),
-    ("parallel", RoutineKind::Call, "mc_close_stdout", 1),
-    ("parallel", RoutineKind::Call, "mc_exit", 1),
-    ("parallel", RoutineKind::Call, "mc_fds", 1),
-    ("parallel", RoutineKind::Call, "mc_fork", 1),
-    ("parallel", RoutineKind::Call, "mc_is_child", 0),
-    ("parallel", RoutineKind::Call, "mc_kill", 2),
-    ("parallel", RoutineKind::Call, "mc_master_fd", 0),
-    ("parallel", RoutineKind::Call, "mc_read_child", 1),
-    ("parallel", RoutineKind::Call, "mc_read_children", 1),
-    ("parallel", RoutineKind::Call, "mc_rm_child", 1),
-    ("parallel", RoutineKind::Call, "mc_send_master", 1),
-    ("parallel", RoutineKind::Call, "mc_select_children", 2),
-    ("parallel", RoutineKind::Call, "mc_send_child_stdin", 2),
-    ("parallel", RoutineKind::Call, "mc_affinity", 1),
-    ("parallel", RoutineKind::Call, "mc_interactive", 1),
-    ("parallel", RoutineKind::Call, "mc_cleanup", 3),
-    ("parallel", RoutineKind::Call, "mc_prepare_cleanup", 0),
     ("methods", RoutineKind::Call, "R_M_setPrimitiveMethods", 5),
     ("methods", RoutineKind::Call, "R_clear_method_selection", 0),
     ("methods", RoutineKind::Call, "R_dummy_extern_place", 0),

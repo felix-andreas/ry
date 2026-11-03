@@ -2,6 +2,8 @@
 //! purpose-written `rytest`, called through `.Call` with correct results, including under
 //! collection stress, with PROTECT imbalance, and with errors unwinding through native frames.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

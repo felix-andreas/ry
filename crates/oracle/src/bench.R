@@ -53,6 +53,10 @@ local({
     text
   }
 
+  # The `<total>` line's value is the elapsed time the collector took during the run, which
+  # `gc.time()` measures the same way under both runtimes.
+  gc.time(TRUE)
+  collecting <- gc.time()[[3L]]
   started <- proc.time()[["elapsed"]]
   status <- tryCatch(
     {
@@ -152,6 +156,6 @@ local({
     )
     if (!is.null(outcome)) emit(file, "<file>", "error", 0L, paste("error:", outcome), "", proc.time()[["elapsed"]] - began)
   }
-  emit("<total>", "<total>", "pass", 0L, character(), "", proc.time()[["elapsed"]] - started)
+  emit("<total>", "<total>", "pass", 0L, character(), sprintf("%.6f", gc.time()[[3L]] - collecting), proc.time()[["elapsed"]] - started)
   close(connection)
 })

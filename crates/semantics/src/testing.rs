@@ -3,8 +3,8 @@
 
 use {
     crate::{
-        AnalysisSettings, Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
-        SpliceCache, binds_only_own_name,
+        AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase,
+        SourceFile, SpliceCache, binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
         item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
@@ -14,6 +14,7 @@ use {
     salsa::{Setter as _, plumbing::AsId as _},
     std::{
         cell::RefCell,
+        collections::BTreeMap,
         mem,
         sync::{Arc, Mutex},
     },
@@ -160,6 +161,20 @@ pub fn with_fixture_project<R>(
     files: Vec<(String, DocumentKind)>,
     render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
 ) -> R {
+    with_fixture_data_project(files, Vec::new(), render)
+}
+
+/// [`with_fixture_project`] with the project's data files, each a path and its text, sniffed as
+/// a host sniffs a project's `.csv` files.
+pub fn with_fixture_data_project<R>(
+    files: Vec<(String, DocumentKind)>,
+    data_files: Vec<(String, String)>,
+    render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
+) -> R {
+    let layouts: BTreeMap<String, sniff::Layout> = data_files
+        .into_iter()
+        .map(|(path, text)| (path, sniff::sniff_head(text.as_bytes())))
+        .collect();
     FIXTURE_DATABASE.with_borrow_mut(|slot| {
         let db = slot.get_or_insert_with(|| {
             let db = RootDatabase::default();
@@ -184,6 +199,16 @@ pub fn with_fixture_project<R>(
             }
             None => {
                 ProjectFiles::new(db, sources.clone());
+            }
+        }
+        match DataFiles::try_get(db) {
+            Some(data) if *data.layouts(db) != layouts => {
+                data.set_layouts(db).to(layouts);
+            }
+            Some(_) => {}
+            None if layouts.is_empty() => {}
+            None => {
+                DataFiles::new(db, layouts);
             }
         }
         render(db, &sources)

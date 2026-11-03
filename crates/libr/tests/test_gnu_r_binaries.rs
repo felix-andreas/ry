@@ -2,6 +2,8 @@
 //! R's `-lR`, load into ry's `libR` and run. This is the ABI promise: prebuilt binaries work.
 //! `RY_SKIP_GNU_R=1` skips these on a machine without R.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {harness::*, std::process::Command};

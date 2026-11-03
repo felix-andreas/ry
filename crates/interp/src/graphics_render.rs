@@ -4454,6 +4454,10 @@ unsafe extern "C" fn device_text(
     );
 }
 
+// The metrics below are extracted and reformatted from Adobe's Core 14 AFM files (Helvetica.afm),
+// Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated. All Rights Reserved.
+// Adobe's terms for those files are in THIRD_PARTY_NOTICES at the repository root.
+
 /// The top of each character from space to `~` in Helvetica, in thousandths of an em above the
 /// baseline (the AFM bounding box's top).
 const HELVETICA_ASCENTS: [i16; 95] = [

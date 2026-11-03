@@ -482,13 +482,11 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
         }
         let staging = directory.join(format!(".{}.{}", file.name, rcmd::staging_suffix()));
         let bytes = zstd::decode_all(file.compressed).map_err(|error| failed(&path, error))?;
-        let written = fs::write(&staging, &bytes).and_then(|()| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
-            }
-            Ok(())
+        let written = fs::write(&staging, &bytes);
+        #[cfg(unix)]
+        let written = written.and_then(|()| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
         });
         if let Err(error) = written {
             // A partial file, say from a full disk, would otherwise stay in the cache for good.

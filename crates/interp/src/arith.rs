@@ -1,3 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/main/complex.c (complex_asin, complex_acos, complex_atan)
+//     Copyright (C) 2000-2022 The R Core Team
+//     Copyright (C) 2005 The R Foundation
+//     Copyright (C) 1995-1997 Robert Gentleman and Ross Ihaka
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! Arithmetic, comparison and logic operators, the `Math` and `Summary` groups, NA tests,
 //! sequences and repetition.
 

@@ -34,9 +34,9 @@ native_path() {
 if version=$("$ry" --version); then pass "ry --version: $version"; else fail "ry --version"; fi
 
 # The runtime and the R front end are built into `ry`, which extracts the runtime on first use.
-contents=$(cd "$scratch/install" && ls | tr '\n' ' ')
+contents=$(cd "$scratch/install" && LC_ALL=C ls | tr '\n' ' ')
 case "$contents" in
-"LICENSE ry " | "LICENSE ry.exe ") pass "the archive holds ry alone" ;;
+"LICENSE THIRD_PARTY_NOTICES ry " | "LICENSE THIRD_PARTY_NOTICES ry.exe ") pass "the archive holds ry alone" ;;
 *) fail "the archive holds more than ry: $contents" ;;
 esac
 XDG_CACHE_HOME=$(native_path "$scratch/cache")

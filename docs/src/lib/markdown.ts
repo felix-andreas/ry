@@ -4,6 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
+import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkTableMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -94,9 +95,22 @@ function bodyToMarkdown(body: string): string {
       push(`${'#'.repeat(Math.min(headingLevel + 1, 6))} ${tab[1]}`, false);
       continue;
     }
-    if (/^<\/?(Tabs|TabItem|figure)\b/.test(line) || line.startsWith('import ')) continue;
+    if (/^<\/?(Tabs|TabItem|figure|details|summary)\b/.test(line) || line.startsWith('import ')) continue;
     if (/^<Venn\b/.test(line.trim())) {
       push(`Diagram: ${vennDescription()}`, false);
+      continue;
+    }
+    const table = /^<BenchmarkTable\b(?:\s+programs=\{(\[[^\]]*\])\})?/.exec(line.trim());
+    if (table) {
+      push(benchmarkTableMarkdown(table[1] === undefined ? undefined : JSON.parse(table[1])), false);
+      continue;
+    }
+    if (/^<BenchmarkPrograms\b/.test(line.trim())) {
+      push(benchmarkProgramsMarkdown(headingLevel + 1), false);
+      continue;
+    }
+    if (/^<BenchmarkMachine\b/.test(line.trim())) {
+      push(`Measured on ${benchmarkMachine}.`, false);
       continue;
     }
 

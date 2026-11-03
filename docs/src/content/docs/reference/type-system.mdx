@@ -718,7 +718,7 @@ the nominal identity.
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
 `factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
-`@type NAME` (see [stubs](/type-checking/stubs)). For these types:
+`@type NAME` (see [stubs](/type-checking/unknown#package-stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
   commonly support access that depends on values.
@@ -2844,7 +2844,7 @@ scoping.
 
 - A namespace is *known* when stubs declare it. The shipped standard-library packages are known, and
   so is any namespace a project stub file declares: `stubs/dplyr.Rtypes` declares the namespace
-  `dplyr` (see [stubs](/type-checking/stubs)).
+  `dplyr` (see [stubs](/type-checking/unknown#package-stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
@@ -3336,7 +3336,7 @@ expression built from `col("x")`:
 | `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
 | `DataFrame.join_asof(df, other, on, by)` | as a left join on the `by` columns and then `on` |
 | `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
-| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
+| `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)); with `strings_as_factors = TRUE`, text columns are `factor` |
 
 Every `LazyFrame.` verb types like its `DataFrame.` namesake and returns a `LazyFrame`.
 
@@ -3400,7 +3400,11 @@ type-mismatch
 The engine compares an `integer` with a string by formatting the number, as R does, so that
 comparison runs, but it is still an error here: a schema that puts text against a number almost
 always means the wrong column. The rules check only operands of known type, so an expression over
-a frame whose columns are unknown is never an error.
+a frame whose columns are unknown is never an error. In strict mode, a verb that names a column of
+such a frame, with a string or `col("x")`, is an error on the verb's subject. A chain is
+reported once, at its first step that names a column: a later step is not reported again, while a
+step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
+hides a report.
 
 #### data.table queries
 
@@ -3698,7 +3702,8 @@ cheap <- prices[prce < 10]           # warning: the frame `prices` has no column
 `select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
 path, a file the project does not have, and any other argument that changes the columns (such as
 `colClasses` or `skip`) give a `data.table` with unknown columns. `DataFrame.read_csv` and
-`LazyFrame.scan_csv` sniff their file the same way.
+`LazyFrame.scan_csv` sniff their file the same way and give a `DataFrame` or `LazyFrame`, and
+`read_csv`'s `strings_as_factors` must be a literal `TRUE` or `FALSE` for the columns to be known.
 
 The other functions follow data.table's rules:
 
@@ -3853,7 +3858,7 @@ exception, because the fallback marks a call the declarations could not describe
 
 Strict mode also reports each read that the
 [attached-package tolerance](#package-imports-namespace-and-description) silenced, and points at the
-[stub](/type-checking/stubs) that would make it checkable. Without that, a clean run after
+[stub](/type-checking/unknown#package-stubs) that would make it checkable. Without that, a clean run after
 `library(unknownpkg)` would look the same as a run that checked nothing.
 
 ### Unresolved references escalate to errors

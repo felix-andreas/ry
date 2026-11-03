@@ -7,7 +7,7 @@ These are working documents, not contracts. They describe what ry *might* do, wh
 undecided, and why, so read them for their reasoning, not as a description of current behavior.
 Where a draft disagrees with the rest of the documentation, the rest of the documentation is right:
 the typing contract is the [type system reference](/reference/type-system/), and
-[limitations](/type-checking/limitations/) lists what the checker cannot do yet.
+[limitations](/type-checking/unknown#limitations) lists what the checker cannot do yet.
 
 The drafts are left out of the sidebar, so this page is the way in. A draft leaves this folder when
 its design is built and graduates into the reference pages, or stays here as the record of why it

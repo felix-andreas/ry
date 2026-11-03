@@ -41,6 +41,8 @@ pub mod dispatch;
 pub mod distributions;
 pub mod envir;
 pub mod eval;
+#[cfg(unix)]
+pub mod fork;
 pub mod format;
 pub mod frame;
 pub mod gnu_r_home;
@@ -58,8 +60,6 @@ mod makeconf;
 pub mod methods;
 pub mod moves;
 pub mod native;
-// The fork routines exist only on Unix, as in GNU R, whose Windows build of parallel has none.
-#[cfg(unix)]
 pub mod parallel;
 pub mod parse_data;
 pub mod platform;
@@ -283,7 +283,7 @@ pub struct Interp {
     pub parked_unwind: Option<Unwind>,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
-    pub forks: parallel::Forks,
+    pub forks: fork::Forks,
 }
 
 struct InterpState {
@@ -395,7 +395,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         prelude: true,
         parked_unwind: None,
         #[cfg(unix)]
-        forks: parallel::Forks::default(),
+        forks: fork::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

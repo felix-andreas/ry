@@ -1,3 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep
+// their copyright notices:
+//
+// GNU R: src/main/xspline.c (xspline_points)
+//     Source code from Xfig 3.2.4, modified for R
+//     Copyright (c) 1985-1988 by Supoj Sutanthavibul
+//     Parts Copyright (c) 1989-2002 by Brian V. Smith
+//     Parts Copyright (c) 1991 by Paul King
+//     Parts Copyright (c) 1992 by James Tough
+//     Parts Copyright (c) 1998 by Georg Stemmer
+//     Parts Copyright (c) 1995 by C. Blanc and C. Schlick
+//
+// The Xfig code carries this notice:
+//
+//     Any party obtaining a copy of these files is granted, free of charge, a full and
+//     unrestricted irrevocable, world-wide, paid up, royalty-free, nonexclusive right and
+//     license to deal in this software and documentation files (the "Software"), including
+//     without limitation the rights to use, copy, modify, merge, publish and/or distribute
+//     copies of the Software, and to permit persons who receive copies from any such party to
+//     do so, with the only requirement being that this copyright notice remain intact.
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! R's graphics engine: the device table, the graphics systems registered with every device,
 //! and the drawing calls that sit between a system (base graphics, grid) and a device.
 //!

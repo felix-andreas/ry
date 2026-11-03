@@ -22,6 +22,13 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: bundle base R into the `ry` binary
+
+- Today `ry run` reads the R code of the base packages (base, stats, utils, methods, graphics, grDevices, datasets, tools, grid, splines, stats4, parallel, compiler) from an installed GNU R (`rcmd::runtime_home`), which is the only reason a user needs GNU R for it. Both are GPL-2.0-or-later, so bundling is licence-clean.
+- Plan: a build step, not vendored sources. Download one pinned R source tarball (SHA-256 in the repo; patches as files in git), parse `src/library/*/R` per platform (base selects unix/windows code at build time), and write one preloaded base image in ry's own format, which can also start faster than R's lazy-load DBs (relevant to S4 first load). Embed it zstd-compressed and extract it to the cache like libR. Nix fetches the tarball as a fixed-output derivation.
+- About 25 MB on disk for those packages on Linux, roughly 8-10 MB compressed (estimate). Check whether ry loads any of their compiled `.so` files.
+- Unchanged: compiled packages still need a C/Fortran toolchain, and `ry R` still needs GNU R.
+
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
@@ -31,6 +38,12 @@ The quality bar is four things.
 
 - **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
 
+## Open: collector throughput on the benchmark suites
+
+- **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
+- **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `contributing/robustness.md`).
+- **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
+
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
@@ -39,14 +52,12 @@ The quality bar is four things.
 - **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
 - **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. Profile-guided optimization made things worse (`decisions.md`, "PGO is not used for the release build"), and BOLT is not installed in the cloud environment. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs, `vapply` 8.2 µs against 3.4 and `pmin` 15.7 µs against 6.2, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
-- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.1 times GNU R's for `paste0` (1.07), `format` (1.10), `sprintf`, `formatC` and most kernels, and kernels that allocate little sit about 4 MB above GNU R (`decisions.md`, "Start-up memory: release relocation tables and preflight code pages"). Still above 1.15:
-  - `paste(collapse =)` 1.37, `xts period.apply` 1.36, `order(chr)` 1.26, `gsub(perl = TRUE)` 1.20, `sort`/`order` on doubles 1.18 to 1.19, `unsplit` 1.18, `merge` and `as.character(double)` 1.17.
-  - Base `order` on two keys is at 1.07 (157 MB against 147): the radix order stores each key as one `u32` or `u64` per row and sorts `(key, row)` pairs between two buffers.
+- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions.md`, "String keys sort by rank"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 names peaks at 127 MB against GNU R's 92 MB; names that are not ASCII still take the `String` path.
 
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guides/running.md`). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -70,7 +81,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the
 behavior below truthfully, most of it under "Where correct code is reported" in
-`type-checking/limitations.md`, so fixing an item means updating that page too.
+the Limitations section of `type-checking/unknown.mdx`, so fixing an item means updating that page too.
 
 False reports on correct R, worst first:
 
@@ -120,7 +131,7 @@ gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports 
 three generated benchmark packages (`tools/bench/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
-gap, on `type-checking/limitations.md`.
+gap, in the Limitations section of `type-checking/unknown.mdx`.
 
 ### True bugs, left reported (25)
 
@@ -2121,22 +2132,38 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** At 2e7 rows the five
-  joins take 3.7 s against data.table's 22.3 s but peak at 11.6 GB against 5.2 GB, and nearly all
-  of it is reading the CSVs (`join_x` 4.9 GB, `join_big` 4.2 GB more). Two causes, both measured:
-  - A Polars Enum stores every level twice (a `Utf8ViewArray` plus `CategoricalMapping`'s hash
-    table and boxcar vector), about 135 bytes per level, and the read peaks at about twice its
-    resident size (2e7 `join_x` with factors: 4.87 GB peak, 2.37 GB resident, 0.64 GB of column
-    data). The fix is a factor type outside Polars: u32 codes plus one levels array beside the
-    frame (`Table.string_codes` is precedent), converted to an Enum only where a Polars plan needs
-    one. About 50 sites read the Enum: `query.rs`, `ops.rs`, `convert.rs`, `table.rs`,
-    `kernel.rs`, `io.rs`, `join.rs`, `group.rs`, interp's `data_table.rs` and `frame.rs`, libr's
-    `frame_altrep.rs`, and the lazy plans' string expressions.
-  - Reading the id columns as text (`strings_as_factors = FALSE`) holds slices and final columns
-    at once: 2.44 GB peak and 1.4 GB resident at 2e7, and an 11.7 GB peak for the 5.1 GB 1e8
-    `join_x`, after which `join_big` no longer fits.
-  At 1e8, data.table runs out of memory reading `join_x` with factors as well, so "at or below
-  data.table's memory" is met trivially there; the target is that ry completes.
+- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** The factor type outside
+  Polars and the code-building reader are in (`decisions.md`, "Factors are ry's own codes plus
+  one level table, outside Polars"), and at 1e7 the joins beat data.table on every question. At 1e8 both
+  data.table and ry run out of memory (`tools/bench/table/report.py` records it as "out of
+  memory"). Measured for ry, with libR's mimalloc settings:
+  - Reading `join_x` (5.1 GB, 63.2 million `id6` levels) peaks at 7.35 GB against 3.9 GB live:
+    2.9 GB of columns plus about 1.0 GB of level views. `join_big` is the same size, and q5's
+    answer is about 4.9 GB, so x, big and one answer already need about 12.7 GB.
+  - The transients are the u32 codes a low-cardinality column holds until it narrows (`id4`:
+    0.4 GB, then 0.1 GB as u8), the interner's hash tables, `finish`'s keys and rank array beside
+    the old views, and the per-slice Polars frames. libR never purges freed memory
+    (`PURGE_DELAY=-1`), so they stay resident; `mi_collect(true)` with purging switched on
+    briefly freed little at 2e7 (2.04 GB resident against about 0.87 GB live), which points at
+    pages held in the rayon threads' heaps.
+  - Next: give the reader's large transients an allocator that maps and unmaps whole regions
+    (std's `Allocator` on the pinned nightly; hashbrown takes it with its `nightly` feature),
+    keep a column's codes narrow while its level count allows, and sum the checksum in
+    `tools/bench/table/ry.R` per chunk rather than converting a whole column. Then run
+    `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
+    `--write`, and update `contributing/design/r-runtime.md` section 7, whose 1e8 join prose
+    says neither engine fits.
+- **`ry migrate data-table` checks a name's uses in the current file only** (`uses_are_safe` in
+  `crates/ide/src/migrate.rs`). A top-level `sales <- fread(...)` in one file that another file
+  queries with `sales[, z := 1]` is rewritten, which breaks the other file. The safety check
+  should see every file of the project that can read the name.
+- **A factor whose labels share their first 12 bytes sorts serially** (`Interner::finish` in
+  `crates/table/src/factor.rs`). Labels such as `customer_00001234` or ISO timestamps form one
+  run of tied prefixes, which is re-sorted on one thread through indirect label lookups. Sorting
+  such a run in parallel, or keying on the bytes after the common prefix, would fix it.
+- **A Polars `Enum` converted to a factor loses its level order** (`convert` in
+  `crates/table/src/table.rs`): it goes through `from_strings`, which sorts the levels by bytes,
+  so an Enum read from Parquet with a non-alphabetical order is reordered.
 - **A factor column with a missing value costs a second whole-file parse.** The sliced reader
   (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
   `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
@@ -2149,7 +2176,7 @@ The end-to-end guard rests on the corpus suites.
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
   at 6.7 GB peak with the default delay and 91 s at 8.1 GB with the delay set to never. libR sets it
-  to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
+  to 1e9 ms, so pages return only at `gc()` (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory until `gc()`"), because
   refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
   Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
 - **A factor build is bound by Polars' Enum interning.** `string_to_factor`
@@ -2176,6 +2203,10 @@ The end-to-end guard rests on the corpus suites.
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
   and the numeric aggregations.
+- **Checker, file schemas:** only `.csv`/`.tsv` files are sniffed, so `DataFrame.read_parquet` and
+  `LazyFrame.scan_parquet` always have unknown columns (a Parquet footer holds the schema and is
+  cheap to read on the host). An annotation that disagrees with the sniffed file reports the
+  generic `expected ..., found ...` mismatch without naming the file or the differing column.
 - **Building a DataFrame copies every column** into the engine, where `data.table()` keeps R's
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
   and `enrol` (`contributing/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
@@ -2242,6 +2273,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
+- **Windows `parallel` is unverified.** GNU R for Windows registers routines of its own there
+  (probably `ncpus`, behind `detectCores()`), which `WINDOWS_ROUTINES` in `builtin_libraries.rs`
+  lacks, so the namespace may not load. Check against a Windows R home's `parallel` and add them.
 - **`Tailcall` does not reuse the caller's frame** (`do_tailcall` in `crates/interp/src/eval.rs`), so
   a deep tail-recursive loop written with it still grows the stack. GNU R 4.6 replaces the frame.
 - **R 4.4 and 4.5 are supported by reading GNU R's sources, not by running them.** Install both and

@@ -20,6 +20,7 @@ use {
 };
 
 /// How long a request to the console may take before the editor gives up on it.
+#[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_millis(150);
 
 /// How long an answer stays fresh, and how long the link waits after finding no console before

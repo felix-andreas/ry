@@ -3,7 +3,7 @@ name = "interp"
 description = "ry's R interpreter: language objects, the bytecode interpreter, and base R's internals"
 edition = "2024"
 version.workspace = true
-license.workspace = true
+license = "GPL-2.0-or-later"
 publish = false
 
 [lib]

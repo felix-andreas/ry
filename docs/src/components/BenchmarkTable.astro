@@ -1,0 +1,35 @@
+---
+// The measured benchmark table, from tools/bench/why/results.json. `programs` picks and orders rows.
+import { benchmarkCells, benchmarkEngines, benchmarkRows } from '../lib/benchmarks';
+
+interface Props {
+	programs?: string[];
+}
+
+const rows = benchmarkRows(Astro.props.programs);
+---
+
+<table>
+	<thead>
+		<tr>
+			<th rowspan="2">program</th>
+			<th colspan={benchmarkEngines.length} style="text-align: center">time</th>
+			<th rowspan="2" style="text-align: right">ry vs GNU R</th>
+			<th colspan={benchmarkEngines.length} style="text-align: center">peak memory</th>
+		</tr>
+		<tr>
+			{[...benchmarkEngines, ...benchmarkEngines].map((engine) => <th style="text-align: right">{engine}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		{
+			rows.map((row) => (
+				<tr>
+					{benchmarkCells(row).map((cell, index) => (
+						<td style={index > 0 ? 'text-align: right' : undefined}>{index === 0 ? <code>{cell}</code> : cell}</td>
+					))}
+				</tr>
+			))
+		}
+	</tbody>
+</table>

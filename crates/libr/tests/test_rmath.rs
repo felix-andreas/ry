@@ -3,6 +3,8 @@
 //! the C package `tests/packages/rmathtest`; here the same package, built against ry's
 //! headers, evaluates every case in ry's libR.
 
+#![cfg(unix)]
+
 mod harness;
 
 use {

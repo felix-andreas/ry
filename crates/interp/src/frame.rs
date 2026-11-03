@@ -90,7 +90,7 @@ local({{
       if (is.null(path)) {{
         path <<- file.path(tempdir(), "{name}")
         dir.create(path, showWarnings = FALSE)
-        writeLines(c("Package: {name}", "Version: 0.0.0", "Title: {title}", "License: UPL-1.0"),
+        writeLines(c("Package: {name}", "Version: 0.0.0", "Title: {title}", "License: GPL (>= 2)"),
                    file.path(path, "DESCRIPTION"))
       }}
       path

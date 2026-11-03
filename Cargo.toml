@@ -9,7 +9,6 @@ iana-time-zone = { path = "patches/iana-time-zone" }
 
 [workspace.package]
 version = "0.4.0-beta"
-license = "UPL-1.0"
 repository = "https://github.com/felix-andreas/ry"
 
 [workspace.dependencies]
