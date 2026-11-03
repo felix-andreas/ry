@@ -2099,7 +2099,11 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             let mut selection = Vec::new();
             for (offset, position) in positions.into_iter().enumerate() {
                 match position {
-                    position if position < extent => selection.push(position),
+                    // GNU R's `MatrixAssign` and `ArrayAssign` skip an NA subscript, but count it
+                    // towards the number of items to replace.
+                    position if position < extent || position == NA_POSITION => {
+                        selection.push(position);
+                    }
                     _ => {
                         let call = crate::unwind::generated_call(call)?;
                         return Err(array_out_of_bounds(
@@ -2116,6 +2120,13 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         }
         if value_count == 0 {
             return Err(crate::unwind::error_in(call, "replacement has length zero"));
+        }
+        if value_count > 1 && selections.iter().flatten().any(|&position| position == NA_POSITION)
+        {
+            return Err(crate::unwind::error_in(
+                call,
+                "NAs are not allowed in subscripted assignments",
+            ));
         }
         if !total.is_multiple_of(value_count) {
             return Err(crate::unwind::error_in(
@@ -2331,14 +2342,17 @@ unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
             _ => {}
         }
     }
-    for (position, &offset) in offsets.iter().enumerate() {
+    let offsets = offsets.iter().filter(|&&offset| offset != NA_POSITION);
+    for (position, &offset) in offsets.enumerate() {
         assign_element(target, offset, value, position % count)?;
     }
     Ok(())
 }
 
+/// Writes `source`, recycled, to `offsets`, skipping the NA offsets without using up a value.
 fn recycle_into<T: Copy>(target: &mut [T], offsets: &[usize], source: &[T]) {
-    for (&offset, &item) in offsets.iter().zip(source.iter().cycle()) {
+    let offsets = offsets.iter().filter(|&&offset| offset != NA_POSITION);
+    for (&offset, &item) in offsets.zip(source.iter().cycle()) {
         target[offset] = item;
     }
 }
