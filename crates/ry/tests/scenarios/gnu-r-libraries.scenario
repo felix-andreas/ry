@@ -1,0 +1,31 @@
+# A user who installed packages with GNU R runs a script with ry and no R variables set: ry's
+# `.libPaths()` holds GNU R's user library for an older minor version and the site library of
+# the GNU R on `PATH`, after the current version's user library and before ry's own library.
+# A variable the user sets wins over these defaults. The paths are those of x86_64 Linux.
+
+requires ry-runtime
+
+file home/R/x86_64-pc-linux-gnu-library/4.5/.keep
+|
+file home/R/x86_64-pc-linux-gnu-library/4.0/.keep
+|
+file gnu/lib/R/site-library/.keep
+|
+file gnu/bin/R
+| #!/bin/sh
+| R_HOME_DIR="$ROOT/gnu/lib/R"
+file paths.R
+| for (path in .libPaths()) cat("library", sub(getwd(), "ROOT", path, fixed = TRUE), "\n")
+
+env HOME $ROOT/home
+env PATH $ROOT/gnu/bin
+run ry run paths.R
+expect exit 0
+expect stdout "library ROOT/home/R/x86_64-pc-linux-gnu-library/4.5 \nlibrary ROOT/home/R/x86_64-pc-linux-gnu-library/4.0 \nlibrary ROOT/gnu/lib/R/site-library \n"
+expect stdout "/library \n"
+
+env R_LIBS_SITE NULL
+run ry run paths.R
+expect exit 0
+expect stdout "library ROOT/home/R/x86_64-pc-linux-gnu-library/4.5 \n"
+expect stdout lacks "site-library"

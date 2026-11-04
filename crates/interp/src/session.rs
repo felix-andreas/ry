@@ -390,6 +390,93 @@ fn read_renviron() {
     // SAFETY: the session starts before any other thread exists.
     unsafe { std::env::set_var("R_HOME", &home) };
     export_wrapper_directories(&home);
+    let user_set = std::env::var_os("R_LIBS_USER").is_some();
+    let site_set = std::env::var_os("R_LIBS_SITE").is_some();
+    read_renviron_file(&home);
+    // ry is its own R home, so the defaults would hide every package installed for GNU R.
+    // Its libraries go after ry's own, which keeps a package installed for ry in front.
+    #[cfg(unix)]
+    for (name, set, extra) in [
+        ("R_LIBS_USER", user_set, gnu_r_user_libraries()),
+        ("R_LIBS_SITE", site_set, gnu_r_site_libraries()),
+    ] {
+        if set || extra.is_empty() {
+            continue;
+        }
+        let mut value = std::env::var(name).unwrap_or_default();
+        for path in extra {
+            if !value.split(':').any(|entry| entry == path) {
+                if !value.is_empty() {
+                    value.push(':');
+                }
+                value.push_str(&path);
+            }
+        }
+        // SAFETY: the session starts before any other thread exists.
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
+/// GNU R's user libraries for this major version and an older minor one, newest first:
+/// `~/R/<platform>-library/<x.y>` on Linux, `~/Library/R/<arch>/<x.y>/library` on macOS. The
+/// current version's is `R_LIBS_USER`'s `%U` already.
+#[cfg(unix)]
+fn gnu_r_user_libraries() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let version = crate::system::r_version();
+    let arch = std::env::consts::ARCH;
+    (0..version.minor)
+        .rev()
+        .map(|minor| {
+            let x_y = format!("{}.{minor}", version.major);
+            if cfg!(target_os = "macos") {
+                home.join("Library/R").join(arch).join(x_y).join("library")
+            } else {
+                home.join("R")
+                    .join(format!("{arch}-pc-linux-gnu-library"))
+                    .join(x_y)
+            }
+        })
+        .filter(|path| path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The site libraries of GNU R: the `site-library` of the `R` on `PATH`, and the ones Debian,
+/// Ubuntu and Fedora install packages into. A directory holding `base` is a GNU R's own
+/// library, whose base packages must not shadow ry's, so it is left out.
+#[cfg(unix)]
+fn gnu_r_site_libraries() -> Vec<String> {
+    let path_home = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|directory| {
+            let wrapper = std::fs::read_to_string(directory.join("R")).ok()?;
+            wrapper.lines().find_map(|line| {
+                let value = line.trim().strip_prefix("R_HOME_DIR=")?;
+                let value = value.trim_matches(|c| c == '\'' || c == '"');
+                (!value.is_empty() && !value.contains('$'))
+                    .then(|| std::path::Path::new(value).join("site-library"))
+            })
+        })
+    });
+    path_home
+        .into_iter()
+        .chain(
+            [
+                "/usr/local/lib/R/site-library",
+                "/usr/lib/R/site-library",
+                "/usr/local/lib/R/library",
+            ]
+            .map(std::path::PathBuf::from),
+        )
+        .filter(|path| path.is_dir() && !path.join("base").is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Sets the variables of the first system `Renviron` that exists.
+fn read_renviron_file(home: &str) {
     for path in [format!("{home}/etc/Renviron"), "/etc/R/Renviron".to_owned()] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
