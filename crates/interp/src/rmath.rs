@@ -577,6 +577,9 @@ pub fn r_pow(x: f64, y: f64) -> f64 {
             y
         };
     }
+    if let Some(product) = crate::arith::small_power_product(x, y) {
+        return product;
+    }
     if finite(x) && finite(y) {
         return x.powf(y);
     }
