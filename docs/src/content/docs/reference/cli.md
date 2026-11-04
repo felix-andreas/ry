@@ -389,6 +389,23 @@ place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas
 `-l:liblapack.so.3`), so a package that uses them (Matrix, quadprog) builds without the
 distribution's BLAS and LAPACK development packages.
 
+Packages you installed with GNU R are on ry's `.libPaths()` without any setup. When `R_LIBS_USER`
+is unset, it holds GNU R's user library for ry's R version (`~/R/<platform>-library/4.6` on
+Linux, `~/Library/R/<arch>/4.6/library` on macOS, with `arm64` for Apple silicon) and then the existing ones of older 4.x versions,
+newest first. When `R_LIBS_SITE` is unset, it holds ry's own site library, then the `site-library`
+of the GNU R on `PATH` (read from its `R` script's `R_HOME_DIR`) and `/usr/local/lib/R/site-library`,
+`/usr/lib/R/site-library` and `/usr/local/lib/R/library`, skipping any that holds `base`. Only
+directories that exist are kept, in this order and ahead of ry's own library:
+
+```text
+[1] "/home/me/R/x86_64-pc-linux-gnu-library/4.6"
+[2] "/home/me/R/x86_64-pc-linux-gnu-library/4.5"
+[3] "/opt/R/4.5.1/lib/R/site-library"
+[4] "/home/me/.cache/ry/home/18e0bd65b5dace8c/library"
+```
+
+A variable you set replaces its default, as in GNU R; `R_LIBS_SITE=NULL` drops the site libraries.
+
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged: it loads a copy
 of each package library, cached under `~/Library/Caches/ry/rebound/`, that names ry's runtime
 instead of GNU R's `libR`.

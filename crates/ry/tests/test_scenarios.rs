@@ -476,6 +476,7 @@ impl Journey {
             }
             ["file", path] => {
                 let body = step.body.clone().ok_or("`file` needs a `|` body")?;
+                let body = body.replace("$ROOT", &self.root.to_string_lossy());
                 let existed = self.root.join(path).exists();
                 self.write(path, &body)?;
                 self.watched(
@@ -489,8 +490,10 @@ impl Journey {
                 Ok(())
             }
             ["env", name, value] => {
-                self.environment
-                    .insert((*name).to_owned(), (*value).to_owned());
+                self.environment.insert(
+                    (*name).to_owned(),
+                    value.replace("$ROOT", &self.root.to_string_lossy()),
+                );
                 Ok(())
             }
             ["remove", path] => {
