@@ -7619,9 +7619,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
   hashes), so a package that changes, a library edit or another R release needs no invalidation:
   `.checkGroupSigLength` (`ryS4CheckGroupSigLength` in `methods_core.rs`), `registerS3methods`
   (ported to 4.6.2, `register_s3_methods.R`) and utils' `osVersion` (`ryOsVersion`, which reads
-  `/etc/os-release` instead of spawning shells). The heap promotes every object a start-up image
-  loads to the old generation (`Heap::promote_young`), because the first minor collection
-  otherwise traced all 10 MB of them (5.3 ms). Lazy-load records inflate through one reused
+  `/etc/os-release` instead of spawning shells). The heap tenures every object once a start-up image
+  loads (`Heap::promote_young`), because the first minor collection otherwise traced all 10 MB of
+  them (5.3 ms), and each intermediate collection would trace them again. The heap then holds
+  little but the image, so tenuring every object keeps the rule that a tenured object points only
+  at tenured ones without tracing. Lazy-load records inflate through one reused
   inflater straight into the output, and decompressing file connections are buffered, which halves
   `readRDS` of a gzip file.
 - **Impact.** `library()` of the 31 namespaces: about 282 ms to about 187 ms (GNU R 350 ms); the

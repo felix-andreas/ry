@@ -148,16 +148,27 @@ unsafe fn round_trip(seed: u64) {
 
         // The loaded objects are ordinary heap objects: they survive collections and take new
         // bindings.
+        // A load tenures every object, so each kind of collection must find the barrier intact
+        // and keep a young object stored into a loaded environment.
+        target.update_policy(|policy| policy.verify = true);
         for &root in &loaded {
             target.root(root);
         }
-        target.collect(Collection::Major);
-        target.collect(Collection::Minor);
         let global = target.known().global_env;
         let symbol = target.install(b"after").expect("install");
         let value = target.alloc_vector(SexpType::Real, 1).expect("alloc");
         target.define(global, symbol, value).expect("define");
-        target.collect(Collection::Major);
+        for kind in [
+            Collection::Minor,
+            Collection::Intermediate,
+            Collection::Minor,
+            Collection::Major,
+            Collection::Minor,
+        ] {
+            target.collect(kind);
+            let cell = target.frame_cell(global, symbol).expect("bound");
+            assert_eq!(cell.cdr(), value, "seed {seed}: {kind:?} dropped a binding");
+        }
         let mut recheck = Check {
             source: &source,
             target: &target,
