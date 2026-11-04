@@ -307,11 +307,24 @@ pub struct DeferredS4 {
     pub foreign_methods: Vec<ForeignMethod>,
     /// Every namespace binding the definitions make.
     pub names: Vec<String>,
-    /// A key for the S4 metadata the definitions produce, when running them depends on nothing
-    /// but their own text, the package's imports and the version of R: each reads only names
-    /// they bind themselves and functions in [`PURE_S4_READS`]. A backend may then save what
-    /// they bind and restore it in a later process instead of running them.
-    pub cache_key: Option<String>,
+    /// The unit each statement of [`DeferredS4::run`] belongs to, at the same index: `0` for the
+    /// first unit, which holds the classes and everything not split off, and `k` for the
+    /// generic `lazy_generics[k - 1]`.
+    pub units: Vec<u32>,
+    /// The generics whose definition and methods wait for the generic's own first use, after
+    /// the first unit, instead of running with it.
+    pub lazy_generics: Vec<LazyGeneric>,
+}
+
+/// A generic split off into its own unit of [`DeferredS4`]: its `setGeneric` and all its
+/// methods, which nothing outside them reads while running. Running them after every class is
+/// defined does what running them in their places did, because each class a method's signature
+/// names from the package is defined before that method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LazyGeneric {
+    pub generic: String,
+    /// The namespace bindings the unit makes, each also in [`DeferredS4::names`].
+    pub names: Vec<String>,
 }
 
 /// A held-back method for another package's generic.
@@ -322,53 +335,6 @@ pub struct ForeignMethod {
     /// [`S4Definition::Method`].
     pub signature: Vec<(Option<String>, String)>,
 }
-
-/// The functions an S4 definition may call and still be cached: the methods package's
-/// definition functions and the base functions that build constant values, all of which
-/// return the same result for the same arguments. A definition that reads any other name, a
-/// package constant or something like `Sys.time()`, runs in every process.
-const PURE_S4_READS: &[&str] = &[
-    "setClass",
-    "setGeneric",
-    "setMethod",
-    "setReplaceMethod",
-    "setValidity",
-    "setClassUnion",
-    "setAs",
-    "representation",
-    "signature",
-    "prototype",
-    "standardGeneric",
-    "new",
-    "methods",
-    "::",
-    "c",
-    "list",
-    "character",
-    "numeric",
-    "integer",
-    "logical",
-    "double",
-    "complex",
-    "function",
-    "-",
-    "+",
-    "*",
-    "/",
-    "^",
-    ":",
-    "(",
-    "{",
-    "<-",
-    "=",
-    "!",
-    "==",
-    "!=",
-    "&&",
-    "||",
-    "T",
-    "F",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceText {
@@ -2023,25 +1989,20 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         }
         names.extend(item.binds.iter().cloned());
     }
-    let pure = definitions.iter().all(|(_, _, item, _)| {
-        item.reads.iter().all(|name| {
-            PURE_S4_READS.contains(&name.as_str()) || names.iter().any(|bound| bound == name)
+    let lazy_generics = lazy_generics(&definitions, &generics, &index.package);
+    let units = definitions
+        .iter()
+        .map(|(_, _, _, definition)| {
+            let generic = match definition {
+                S4Definition::Generic { generic } | S4Definition::Method { generic, .. } => generic,
+                _ => return 0,
+            };
+            lazy_generics
+                .iter()
+                .position(|lazy| &lazy.generic == generic)
+                .map_or(0, |position| position as u32 + 1)
         })
-    });
-    let cache_key = pure.then(|| {
-        let mut hasher = Xxh3::new();
-        let mut field = |bytes: &[u8]| {
-            hasher.update(&(bytes.len() as u64).to_le_bytes());
-            hasher.update(bytes);
-        };
-        field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
-        field(index.package.as_bytes());
-        field(index.version.as_bytes());
-        for (_, _, item, _) in &definitions {
-            field(&item.hash.to_le_bytes());
-        }
-        format!("{:032x}", hasher.digest128())
-    });
+        .collect();
     names.extend(classes.iter().map(|class| format!(".__C__{class}")));
     names.extend(
         generics
@@ -2056,8 +2017,81 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         generics,
         foreign_methods,
         names,
-        cache_key,
+        units,
+        lazy_generics,
     })
+}
+
+/// The package's own generics that can each run on first use, apart from the classes: every
+/// statement of one is its `setGeneric` or one of its methods, no other held-back statement
+/// reads a name they bind, and every class of the package that a method's signature names is
+/// defined before that method, so the method sees the same classes when it runs later.
+fn lazy_generics(
+    definitions: &[(usize, usize, &IndexedItem, &S4Definition)],
+    generics: &[String],
+    package: &str,
+) -> Vec<LazyGeneric> {
+    let defined_at: FxHashMap<&str, usize> = definitions
+        .iter()
+        .filter_map(|&(_, position, _, definition)| match definition {
+            S4Definition::Class { class } | S4Definition::Union { class, .. } => {
+                Some((class.as_str(), position))
+            }
+            _ => None,
+        })
+        .collect();
+    fn generic_of(definition: &S4Definition) -> Option<&str> {
+        match definition {
+            S4Definition::Generic { generic } | S4Definition::Method { generic, .. } => {
+                Some(generic.as_str())
+            }
+            _ => None,
+        }
+    }
+    // Who reads each name: the generic of the reading statement, or `None` for a statement
+    // that stays in the first unit.
+    let mut readers: FxHashMap<&str, FxHashSet<Option<&str>>> = FxHashMap::default();
+    for &(_, _, item, definition) in definitions {
+        let reader =
+            generic_of(definition).filter(|generic| generics.iter().any(|own| own == generic));
+        for name in &item.reads {
+            readers.entry(name.as_str()).or_default().insert(reader);
+        }
+    }
+    let mut lazy = Vec::new();
+    for generic in generics {
+        let mut names = vec![generic.clone(), format!(".__T__{generic}:{package}")];
+        let mut ordered = true;
+        for &(_, position, item, definition) in definitions {
+            if generic_of(definition) != Some(generic.as_str()) {
+                continue;
+            }
+            names.extend(item.binds.iter().cloned());
+            if let S4Definition::Method { signature, .. } = definition {
+                ordered &= signature.iter().all(|(_, class)| {
+                    defined_at
+                        .get(class.as_str())
+                        .is_none_or(|&defined| defined < position)
+                });
+            }
+        }
+        names.sort_unstable();
+        names.dedup();
+        let read_elsewhere = names.iter().any(|name| {
+            readers.get(name.as_str()).is_some_and(|readers| {
+                readers
+                    .iter()
+                    .any(|reader| *reader != Some(generic.as_str()))
+            })
+        });
+        if ordered && !read_elsewhere {
+            lazy.push(LazyGeneric {
+                generic: generic.clone(),
+                names,
+            });
+        }
+    }
+    lazy
 }
 
 /// The names among `roots` whose call may read a changed binding, through any chain of lazy
@@ -2342,9 +2376,8 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
 }
 
 /// Where one kind of per-package cache lives for the package at `root`, one entry per package
-/// that each save replaces: `s4` is a directory holding a lazy-load database of the S4
-/// metadata a backend holds back ([`DeferredS4::cache_key`]), and `roxygen` names the `.rds`
-/// file of the blocks `ry document` parsed once the caller adds the extension.
+/// that each save replaces: `roxygen` names the `.rds` file of the blocks `ry document` parsed
+/// once the caller adds the extension.
 pub fn package_cache_path(root: &Path, kind: &str) -> Option<PathBuf> {
     let name = format!("{:016x}", xxh3_64(root.as_os_str().as_encoded_bytes()));
     Some(cache_directory()?.join("ry").join(kind).join(name))

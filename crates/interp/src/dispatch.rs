@@ -252,10 +252,7 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
     };
     let heap = crate::heap();
     let stats = heap.stats();
-    let stamp = (
-        heap.binding_epoch(),
-        stats.collections(),
-    );
+    let stamp = (heap.binding_epoch(), stats.collections());
     let key = (name, top, table.unwrap_or(values::empty_env()), search_top);
     let cache = &mut interp().method_cache;
     if cache.stamp != stamp {
@@ -1506,7 +1503,7 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
     // when they run. They apply only to objects of the classes held back with them, and an
     // argument not yet evaluated cannot be one of those. A special such as `[` passes its
     // arguments as promises, the first already forced, so that one's value is what counts.
-    if !interp().globals.deferred_definitions.is_empty() {
+    if crate::methods::first_units_pending() {
         let classes: Vec<&[u8]> = args
             .iter()
             .map(|arg| {

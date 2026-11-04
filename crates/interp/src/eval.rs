@@ -1175,9 +1175,7 @@ pub unsafe fn run_closure(
     };
     let result = stray_loop_jump(call, env, catch_return(env, result));
     let result = match (signature, result) {
-        (Some(signature), Ok(value)) => {
-            crate::annotations::check_return(call, signature, value)
-        }
+        (Some(signature), Ok(value)) => crate::annotations::check_return(call, signature, value),
         (_, result) => result,
     };
     crate::annotations::leave(depth);

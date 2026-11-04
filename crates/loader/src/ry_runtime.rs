@@ -11,8 +11,7 @@
 
 use {
     crate::{
-        Code, Loader, NamespaceConditions, Source, find_package_root, package_cache_path,
-        parse_namespace_conditions,
+        Code, Loader, NamespaceConditions, Source, find_package_root, parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
     },
     heap::object::{Sexp, SexpType},
@@ -20,7 +19,9 @@ use {
         builtins::{BuiltinDef, Call, internal, internal_function},
         eval::{define, eval, make_promise},
         lower::{file_srcfile, lower_node, lower_node_at_line, parse_text},
-        methods::{DeferredDefinitions, defer_definitions, drop_deferred_definitions},
+        methods::{
+            DeferredDefinitions, defer_definitions, drop_deferred_definitions, force_deferred_unit,
+        },
         scope,
         unwind::{R, error},
         values::{self, install, length, nil},
@@ -48,7 +49,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderRun", 3, do_run).invisible(),
     internal("ryLoaderForce", 2, do_force),
     internal("ryLoaderAwaitVerdict", 0, do_await_verdict).invisible(),
-    internal("ryLoaderDefer", 6, do_defer).invisible(),
+    internal("ryLoaderDefer", 7, do_defer).invisible(),
+    internal("ryLoaderForceUnit", 2, do_force_unit).invisible(),
     internal("ryLoaderDeferred", 1, do_deferred),
     internal("ryLoaderRunDeferred", 3, do_run_deferred).invisible(),
     internal("ryLoaderUndefer", 1, do_undefer).invisible(),
@@ -419,7 +421,7 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `.Internal(ryLoaderDefer(root, positions, classes, generics, primitives, force))`:
+/// `.Internal(ryLoaderDefer(root, positions, classes, generics, primitives, lazy, force))`:
 /// holds back the pending plan's statements at `positions` (1-based, in `run`) and registers
 /// `force` to run as [`DeferredDefinitions`] describes for the other arguments.
 unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
@@ -430,11 +432,12 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
             .map(|index| Box::from(argument.element(index).bytes()))
             .collect()
     };
-    let (classes, generics, primitives, force) = (
+    let (classes, generics, primitives, lazy, force) = (
         names(call.arg(2)),
         names(call.arg(3)),
         names(call.arg(4)),
-        call.arg(5),
+        names(call.arg(5)),
+        call.arg(6),
     );
     if force.kind() != SexpType::Closure {
         return Err(error(
@@ -480,8 +483,20 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
         classes,
         generics,
         primitives,
+        lazy,
+        first_pending: true,
         force,
     });
+    Ok(nil())
+}
+
+/// `.Internal(ryLoaderForceUnit(root, generic))`: runs the held-back unit of the package at `root`
+/// that `generic` names, or the first unit for `NULL`, unless it ran already.
+unsafe fn do_force_unit(call: &Call<'_>) -> R<Sexp> {
+    let root = values::require_string(call.arg(0), "root")?;
+    let generic = call.arg(1);
+    let generic = (generic != nil()).then(|| generic.element(0).bytes());
+    force_deferred_unit(&root, generic)?;
     Ok(nil())
 }
 
@@ -573,12 +588,6 @@ unsafe fn do_deferred(call: &Call<'_>) -> R<Sexp> {
                     .map(|(_, code)| i32::try_from(code.line).unwrap_or(i32::MAX))
                     .collect(),
             ),
-        ),
-        (
-            "cache".into(),
-            package_cache_path(Path::new(&root), "s4").map_or(RValue::Null, |path| {
-                RValue::Character(vec![path.to_string_lossy().into_owned()])
-            }),
         ),
     ]);
     drop(session);

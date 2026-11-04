@@ -15,6 +15,7 @@ hold back R/a.R:3 setValidity("Sq", function(object) TRUE)
 hold back R/a.R:4 setGeneric("area", function(shape) standardGeneric("area"))
 hold back R/a.R:5 setMethod("area", signature("Sq"), function(shape) shape@side^2)
 placeholders .__C__Sq .__T__area:demo Sq area
+generics run on first use area
 sync exports
 run .onLoad
 
@@ -32,6 +33,7 @@ hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
 run R/a.R:3 ORIGIN <- new("Sq", side = 0)
 hold back R/a.R:4 setMethod("area", "Sq", function(shape) shape@side^2)
 placeholders .__C__Sq .__T__area:demo area
+generics run on first use area
 sync exports
 run .onLoad
 
@@ -74,6 +76,7 @@ hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"))
 hold back R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
 placeholders .__C__Sq .__T__area:demo area
 forced by other packages' generics area<-
+generics run on first use area
 sync exports
 run .onLoad
 
@@ -89,6 +92,7 @@ hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
 hold back R/a.R:2 setGeneric("area<-", function(shape, value) standardGeneric("area<-"))
 hold back R/a.R:3 setReplaceMethod("area", signature("Sq", "numeric"), function(shape, value) shape)
 placeholders .__C__Sq .__T__area<-:demo area<-
+generics run on first use area<-
 sync exports
 run .onLoad
 
@@ -128,17 +132,36 @@ run R/a.R:2 Sq <- function(...) new("Sq", ...)
 sync exports
 run .onLoad
 
-#---- a_definition_that_reads_a_package_constant_is_not_cached
+#---- a_generic_whose_method_names_a_later_class_runs_with_the_classes
 #~~~~ R/a.R
-ZERO <- 0
-setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", "Sq", function(shape) shape@side^2)
+setClass("Sq", representation(side = "numeric"))
+setGeneric("perimeter", function(shape) standardGeneric("perimeter"))
+setMethod("perimeter", "Sq", function(shape) 4 * shape@side)
 #++++
 rebuild imports (0 directives)
 source R/a.R
-run R/a.R:1 ZERO <- 0
-hold back R/a.R:2 setClass("Sq", representation(side = "numeric"), prototype(side = ZERO))
-placeholders .__C__Sq
-metadata not cached: a definition reads other code
+hold back R/a.R:1 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:2 setMethod("area", "Sq", function(shape) shape@side^2)
+hold back R/a.R:3 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:4 setGeneric("perimeter", function(shape) standardGeneric("perimeter"))
+hold back R/a.R:5 setMethod("perimeter", "Sq", function(shape) 4 * shape@side)
+placeholders .__C__Sq .__T__area:demo .__T__perimeter:demo area perimeter
+generics run on first use perimeter
+sync exports
+run .onLoad
+
+#---- a_generic_that_a_class_definition_reads_runs_with_the_classes
+#~~~~ R/a.R
+setGeneric("area", function(shape) standardGeneric("area"))
+setClass("Op", representation(f = "function"), prototype(f = area))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setGeneric("area", function(shape) standardGeneric("area"))
+hold back R/a.R:2 setClass("Op", representation(f = "function"), prototype(f = area))
+placeholders .__C__Op .__T__area:demo area
 sync exports
 run .onLoad
 
@@ -158,6 +181,7 @@ hold back R/a.R:3 setClassUnion("Shape", c("Sq", "Circle"))
 hold back R/a.R:4 setGeneric("area", function(shape) standardGeneric("area"))
 hold back R/a.R:5 setMethod("area", "Shape", function(shape) 1)
 placeholders .__C__Circle .__C__Shape .__C__Sq .__T__area:demo area
+generics run on first use area
 sync exports
 run .onLoad
 
@@ -188,6 +212,7 @@ hold back R/a.R:2 setClassUnion("SqOrNull", c("Sq", "NULL"))
 hold back R/a.R:3 setGeneric("area", function(shape) standardGeneric("area"))
 hold back R/a.R:4 setMethod("area", "SqOrNull", function(shape) 1)
 placeholders .__C__Sq .__C__SqOrNull .__T__area:demo area
+generics run on first use area
 sync exports
 run .onLoad
 

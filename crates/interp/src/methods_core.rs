@@ -54,6 +54,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4CheckGroupSigLength", 1, do_check_group_sig_length),
     internal("ryS4SetClassUnion", 1, do_set_class_union),
     internal("ryS4CacheMetaData", 1, do_cache_meta_data),
+    internal("ryS4CacheGeneric", 2, do_cache_generic),
 ];
 
 /// The methods package's functions that get a fast path, with the [`stable_hash`] of the formals
@@ -840,7 +841,11 @@ unsafe fn name_extends(class1: Sexp, definition1: Option<Sexp>, class2: &[u8]) -
 
 /// `extends(definition, class2)` for a class definition.
 unsafe fn class_extends(definition: Sexp, class2: &[u8]) -> R<Option<bool>> {
-    name_extends(slot(definition, symbols().class_name)?, Some(definition), class2)
+    name_extends(
+        slot(definition, symbols().class_name)?,
+        Some(definition),
+        class2,
+    )
 }
 
 /// `isClassUnion(definition)`: whether the class of the definition extends
@@ -1195,7 +1200,10 @@ unsafe fn methods_generic(name: Sexp) -> R<Option<Sexp>> {
         .globals
         .deferred_definitions
         .iter()
-        .any(|definitions| definitions.generics.contains(text))
+        .any(|definitions| {
+            (definitions.first_pending && definitions.generics.contains(text))
+                || definitions.lazy.contains(text)
+        })
     {
         return Ok(None);
     }
@@ -2169,7 +2177,11 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             bail!(skip);
         };
         let qualified = values::scalar_string_charsxp(slot_class)?;
-        values::set_attr(qualified, package_symbol, slot(definition, symbols().package)?)?;
+        values::set_attr(
+            qualified,
+            package_symbol,
+            slot(definition, symbols().package)?,
+        )?;
         slots.push((slot_name, qualified));
     }
     for known in &supers {
@@ -2876,8 +2888,10 @@ unsafe fn add_union_member(
             if subclass.bytes() == union.bytes() {
                 continue;
             }
-            let subclass_package =
-                get_attr(slot(subclass_extension, symbols().sub_class)?, symbols().package);
+            let subclass_package = get_attr(
+                slot(subclass_extension, symbols().sub_class)?,
+                symbols().package,
+            );
             if subclass_package.kind() != SexpType::String
                 || length(subclass_package) != 1
                 || subclass_package.element(0).bytes() != member_package.element(0).bytes()
@@ -2909,11 +2923,7 @@ unsafe fn add_union_member(
             bound_contains.push((union, union_extension));
             let rebound = values::shallow_duplicate(bound)?;
             crate::heap().root(rebound);
-            crate::subset::assign_slot(
-                rebound,
-                symbols().contains,
-                named_list(&bound_contains)?,
-            )?;
+            crate::subset::assign_slot(rebound, symbols().contains, named_list(&bound_contains)?)?;
             pending.bind(place, subclass_meta, rebound);
             pending.cache(subclass, rebound, true);
         }
@@ -2984,7 +2994,9 @@ unsafe fn resolved_superclasses(
         let ordering = match pending.class(direct)? {
             Some(definition) => {
                 let mut names = Vec::new();
-                for (name, superclass_extension) in list_entries(slot(definition, symbols().contains)?) {
+                for (name, superclass_extension) in
+                    list_entries(slot(definition, symbols().contains)?)
+                {
                     if is_simple(superclass_extension) {
                         names.push(name);
                     }
@@ -3151,6 +3163,10 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
         let Some(generic_package) = packages.get(index) else {
             break;
         };
+        // A generic a loader holds back on its own is cached when it runs.
+        if lazily_deferred(name) {
+            continue;
+        }
         if generic_package.as_slice() == package_name
             && cache_own_generic(name, package_name, place, generic_table)?
         {
@@ -3180,6 +3196,41 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
     crate::heap().root(load_actions);
     eval::eval(load_actions, namespace)?;
     values::scalar_bool(true)
+}
+
+/// `.Internal(ryS4CacheGeneric(where, name))`: what `cacheMetaData(where)` does for the package's
+/// own generic `name`, for a generic whose definitions ran after the rest, when its effects can
+/// be written directly. `FALSE` before any effect otherwise, and the caller runs the R code.
+unsafe fn do_cache_generic(call: &Call<'_>) -> R<Sexp> {
+    let (place, name) = (call.arg(0), call.arg(1));
+    let skip = values::scalar_bool(false)?;
+    if !native_definitions() || place.kind() != SexpType::Environment || !is_plain_name(name) {
+        bail!(skip);
+    }
+    let Some(package) = quiet_value(symbols().dot_package_name, place)? else {
+        bail!(skip);
+    };
+    let Some(generic_table) = methods_value(".genericTable")? else {
+        bail!(skip);
+    };
+    if !is_plain_name(package) || generic_table.kind() != SexpType::Environment {
+        bail!(skip);
+    }
+    let cached = cache_own_generic(
+        name.element(0).bytes(),
+        package.element(0).bytes(),
+        place,
+        generic_table,
+    )?;
+    values::scalar_bool(cached)
+}
+
+fn lazily_deferred(name: &[u8]) -> bool {
+    interp()
+        .globals
+        .deferred_definitions
+        .iter()
+        .any(|definitions| definitions.lazy.contains(name))
 }
 
 fn trace_delegate(line: u32) {
@@ -3707,7 +3758,7 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     // dispatch selects the default method for the object's class, that call returns the object,
     // so the object and the method dispatch caches are the whole result. The value becomes a slot of the new class's
     // prototype, which `new()` copies deeply, so a shallow copy is enough here.
-    if interp().globals.deferred_definitions.is_empty() {
+    if !crate::methods::first_units_pending() {
         let value = crate::methods::new_object_copying(definition, false)?;
         crate::heap().root(value);
         let label = crate::methods::dispatch_class(value)?;
@@ -3780,7 +3831,10 @@ pub(crate) unsafe fn inherited_method(
         } else {
             simple(extension)?
                 || (!simple_only
-                    && is_true(crate::bytecode::closure_body(slot(extension, symbols().test)?)))
+                    && is_true(crate::bytecode::closure_body(slot(
+                        extension,
+                        symbols().test,
+                    )?)))
         };
         if !eligible || seen.contains(&label.bytes()) {
             continue;
@@ -4002,7 +4056,10 @@ unsafe fn combine_extensions(
     let by_replace_body = crate::bytecode::closure_body(by_replace);
     let replace = if is_true(slot(by_definition, symbols().virtual_)?) {
         // The replace method goes through the extension from `by` to `to`, when `by` has one.
-        match element(slot(by_definition, symbols().contains)?, to.element(0).bytes()) {
+        match element(
+            slot(by_definition, symbols().contains)?,
+            to.element(0).bytes(),
+        ) {
             Some(skip) => {
                 let body = template(
                     Template::CombineReplaceVirtual,
@@ -4571,11 +4628,7 @@ unsafe fn s4_null() -> R<Sexp> {
 /// A class attribute for a class of the methods package.
 unsafe fn methods_class(class: &str) -> R<Sexp> {
     let value = values::scalar_string(class)?;
-    values::set_attr(
-        value,
-        symbols().package,
-        values::scalar_string("methods")?,
-    )?;
+    values::set_attr(value, symbols().package, values::scalar_string("methods")?)?;
     Ok(value)
 }
 
@@ -4625,8 +4678,10 @@ unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
 /// `.Internal` function of an internal generic, which dispatch from C code.
 unsafe fn has_closure_default(generic: Sexp) -> R<bool> {
     let default = get_attr(generic, symbols().default);
-    Ok(!matches!(default.kind(), SexpType::Builtin | SexpType::Special)
-        && !values::inherits(default, "internalDispatchMethod"))
+    Ok(
+        !matches!(default.kind(), SexpType::Builtin | SexpType::Special)
+            && !values::inherits(default, "internalDispatchMethod"),
+    )
 }
 
 /// The text of a slot that holds a single string.

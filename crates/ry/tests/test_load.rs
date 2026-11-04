@@ -640,8 +640,7 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
 /// its own, sees what an eager load shows: union membership of the basic classes, everything a
 /// basic class extends once a union was named, in the order the unions were defined, coercions
 /// in both directions and their replacement form, method lookups, validity, and dispatch on an
-/// object read back from disk.
-/// The second round restores the definitions from the S4 metadata cache.
+/// object read back from disk. `worth` waits for its own first use, after the classes.
 #[test]
 fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_eagerly() {
     if !r_available() {
@@ -706,24 +705,14 @@ fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_ea
         "cat('probe:', capture.output(showMethods('worth')), '\\n')".to_owned(),
         format!("x <- readRDS({saved:?}); cat('probe:', as(x, 'character'), worth(x), '\\n')"),
     ];
-    // The second round finds the S4 metadata cache the first round's forces saved.
-    for round in ["miss", "hit"] {
-        let cached = std::fs::read_dir(root.path().join("cache/ry/s4"))
-            .is_ok_and(|mut entries| entries.next().is_some());
-        assert_eq!(cached, round == "hit", "{round}");
-        for probe in &probes {
-            let lazy = load("TRUE", probe);
-            let eager = load("FALSE", probe);
-            assert!(
-                lazy.contains("11 S4 definitions held back until first use"),
-                "{round}: {lazy}"
-            );
-            assert_eq!(
-                line(&lazy),
-                line(&eager),
-                "{round}: lazy:\n{lazy}\neager:\n{eager}"
-            );
-        }
+    for probe in &probes {
+        let lazy = load("TRUE", probe);
+        let eager = load("FALSE", probe);
+        assert!(
+            lazy.contains("11 S4 definitions held back until first use"),
+            "{lazy}"
+        );
+        assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
     }
 }
 

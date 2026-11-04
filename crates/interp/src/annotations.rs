@@ -228,7 +228,14 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
                 if let Some(cell) = heap.frame_cell(env, formal.tag()) {
                     let mut dots = cell.cdr();
                     while dots.kind() == SexpType::Dots {
-                        check_argument(call, signature, REST_SLOT, Holder::Dots(dots), dots.car(), depth)?;
+                        check_argument(
+                            call,
+                            signature,
+                            REST_SLOT,
+                            Holder::Dots(dots),
+                            dots.car(),
+                            depth,
+                        )?;
                         dots = dots.cdr();
                     }
                 }
@@ -677,7 +684,10 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     if mask & ARRAY == 0 {
-        return match crate::numbers::r_source(value).ok().and_then(crate::numbers::convert) {
+        return match crate::numbers::r_source(value)
+            .ok()
+            .and_then(crate::numbers::convert)
+        {
             Some(number) => crate::numbers::alloc(number).map(Some),
             None => Ok(None),
         };
