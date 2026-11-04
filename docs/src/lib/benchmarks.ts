@@ -2,6 +2,7 @@
 // regenerates, and the programs it measured. Pages render both from here, so a table never drifts
 // from the measurement or from the code it measured.
 import results from '../../../tools/bench/why/results.json';
+import realResults from '../../../tools/bench/real/results.json';
 
 const sources = import.meta.glob('../../../tools/bench/why/{untyped,typed}/*.R', {
   query: '?raw',
@@ -131,4 +132,59 @@ function seconds(value: number): string {
 
 function mebibytes(value: number): string {
   return `${value.toFixed(0)} MiB`;
+}
+
+export type RealWorkloadRow = { workload: string; gnuR: number; ryJit: number; ryNoJit: number };
+
+// The call-heavy workloads of `tools/bench/real/results.json`, which `just bench-real --write` regenerates.
+export function realWorkloadRows(): RealWorkloadRow[] {
+  return realResults.workloads.map((row) => ({
+    workload: row.workload,
+    gnuR: row.gnu_r,
+    ryJit: row.ry_jit,
+    ryNoJit: row.ry_nojit,
+  }));
+}
+
+// GNU R's time over ry's, as a geometric mean: above 1x means ry is faster.
+export function geomean(ratios: number[]): number {
+  return Math.exp(ratios.reduce((sum, ratio) => sum + Math.log(ratio), 0) / ratios.length);
+}
+
+export const kernelGeomean = geomean(results.programs.map((row) => row.gnu_r / row.ry));
+export const kernelCount = results.programs.length;
+export const realGeomean = geomean(realWorkloadRows().map((row) => row.gnuR / row.ryJit));
+export const realGeomeanNoJit = geomean(realWorkloadRows().map((row) => row.gnuR / row.ryNoJit));
+export const realCount = realWorkloadRows().length;
+
+export const benchmarkRealMachine = `${realResults.machine}, against GNU R ${/\d+\.\d+\.\d+/.exec(realResults.r)?.[0] ?? realResults.r}`;
+
+// What each of the two benchmarks measures and how ry fares on it, for the side-by-side summary.
+export function benchmarkSummaryRows(): string[][] {
+  return [
+    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists', `${realCount}`, `${realGeomean.toFixed(2)}x`],
+    ['Synthetic kernels', 'tight loops, recursion and vector kernels, where the JIT applies', `${kernelCount}`, `${kernelGeomean.toFixed(2)}x`],
+  ];
+}
+export const benchmarkSummaryColumns = ['untyped R on ry', 'what it measures', 'programs', 'speed vs GNU R (geometric mean)'];
+
+export function realWorkloadMarkdown(): string {
+  const rows = realWorkloadRows();
+  return [
+    '| workload | GNU R | ry, JIT on | ry, JIT off | GNU R / ry, JIT on | GNU R / ry, JIT off |',
+    '| --- | ---: | ---: | ---: | ---: | ---: |',
+    ...rows.map(
+      (row) =>
+        `| \`${row.workload}\` | ${seconds(row.gnuR)} | ${seconds(row.ryJit)} | ${seconds(row.ryNoJit)} | ${(row.gnuR / row.ryJit).toFixed(2)}x | ${(row.gnuR / row.ryNoJit).toFixed(2)}x |`,
+    ),
+    `| geometric mean | | | | ${realGeomean.toFixed(2)}x | ${realGeomeanNoJit.toFixed(2)}x |`,
+  ].join('\n');
+}
+
+export function benchmarkSummaryMarkdown(): string {
+  return [
+    `| ${benchmarkSummaryColumns.join(' | ')} |`,
+    '| --- | --- | ---: | ---: |',
+    ...benchmarkSummaryRows().map((row) => `| ${row.join(' | ')} |`),
+  ].join('\n');
 }

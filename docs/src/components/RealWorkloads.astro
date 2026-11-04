@@ -1,0 +1,35 @@
+---
+// The call-heavy workloads from tools/bench/real/results.json with their geometric mean.
+import { realGeomean, realGeomeanNoJit, realWorkloadRows } from '../lib/benchmarks';
+
+const rows = realWorkloadRows();
+const time = (value: number) => `${value.toFixed(3)} s`;
+const ratio = (value: number) => `${value.toFixed(2)}x`;
+const columns = ['workload', 'GNU R', 'ry, JIT on', 'ry, JIT off', 'GNU R / ry, JIT on', 'GNU R / ry, JIT off'];
+---
+
+<table>
+	<thead>
+		<tr>{columns.map((column, index) => <th style={index > 0 ? 'text-align: right' : undefined}>{column}</th>)}</tr>
+	</thead>
+	<tbody>
+		{
+			rows.map((row) => (
+				<tr>
+					<td><code>{row.workload}</code></td>
+					<td style="text-align: right">{time(row.gnuR)}</td>
+					<td style="text-align: right">{time(row.ryJit)}</td>
+					<td style="text-align: right">{time(row.ryNoJit)}</td>
+					<td style="text-align: right">{ratio(row.gnuR / row.ryJit)}</td>
+					<td style="text-align: right">{ratio(row.gnuR / row.ryNoJit)}</td>
+				</tr>
+			))
+		}
+		<tr>
+			<td>geometric mean</td>
+			<td></td><td></td><td></td>
+			<td style="text-align: right">{ratio(realGeomean)}</td>
+			<td style="text-align: right">{ratio(realGeomeanNoJit)}</td>
+		</tr>
+	</tbody>
+</table>

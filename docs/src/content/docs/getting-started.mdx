@@ -3,6 +3,7 @@ title: Introduction
 description: A type checker, formatter, language server and fast runtime for R, written in Rust
 ---
 
+import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
 ry is a toolchain for R, written in Rust. It checks, formats and runs the R code you have, and adds
@@ -52,14 +53,20 @@ type-mismatch
 
 ## Run
 
-`ry run` runs R on ry's own runtime. Seconds per program, the same plain R on GNU R and on ry, and
-typed in strict mode on ry:
+`ry run` runs R on ry's own runtime. Untyped R is faster than GNU R where the JIT applies and slower
+on call-heavy code, so the two benchmarks are shown side by side:
+
+<BenchmarkSummary />
+
+The real-world workloads are call-heavy: most time goes to calling small closures, dispatching S3
+and S4 methods, signaling conditions and building strings and lists, which the JIT does not
+speed up yet. The kernels are tight loops and vector code. Seconds per kernel, the same plain R on
+GNU R and on ry, and typed in strict mode on ry:
 
 <BenchmarkTable programs={["fib", "drawdown", "loop_sum", "orders", "expr_tree", "vector_arith", "report"]} />
 
-Loops and recursion gain the most. Vectorized code already runs in C on GNU R, and code that
-builds strings, like `report`, runs at about the same speed. Typed functions over numbers, records
-and `match` compile to native code. [Benchmarks](/benchmarks) has every program and the method.
+Typed functions over numbers, records and `match` compile to native code, which is where the large
+gains are. [Benchmarks](/benchmarks) has every program, the real-world table and the method.
 
 ## Model data
 

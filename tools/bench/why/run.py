@@ -131,6 +131,9 @@ def main():
                 sys.exit(f"error: {readme} has no <!-- bench-why --> block to rewrite")
             readme.write_text(updated)
             print(f"wrote {readme}")
+        sys.path.insert(0, str(here.parent / "real"))
+        import run as real_run
+        real_run.write_readme_block()
 
 def readme_table(rows):
     # A README cannot show the site's CPU and Memory tabs, so one table carries both.

@@ -3,6 +3,7 @@ title: ry at a glance
 description: Everything important about ry on one page, for people and agents, also served as Markdown at /ry.md
 ---
 
+import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
 ry is a type checker and a fast runtime for R, written in Rust. It also has a linter, a formatter, a
@@ -218,7 +219,12 @@ LSP editor can run `ry server`. [Installation](/installation#editors) sets each 
 
 ## Performance
 
-On ry's runtime, untyped and typed in strict mode, against GNU R with its bytecode compiler:
+Untyped R on ry's runtime is faster than GNU R (with its bytecode compiler) on tight loops and
+recursion and slower on call-heavy code. The two benchmarks, side by side:
+
+<BenchmarkSummary />
+
+The kernels, untyped and typed in strict mode:
 
 <BenchmarkTable />
 

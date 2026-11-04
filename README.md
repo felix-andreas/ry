@@ -13,9 +13,18 @@
 
 </div>
 
-On ry's runtime, loops and recursion run several times faster than on GNU R, and vectorized code
-runs about as fast. The table gives seconds per program and the peak memory of the whole process,
-R's startup included:
+Untyped R on ry's runtime is faster than GNU R on tight loops and recursion and slower on call-heavy
+code. The two benchmarks, side by side:
+
+<!-- bench-summary -->
+| untyped R on ry | what it measures | programs | speed vs GNU R (geometric mean) |
+| --- | --- | ---: | ---: |
+| Real-world workloads | call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists | 7 | 0.90x |
+| Synthetic kernels | tight loops, recursion and vector kernels, where the JIT applies | 17 | 2.70x |
+<!-- /bench-summary -->
+
+The synthetic kernels give seconds per program and the peak memory of the whole process, R's
+startup included:
 
 <!-- bench-why -->
 | program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
@@ -26,7 +35,8 @@ R's startup included:
 | `log_rank` | 0.071 s | 0.046 s | 1.426 s | 1.5x | 105 / 64 / 108 MiB |
 <!-- /bench-why -->
 
-The typed column runs the same program with type annotations in strict mode.
+The typed column runs the same program with type annotations in strict mode. The real-world workloads
+are in [Benchmarks](https://ry-lang.org/benchmarks#untyped-r-on-call-heavy-real-world-workloads).
 [Benchmarks](https://ry-lang.org/benchmarks) has the code of each program and the method.
 
 ## Installation

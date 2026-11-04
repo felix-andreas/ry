@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkTableMarkdown } from './benchmarks';
+import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -103,6 +103,14 @@ function bodyToMarkdown(body: string): string {
     const table = /^<BenchmarkTable\b(?:\s+programs=\{(\[[^\]]*\])\})?/.exec(line.trim());
     if (table) {
       push(benchmarkTableMarkdown(headingLevel + 1, table[1] === undefined ? undefined : JSON.parse(table[1])), false);
+      continue;
+    }
+    if (/^<BenchmarkSummary\b/.test(line.trim())) {
+      push(benchmarkSummaryMarkdown(), false);
+      continue;
+    }
+    if (/^<RealWorkloads\b/.test(line.trim())) {
+      push(realWorkloadMarkdown(), false);
       continue;
     }
     if (/^<BenchmarkPrograms\b/.test(line.trim())) {

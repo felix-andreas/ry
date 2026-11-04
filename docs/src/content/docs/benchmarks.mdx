@@ -5,7 +5,38 @@ description: The same programs run untyped on GNU R, untyped on ry, and typed in
 
 import BenchmarkMachine from '../../components/BenchmarkMachine.astro';
 import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
+import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
+import RealWorkloads from '../../components/RealWorkloads.astro';
+
+Two benchmarks measure different code, and neither speed-up describes the other. Untyped R on ry is
+faster than GNU R on tight loops and slower on call-heavy code:
+
+<BenchmarkSummary />
+
+The [real-world workloads](#untyped-r-on-call-heavy-real-world-workloads) are shaped like the code
+in the benchmark code bases. The [synthetic kernels](#synthetic-kernels) are small programs that
+the JIT compiles.
+
+## Untyped R on call-heavy real-world workloads
+
+`just bench-real` times the workloads below. They are shaped like production R: S3 classes and
+dispatch, S4 and R6 objects, `tryCatch` and condition handlers, validation helpers, `lapply`
+pipelines, list records, tables, xts and zoo time series, and scalar simulation. Each workload runs
+in a fresh process per engine, three times, and the table reports the median seconds.
+
+<RealWorkloads />
+
+A ratio above 1 means ry is faster. Most hot code in these workloads sits in closures called too
+few times to reach the JIT, so call setup, S3 lookup and complex assignment decide the result, and
+ry trails GNU R there. The `functional` and `strings` workloads are missing from the table because
+they fail on the GNU R of the measuring machine. GNU R's own times vary by up to 25% between runs on
+this machine, so read small differences as noise. The workloads will be recalibrated against
+[profile summaries](/reference/cli#profile-summary) from real code bases.
+
+`just bench-real --write` regenerates `tools/bench/real/results.json`, which this page reads.
+
+## Synthetic kernels
 
 Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
 [strict mode](/tutorial/fully-typed#strict-mode) on ry. All three compute the same result.
@@ -35,32 +66,3 @@ fastest time and the largest memory peak in `tools/bench/why/results.json`, whic
 this site reads.
 
 <BenchmarkMachine />
-
-## Untyped R on production-shaped workloads
-
-The programs above are small. `just bench-real` times nine workloads shaped like the code in the
-benchmark code bases instead: S3 classes and dispatch, `tryCatch` and condition handlers,
-validation helpers, string processing, `lapply` pipelines, list records, tables, xts and zoo time
-series, and a scalar simulation. It runs each workload in a fresh process per engine, three times,
-and reports the median.
-
-| workload | GNU R | ry, JIT on | ry, JIT off | GNU R / ry, JIT on | GNU R / ry, JIT off |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| conditions | 0.731 s | 0.774 s | 0.846 s | 0.94x | 0.86x |
-| functional | 0.710 s | 0.903 s | 0.903 s | 0.79x | 0.79x |
-| objects | 0.947 s | 1.200 s | 1.149 s | 0.79x | 0.82x |
-| records | 0.628 s | 0.670 s | 0.629 s | 0.94x | 1.00x |
-| simulation | 0.527 s | 0.318 s | 0.321 s | 1.66x | 1.64x |
-| strings | 0.916 s | 0.809 s | 0.849 s | 1.13x | 1.08x |
-| tables | 0.337 s | 0.394 s | 0.385 s | 0.86x | 0.88x |
-| timeseries | 1.330 s | 1.323 s | 1.385 s | 1.01x | 0.96x |
-| validation | 0.825 s | 1.052 s | 1.082 s | 0.78x | 0.76x |
-
-A ratio above 1 means ry is faster. Over all nine the geometric mean is 0.96x with the JIT and
-0.95x without it, so untyped R runs slightly slower on ry than on GNU R, and the goal is 1.5x.
-Most hot code in these workloads sits in closures called too few times to reach the JIT, so call
-setup, S3 lookup and complex assignment decide the result. The workloads will be recalibrated
-against [profile summaries](/reference/cli#profile-summary) from real code bases. On this
-machine, GNU R's own times vary by up to 25% between runs, so read small differences as noise.
-`tools/bench/real/results.json` holds the numbers.
-

@@ -3,7 +3,8 @@
 JIT on and off. Each workload runs in a fresh process per engine and repeat, engines alternate run by
 run so they never share the CPU in a block, and each process reports the median of its warm runs
 (see harness.R). The table shows the median over processes, the ratio to GNU R, and the geometric
-mean over workloads. `--write` stores the results in results.json, the record the tables in benchmarks.mdx are copied from.
+mean over workloads. `--write` stores the results in results.json, which the tables on the docs site render,
+and rewrites the summary table in README.md.
 
 With `--suites DIR`, the generated benchmark packages under DIR (finbench, dsbench, biobench, from
 `just bench-gen`) are timed too: their testthat suite end to end, once per engine and repeat.
@@ -18,7 +19,7 @@ the workload mix only.
 Usage: tools/bench/real/run.py [--ry PATH] [--filter NAME] [--repeat N] [--suites DIR]
                                [--public SUITE]... [--fastr PATH] [--write]
 """
-import argparse, json, math, os, pathlib, platform, statistics, subprocess, sys, tempfile, time
+import argparse, json, math, os, pathlib, platform, re, statistics, subprocess, sys, tempfile, time
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -149,17 +150,17 @@ def main():
                 **{key: round(value, 4) for key, value in medians.items() if value},
                 "cold": {key: round(min(s["cold"] for s in values), 4) for key, values in samples.items() if values},
             })
-    def geomean(group, key):
-        return math.exp(statistics.fmean(math.log(row["gnu_r"] / row[key]) for row in group))
+    def group_geomean(group, key):
+        return geomean(row["gnu_r"] / row[key] for row in group)
     groups = [("workloads", [row for row in rows if row["kind"] == "workload"])]
     for suite in sorted({row["workload"].split("/")[0] for row in rows if row["kind"] == "program"}):
         groups.append((f"{suite} programs", [row for row in rows if row["workload"].startswith(suite + "/")]))
     for label, group in groups:
         if group:
-            summary = f"JIT on {geomean(group, 'ry_jit'):.2f}x, JIT off {geomean(group, 'ry_nojit'):.2f}x"
+            summary = f"JIT on {group_geomean(group, 'ry_jit'):.2f}x, JIT off {group_geomean(group, 'ry_nojit'):.2f}x"
             measured = [row for row in group if row.get("fastr")]
             if measured:
-                summary += f", FastR {geomean(measured, 'fastr'):.2f}x ({len(measured)} of them)"
+                summary += f", FastR {group_geomean(measured, 'fastr'):.2f}x ({len(measured)} of them)"
             print(f"\nGeometric mean speed-up over GNU R ({len(group)} {label}): {summary}")
     if args.write:
         if args.filter:
@@ -167,5 +168,27 @@ def main():
         results = {"machine": cpu, "r": r_version, "repeat": args.repeat, "workloads": rows}
         (here / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(f"wrote {here / 'results.json'}")
+        write_readme_block()
 
-main()
+def geomean(ratios):
+    return math.exp(statistics.fmean(math.log(ratio) for ratio in ratios))
+
+def write_readme_block():
+    """Rewrites the side-by-side summary in README.md from both results files."""
+    real = json.loads((here / "results.json").read_text())["workloads"]
+    kernels = json.loads((root / "tools/bench/why/results.json").read_text())["programs"]
+    table = "\n".join([
+        "| untyped R on ry | what it measures | programs | speed vs GNU R (geometric mean) |",
+        "| --- | --- | ---: | ---: |",
+        f"| Real-world workloads | call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists | {len(real)} | {geomean(r['gnu_r'] / r['ry_jit'] for r in real):.2f}x |",
+        f"| Synthetic kernels | tight loops, recursion and vector kernels, where the JIT applies | {len(kernels)} | {geomean(k['gnu_r'] / k['ry'] for k in kernels):.2f}x |",
+    ])
+    readme = root / "README.md"
+    updated, count = re.subn(r"(<!-- bench-summary -->\n).*?(<!-- /bench-summary -->)", lambda match: match[1] + table + "\n" + match[2], readme.read_text(), flags=re.S)
+    if count != 1:
+        sys.exit(f"error: {readme} has no <!-- bench-summary --> block to rewrite")
+    readme.write_text(updated)
+    print(f"wrote {readme}")
+
+if __name__ == "__main__":
+    main()
