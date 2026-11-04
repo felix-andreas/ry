@@ -381,9 +381,10 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         let installed = root.join("bin/x64/libR.dll.a");
         fs::copy(&import_library, &installed).map_err(io_error(&installed))?;
     }
+    let toolchain = link_system_linear_algebra(root, &sources.toolchain)?;
     write(
         &root.join("etc/Makeconf"),
-        &makeconf(home, &sources.toolchain, Platform::HOST),
+        &makeconf(home, &toolchain, Platform::HOST),
     )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
@@ -542,6 +543,90 @@ exec "$cmd" $extra "$@"
              exec '{rcmd}' Rscript \"$@\"\n"
         ),
     )
+}
+
+/// The toolchain with the system's BLAS and LAPACK behind `lib/libRblas.so` and
+/// `lib/libRlapack.so`, linked as GNU R links its own (`-L"$(R_HOME)/lib" -lRblas`). The default
+/// `-lblas` and `-llapack` need the unversioned `libblas.so` that only a distribution's
+/// development package installs, while the runtime opens `libblas.so.3`, so a system without
+/// that package runs linear algebra but cannot link a package that uses it (Matrix, quadprog).
+/// Each library is the file the dynamic loader resolves the soname to, the one the runtime
+/// opens, and a package linked against it records that soname. A toolchain naming other
+/// libraries, or a system without them, is returned unchanged.
+fn link_system_linear_algebra(root: &Path, toolchain: &Toolchain) -> Result<Toolchain> {
+    let mut linked = toolchain.clone();
+    if !cfg!(target_os = "linux") {
+        return Ok(linked);
+    }
+    if toolchain.blas_libs == "-lblas"
+        && link_system_library(
+            root,
+            &["libblas.so.3", "libblas.so"],
+            "dgemm_",
+            "libRblas.so",
+        )?
+    {
+        linked.blas_libs = r#"-L"$(R_HOME)/lib" -lRblas"#.into();
+    }
+    if toolchain.lapack_libs == "-llapack"
+        && link_system_library(
+            root,
+            &["liblapack.so.3", "liblapack.so"],
+            "dgesv_",
+            "libRlapack.so",
+        )?
+    {
+        linked.lapack_libs = r#"-L"$(R_HOME)/lib" -lRlapack"#.into();
+    }
+    Ok(linked)
+}
+
+/// Links `lib/<own>` in the home at `root` to the first of `sonames` the dynamic loader opens,
+/// found as the file that defines `symbol`; `false` when none opens.
+fn link_system_library(root: &Path, sonames: &[&str], symbol: &str, own: &str) -> Result<bool> {
+    let Some(target) = sonames
+        .iter()
+        .find_map(|soname| system_library_file(soname, symbol))
+    else {
+        return Ok(false);
+    };
+    link(&target, &root.join("lib").join(own))?;
+    Ok(true)
+}
+
+/// The file the dynamic loader resolves `soname` to, found through the file that defines `symbol`.
+#[cfg(target_os = "linux")]
+fn system_library_file(soname: &str, symbol: &str) -> Option<PathBuf> {
+    use std::{
+        ffi::{CStr, CString, OsStr},
+        os::unix::ffi::OsStrExt,
+    };
+    let soname = CString::new(soname).ok()?;
+    let symbol = CString::new(symbol).ok()?;
+    // SAFETY: opening a shared library runs its initializers, and OpenBLAS's starts a thread pool;
+    // the handle is closed before returning, which joins it again. `dladdr` fills `info` with
+    // pointers into the loader's tables, and the path is copied out before `dlclose` frees them.
+    unsafe {
+        let handle = libc::dlopen(soname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+        if handle.is_null() {
+            return None;
+        }
+        let address = libc::dlsym(handle, symbol.as_ptr());
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        let file = (!address.is_null()
+            && libc::dladdr(address, &mut info) != 0
+            && !info.dli_fname.is_null())
+        .then(|| PathBuf::from(OsStr::from_bytes(CStr::from_ptr(info.dli_fname).to_bytes())));
+        // A failed close leaves the library mapped in an install process that exits soon, and the
+        // path found is right either way, so the failure changes nothing worth reporting.
+        libc::dlclose(handle);
+        file.filter(|file| file.is_absolute())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_library_file(_soname: &str, _symbol: &str) -> Option<PathBuf> {
+    None
 }
 
 /// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
@@ -1652,6 +1737,8 @@ pub fn install(
     options: &InstallOptions,
 ) -> Result<Installed> {
     fs::create_dir_all(library).map_err(io_error(library))?;
+    // The R half runs in the build directory, where a relative library would name nothing.
+    let library = &std::path::absolute(library).map_err(io_error(library))?;
     // Building happens outside the library, as in GNU R: a build tree inside a Cargo workspace
     // (such as a library in ry's own checkout) would make Cargo build the package as a member.
     let staging = tempdir(&std::env::temp_dir())?;
@@ -2070,7 +2157,7 @@ fn compile_in(
     // dot renames the result in its Makevars (data.table's `mv $(SHLIB) data_table.dll`).
     let library_name = format!("{name}{}", platform.shlib_ext());
     if let Some(makefile) = platform.build_file(&src, "Makefile") {
-        run_command(
+        run_make(
             Command::new("make")
                 .arg("-f")
                 .arg(&makefile)
@@ -2313,8 +2400,25 @@ pub fn shlib(
     }
     command.env("R_HOME", home);
     command.env("PATH", path_with(&home.join("bin"))?);
-    run_command(&mut command)?;
+    run_make(&mut command)?;
     Ok(directory.join(output))
+}
+
+/// Runs `make` with one job per processor unless `MAKEFLAGS` sets its own flags. GNU R builds
+/// with one job, and a package with many sources (Matrix: about 130 s serially, 33 s with four
+/// jobs) spends nearly its whole installation compiling. A Makevars that misses a dependency
+/// between its targets fails only in parallel, so a failed parallel build runs again with one
+/// job, which reuses the objects already built and reports the serial build's error.
+fn run_make(command: &mut Command) -> Result<String> {
+    let jobs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    if jobs == 1 || std::env::var_os("MAKEFLAGS").is_some_and(|flags| !flags.is_empty()) {
+        return run_command(command);
+    }
+    command.env("MAKEFLAGS", format!("-j{jobs}"));
+    run_command(command).or_else(|_parallel_failure| {
+        command.env_remove("MAKEFLAGS");
+        run_command(command)
+    })
 }
 
 /// The site Makevars GNU R reads after `Makeconf`: `R_MAKEVARS_SITE`, else `etc/Makevars.site`.

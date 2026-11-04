@@ -357,7 +357,8 @@ from GNU R's source release (`ry-rcmd build-base`, behind `just base-r`): it rep
 `src/library/Makefile` on ry's interpreter, one `ry-rcmd R` process per step, writes the
 lazy-load databases and help, and compiles grid's and splines' C code. `runtime_home` links that
 tree into an R home as it does a GNU R installation.
-`install`, `shlib` and `config` are `R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`.
+`install`, `shlib` and `config` are `R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`; `run_make` runs
+`make` in parallel and retries a failed parallel build with one job.
 `r_command_line` and `rscript_command_line` parse GNU R's front-end arguments into a `Session`
 that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level
 half of `R CMD INSTALL`, embedded and run on ry after the compile. `Platform::of_home` reads

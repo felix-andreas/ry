@@ -312,6 +312,12 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
+ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
+is set to a value. A package
+whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
+runs again with one job, reusing the objects already built. Installed R code is not byte-compiled,
+because ry compiles closures when they run.
+
 ## debug-adapter
 
 `ry debug-adapter` serves one debug session over the
@@ -378,7 +384,9 @@ first use: `libblas.so.3` and `liblapack.so.3` on Linux, Accelerate on macOS. Wi
 also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds them on NixOS),
 then for GNU R's own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every
 place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas.dll` and
-`Rlapack.dll`. Compiled package code links the same libraries.
+`Rlapack.dll`. Compiled package code links the same libraries: on Linux, ry's R home links them as
+`lib/libRblas.so` and `lib/libRlapack.so`, as GNU R's home holds its own, so a package that uses
+them (Matrix, quadprog) builds without the distribution's BLAS and LAPACK development packages.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged: it loads a copy
 of each package library, cached under `~/Library/Caches/ry/rebound/`, that names ry's runtime
