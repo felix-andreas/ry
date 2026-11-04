@@ -36,9 +36,9 @@ x <- "foo"
 bad <- x + 1L
 #++++
 == R/main.R
-x: character
+x: Str
 bad: Unknown
-18..19 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+18..24 error[type-mismatch] `+` is not defined on `Str`. It takes a number
 
 #---- any_is_tolerated_trust_any_over_unsupported
 #~~~~ R/main.R
@@ -144,7 +144,7 @@ config <- 1L
 port <- config@port
 #++++
 == R/main.R
-config: integer
+config: I64
 port: Unknown
 21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation
 

@@ -138,6 +138,7 @@ class Generator:
     def __init__(self, rng):
         self.rng = rng
         self.variables = {kind: [] for kind in RUNTIME_TYPE}
+        self.undecided = False
 
     def literal(self, kind):
         rng = self.rng
@@ -145,7 +146,12 @@ class Generator:
             value = rng.randint(0, 9)
             return rng.choice([str(value), f"{value}i64", f"{value}L"])
         value = rng.choice(["0.5", "1.25", "2", "3", "0.1"])
-        return rng.choice([value, f"{value}f64"]) if "." in value else rng.choice([value, f"{value}.0", f"{value}f64"])
+        if "." in value:
+            return rng.choice([value, f"{value}f64"])
+        # A bare whole literal is an F64 only where its context asks for one; at an unannotated
+        # top-level binding nothing does, and it is an I64.
+        forms = [f"{value}.0", f"{value}f64"] if self.undecided else [value, f"{value}.0", f"{value}f64"]
+        return rng.choice(forms)
 
     def expression(self, kind, depth):
         rng = self.rng
@@ -221,8 +227,10 @@ class Generator:
         for index in range(statements):
             kind = self.rng.choice(list(RUNTIME_TYPE))
             name = f"v{index}"
+            annotated = self.rng.random() < 0.5
+            self.undecided = not annotated
             value = self.expression(kind, self.rng.randint(0, 3))
-            if self.rng.random() < 0.5:
+            if annotated:
                 lines.append(f"{name}: {kind} <- {value}")
             else:
                 # Unannotated: the binding's type comes from the value or from the later use below.

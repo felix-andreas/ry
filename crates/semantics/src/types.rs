@@ -363,6 +363,9 @@ pub struct NumberLiteral {
     pub decimal_places: Option<u32>,
     /// Written with R's `L` suffix, so its R type is `integer`.
     pub integer: bool,
+    /// Written with a decimal point or an exponent (`2.0`, `1e3`) and no `L`, which makes `F64`
+    /// the ry number type it takes when nothing decides one, as in Roc. `1e3L` is R's `integer`.
+    pub fractional_form: bool,
 }
 
 impl NumberLiteral {
@@ -396,17 +399,32 @@ impl NumberLiteral {
             };
             (whole, value, decimal_places)
         };
+        let fractional_form = !integer
+            && !digits.starts_with("0x")
+            && !digits.starts_with("0X")
+            && digits.contains(['.', 'e', 'E']);
         Some(NumberLiteral {
             negative,
             whole,
             value: if negative { -value } else { value },
             decimal_places,
             integer,
+            fractional_form,
         })
     }
 
     pub fn is_fraction(&self) -> bool {
         self.whole.is_none()
+    }
+
+    /// The ry number the literal takes when nothing decides one: `F64` for a fraction, a
+    /// fractional spelling, or a whole number past `I64`'s range, and `I64` otherwise.
+    pub fn default_native(&self) -> NativeScalar {
+        if self.is_fraction() || self.fractional_form || !NativeScalar::I64.holds(self) {
+            NativeScalar::F64
+        } else {
+            NativeScalar::I64
+        }
     }
 }
 

@@ -1973,24 +1973,22 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     Ok(numbers)
 }
 
-/// The items of a list of `I64`s, read without converting them; `None` for any other list,
-/// including an empty one, which the R-number path handles.
+/// The items of a list of `I64`s, read without converting them; `None` for any other list. An
+/// empty list of `I64`s counts, so its sum is the `I64` 0 its type promises.
 unsafe fn native_numbers(call: &Call<'_>) -> R<Option<Vec<i64>>> {
     let [list] = arguments(call, ["list"])?;
-    if list.kind() != SexpType::I64 || !list.is_array() || length(list) == 0 {
+    if list.kind() != SexpType::I64 || !list.is_array() {
         return Ok(None);
     }
     Ok(Some(list.slice::<i64>().to_vec()))
 }
 
-/// A sum or product of native numbers in their own type, where overflow is an error.
-unsafe fn fold_native(call: &Call<'_>, op: Op, items: &[i64]) -> R<Sexp> {
+/// A sum or product of native numbers in their own type from `start`, the operation's identity,
+/// where overflow is an error.
+unsafe fn fold_native(call: &Call<'_>, op: Op, start: i64, items: &[i64]) -> R<Sexp> {
     let name = call.name();
-    let Some((&first, rest)) = items.split_first() else {
-        return Err(call.error("`list` is empty"));
-    };
-    let mut total = first;
-    for &item in rest {
+    let mut total = start;
+    for &item in items {
         total = numbers::binary(name, op, total, item).map_err(|message| call.error(message))?;
     }
     numbers::alloc(total)
@@ -2038,7 +2036,7 @@ unsafe fn fold_numbers(
 // with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     if let Some(items) = native_numbers(call)? {
-        return fold_native(call, Op::Add, &items);
+        return fold_native(call, Op::Add, 0, &items);
     }
     fold_numbers(call, 0, i32::checked_add, |start, items| {
         long_double::add_all(LongDouble::from(start), items).to_f64()
@@ -2047,7 +2045,7 @@ unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
     if let Some(items) = native_numbers(call)? {
-        return fold_native(call, Op::Multiply, &items);
+        return fold_native(call, Op::Multiply, 1, &items);
     }
     fold_numbers(call, 1, i32::checked_mul, |start, items| {
         items.iter().fold(start, |total, &item| total * item)
@@ -2072,8 +2070,11 @@ unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
         return ok(scalar_real(best)?);
     }
     if let Some(items) = native_numbers(call)? {
-        let mut best = items[0];
-        for &item in &items[1..] {
+        let Some((&first, rest)) = items.split_first() else {
+            return err("ListWasEmpty");
+        };
+        let mut best = first;
+        for &item in rest {
             if item.cmp(&best) == wanted {
                 best = item;
             }
