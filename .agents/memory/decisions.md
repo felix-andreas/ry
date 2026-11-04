@@ -7538,6 +7538,25 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `completeExtends` resolves a class reached twice with `.resolveSuperclasses`' first consistent
   candidate (`resolved_superclasses` in `crates/interp/src/methods_core.rs`). `.S3Extends` is not
   ported, so a union member whose indirect extensions it would rewrite bails.
+- **`setClass` does `setIs`'s subclass bookkeeping natively, by GNU R's quirks.** Only the
+  direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
+  ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
+  new class or any direct superclass among its subclasses is skipped (a later subclass of a union
+  member is not added to the union). The class cache and the namespace binding of a superclass
+  may legitimately differ after `setClassUnion` (GNU R orders the extensions differently in each),
+  and `getClassDef` reads the cache, so `local_class` takes the cached definition and only
+  requires a binding to exist. `prototype()` objects reduce to the list `do.call("prototype",
+  list)` would wrap (`prototype_def_list`). A slot default whose class has a methods-package
+  `initialize` (`environment`) runs `new()`, which cannot fail, unlike a package's method, where
+  `tryNew` would fall back to the prototype.
+- **`setMethod` builds the `.local` wrapper natively** (`conform_definition`), with the result
+  `rematchDefinition` gives: the generic's formals, `.local <- definition; .local(args)`, args
+  after `...` and from the first `missing` signature position passed by name, and the method's
+  defaults kept unless they are a symbol or missing (`.copyMethodDefaults` then `matchDefaults`).
+  A renamed single argument, an omitted argument, a different order or a method without `...` bail.
+- **Every fallback says why.** `bail!(skip, "reason")` records the reason and line, and
+  `report_fallback` prints them under `RY_LOAD_VERBOSE` for the four definition functions, so a
+  slow load names the definitions to fix without a profiler (`reference/package-loading.md`).
 - **`cacheMetaData` does the cheap cases and delegates the rest per item.** A class whose bound
   definition is already the cached one (and, for a union, whose members' cached extensions match)
   needs nothing; a package's own standard generic gets its tables merged natively. Anything else

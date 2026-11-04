@@ -59,6 +59,9 @@ fn trace_bails() -> bool {
 /// is many times slower, when load reports are on: `options(ry.load.verbose = TRUE)` or
 /// `RY_LOAD_VERBOSE=true`. The report names the definition, the reason, and the bail's source
 /// line for a contributor.
+/// The line `LAST_BAIL` holds for a fallback the caller has already reported.
+const UNREPORTED: u32 = u32::MAX;
+
 unsafe fn report_fallback(
     call: &Call<'_>,
     function: &str,
@@ -73,6 +76,9 @@ unsafe fn report_fallback(
         return Ok(value);
     }
     let (line, reason) = LAST_BAIL.with(|last| last.get());
+    if line == UNREPORTED {
+        return Ok(value);
+    }
     let name = match quiet_value(install(argument)?, frame)? {
         Some(name) if name.kind() == SexpType::String && length(name) > 0 => {
             format!("\"{}\"", String::from_utf8_lossy(name.element(0).bytes()))
@@ -2128,7 +2134,8 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
         .iter()
         .any(|name| !generic_names.contains(name));
     if !added {
-        // Every generic argument is in the method in order, so the names would be equal.
+        // The method keeps the generic's arguments in order and adds none, but drops some (such as
+        // `...`), which `rematchDefinition()` handles with a `.local` the fast path does not build.
         return Ok(None);
     }
     let Some(dots_position) = generic_names.iter().position(|name| *name == dots) else {
@@ -2570,6 +2577,11 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
             bail!(skip, "`representation` is missing");
         };
         let Some((pairs, listed)) = representation_parts(representation) else {
+            if values::inherits(representation, "ClassUnionRepresentation") {
+                // `setClassUnion()`'s R code defines the union this way, and has said why.
+                LAST_BAIL.with(|last| last.set((UNREPORTED, "")));
+                return Ok(skip);
+            }
             bail!(skip, "`representation` is not a list of single class names");
         };
         own = pairs;
@@ -2718,6 +2730,11 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
     for known in supers.iter().chain(&ancestors) {
         if element(slot(known.definition, symbols().subclasses)?, name.bytes()).is_some() {
             bail!(skip, "a superclass already lists this class as a subclass");
+        }
+        // Recording a subclass in a union makes `setIs()` recache the union's other members,
+        // which re-sorts their extensions, drops `conflicts` and rebuilds replace methods.
+        if is_class_union(known.definition)? == Some(true) {
+            bail!(skip, "the class extends a class union");
         }
     }
 
@@ -4433,9 +4450,10 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     let contained = values::names(slot(definition, symbols().contains)?);
     let mut labels = vec![class.bytes()];
     labels.extend((0..length(contained)).map(|index| contained.element(index).bytes()));
-    // The methods package's own `initialize` methods (for `environment`, `matrix`, `ts` and the
-    // like) never fail without arguments, so `new()` gives what `tryNew()`'s `tryCatch()` would.
-    // A package's method may fail, and then `tryNew()` falls back to the prototype.
+    // The methods package's own `initialize` methods for `environment`, `matrix` and `array`
+    // never fail without arguments, so `new()` gives what `tryNew()`'s `tryCatch()` would. Any
+    // other method may fail (`envRefClass`'s calls the class's own), and then `tryNew()` falls
+    // back to the prototype.
     let mut own_initialize = false;
     for label in labels {
         let symbol = values::install_bytes(label)?;
@@ -4444,7 +4462,8 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
                 return Ok(None);
             };
             let namespace = interp().globals.methods_namespace;
-            if method.kind() != SexpType::Closure
+            if !matches!(label, b"environment" | b"matrix" | b"array")
+                || method.kind() != SexpType::Closure
                 || (method.tag() != namespace && method.tag().enclosure() != namespace)
             {
                 return Ok(None);
@@ -4888,8 +4907,13 @@ unsafe fn named_classes(value: Sexp) -> Option<Vec<(Sexp, Sexp)>> {
 /// superclass, or a character vector or list of single class names, the named ones slots and
 /// the others superclasses. Slot names and superclass names are each distinct.
 unsafe fn representation_parts(value: Sexp) -> Option<(Vec<(Sexp, Sexp)>, Vec<Sexp>)> {
-    if is_plain_name(value) && values::names(value) == nil() {
-        return Some((Vec::new(), vec![value.element(0)]));
+    // `representation()` returns a list; the only character vector `setClass()` accepts is a
+    // single unnamed class name.
+    if value.kind() == SexpType::String {
+        if is_plain_name(value) && values::names(value) == nil() {
+            return Some((Vec::new(), vec![value.element(0)]));
+        }
+        return None;
     }
     let names = values::names(value);
     if value.attrib() != nil() && (names == nil() || value.attrib().cdr() != nil())
@@ -4901,7 +4925,6 @@ unsafe fn representation_parts(value: Sexp) -> Option<(Vec<(Sexp, Sexp)>, Vec<Se
     let mut supers: Vec<Sexp> = Vec::new();
     for index in 0..length(value) {
         let class = match value.kind() {
-            SexpType::String => value.element(index),
             SexpType::List => {
                 let item = value.element(index);
                 if !is_plain_name(item) || values::names(item) != nil() {

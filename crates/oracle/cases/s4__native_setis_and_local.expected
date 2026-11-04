@@ -226,9 +226,17 @@
 | 
 | 
 | 
+| [1] "D"  "C"  "S"  "U3" "M"  "U" 
+| [1] "h"
+| [1] "U3"
+| [1] "RC"
+| attr(,"package")
+| [1] "s4setis"
+| [1] FALSE
+| [1] FALSE
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| structure(1L, class = c("terminal", "connection"))
+logical
+| FALSE

@@ -18,15 +18,11 @@ package's classes and basic ones, which are the two shapes that used to keep eve
 eager. `--imports` adds real packages to `Imports` and `import()`s them, so the load's import
 phase does real work, as `--imports lubridate,data.table,xts` does.
 
-A third of the methods on package generics (`--local-share`) add a `verbose = FALSE` argument
-before the generic's `...`, so `setMethod()` wraps them in a `.local` function as the methods
-package does for any method whose formals differ from its generic's.
-
 `R/zz_probe.R` defines `s4_probe()`, which exercises dispatch, `is()`, `validObject`,
 `callNextMethod`, `show`, `initialize`, unions and the base generics' methods, and returns the
 results as a list, so `s4_check.R` can compare a load on one runtime against another.
 
-`--local-share 0.33` gives that share of the package-generic methods an extra formal
+`--local-share` (0.33 by default) gives that share of the package-generic methods an extra formal
 (`function(object, verbose = FALSE, ...)`), which `setMethod()` rematches through `.local`, as
 about a third of the reported package's methods do.
 

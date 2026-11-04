@@ -229,7 +229,7 @@ when the result is identical to what the methods package's R code builds, and th
 otherwise. With the option on, each definition that takes the R code says which one and why:
 
 ```
-ry: setClass("Num") runs the methods package's R code: a superclass is a basic class or comes from another package (methods_core.rs:2520)
+ry: setClass("Num") runs the methods package's R code: a superclass is a basic class or comes from another package (methods_core.rs:2682)
 ```
 
 The R code gives the same classes and methods, only more slowly (a few milliseconds per

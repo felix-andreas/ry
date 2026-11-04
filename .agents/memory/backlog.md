@@ -101,10 +101,12 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
   the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
-- About 23 calls still bail (`RY_TRACE_METHODS_BAILS=1`): `setOldClass`, `setMethod("[")` whose
-  method formals need rematching, the first union of a basic class, a few `setClass` shapes, and
-  `cacheMetaData` delegating classes whose cached definition differs, generics of other packages,
-  group generics and primitives.
+- **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
+  classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
+  `"data.frame"`, an old class), a second superclass that has superclasses of its own,
+  `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
+  `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
+  cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every

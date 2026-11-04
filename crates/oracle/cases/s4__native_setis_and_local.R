@@ -88,3 +88,31 @@ for (spec in list(list("g1", "P0"), list("g1", "Q1"), list("g2", c("P0", "missin
 }
 showMethods("g2", where = ns)
 showMethods("g3", where = ns, includeDefs = TRUE)
+
+# A class whose ancestors include a union makes `setIs()` recache the union's other members,
+# which changes how their methods dispatch.
+setClass("M", slots = c(m = "numeric"), where = ns)
+setClassUnion("U", "M", where = ns)
+setClass("S", contains = "M", where = ns)
+setClass("C", contains = "S", where = ns)
+setClass("D", contains = "C", slots = c(d = "list"), where = ns)
+setClassUnion("U3", "C", where = ns)
+setClass("E", contains = "D", where = ns)
+setClass("F", contains = "E", where = ns)
+is(new("D"))
+setGeneric("h", function(x) standardGeneric("h"), where = ns)
+setMethod("h", "M", function(x) "M", where = ns)
+setMethod("h", "U3", function(x) "U3", where = ns)
+get("h", ns)(new("D"))
+
+# `tryNew()` falls back to the prototype when a slot class's `initialize` fails.
+gen <- suppressMessages(setRefClass("RC", fields = list(a = "numeric"),
+  methods = list(initialize = function(...) stop("boom")), where = ns))
+setClass("Holder", slots = c(r = "RC", n = "numeric"), where = ns)
+class(attr(getClass("Holder", where = ns)@prototype, "r"))
+
+# A character `representation` other than a single class name is an error.
+r <- try(setClass("Z", representation = c(x = "numeric"), where = ns), silent = TRUE)
+isClass("Z", where = ns)
+r <- try(setClass("Z2", representation = c(y = "numeric", "P0"), where = ns), silent = TRUE)
+isClass("Z2", where = ns)
