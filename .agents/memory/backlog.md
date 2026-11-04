@@ -65,16 +65,19 @@ The methods package's core is moving into Rust behind hash-guarded prologues (`d
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
 `initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()`, `setClass()`,
 `setClassUnion()` and `cacheMetaData()` are native when nothing observable would differ. On
-`target/s4plain` (2,892 definitions, no imports beyond R6) a cold first `new()` costs about 0.5 s
-(running the definitions about 280 ms, `cacheMetaData` 16 ms, the cache save about 190 ms) and a
-warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
+the S4-heavy bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
+lubridate,data.table,xts`) a cold first `new()` costs about 0.47 s (running the definitions about
+245 ms, `cacheMetaData` 16 ms, the cache save about 200 ms) and a warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
 that holds (`decisions.md`). Consider a native class table with dense ids and a bitset extends
 relation instead of porting function by function. A reload after editing a method or a class
 takes 0.2 to 0.45 s, and dispatch costs 2.3 to 4.5 µs per call. Remaining, largest first (per-call
 costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
 
-- Native `setClass` itself: about 126 µs per call, 73 ms for 579 classes. Its slot defaults run
-  R's `new()` through `tryNew()`, and each direct extension builds three closures from templates.
+- Native `setClass` itself: about 100 µs per call, 60 ms for 579 classes (callgrind with
+  `--toggle-collect='*do_set_class'` on a build with `CARGO_PROFILE_RELEASE_STRIP=false`). A slot
+  default runs R's `new()` only the first time a class is used, to fill `initialize`'s dispatch
+  cache (about a quarter of the cost, `.InheritForDispatch` in R); then come the templates each
+  direct extension instantiates (`substitute_symbols`) and symbol interning.
 - The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing), which goes
   away with the cache.
 - `setMethod` on a generic that is not yet a standard generic: primitives (`length`, `c`), base
