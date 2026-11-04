@@ -1238,7 +1238,9 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     }
     let name_symbol = install_text(name.element(0))?;
     let generic = crate::methods::visible_generic(name_symbol, place)?;
-    if !is_standard_generic(generic)? {
+    // `setMethod()` stores a method for a generic whose body does more than dispatch, such as
+    // `coerce` and `initialize`, exactly as for a standard one.
+    if !is_standard_generic(generic, true)? {
         bail!(skip);
     }
     // `getGeneric()` caches a generic it finds that is also the global binding.
@@ -2981,7 +2983,7 @@ unsafe fn cache_own_generic(
     let Some(generic) = quiet_value(symbol, place)? else {
         bail!(false);
     };
-    if !is_standard_generic(generic)? || slot_text(generic, "package")? != package {
+    if !is_standard_generic(generic, false)? || slot_text(generic, "package")? != package {
         bail!(false);
     }
     let default = slot(generic, "default")?;
@@ -4065,15 +4067,21 @@ unsafe fn append_attributes(from: Sexp, to: Sexp) -> R<()> {
     Ok(())
 }
 
-/// Whether `generic` is a plain `standardGeneric` whose methods dispatch through its own tables:
-/// not a group generic, a member of a group, or the generic of a primitive.
-unsafe fn is_standard_generic(generic: Sexp) -> R<bool> {
+/// Whether `generic` is a plain `standardGeneric`, or with `nonstandard` also a
+/// `nonstandardGenericFunction`, whose methods dispatch through its own tables: not a group
+/// generic, a member of a group, or the generic of a primitive.
+unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
     if generic.kind() != SexpType::Closure || !generic.has_gp(gp::S4_OBJECT) {
         return Ok(false);
     }
     let class = values::class_attr(generic);
-    if length(class) != 1 || class.element(0).bytes() != b"standardGeneric" {
+    if length(class) != 1 {
         return Ok(false);
+    }
+    match class.element(0).bytes() {
+        b"standardGeneric" => {}
+        b"nonstandardGenericFunction" if nonstandard => {}
+        _ => return Ok(false),
     }
     let group = get_attr(generic, install("group")?);
     if group.kind() != SexpType::List || length(group) != 0 {
