@@ -925,6 +925,15 @@ unsafe fn basic_classes<'a>() -> R<Vec<&'a [u8]>> {
 /// value, a forced promise, or a promise of a constant or of a variable bound to such a value,
 /// which is forced as the R code would force it. `None` for anything else, a missing argument
 /// included.
+/// Whether `value` is an unforced promise of `lazyLoadDBfetch()`, the binding a lazy-loaded
+/// namespace or its imports hold until first use.
+unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
+    Ok(value.kind() == SexpType::Promise
+        && value.car() == unbound()
+        && value.cdr().kind() == SexpType::Language
+        && value.cdr().car() == install("lazyLoadDBfetch")?)
+}
+
 unsafe fn quiet_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) => quiet_binding(cell, 0),
@@ -2365,6 +2374,13 @@ unsafe fn add_union_member(
     } else {
         let mut found = None;
         for &frame in &homes {
+            // `get()` forces a lazy-loaded binding, such as metadata an imported package
+            // exports, which only reads the package's database.
+            if let Some(cell) = crate::heap().frame_cell(frame, member_meta)
+                && is_lazy_load_promise(cell.cdr())?
+            {
+                eval::force_promise(cell.cdr())?;
+            }
             let Some(bound) = pending.bound(frame, member_meta)? else {
                 bail!(false);
             };
@@ -2670,8 +2686,8 @@ unsafe fn resolved_superclasses(
 /// `cacheMetaData(where, attach = TRUE)` for a namespace. The loops over the classes and the
 /// generics run here, item by item in GNU R's order, and an item takes the R code of its loop
 /// body (`Template::CacheClassItem`, `Template::CacheGenericItem`) unless it is one of the
-/// shapes below, whose effects this writes directly: a class whose cached definition is already
-/// the one bound, and a standard generic of the package's own whose methods table merge needs no
+/// shapes below, whose effects this writes directly: a plain class, union or reference class
+/// whose cached definition is of the same package, and a standard generic of the package's own whose methods table merge needs no
 /// new method objects. Load actions run in R. `false` only before anything has run.
 unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
@@ -2759,7 +2775,7 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
     let generic_item = templates.element(Template::CacheGenericItem as usize);
     for symbol in classes {
         let name = &symbol.car().bytes()[b".__C__".len()..];
-        if !class_cached(symbol, name, place, class_table)? {
+        if !cache_class_item(symbol, name, place, class_table)? {
             trace_delegate(line!());
             let name = values::scalar_string(&String::from_utf8_lossy(name))?;
             let item = lcons(class_item, cons(name, cons(place, nil())?)?)?;
@@ -2809,10 +2825,16 @@ fn trace_delegate(line: u32) {
     }
 }
 
-/// Whether `.cacheClass()` of the class bound to `symbol` in `place` would change nothing: the
-/// table caches that very definition and, for a union, every subclass's cached definition holds
-/// the union's extension for it already.
-unsafe fn class_cached(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp) -> R<bool> {
+/// `.cacheClass(name, definition, is(definition, "ClassUnionRepresentation"), place)` for the
+/// class bound to `symbol` in `place`, with its effects written directly. `false`, before any
+/// effect, when the definition is not a plain class, union or reference class representation,
+/// or when the class table holds a definition of the name from another package.
+unsafe fn cache_class_item(
+    symbol: Sexp,
+    name: &[u8],
+    place: Sexp,
+    class_table: Sexp,
+) -> R<bool> {
     let Some(definition) = quiet_value(symbol, place)? else {
         bail!(false);
     };
@@ -2821,29 +2843,46 @@ unsafe fn class_cached(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp
         bail!(false);
     }
     let union = match class.element(0).bytes() {
-        b"classRepresentation" => false,
+        b"classRepresentation" | b"refClassRepresentation" => false,
         b"ClassUnionRepresentation" => true,
         _ => bail!(false),
     };
-    if quiet_value(values::install_bytes(name)?, class_table)? != Some(definition) {
-        bail!(false);
-    }
-    // `.recacheSubclasses()` gives every subclass the union's extension for it, in place, and
-    // re-sorts, which changes nothing when the subclass holds that very extension already.
+    let name_text = values::mkchar(&String::from_utf8_lossy(name))?;
+    let mut pending = Pending::default();
+    // `.recacheSubclasses()` gives every subclass the union's extension for it.
     if union {
         for (member, extension) in list_entries(slot(definition, "subclasses")?) {
             let Some(member_definition) = cached_class(values::scalar_string_charsxp(member)?)?
             else {
                 bail!(false);
             };
-            if !matches!(
-                recached(member_definition, values::install_bytes(name)?, extension)?,
-                Recache::Unchanged
-            ) {
-                bail!(false);
+            match recached(member_definition, name_text, extension)? {
+                Recache::Unchanged => {}
+                Recache::Changed(updated) => pending.cache(member, updated, true),
+                Recache::Unsupported => bail!(false),
             }
         }
     }
+    match quiet_value(install_text(name_text)?, class_table)? {
+        None => pending.cache(name_text, definition, false),
+        Some(previous) if previous == definition => {}
+        Some(previous) => {
+            let package = install("package")?;
+            if !previous.has_gp(gp::S4_OBJECT)
+                || !crate::sort::identical(
+                    get_attr(previous, package),
+                    get_attr(definition, package),
+                    &Default::default(),
+                )
+            {
+                bail!(false);
+            }
+            if !crate::sort::identical(previous, definition, &Default::default()) {
+                pending.cache(name_text, definition, true);
+            }
+        }
+    }
+    pending.commit(class_table)?;
     Ok(true)
 }
 
