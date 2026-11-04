@@ -6,7 +6,7 @@ requires ry-runtime
 
 file updates.R
 | h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }
-| f <- function() { d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(keep), Dict.len(d)) }
+| f <- function() { d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Num.to_r(Dict.len(keep)), Num.to_r(Dict.len(d))) }
 | print(f())
 | g <- function(d) { s <- function() length(d); List.append(d, s) }
 | f2 <- function() { d <- list(1, 2); for (i in 1:4) d <- g(d); c(length(d), d[[6L]](), d[[3L]]()) }

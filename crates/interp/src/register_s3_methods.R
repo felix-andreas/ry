@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# A modified copy of `registerS3methods()` from GNU R 4.3.3, which keeps its copyright notice:
+# A modified copy of `registerS3methods()` from GNU R 4.6.2, which keeps its copyright notice:
 #
 # GNU R: src/library/base/R/namespace.R (registerS3methods)
-#     Copyright (C) 1995-2023 The R Core Team
+#     Copyright (C) 1995-2025 The R Core Team
 #
 # Modifications Copyright (C) 2026 Felix Andreas. This file is free software: you can
 # redistribute it and/or modify it under the terms of the GNU General Public License as
@@ -11,7 +11,7 @@
 # option) any later version.
 #
 # The runtime installs this in place of base R's own `registerS3methods()` only when that one is
-# the GNU R 4.3.3 function this copies (`session::install_register_s3_methods`). The two loops
+# the GNU R 4.6.2 function this copies (`session::install_register_s3_methods`). The two loops
 # that look at every method run natively (`ryLocalS4Generics`, `ryRegisterS3Methods` in
 # `envir.rs`); every other step is GNU R's.
 function(info, package, env)
@@ -26,12 +26,16 @@ function(info, package, env)
         info <- cbind(info, NA_character_)
     Info <- cbind(info[, 1L:3L, drop = FALSE], methname, info[, 4L])
     loc <- names(env)
-    if (any(notex <- match(info[, 3], loc, nomatch = 0L) == 0L)) {
-        warning(sprintf(ngettext(sum(notex), "S3 method %s was declared in NAMESPACE but not found",
-            "S3 methods %s were declared in NAMESPACE but not found"),
-            paste(sQuote(info[notex, 3]), collapse = ", ")),
-            call. = FALSE, domain = NA)
-        Info <- Info[!notex, , drop = FALSE]
+    if (any(notex <- match(info[, 3L], loc, nomatch = 0L) == 0L)) {
+        found <- vapply(info[notex, 3L], exists, logical(1), envir = parent.env(env))
+        notex[notex] <- !found
+        if (any(notex)) {
+            warning(sprintf(ngettext(sum(notex), "S3 method %s was declared in NAMESPACE but not found",
+                "S3 methods %s were declared in NAMESPACE but not found"),
+                paste(sQuote(info[notex, 3]), collapse = ", ")),
+                call. = FALSE, domain = NA)
+            Info <- Info[!notex, , drop = FALSE]
+        }
     }
     eager <- is.na(Info[, 5L])
     delayed <- Info[!eager, , drop = FALSE]

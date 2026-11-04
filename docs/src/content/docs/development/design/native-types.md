@@ -181,10 +181,11 @@ complex `5i` followed by `64`, so each is a syntax error in R today. `5i` alone 
 and any other suffix is a syntax error in ry. A hex literal takes only the `i64` suffix (`0xFFi64`),
 because `f` is a hex digit: R reads `0x1Ff64` as the number `0x1FF64`, and so does ry.
 
-At run time an unsuffixed literal is the R value it always was. Where the checker gave it a ry type,
-the operator or typed parameter that receives it converts it, which the interpreter can do without
-type information. This conversion applies only to literals and to unannotated values the checker
-already accepted. It refuses `NA` and an inexact value, and a compiler folds it away.
+At run time a literal is the type the checker gave it: the preflight spells each unsuffixed literal
+the checker typed `I64` with its suffix before ry's runtime reads the program, the mirror of erasing
+annotations for GNU R. Code that skips the preflight (`ry load`, `source()`) falls back to the
+interpreter's conversion at the operator or annotated binding, which refuses `NA` and an inexact
+value.
 
 ### Arithmetic
 

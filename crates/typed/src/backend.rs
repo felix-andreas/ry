@@ -72,6 +72,7 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
     match ty {
         Type::Int | Type::Lgl | Type::Bool => SmallVec::from_slice(&[I32]),
         Type::Dbl => SmallVec::from_slice(&[F64]),
+        Type::I64 => SmallVec::from_slice(&[I64]),
         Type::Str => SmallVec::from_slice(&[I64, I64]),
         Type::Null | Type::Vector { .. } | Type::List(_) | Type::Dict { .. } => {
             SmallVec::from_slice(&[I64])
@@ -497,8 +498,11 @@ impl Emitter<'_, '_> {
         self.builder.ins().iconst(I64, value)
     }
 
-    /// A 32-bit integer as a sign-extended 64-bit word.
+    /// A 32-bit integer as a sign-extended 64-bit word, and an `I64` as itself.
     fn wide(&mut self, value: Value) -> Value {
+        if self.builder.func.dfg.value_type(value) == I64 {
+            return value;
+        }
         self.builder.ins().sextend(I64, value)
     }
 
@@ -516,7 +520,7 @@ impl Emitter<'_, '_> {
                     .bitcast(I64, MemFlagsData::new(), values[0]);
                 (bits, self.iconst(0))
             }
-            Type::Int | Type::Lgl | Type::Bool => {
+            Type::Int | Type::Lgl | Type::Bool | Type::I64 => {
                 let wide = self.wide(values[0]);
                 (wide, self.iconst(0))
             }
@@ -638,6 +642,7 @@ impl Emitter<'_, '_> {
                     SmallVec::from_slice(&[self.builder.ins().iconst(I32, i64::from(value))])
                 }
                 Constant::Dbl(value) => SmallVec::from_slice(&[self.builder.ins().f64const(value)]),
+                Constant::I64(value) => SmallVec::from_slice(&[self.iconst(value)]),
                 Constant::Str(lo, hi) => {
                     SmallVec::from_slice(&[self.iconst(lo as i64), self.iconst(hi as i64)])
                 }
@@ -665,6 +670,7 @@ impl Emitter<'_, '_> {
                         }
                         self.real_arith(*op, x, y)
                     }
+                    Item::I64 => self.i64_arith(*op, x, y, inst)?,
                     _ => self.integer_arith(*op, x, y, inst)?,
                 };
                 SmallVec::from_slice(&[value])
@@ -691,6 +697,11 @@ impl Emitter<'_, '_> {
                         let compared = self.builder.ins().fcmp(float_condition(*op), x, y);
                         let compared = self.logical(compared);
                         self.na_or(unordered, compared)
+                    }
+                    Item::I64 => {
+                        let (x, y) = (self.one(*a)?, self.one(*b)?);
+                        let compared = self.builder.ins().icmp(integer_condition(*op), x, y);
+                        self.logical(compared)
                     }
                     Item::Int | Item::Lgl => {
                         let (x, y) = (self.one(*a)?, self.one(*b)?);
@@ -725,6 +736,16 @@ impl Emitter<'_, '_> {
                 let x = self.one(*a)?;
                 let value = match item {
                     Item::Dbl => self.real_math(*op, x, inst)?,
+                    Item::I64 => {
+                        // Only the most negative `I64` has no negation or absolute value.
+                        let lowest = self.builder.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                        self.fail_if(lowest, &inst.fail_drops)?;
+                        match op {
+                            Math::Neg => self.builder.ins().ineg(x),
+                            Math::Abs => self.builder.ins().iabs(x),
+                            _ => return Err(Refusal("an I64 math function")),
+                        }
+                    }
                     _ => {
                         let na = self.is_na_integer(x);
                         let value = match op {
@@ -746,12 +767,39 @@ impl Emitter<'_, '_> {
             Op::ToDbl(a) => {
                 let x = self.one(*a)?;
                 let converted = self.builder.ins().fcvt_from_sint(F64, x);
-                let value = if ty(*a) == Type::Bool {
+                let value = if matches!(ty(*a), Type::Bool | Type::I64) {
                     converted
                 } else {
                     let na = self.is_na_integer(x);
                     let missing = self.builder.ins().f64const(f64::from_bits(NA_REAL_BITS));
                     self.builder.ins().select(na, missing, converted)
+                };
+                SmallVec::from_slice(&[value])
+            }
+            Op::ToI64(a) => {
+                let x = self.one(*a)?;
+                let value = match ty(*a) {
+                    Type::I64 => x,
+                    Type::Dbl => {
+                        // Exactly a whole number in [-2^63, 2^63): `NaN` fails the first test.
+                        let whole = self.builder.ins().trunc(x);
+                        let exact = self.builder.ins().fcmp(FloatCC::Equal, whole, x);
+                        let low = self.builder.ins().f64const(-9_223_372_036_854_775_808.0);
+                        let high = self.builder.ins().f64const(9_223_372_036_854_775_808.0);
+                        let above = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, x, low);
+                        let below = self.builder.ins().fcmp(FloatCC::LessThan, x, high);
+                        let inside = self.builder.ins().band(above, below);
+                        let fits = self.builder.ins().band(exact, inside);
+                        let outside = self.builder.ins().bxor_imm_s(fits, 1);
+                        self.fail_if(outside, &inst.fail_drops)?;
+                        self.builder.ins().fcvt_to_sint_sat(I64, x)
+                    }
+                    Type::Int => {
+                        let na = self.is_na_integer(x);
+                        self.fail_if(na, &inst.fail_drops)?;
+                        self.wide(x)
+                    }
+                    _ => return Err(Refusal("an I64 from a value that is not a number")),
                 };
                 SmallVec::from_slice(&[value])
             }
@@ -777,7 +825,11 @@ impl Emitter<'_, '_> {
                     self.builder
                         .ins()
                         .load(I64, MemFlagsData::trusted(), pointer, LENGTH_OFFSET);
-                SmallVec::from_slice(&[self.builder.ins().ireduce(I32, length)])
+                if inst.dest.is_some_and(|dest| ty(dest) == Type::I64) {
+                    SmallVec::from_slice(&[length])
+                } else {
+                    SmallVec::from_slice(&[self.builder.ins().ireduce(I32, length)])
+                }
             }
             Op::Get(a, index) => {
                 let item = ty(*a)
@@ -852,6 +904,12 @@ impl Emitter<'_, '_> {
                 let list = self.call_words(address!(values::ry_list_seq), I64, &[from, to]);
                 SmallVec::from_slice(&[list])
             }
+            Op::RangeI64(from, to) => {
+                let (from, to) = (self.one(*from)?, self.one(*to)?);
+                let list = self.call_words(address!(values::ry_list_range_i64), I64, &[from, to]);
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
             Op::Repeat(value, times) => {
                 let item = ty(*value)
                     .item()
@@ -870,7 +928,11 @@ impl Emitter<'_, '_> {
                 SmallVec::from_slice(&[list])
             }
             Op::VectorArith(op, item, a, b) => {
-                let operation = self.iconst(*op as i64);
+                let lists = inst
+                    .dest
+                    .is_some_and(|dest| matches!(ty(dest), Type::Vector { array: true, .. }));
+                let flag = if lists { values::LIST_ARITH } else { 0 };
+                let operation = self.iconst(i64::from(*op as u32 | flag));
                 let kind = self.iconst(kind(*item));
                 let list = match (ty(*a).items().is_some(), ty(*b).items().is_some()) {
                     (true, true) => {
@@ -905,6 +967,59 @@ impl Emitter<'_, '_> {
                 };
                 self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
+            }
+            Op::Elementwise {
+                item,
+                sum,
+                program,
+                inputs,
+            } => {
+                let words = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8 * inputs.len().max(1) as u32,
+                    3,
+                ));
+                let mut lists = 0i64;
+                for (index, &input) in inputs.iter().enumerate() {
+                    let word = if ty(input).items().is_some() {
+                        lists |= 1 << index;
+                        self.one(input)?
+                    } else {
+                        self.item_words(input)?.0
+                    };
+                    self.builder.ins().stack_store(I64, word, words, 8 * index as i32);
+                }
+                let steps = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    4 * program.len() as u32,
+                    2,
+                ));
+                for (index, &step) in program.iter().enumerate() {
+                    let step = self.builder.ins().iconst(I32, i64::from(step));
+                    self.builder.ins().stack_store(I64, step, steps, 4 * index as i32);
+                }
+                let out = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let arguments = [
+                    self.iconst(kind(*item)),
+                    self.builder.ins().stack_addr(I64, steps, 0),
+                    self.iconst(program.len() as i64),
+                    self.builder.ins().stack_addr(I64, words, 0),
+                    self.iconst(inputs.len() as i64),
+                    self.iconst(lists),
+                    self.iconst(i64::from(*sum)),
+                    self.builder.ins().stack_addr(I64, out, 0),
+                ];
+                let status = self.call_words(address!(values::ry_elementwise), I32, &arguments);
+                self.fail_if(status, &inst.fail_drops)?;
+                let result = match (*sum, item) {
+                    (true, Item::Dbl) => self.builder.ins().stack_load(I64, F64, out, 0),
+                    _ => self.builder.ins().stack_load(I64, I64, out, 0),
+                };
+                SmallVec::from_slice(&[result])
             }
             Op::VectorCompare(op, item, a, b) => {
                 let operation = self.iconst(*op as i64);
@@ -1197,6 +1312,7 @@ impl Emitter<'_, '_> {
             Arith::Mul => return self.builder.ins().fmul(x, y),
             Arith::Div => return self.builder.ins().fdiv(x, y),
             Arith::Pow => address!(real_power),
+            Arith::NumPow => address!(real_platform_power),
             Arith::Mod => address!(real_modulo),
             Arith::IntDiv => address!(real_integer_divide),
             Arith::Min => address!(real_min),
@@ -1268,9 +1384,77 @@ impl Emitter<'_, '_> {
             }
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
-            Arith::Div | Arith::Pow => return Err(Refusal("an integer division or power")),
+            Arith::Div | Arith::Pow | Arith::NumPow => {
+                return Err(Refusal("an integer division or power"));
+            }
         };
         Ok(self.na_or(na, value))
+    }
+
+    /// `I64` arithmetic as the standard library does it: an overflow, a division by zero and a
+    /// negative power give up, so the interpreter raises the error.
+    fn i64_arith(&mut self, op: Arith, x: Value, y: Value, inst: &Inst) -> Result<Value, Refusal> {
+        Ok(match op {
+            Arith::Add | Arith::Sub | Arith::Mul => {
+                let (value, overflow) = match op {
+                    Arith::Add => self.builder.ins().sadd_overflow(x, y),
+                    Arith::Sub => self.builder.ins().ssub_overflow(x, y),
+                    _ => self.builder.ins().smul_overflow(x, y),
+                };
+                self.fail_if(overflow, &inst.fail_drops)?;
+                value
+            }
+            Arith::Mod | Arith::IntDiv => {
+                let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);
+                self.fail_if(zero, &inst.fail_drops)?;
+                let minus_one = self.builder.ins().icmp_imm_s(IntCC::Equal, y, -1);
+                if op == Arith::IntDiv {
+                    let lowest = self.builder.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                    let overflow = self.builder.ins().band(lowest, minus_one);
+                    self.fail_if(overflow, &inst.fail_drops)?;
+                }
+                // Every remainder by -1 is 0, and dividing the most negative value by -1 would
+                // trap, so the remainder divides by 1 instead.
+                let one = self.iconst(1);
+                let safe_y = self.builder.ins().select(minus_one, one, y);
+                let remainder = self.builder.ins().srem(x, safe_y);
+                let nonzero = self.builder.ins().icmp_imm_s(IntCC::NotEqual, remainder, 0);
+                let signs = self.builder.ins().bxor(remainder, y);
+                let opposite = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedLessThan, signs, 0);
+                let floored = self.builder.ins().band(nonzero, opposite);
+                if op == Arith::Mod {
+                    let moved = self.builder.ins().iadd(remainder, y);
+                    self.builder.ins().select(floored, moved, remainder)
+                } else {
+                    let quotient = self.builder.ins().sdiv(x, y);
+                    let lower = self.builder.ins().iadd_imm_s(quotient, -1);
+                    self.builder.ins().select(floored, lower, quotient)
+                }
+            }
+            Arith::Pow => {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let status = self.call(
+                    address!(values::ry_power_i64),
+                    &[I64, I64, I64],
+                    &[I32],
+                    &[x, y, out],
+                )[0];
+                self.fail_if(status, &inst.fail_drops)?;
+                self.builder.ins().stack_load(I64, I64, slot, 0)
+            }
+            Arith::Min => self.builder.ins().smin(x, y),
+            Arith::Max => self.builder.ins().smax(x, y),
+            Arith::Div => return Err(Refusal("a `/` of I64s")),
+            Arith::NumPow => return Err(Refusal("a `Num.pow` of I64s")),
+        })
     }
 
     /// A math function of a double. One that turns a number into `NaN` gives up, so the
@@ -1292,12 +1476,13 @@ impl Emitter<'_, '_> {
             Math::Tan => Some(address!(real_tan)),
             Math::Round => Some(address!(real_round)),
             Math::Sign => Some(address!(real_sign)),
+            Math::RoundAway => Some(address!(real_round_away)),
         };
         let value = match helper {
             None => self.builder.ins().sqrt(x),
             Some(helper) => self.call(helper, &[F64], &[F64], &[x])[0],
         };
-        if matches!(op, Math::Exp | Math::Round | Math::Sign) {
+        if matches!(op, Math::Exp | Math::Round | Math::Sign | Math::RoundAway) {
             return Ok(value);
         }
         let produced = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
@@ -1318,6 +1503,10 @@ impl Emitter<'_, '_> {
             (Reduce::Sum, Item::Dbl) => {
                 self.call(address!(values::ry_sum_dbl), &[I64], &[F64], &[x])[0]
             }
+            (Reduce::Sum, Item::I64) => {
+                self.reduce_status(address!(values::ry_sum_i64), I64, x, inst)?
+            }
+            (_, Item::I64) => return Err(Refusal("an I64 reduction other than a sum")),
             (Reduce::Prod, _) => self.call(address!(values::ry_prod_dbl), &[I64], &[F64], &[x])[0],
             (Reduce::Mean, _) => self.call(address!(values::ry_mean_dbl), &[I64], &[F64], &[x])[0],
             (Reduce::Sum, _) => self.reduce_status(address!(values::ry_sum_int), I32, x, inst)?,
@@ -1399,6 +1588,7 @@ impl Emitter<'_, '_> {
                 SmallVec::from_slice(&[self.builder.ins().load(I32, flags, address, 0)])
             }
             Item::Dbl => SmallVec::from_slice(&[self.builder.ins().load(F64, flags, address, 0)]),
+            Item::I64 => SmallVec::from_slice(&[self.builder.ins().load(I64, flags, address, 0)]),
             Item::Str => SmallVec::from_slice(&[
                 self.builder.ins().load(I64, flags, address, 0),
                 self.builder.ins().load(I64, flags, address, 8),
@@ -1492,13 +1682,14 @@ fn kind(item: Item) -> i64 {
         Item::Dbl => values::DBL,
         Item::Lgl => values::LGL,
         Item::Str => values::STR,
+        Item::I64 => values::I64,
     })
 }
 
 fn item_size(item: Item) -> i64 {
     match item {
         Item::Int | Item::Lgl => 4,
-        Item::Dbl => 8,
+        Item::Dbl | Item::I64 => 8,
         Item::Str => 16,
     }
 }
@@ -1527,6 +1718,10 @@ fn integer_condition(op: Compare) -> IntCC {
 
 extern "C" fn real_power(x: f64, y: f64) -> f64 {
     interp::rmath::r_pow(x, y)
+}
+
+extern "C" fn real_platform_power(x: f64, y: f64) -> f64 {
+    x.powf(y)
 }
 
 extern "C" fn real_modulo(x: f64, y: f64) -> f64 {
@@ -1588,6 +1783,10 @@ extern "C" fn real_cos(x: f64) -> f64 {
 
 extern "C" fn real_tan(x: f64) -> f64 {
     x.tan()
+}
+
+extern "C" fn real_round_away(x: f64) -> f64 {
+    x.round()
 }
 
 extern "C" fn real_round(x: f64) -> f64 {

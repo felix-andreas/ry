@@ -150,7 +150,7 @@ A set of the list's elements, without duplicates, in first-seen order.
 
 ```r ry run runtime=ry dput
 Set.from_list([2, 1, 2])
-#> Set.from_list([2, 1])
+#> Set.from_list([2i64, 1i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2052)
@@ -324,7 +324,7 @@ Removes an element, if it is there.
 
 ```r ry run runtime=ry dput
 Set.remove(Set.from_list([1, 2]), 1)
-#> Set.from_list([2])
+#> Set.from_list([2i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2100)
@@ -353,7 +353,7 @@ The elements of either set.
 
 ```r ry run runtime=ry dput
 Set.union(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#> Set.from_list([1, 2, 3])
+#> Set.from_list([1i64, 2i64, 3i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2108)
@@ -382,7 +382,7 @@ The elements of both sets.
 
 ```r ry run runtime=ry dput
 Set.intersection(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#> Set.from_list([2])
+#> Set.from_list([2i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2116)
@@ -411,7 +411,7 @@ The elements of `first` that are not in `second`.
 
 ```r ry run runtime=ry dput
 Set.difference(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#> Set.from_list([1])
+#> Set.from_list([1i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2124)
@@ -440,7 +440,7 @@ Folds over the elements.
 
 ```r ry run runtime=ry dput
 Set.walk(Set.from_list([1, 2, 3]), 0, function(total, x) total + x)
-#> 6
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2132)
@@ -469,7 +469,7 @@ Folds the elements until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
 Set.walk_until(Set.from_list([1, 2, 3]), 0, function(total, x) if (x > 2) :Break(total) else :Continue(total + x))
-#> 3
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2140)
@@ -498,7 +498,7 @@ The set of `f` of every element.
 
 ```r ry run runtime=ry dput
 Set.map(Set.from_list([1, 2, 3]), function(x) x %% 2)
-#> Set.from_list([1, 0])
+#> Set.from_list([1i64, 0i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2148)
@@ -527,7 +527,7 @@ Unions the sets `f` returns for each element.
 
 ```r ry run runtime=ry dput
 Set.join_map(Set.from_list([1, 2]), function(x) Set.from_list([x, x * 10]))
-#> Set.from_list([1, 10, 2, 20])
+#> Set.from_list([1i64, 10i64, 2i64, 20i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2156)
@@ -556,7 +556,7 @@ The elements for which `predicate` is `TRUE`.
 
 ```r ry run runtime=ry dput
 Set.keep_if(Set.from_list([1, 2, 3]), function(x) x > 1)
-#> Set.from_list([2, 3])
+#> Set.from_list([2i64, 3i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2164)
@@ -585,7 +585,7 @@ The elements for which `predicate` is `FALSE`.
 
 ```r ry run runtime=ry dput
 Set.drop_if(Set.from_list([1, 2, 3]), function(x) x > 1)
-#> Set.from_list([1])
+#> Set.from_list([1i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2172)

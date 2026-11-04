@@ -37,6 +37,7 @@ pub const EXTPTRSXP: c_int = 22;
 #[derive(Default, Debug, Clone, Copy)]
 pub struct GcStats {
     pub minor_collections: u64,
+    pub intermediate_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
     pub live_objects: u64,

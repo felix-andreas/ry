@@ -792,6 +792,20 @@ pub unsafe extern "C" fn jit_duplicate(
     }
 }
 
+/// An ALTREP `for` loop sequence expanded into an ordinary vector, as tier 0's `ForInit`
+/// expands it; any other value is returned as it is.
+pub unsafe extern "C" fn jit_expand_sequence(
+    activation: *mut Activation,
+    value: *mut Header,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || match Sexp::from_raw(value) {
+            Some(value) => values::materialize(value),
+            None => Ok(values::nil()),
+        })
+    }
+}
+
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
         guarded(

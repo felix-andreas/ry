@@ -6582,10 +6582,22 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Target shape.**
   - `GcPolicy::heap_limit` bounds all of the heap's bytes (old, young small, young large). A large allocation past it, or a minor collection that leaves less than a fifth of `min_heap_limit` (64 MB, GNU R's `R_VSIZE`) free, runs a major collection (GNU R's `R_MinFreeFrac` escalation). After a major one, `HeapGrowth::next_limit` applies GNU R's `AdjustHeapSize` fractions, and the limit never sits closer than that fifth to the need, or every following minor collection would escalate. `HeapGrowth::from_environment` reads `R_GC_MEM_GROW`, `R_GC_GROWFRAC`, `R_GC_GROWINCRFRAC` and `R_GC_VGROWINCRFRAC` with GNU R's presets and ranges (user docs: `reference/cli.md`, "Memory").
   - The small-object trigger is half the old *small* bytes (`old_small_bytes` and `old_large_bytes` are counted apart), as GNU R's cons-cell trigger ignores vector memory. Counting old large vectors let a session holding 300 MB of vectors pile up 150 MB of small garbage (vapply over a 1e6 list: 230 MB peak, now 112 MB, GNU R 58 MB).
-  - Vectors of at least `large::MAPPED_BYTES` (1 MB) get an anonymous mapping each, unmapped when they die (`crates/heap/src/large.rs`). `MappedPool` keeps freed mappings up to a quarter of the limit and resizes them with `mremap`; when no kept mapping is long enough it grows the longest and unmaps the rest, so the pool never holds memory idle while pages are added; otherwise up to its limit stays resident while idle. It is a pool of address space (the allocation pools the performance principles call for), not a cache of derived data: nothing in it can go stale, and the redesign that would remove it is fewer large temporaries, not a faster lookup. A sixteenth of the limit cost the subset loop 4.2 s of system time against 2.2 s; `MADV_HUGEPAGE` raised it to 9.9 s (huge-page zeroing and compaction) and was rejected.
+  - Vectors of at least `large::MAPPED_BYTES` (1 MB) get an anonymous mapping each, unmapped when they die (`crates/heap/src/large.rs`). `MappedPool` keeps freed mappings up to the vector limit ("Two old generations" below) and resizes them with `mremap`; when no kept mapping is long enough it grows the longest and unmaps the rest, so the pool never holds memory idle while pages are added; otherwise up to its limit stays resident while idle. It is a pool of address space (the allocation pools the performance principles call for), not a cache of derived data: nothing in it can go stale, and the redesign that would remove it is fewer large temporaries, not a faster lookup. A sixteenth of the limit cost the subset loop 4.2 s of system time against 2.2 s; `MADV_HUGEPAGE` raised it to 9.9 s (huge-page zeroing and compaction) and was rejected.
   - libR's global allocator is `heap::large::Mapped<MiMalloc>`: blocks of 1 MB and more are mapped the same way, so a builtin's scratch buffer goes back to the kernel instead of staying in mimalloc where the mapped vectors cannot reuse it (`sample(x)` on 2e7 doubles: 305 MB peak with mapped vectors alone, 229 MB with the allocator, GNU R 229 MB). Growing such a block is an `mremap`, not a copy.
   - `rep`, `rep.int` and `rep_len` stream positions (`RepPlan` in `crates/interp/src/arith.rs`, `subset::select_positions`), and a plain vector's negative subscripts stream through a keep mask (`gather_kept` in `crates/interp/src/subset.rs`: `x[-(1:10)]` on 2e7 doubles, 305 MB peak, now 171 MB, GNU R 229 MB).
 - **Impact.** Peaks against GNU R 4.3.3: rep 242/239 MB, the subset loop 1386/1386 MB, data.table's `dt[v > 0.5]` loop 329/330 MB (`runtime_peak_memory_stays_near_gnu_r` in `crates/ry/tests/test_perf.rs`). The subset loop takes about 18 s against 17-19 s before and GNU R's 28.6 s. On the generated 60,000-line suites the collector's share grows from 0.44-0.58 s to 0.68-0.82 s of 20-28 s suites. `R_GC_MEM_GROW=0` costs far more on ry than on GNU R (finbench: 66 majors and 4.8 s in the collector against GNU R's 1.6 s), because GNU R's second old generation frees promoted temporaries without a full mark and ry has one old generation (`backlog.md`, "Open: collector throughput on the benchmark suites").
+
+## Two old generations, separate vector and node limits, and a pool as large as the vector limit
+
+- **Previous shape.** One old generation: a minor collection promoted everything it marked, so a temporary live at one minor collection died only in a full one (`R_GC_MEM_GROW=0` ran 66 full collections on finbench, 4.8 s in the collector). `heap_limit` bounded small and large bytes together, and `MappedPool` kept freed mappings up to a quarter of it. Unmapping every dead large vector beyond that made `vector_arith` (8 MB temporaries) and `loop_sum` (the 40 MB `1:n` the `for` loop expands per call) page-fault fresh mappings each time: 0.6x and 3.8x of GNU R against 1.2x and 5.0x before.
+- **Target shape** (`crates/heap/src/heap.rs`, `space.rs`, `large.rs`):
+  - Objects age one generation per collection, as in GNU R: a minor collection makes a young survivor `OLD`, and a deeper collection makes an old one `TENURED`. An intermediate collection (`Collection::Intermediate`) traces and frees the untenured old objects and treats the tenured ones as roots through the remembered set. A deeper collection empties the remembered set before it marks, and tracing puts back each tenured object that still points at a younger one (`tracing_tenured`, `younger_child`). A full heap escalates minor, then intermediate, then major (`escalate_if_full`), as GNU R's `num_old_gens_to_collect` does.
+  - `heap_limit` counts large vectors only (GNU R's `R_VSize`) and `node_limit` counts small objects (`R_NSize`, at least 32 MiB), each grown by `HeapGrowth::next_limit` after a major collection. The need includes a fifth of the smallest limit, as `AdjustHeapSize` adds `R_MinVFree`, so a live set just under the grow fraction cannot pin the limit where every collection escalates.
+  - A major collection that escalation forced before the program allocated a limit's worth of vectors since the last one counts as thrashing and grows the limit as if the survivors filled it: each such collection tenures the in-flight working set, which only the next major one frees. `sales` ran 21 majors in 20 calls without it, 9 with it.
+  - `MappedPool::limit` equals the vector limit. Kept mappings never lift the peak, because the pool maps nothing while it holds a mapping, so the limit bounds only idle memory after a peak. It is allocation policy (a free list in the allocator), not cached derived data: nothing in it can go stale.
+  - The JIT's `for` over a compact `1:n` expands it in place (`jit_expand_sequence`) instead of deoptimizing on every call.
+- **Measured** against 0.4.1-beta, one sitting (`tools/bench/why/run.py`, ratio to GNU R 4.3.3, peak MiB): `vector_arith` 1.2x/1.2x, 132/165; `loop_sum` 4.2x/4.1x, 82/130; `sales` 1.2-1.7x/1.8x, 128/158 (GNU R 149). `sales` gives back about 8 ms per call to 0.4.1-beta, whose limit of twice the survivors ran 2 majors where GNU R's schedule runs 3 majors and 5 intermediates; that is the price of the lower peak. `runtime_speed_stays_ahead_of_gnu_r` in `crates/ry/tests/test_perf.rs` holds each program above a floor.
+- **Suites** (generated 60,000-line packages, `oracle bench --ry-only`, `RY_GC_LOG`): finbench 360 MiB peak, 0.72 s collecting of 18.4 s (5 major, 11 intermediate, 124 minor); dsbench 382 MiB, 0.88 s; biobench 362 MiB, 0.95 s. `R_GC_MEM_GROW=0` on finbench: 48 majors and 3.8 s, against 66 and 4.8 s with one old generation. Most of that is still full collections, because the tight limit escalates past the intermediate one; GNU R takes 1.6 s there.
 
 ## Large temporaries: freed from their reference counts, tracing stays for cycles
 
@@ -7302,19 +7314,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `methods::is(f, "genericFunction")` is skipped for a value with no class attribute and no S4
   bit, where it is always `FALSE`.
 - **Why a hash guard.** Base R's R code is read from the installed GNU R so that ry behaves like
-  whichever release it finds (licensing record above). The copy follows R 4.3.3, so the runtime
+  whichever release it finds (licensing record above). The copy follows R 4.6.2, so the runtime
   replaces the installed function only when an FNV-1a hash of its formals and body (symbols and
-  strings by their text, attributes ignored) equals the 4.3.3 one; any other release keeps its own
-  function at its own speed. `RY_PRINT_REGISTER_HASH` prints the installed function's hash for
+  strings by their text, attributes ignored) equals the 4.6.2 one. Another release keeps its own
+  function at its own speed, and a mismatch on the bundled 4.6.2 is an error, because it means the
+  copy and the bundled tree drifted apart. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
   updating the constant with the copy.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
   branch: known generics, another package's generic, an overwrite and its message, local plain and
-  S4 generics, delayed registration), and asserts the replacement is in place under R 4.3.3.
+  S4 generics, delayed registration), and asserts the replacement is in place under the bundled release.
 - **Next by cost.** `methods::cacheMetaData` of the imports (about 150 ms, lubridate most of it) is
   dominated by `.checkGroupSigLength`, which `.updateMethodsInTable` runs for every member of a
   group generic and which rescans the whole group tree each time (1.2 ms per call on ry, 0.8 ms on
-  GNU R). The same guarded replacement would apply to it.
+  GNU R). It runs natively ("Installed packages load through native fast paths, not an image").
 
 ## Typed closures run as native functions over records, tags and match
 
@@ -7360,7 +7373,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Number set cut to `I64` and `F64` (orchestrator decision).** The first version took all thirteen of Roc's number types (`I8`..`U128`, `F32`, `Dec`). Each width multiplied the checker's constraint cases, the interpreter's arithmetic and the JIT's register types, and no typed program used anything but `I64` and `F64`. Another width returns only when the benchmark hill climb shows a program that needs it. Any other literal suffix is a syntax error (`syntax` lexer). The internal literal constraints (`Constraint::Int`, `Constraint::Frac`) default to `I64` and `F64` and have no annotation spelling; `number` is the only written one. An R `integer` or `raw` value becomes `I64` at the boundary.
 - **Representation:** `F64`, `Bool` and `Str` reuse R's `double`, `logical` and `character` storage, so they cross into R for free. `I64` has its own vector type, `SexpType::I64` (code 28, `I64SXP`), with `REALSXP`'s layout: the 16-byte header, length and capacity, then 8 bytes per item at `VECTOR_DATA_OFFSET`. A scalar `I64` is a length-1 vector and a `List<I64>` is the same object at length n with the heap's Array flag (`numbers::alloc`, `numbers::list`). It carries no attributes and is never ALTREP.
 - **Why a dense `I64` vector (decision).** The previous shape was a boxed record per number (`Fields::Number`, one raw slot) and an R list of boxes for `List<I64>`, which gave two representations for one type, one GC-traced object per item, and an item-by-item arithmetic path (`arith::item_by_item`, `Items::RyValues`). A dense vector gives one representation for scalars and lists, a zero-copy handoff to the typed runtime (`crates/typed`), no per-item tracing (it is a leaf), vectorized same-length list arithmetic (`numbers::arithmetic`, no recycling, overflow an error) and storage compatible with bit64's `integer64`. A new type code beats a gp bit on `REALSXP`: R code and C code that test `TYPEOF` refuse it instead of reading the bits as doubles, and `is_atomic` is false for it, so every R builtin raises the `Num.to_r()` boundary error (`records::boundary_message`). Crossing to R stays explicit through `Num.to_r` and `List.to_r`.
-- **Literals:** a suffix names the type (`5i64`), and a `-` written directly before a literal is part of it. An unsuffixed literal keeps R's type unless an expected type, the other operand, or a later use decides it. At run time it stays the R value, and the operator (`numbers::operands`) or the annotated binding (`lower::with_annotated_literals`, which rewrites `n: I64 <- 5` and `List<N>` literal items) converts it. A literal branch adapts to the sibling branch's ry type (`adapt_literal_branch`), and a match arm or `if` arm in a function's tail adapts to the declared result.
+- **Literals:** a suffix names the type (`5i64`), and a `-` written directly before a literal is part of it. An unsuffixed literal keeps R's type unless an expected type, the other operand, or a later use decides it. A literal branch adapts to the sibling branch's ry type (`adapt_literal_branch`), and a match arm or `if` arm in a function's tail adapts to the declared result.
+- **The checker decides a literal's run-time type (decision).** Before, the runtime converted literals by its own syntactic rules (the operator in `numbers::operands`, the annotated binding in `lower::with_annotated_literals`), so a literal the checker typed `I64` anywhere else stayed an R `double`: a `match` arm adapted to a declared `I64` result returned a `double`, which broke soundness, and so did an unannotated `[1, 2]`. Now each `ItemCheck` records the unsuffixed literals it typed `I64` (`i64_literals`), `semantics::file_i64_literals` maps them to file ranges, and the preflight elaborates the program for ry's runtime by spelling each as `5i64` (`preflight::with_i64_suffixes`), the mirror of erasure for GNU R. `ry run` hands the elaborated text to the runtime through `ry_set_script_source`, and the console's filter releases it as the command. A file with no ry syntax and no strict mode skips analysis (`preflight::has_ry_syntax`, which also counts `#:` comments and `Module.function` calls). Columns after an elaborated literal shift right in run-time error messages, an accepted cost. A `List<I64>` given to `DataFrame()` becomes an R `integer` column when every item fits and `double` otherwise, as `Num.to_r` converts (`frame::column_contents`), because an elaborated `[3L, 5L]` column is an `I64` list. `with_annotated_literals` remains because `ry load` and `source()` run unelaborated text; it is redundant on elaborated text, and goes once those paths elaborate too. `ry run` rewrites the file's own bytes, not a lossy UTF-8 copy: the check reads each invalid byte as `?` so offsets stay byte offsets, and `ry_set_script_source` escapes invalid bytes as reading the file does, so a Latin-1 script keeps its bytes. A whole literal spelled with a fraction or exponent (`2.0`, `1e3`) converts digit by digit, because an `f64` rounds past 2^53.
+- **String and logical literal variables (decision).** `greeting <- "hi"` and `flag <- TRUE` bind a literal variable (`Constraint::StrLiteral`, `BoolLiteral`) the way a number literal binds `WholeLiteral`/`FracLiteral`: an annotated binding or a typed parameter in the same item decides `Str`/`Bool`, and every other read defaults it to R's type, so plain R types exactly as before. Meeting a `List` item variable binds the ry type directly in the var-var arm of `unify` (`infer.rs`), because no constraint spells "only `Str`". Call arguments and annotated-binding values that are plain reads join `literal_reads` so the call or annotation, not the read, decides them.
 - **`/` decides `F64`** for undecided items and is a `type-mismatch` on `I64`, as Roc gives `/` a `Frac`.
 - **Lengths, counts and positions are `I64`** (`standard_library::whole_number`), as in Roc.
 - **List operators work item by item** and never recycle: on a `List<I64>` they run over the buffers (`numbers::arithmetic`), and on nested lists item by item (`arith::item_by_item`).
@@ -7466,7 +7481,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
   before its last checks, which fills the same `initialize` dispatch cache the R code fills.
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
-  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_FAST_PATH_HASHES=1`
   prints the hashes of the installed functions, for adding a version.
 - **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
   a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
@@ -7525,6 +7540,21 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Counted loops check their ends once.** `for` over `seq_len`, `seq_along`, `a:b` or a vector tests `counter == end` at the latch and steps with `Op::Step`, which cannot overflow because the counter never passes the end.
 - **Impact.** On the why-bench, typed and strict: `closures` 0.348 s to 0.006 s, `report` 0.640 to 0.009, `bond_book` 0.739 to 0.049, `loop_sum` 0.021 to 0.010, `array_sum` 0.025 to 0.004, `array_map` 0.048 to 0.017.
 
+## Typed `I64` runs in registers, and list arithmetic fuses into one loop
+
+- **Previous shape.** The typed core had no `I64` register type, so every typed program over `I64` (most of `tools/bench/why/typed/`) ran in the interpreter. List arithmetic such as `List.sum(x * 2 + x / 3 - 1)` allocated one full list per operator, and lists over 64 KiB went to the system allocator on every call, which cost page faults on each fresh mapping.
+- **`I64` is a native register value.** `I64` scalars live in Cranelift `I64` registers, `+ - *` use checked arithmetic and fail on overflow, and `%%` and `%/%` follow R's floored rules. A failure reruns the call in the interpreter, which reports the error.
+- **An `I64` parameter or result converts an exactly whole R number** (`annotations::check_value`, `check_return`, `check_forced`), as an annotated binding does, and the typed core mirrors that conversion at `typed::call`, at inlined calls and at returns. Without it, `f(3)` to an `I64` parameter failed the check, and every benchmark caller had to write `3i64`.
+- **Fused elementwise kernels (`Op::Elementwise`, `values::ry_elementwise`).** A tree of base arithmetic over same-length lists and scalars, with at least two list operations or one under `List.sum`, lowers to one small program of up to 16 steps over up to 16 inputs. The kernel runs it in chunks of 128 items, so intermediates stay in L1 and only the final list (or none, under `List.sum`) is allocated. Each intermediate is checked for NaN, as the interpreter checks every operator's result, so a fused tree fails exactly where the unfused one would.
+- **`List.sum` keeps the long-double fold** (`interp::long_double::add_all`), a strict in-order fold, so a chunked sum equals the interpreter's. A plain f64 fold would be faster and match Rust and Roc, but it would change results against the interpreter.
+- **Large blocks get power-of-two pools.** Blocks over 64 KiB round up to a power of two, and up to four freed blocks per class, each at most 64 MiB, are kept per thread (`values::block_alloc`). A benchmark that allocates an 8 MB list per iteration went from 407k page faults to 18k.
+- **Library constants are speculated by identity.** `Num.pi` and its siblings are read as constants when the value the name resolves to is the very object `standard_library::builtins_env()` holds, so a user binding of the same name, or a rebinding, fails the guard (`lower::resolve_value`, `typed::still_resolves`), and a function that assigns the name anywhere (local functions included) refuses, since a read before a later assignment in a loop would otherwise keep the constant (`lower::assigns`).
+- **`Num.pow` is `powf`, not R's `^`.** R's `r_pow` multiplies out small whole powers, which changes the last bit, so the typed core has `Arith::NumPow` for the library function.
+- **A counted `List.range` loop keeps the list length limit** (`i32::MAX` items), failing as `List.range` does, though it allocates no list.
+- **`List<T>` annotations are checked at run time.** The mask reader knew only the old `Array<T>` spelling, so a closure annotated with nothing but lists counted as untyped and never reached the typed core. `List<T>` requires the Array bit and the item's storage (an R list for records, tags, functions and nested lists), and any empty list passes, because an empty list is stored as `logical`. A `List<I64>` parameter or result converts an R double or integer list of exactly whole numbers item by item (`annotations::as_i64`), because an unsuffixed literal such as `[1, 2]` is a double list at run time.
+- **A constant scalar default is passed as the argument** (`jit::native::call`), so a missing argument with a default such as `k: F64 = 3` no longer refuses the call.
+- **Impact.** On the why-bench, typed and strict: `array_dot` 3.171 s to 0.004 s, `loop_sum` 2.341 to 0.007, `bond_book` 4.075 to 0.075, `drawdown` 1.663 to 0.007, `closures` 0.756 to 0.004, `vector_arith` 0.266 to 0.062, `log_rank` 3.286 to 1.653 (its `Record` parameter still refuses).
+
 ## Docs information architecture: Introduction, Tutorial, Reference, Development
 
 - **Previous shape.** The sidebar had Introduction, four numbered step sections of about three pages
@@ -7570,15 +7600,47 @@ Each one trades a narrow class of missed errors for a class of false reports see
   environment but `image::LOADING_VARIABLES`; a start that sets one runs the slow way. Strings
   under the writer's R home are relocated to the tree the image file lives in
   (`heap::image::Relocation`). The writer fails, failing the build, when start-up warned or left
-  `.Random.seed`. User packages get the same treatment as install-time output of `ry install`
-  (`backlog.md`).
+  `.Random.seed`. User packages get no image ("Installed packages load through native fast
+  paths, not an image" below).
 - **No "existing objects" check.** Rust state that holds heap objects across start-up must be a
   fixed object, a heap root, or saved by `image::save_state`; a check that refused every object
   live before start-up flagged only `package:ry`'s frame, which the loader overwrites safely.
-- **Impact.** Empty `ry run`: about 120 ms to 60 ms median. Re-running the environment steps
-  costs about 12 ms against loading a run-time image (47 ms). `methods::getClass("numeric")` with
+- **Impact.** Empty `ry run`: about 120 ms to 60 ms median, and 48 ms once the re-run was cut
+  (below). Re-running the environment steps cost about 12 ms against loading a run-time image
+  (47 ms). `methods::getClass("numeric")` with
   `R_DEFAULT_PACKAGES=NULL` starts the slow way (63 ms; the run-time image keyed that variable and
   took 56 ms). The four cache bugs cannot occur: no image depends on
   the run-time environment. Options, the search path and namespace paths match a slow start
   (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
   image is rewritten. Analysis is unaffected: the image is runtime-only.
+
+## Installed packages load through native fast paths, not an image
+
+- **Question.** Whether `ry install` should write each installed package's loaded namespace as an
+  image inside the package, as `build-base` does for the base tree, so `library()` skips namespace
+  setup.
+- **Measured.** `library()` of 17 benchmark dependencies (31 namespaces: R6, cachem, cli,
+  data.table, digest, fs, jsonlite, memoise, rappdirs, rlang, bit64, htmltools, knitr, rmarkdown,
+  stringi, yaml, lifecycle and their imports) took about 282 ms on ry and 290 to 350 ms on GNU R.
+  Lazy loading already fetches only 763 of the 7,570 objects the namespaces hold, about 40 ms, and
+  an eager image of the same namespaces would cost 30 to 45 ms to load, so an image would save
+  nothing on that part. The rest was setup work an image would also have to replay or invalidate
+  (S4 `cacheMetaData` 66 ms, S3 registration 26 ms, `.onLoad` hooks).
+- **Decision.** No per-package image. Each setup step that dominates runs natively behind a
+  hash-guarded prologue on GNU R 4.6.2's own function (`RY_PRINT_FAST_PATH_HASHES=1` prints the
+  hashes), so a package that changes, a library edit or another R release needs no invalidation:
+  `.checkGroupSigLength` (`ryS4CheckGroupSigLength` in `methods_core.rs`), `registerS3methods`
+  (ported to 4.6.2, `register_s3_methods.R`) and utils' `osVersion` (`ryOsVersion`, which reads
+  `/etc/os-release` instead of spawning shells). The heap tenures every object once a start-up image
+  loads (`Heap::promote_young`), because the first minor collection otherwise traced all 10 MB of
+  them (5.3 ms), and each intermediate collection would trace them again. The heap then holds
+  little but the image, so tenuring every object keeps the rule that a tenured object points only
+  at tenured ones without tracing. Lazy-load records inflate through one reused
+  inflater straight into the output, and decompressing file connections are buffered, which halves
+  `readRDS` of a gzip file.
+- **Impact.** `library()` of the 31 namespaces: about 282 ms to about 187 ms (GNU R 350 ms); the
+  whole script 341 ms to 250 ms (GNU R 440 ms); empty `ry run` 59 ms to 48 ms (GNU R 129 ms). The
+  S4 cache step fell from 66 ms to 27 ms and S3 registration from 26 ms to about 11 ms. The
+  re-run of the environment steps fell from about 20 ms to about 10 ms; what remains is GNU R's
+  profile (`.expand_R_libs_env_var` about 3 ms, the `Autoloads` attach about 1 ms) and the first
+  S3 dispatch of each generic (about 0.3 ms, method lookup through `UseMethod`).

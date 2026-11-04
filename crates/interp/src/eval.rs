@@ -355,9 +355,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
-pub unsafe fn settle_promise(promise: Sexp, value: Sexp) -> R<Sexp> {
+pub unsafe fn settle_promise(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::CHECKED_PROMISE) {
-        crate::annotations::check_forced(promise, value)?;
+        value = crate::annotations::check_forced(promise, value)?;
     }
     let heap = crate::heap();
     heap.set_car(promise, value);
@@ -1176,7 +1176,7 @@ pub unsafe fn run_closure(
     let result = stray_loop_jump(call, env, catch_return(env, result));
     let result = match (signature, result) {
         (Some(signature), Ok(value)) => {
-            crate::annotations::check_return(call, signature, value).map(|()| value)
+            crate::annotations::check_return(call, signature, value)
         }
         (_, result) => result,
     };

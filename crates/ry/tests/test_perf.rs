@@ -1,7 +1,7 @@
-//! Memory budgets that need a release build, so they are ignored by default: the cold check of
-//! the three synthetic benchmark code bases, which generates about 900,000 lines, and the peak
-//! memory of scripts on ry's runtime against GNU R's, which needs `libR` built beside the binary
-//! and a GNU R installation, and skips without either:
+//! Budgets that need a release build, so they are ignored by default: the cold check of the
+//! three synthetic benchmark code bases, which generates about 900,000 lines, and the peak memory
+//! and speed of scripts on ry's runtime against GNU R's, which need `libR` built beside the
+//! binary and a GNU R installation, and skip without either:
 //!
 //! ```sh
 //! cargo build --release -p ry-lang -p libr
@@ -114,6 +114,14 @@ fn runtime_peak_memory_stays_near_gnu_r() {
         eprintln!("skipped: no GNU R installation on this machine");
         return;
     }
+    // ry's runtime has an R home of its own, so it sees packages installed for GNU R, such as
+    // data.table in the site library, only through GNU R's library paths. Both engines then
+    // load the same build of each package.
+    let libraries = Command::new("Rscript")
+        .args(["-e", "cat(.libPaths(), sep = ':')"])
+        .output()
+        .expect("ask GNU R for its library paths");
+    let libraries = String::from_utf8_lossy(&libraries.stdout).into_owned();
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut over = Vec::new();
     for (name, body) in RUNTIME_CASES {
@@ -123,8 +131,13 @@ fn runtime_peak_memory_stays_near_gnu_r() {
             eprintln!("{name}: skipped, it does not run on GNU R here");
             continue;
         };
-        let ry = script_peak(Command::new(binary).arg("run").arg(&script))
-            .unwrap_or_else(|| panic!("{name} runs on GNU R but fails on ry's runtime"));
+        let ry = script_peak(
+            Command::new(binary)
+                .arg("run")
+                .arg(&script)
+                .env("R_LIBS", &libraries),
+        )
+        .unwrap_or_else(|| panic!("{name} runs on GNU R but fails on ry's runtime"));
         let ratio = ry as f64 / gnu_r as f64;
         eprintln!(
             "{name}: peak {} MiB on ry, {} MiB on GNU R ({ratio:.2}x)",
@@ -146,9 +159,90 @@ fn runtime_peak_memory_stays_near_gnu_r() {
     );
 }
 
+/// The least speedup over GNU R each benchmark program from `tools/bench/why/untyped` keeps,
+/// untyped and warm. Each sits a fifth or more below what it measures, since timings on a
+/// shared machine vary that much, and each is a program the
+/// runtime's allocation policy once slowed down without failing a memory budget: the vector
+/// arithmetic and the `1:n` loop page-faulted in a fresh mapping for every large temporary, and
+/// the data frame pipeline ran a major collection per call under too tight a vector limit.
+const RUNTIME_SPEEDUPS: [(&str, f64); 3] =
+    [("vector_arith", 0.85), ("loop_sum", 3.0), ("sales", 1.2)];
+
+#[test]
+#[ignore = "needs a release build with libR beside it; run in release with --ignored"]
+fn runtime_speed_stays_ahead_of_gnu_r() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
+    if !binary.with_file_name("libR.so").exists() {
+        eprintln!("skipped: ry's runtime library is not built beside the binary");
+        return;
+    }
+    if !Command::new("Rscript")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipped: no GNU R installation on this machine");
+        return;
+    }
+    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why/untyped");
+    let harness = fs::read_to_string(programs.join("harness.R")).expect("read the harness");
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut slow = Vec::new();
+    for (name, floor) in RUNTIME_SPEEDUPS {
+        let program = fs::read_to_string(programs.join(format!("{name}.R")))
+            .unwrap_or_else(|error| panic!("read {name}.R: {error}"));
+        let script = directory.path().join(format!("{name}.R"));
+        fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
+        // Other load on the machine only slows a run down, so the fastest of three is the time.
+        let fastest = |command: &dyn Fn() -> Command| {
+            (0..3)
+                .map(|_| warm_seconds(&mut command()))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let gnu_r = fastest(&|| {
+            let mut command = Command::new("Rscript");
+            command.arg("--vanilla").arg(&script);
+            command
+        });
+        let ry = fastest(&|| {
+            let mut command = Command::new(binary);
+            command.arg("run").arg(&script);
+            command
+        });
+        let speedup = gnu_r / ry;
+        eprintln!("{name}: {ry:.3} s on ry, {gnu_r:.3} s on GNU R ({speedup:.2}x)");
+        if speedup < floor {
+            slow.push(format!("{name} at {speedup:.2}x, below {floor}x"));
+        }
+    }
+    assert!(
+        slow.is_empty(),
+        "ry's runtime fell behind its speedup over GNU R: {}",
+        slow.join(", ")
+    );
+}
+
+/// The best warm time a benchmark program prints, as `name checksum best cold`.
+fn warm_seconds(command: &mut Command) -> f64 {
+    let output = command
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the program");
+    assert!(output.status.success(), "the program failed: {command:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .last()
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("no timing line from {command:?}"))
+}
+
 /// The peak resident set in KiB a script prints as its last line, or `None` when it fails.
 fn script_peak(command: &mut Command) -> Option<u64> {
-    let output = command.stderr(Stdio::null()).output().expect("run the script");
+    let output = command
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the script");
     if !output.status.success() {
         return None;
     }

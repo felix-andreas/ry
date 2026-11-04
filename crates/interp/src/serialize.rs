@@ -10,7 +10,7 @@ use {
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
     },
-    flate2::read::ZlibDecoder,
+    flate2::{Decompress, FlushDecompress, Status, read::ZlibDecoder},
     heap::{
         object::{Sexp, SexpType, gp},
         strings::Encoding,
@@ -993,11 +993,7 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
         error(format!("lazy-load database is corrupt: {failure}"))
     };
     match method {
-        b'1' => {
-            ZlibDecoder::new(payload)
-                .read_to_end(&mut output)
-                .map_err(|failure| corrupt(&failure))?;
-        }
+        b'1' => inflate_into(payload, &mut output).map_err(|failure| corrupt(&failure))?,
         b'0' => output.extend_from_slice(payload),
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
@@ -1014,16 +1010,42 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
                 .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
         }
-        _ => {
-            ZlibDecoder::new(body)
-                .read_to_end(&mut output)
-                .map_err(|failure| error(format!("lazy-load database is corrupt: {failure}")))?;
-        }
+        _ => inflate_into(body, &mut output).map_err(|failure| corrupt(&failure))?,
     }
     if output.len() != expected {
         return Err(corrupt(&"its length does not match"));
     }
     Ok(output)
+}
+
+/// Inflates the zlib stream `input` into `output`, whose capacity is the size the record states.
+/// A package load fetches hundreds of records, so one inflater is reset between them rather than
+/// built per record, and the stream is decoded straight from the record without the intermediate
+/// buffer a reading decoder allocates.
+fn inflate_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    thread_local! {
+        static INFLATER: std::cell::RefCell<Decompress> = std::cell::RefCell::new(Decompress::new(true));
+    }
+    INFLATER.with_borrow_mut(|inflater| {
+        inflater.reset(true);
+        loop {
+            let consumed = inflater.total_in() as usize;
+            let rest = input.get(consumed..).unwrap_or_default();
+            if output.len() == output.capacity() {
+                output.reserve(output.capacity().max(4096));
+            }
+            let before = (inflater.total_in(), inflater.total_out());
+            let status = inflater
+                .decompress_vec(rest, output, FlushDecompress::Finish)
+                .map_err(|failure| failure.to_string())?;
+            if status == Status::StreamEnd {
+                return Ok(());
+            }
+            if (inflater.total_in(), inflater.total_out()) == before {
+                return Err("the stream ends early".to_owned());
+            }
+        }
+    })
 }
 
 /// `lazyLoadDBfetch(key, file, compressed, hook)`.
@@ -1043,12 +1065,13 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     let bytes = &cache[&file];
     let record = bytes
         .get(offset..offset + size)
-        .ok_or_else(|| error("lazy-load database is corrupt"))?
-        .to_vec();
+        .ok_or_else(|| error("lazy-load database is corrupt"))?;
+    // The record is decoded (or copied) out of the cached file before `unserialize` runs, because
+    // its refhook can fetch from another database and so insert into the cache.
     let data = if compressed != 0 {
-        decompress_record(&record, compressed)?
+        decompress_record(record, compressed)?
     } else {
-        record
+        record.to_vec()
     };
     let value = unserialize(&data, hook)?;
     if value.kind() == SexpType::Promise {

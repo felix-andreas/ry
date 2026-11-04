@@ -215,22 +215,25 @@ unsafe fn start_slowly(
         source_file(&user, global_env())?;
     }
     eval_text(".First.sys()", global_env())?;
+    install_os_version()?;
     crate::frame::attach_package()?;
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
     Ok(warned)
 }
 
-/// GNU R 4.3.3's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
-/// `RY_PRINT_REGISTER_HASH` prints the hash of the installed one, for updating this together with
+/// GNU R 4.6.2's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
+/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the installed one, for updating this together with
 /// `register_s3_methods.R`.
-const GNU_REGISTER_S3_METHODS: u64 = 0x7ee6_83a0_363f_ff46;
+const GNU_REGISTER_S3_METHODS: u64 = 0x0c89_27a0_c611_ff8c;
 
 /// Replaces base R's `registerS3methods()` with `register_s3_methods.R`, which runs its two
 /// per-method loops natively: they cost every namespace load about a millisecond per hundred S3
 /// methods in R, which is most of the time `stats`, `utils` and the packages a script imports
 /// take to load. The copy follows one GNU R release, so it replaces base R's function only when
 /// that is exactly the code it was made from, recognised by its hash; any other keeps its own.
+/// ry's bundled base R is that release, so there a mismatch is an error rather than a silent
+/// loss of speed.
 unsafe fn install_register_s3_methods() -> R<()> {
     let symbol = values::install("registerS3methods")?;
     let original = eval::value_of(eval::find_var_in_frame(symbol, base_namespace())?)?;
@@ -240,14 +243,70 @@ unsafe fn install_register_s3_methods() -> R<()> {
     let mut hash = FNV_OFFSET;
     stable_hash(original.car(), &mut hash);
     stable_hash(crate::bytecode::closure_body(original), &mut hash);
-    if std::env::var_os("RY_PRINT_REGISTER_HASH").is_some() {
-        eprintln!("{hash:#018x}");
+    if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
+        eprintln!("registerS3methods {hash:#018x}");
     }
     if hash != GNU_REGISTER_S3_METHODS {
+        if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
+            return Err(crate::unwind::error(format!(
+                "base R's registerS3methods() hashes to {hash:#018x}, not the GNU R {} \
+                 function register_s3_methods.R copies",
+                crate::methods_core::BUNDLED_VERSION.trim()
+            )));
+        }
         return Ok(());
     }
     let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
     eval::define(symbol, replacement, base_namespace())
+}
+
+/// GNU R 4.6.2's `utils:::.osVersion()`, as [`stable_hash`] of its formals and body. Setting
+/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the loaded one.
+const GNU_OS_VERSION: u64 = 0x1e6d_407c_5956_7ebd;
+
+/// Puts the native `ryOsVersion` in front of `utils:::.osVersion()`, which utils' `.onLoad` calls
+/// on every start (the start-up image runs that hook again) and which otherwise starts two shells.
+/// The image holds the patched closure, so only a start from it gains.
+unsafe fn install_os_version() -> R<()> {
+    let registry = crate::heap().known().namespace_registry;
+    let utils = eval::find_var_in_frame(values::install("utils")?, registry)?;
+    if utils.kind() != SexpType::Environment {
+        return Ok(());
+    }
+    let original = eval::value_of(eval::find_var_in_frame(
+        values::install(".osVersion")?,
+        utils,
+    )?)?;
+    if original.kind() != SexpType::Closure {
+        return Ok(());
+    }
+    let body = crate::bytecode::closure_body(original);
+    let mut hash = FNV_OFFSET;
+    stable_hash(original.car(), &mut hash);
+    stable_hash(body, &mut hash);
+    if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
+        eprintln!(".osVersion {hash:#018x}");
+    }
+    if hash != GNU_OS_VERSION {
+        if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
+            return Err(crate::unwind::error(format!(
+                "utils' .osVersion() hashes to {hash:#018x}, not the GNU R {} function \
+                 install_os_version patches",
+                crate::methods_core::BUNDLED_VERSION.trim()
+            )));
+        }
+        return Ok(());
+    }
+    let prologue = eval_text(
+        "quote(if (!is.null(version <- .Internal(ryOsVersion()))) return(version))",
+        base_env(),
+    )?;
+    let block = values::lcons(
+        values::install("{")?,
+        values::cons(prologue, values::cons(body, nil())?)?,
+    )?;
+    crate::heap().set_cdr(original, block);
+    Ok(())
 }
 
 pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

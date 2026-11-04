@@ -22,17 +22,15 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: JIT register type for native numbers
+## Open: broken on main
 
-- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. `I64` (which `List.range`, `List.len` and loop counters produce) is a length-1 `I64SXP` vector (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
-- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
-- Fix: an unboxed `I64` register type in the JIT with overflow-checked arithmetic that reads `List<I64>` buffers directly, and `for` over `List.range` lowered to a counted loop.
+- `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
 ## Open: the typed core
 
-- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
-- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
-- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Non-constant defaults.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; it also calls R's `set.seed` and `rnorm`.
+- **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
@@ -53,7 +51,7 @@ The quality bar is four things.
 
 ## Open: what bundling base R left undone
 
-- **Start-up image follow-ups.** An empty `ry run` takes about 60 ms from the image, of which about 12 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions.md`, "The start-up image is build output of the base tree"). Next: give user packages the same as install-time output of `ry install` (a per-library image of the installed namespaces, written when the library changes, never at run time); profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
+- **Start-up image follow-ups.** An empty `ry run` takes about 48 ms from the image, of which about 10 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions.md`, "The start-up image is build output of the base tree"; installed packages get no image, "Installed packages load through native fast paths"). Next: the first S3 dispatch of each generic costs about 0.3 ms against 6 µs for a plain closure call (`UseMethod` lookup); `.expand_R_libs_env_var` in the profile about 3 ms; profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
 - **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
@@ -98,7 +96,8 @@ once that holds (`decisions.md`, "The S4 cache is interim").
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
 - **Free a closure's frame at return** (GNU R's `R_CleanupEnvir`): large vectors bound only in a returned call's frame wait for a collection, because environments are traced and enclosures are not counted. Counting enclosures would let a frame whose count is zero at return give up its bindings to the zero-count table (`decisions.md`, "Large temporaries: freed from their reference counts"). Measure first: subset, data.table and `rep` loops already peak below GNU R.
-- **A second old generation.** A minor collection promotes everything it marks, so a temporary live at one dies only in a full collection. GNU R has two old generations and collects the younger one first, which is why `R_GC_MEM_GROW=0` costs GNU R almost nothing on finbench (collector 1.56 s to 1.59 s) and ry 0.7 s to 4.8 s (66 full collections instead of 5). Aging objects through one minor collection before promotion, or an intermediate generation, is the fix to measure (`decisions.md`, "Collections run on GNU R's schedule").
+- **Intermediate collections sweep the whole heap.** An intermediate one costs about 7 ms against a major one's 17 ms on `sales`, because `sweep_all` walks tenured slots too. Sweeping only untenured pages would make the extra collections GNU R's schedule runs nearly free, and win back the 8 ms per call `sales` pays against 0.4.1-beta (`decisions.md`, "Two old generations").
+- **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
@@ -143,17 +142,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   lubridate,data.table,xts`) spends about 130 ms reaching the load and about 200 ms importing,
   against under 60 ms for the first `new()`. `registerS3methods` runs natively (`decisions.md`,
   "start-up and imports run GNU R's code"), so what remains is GNU R's other R code:
-  - Process start, best of five: base alone 33 ms (`R_DEFAULT_PACKAGES=NULL`), with methods 74 ms,
-    with utils 93 ms, with stats 119 ms, all defaults 130 ms (GNU R's `Rscript`: 153 ms). The levers
-    are interpreter speed, or the preloaded base image of "bundle base R into the `ry` binary"
-    above, which could carry the default packages already loaded.
-  - Imports: `methods::cacheMetaData` is about 150 ms of them, and `.checkGroupSigLength` about
-    70 ms of that (an upper bound measured by stubbing it out): `.updateMethodsInTable` runs it for
-    every member of a group generic, and each call rescans the whole group tree through
-    `getGeneric` (1.2 ms per call on ry, 0.8 ms on GNU R; 67 calls for lubridate, data.table and
-    xts, none of which reset anything). A replacement guarded like `registerS3methods` could skip a
-    rescan whose generics and `.SigLength` values cannot have changed, but proving that cheaply needs
-    an invalidation signal for `.genericTable` and every `.SigLength` assignment. Deferring an
+  - Process start: an empty `ry run` starts from the start-up image in about 48 ms (GNU R's
+    `Rscript`: 129 ms).
+  - Imports: `.checkGroupSigLength` runs natively (`decisions.md`, "Installed packages load
+    through native fast paths, not an image"), which brings `cacheMetaData` to about 2.9 ms per
+    namespace (GNU R 16 ms).
     import's `loadNamespace` until a name is used is not exact: `.onLoad` side effects (options, S3
     registrations that dispatch on objects read back with `readRDS`) would move.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's

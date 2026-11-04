@@ -337,7 +337,7 @@ Replaces the element at a position with `f` of it.
 
 ```r ry run runtime=ry dput
 List.update([1, 2], 1, function(x) x + 10)
-#> [11, 2]
+#> [11i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L176)
@@ -366,7 +366,7 @@ Adds an element at the end.
 
 ```r ry run runtime=ry dput
 List.append([1, 2], 3)
-#> [1, 2, 3]
+#> [1i64, 2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L184)
@@ -395,7 +395,7 @@ Adds an element at the start.
 
 ```r ry run runtime=ry dput
 List.prepend([1, 2], 0)
-#> [0, 1, 2]
+#> [0i64, 1i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L192)
@@ -424,7 +424,7 @@ The elements of `first` followed by those of `second`.
 
 ```r ry run runtime=ry dput
 List.concat([1], [2, 3])
-#> [1, 2, 3]
+#> [1i64, 2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L200)
@@ -546,7 +546,7 @@ The elements in reverse order.
 
 ```r ry run runtime=ry dput
 List.reverse([1, 2, 3])
-#> [3, 2, 1]
+#> [3i64, 2i64, 1i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L238)
@@ -575,7 +575,7 @@ Concatenates a list of lists.
 
 ```r ry run runtime=ry dput
 List.join([[1], [], [2, 3]])
-#> [1, 2, 3]
+#> [1i64, 2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L246)
@@ -604,7 +604,7 @@ Applies `f` to every element.
 
 ```r ry run runtime=ry dput
 List.map([1, 2, 3], function(x) x * 2)
-#> [2, 4, 6]
+#> [2i64, 4i64, 6i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L254)
@@ -662,7 +662,7 @@ Applies `f` to the elements of two lists pairwise, stopping at the shorter one.
 
 ```r ry run runtime=ry dput
 List.map2([1, 2, 3], [10, 20], function(a, b) a + b)
-#> [11, 22]
+#> [11i64, 22i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L270)
@@ -691,7 +691,7 @@ Applies `f` to the elements at each position of three lists, up to the shortest 
 
 ```r ry run runtime=ry dput
 List.map3([1, 2], [10, 20], [100, 200], function(a, b, c) a + b + c)
-#> [111, 222]
+#> [111i64, 222i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L278)
@@ -720,7 +720,7 @@ Applies `f` to the elements at each position of four lists, up to the shortest o
 
 ```r ry run runtime=ry dput
 List.map4([1], [2], [3], [4], function(a, b, c, d) a * b * c * d)
-#> [24]
+#> [24i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L286)
@@ -749,7 +749,7 @@ Applies `f`, which returns a list, to every element and concatenates the results
 
 ```r ry run runtime=ry dput
 List.join_map([1, 2], function(x) [x, x])
-#> [1, 1, 2, 2]
+#> [1i64, 1i64, 2i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L294)
@@ -778,7 +778,7 @@ The elements for which `predicate` is `TRUE`.
 
 ```r ry run runtime=ry dput
 List.keep_if([1, 5, 2], function(x) x > 1)
-#> [5, 2]
+#> [5i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L302)
@@ -838,7 +838,7 @@ The elements for which `predicate` is `FALSE`.
 
 ```r ry run runtime=ry dput
 List.drop_if([1, 5, 2], function(x) x > 1)
-#> [1]
+#> [1i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L320)
@@ -954,7 +954,7 @@ Folds from the first element: `f` gets the state and an element and returns the 
 
 ```r ry run runtime=ry dput
 List.walk([1, 2, 3], 0, function(total, x) total + x)
-#> 6
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L352)
@@ -1012,7 +1012,7 @@ Folds until `f` returns `:Break(state)`; `:Continue(state)` goes on.
 
 ```r ry run runtime=ry dput
 List.walk_until([1, 2, 3, 4], 0, function(total, x) if (total >= 3) :Break(total) else :Continue(total + x))
-#> 3
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L368)
@@ -1041,7 +1041,7 @@ Folds the list from the last element until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
 List.walk_backwards_until([1, 5, 2, 3], 0, function(total, x) if (x > 4) :Break(total) else :Continue(total + x))
-#> 5
+#> 5i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L376)
@@ -1128,7 +1128,7 @@ Folds the list from a 1-based position onwards.
 
 ```r ry run runtime=ry dput
 List.walk_from([1, 2, 3, 4], 3, 0, function(total, x) total + x)
-#> 7
+#> 7i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L400)
@@ -1157,7 +1157,7 @@ Folds the list from a position until `f` returns `:Break(state)`.
 
 ```r ry run runtime=ry dput
 List.walk_from_until([1, 2, 3, 4], 2, 0, function(total, x) if (total >= 5) :Break(total) else :Continue(total + x))
-#> 5
+#> 5i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L408)
@@ -1245,7 +1245,7 @@ Calls `f` on each element, stopping at the first `:Err`.
 
 ```r ry run runtime=ry dput
 List.for_each_try([1, -2, 3], function(x) if (x < 0) :Err(:Negative(x)) else :Ok(NULL))
-#> :Err(:Negative(-2))
+#> :Err(:Negative(-2i64))
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L433)
@@ -1390,7 +1390,7 @@ The first element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
 List.find_first([1, 5, 7], function(x) x > 4)
-#> :Ok(5)
+#> :Ok(5i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L473)
@@ -1419,7 +1419,7 @@ The last element for which `predicate` is `TRUE`, or `:Err(:NotFound)`.
 
 ```r ry run runtime=ry dput
 List.find_last([1, 5, 7], function(x) x > 4)
-#> :Ok(7)
+#> :Ok(7i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L481)
@@ -1564,7 +1564,7 @@ The first `count` elements, or all of them if there are fewer.
 
 ```r ry run runtime=ry dput
 List.take_first([1, 2, 3], 2)
-#> [1, 2]
+#> [1i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L521)
@@ -1593,7 +1593,7 @@ The last `count` elements.
 
 ```r ry run runtime=ry dput
 List.take_last([1, 2, 3], 2)
-#> [2, 3]
+#> [2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L529)
@@ -1622,7 +1622,7 @@ Everything but the first `count` elements.
 
 ```r ry run runtime=ry dput
 List.drop_first([1, 2, 3], 2)
-#> [3]
+#> [3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L537)
@@ -1651,7 +1651,7 @@ Everything but the last `count` elements.
 
 ```r ry run runtime=ry dput
 List.drop_last([1, 2, 3], 2)
-#> [1]
+#> [1i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L545)
@@ -1709,7 +1709,7 @@ List.sublist <- function(list, start, count)
 
 ```r ry run runtime=ry dput
 List.sublist([1, 2, 3, 4], 2, 2)
-#> [2, 3]
+#> [2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L561)
@@ -1738,7 +1738,7 @@ The first `count` elements as `before` and the rest as `others`.
 
 ```r ry run runtime=ry dput
 List.split_at([1, 2, 3], 1)
-#> (before = [1], others = [2, 3])
+#> (before = [1i64], others = [2i64, 3i64])
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L569)
@@ -1825,7 +1825,7 @@ The runs of elements between elements identical to `delimiter`.
 
 ```r ry run runtime=ry dput
 List.split_on([1, 0, 2, 3, 0, 4], 0)
-#> [[1], [2, 3], [4]]
+#> [[1i64], [2i64, 3i64], [4i64]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L593)
@@ -1854,7 +1854,7 @@ The runs of elements between occurrences of the sublist `delimiter`.
 
 ```r ry run runtime=ry dput
 List.split_on_list([1, 0, 0, 2, 0, 3], [0, 0])
-#> [[1], [2, 0, 3]]
+#> [[1i64], [2i64, 0i64, 3i64]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L601)
@@ -1883,7 +1883,7 @@ Groups of `size` elements; the last group may be shorter.
 
 ```r ry run runtime=ry dput
 List.chunks_of([1, 2, 3], 2)
-#> [[1, 2], [3]]
+#> [[1i64, 2i64], [3i64]]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L609)
@@ -1941,7 +1941,7 @@ A stable sort by `compare`, which returns `:LT`, `:EQ` or `:GT`.
 
 ```r ry run runtime=ry dput
 List.sort_with([3, 1, 2], Num.compare)
-#> [1, 2, 3]
+#> [1i64, 2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L625)
@@ -1970,7 +1970,7 @@ Sorts numbers from smallest to largest.
 
 ```r ry run runtime=ry dput
 List.sort_asc([3, 1, 2])
-#> [1, 2, 3]
+#> [1i64, 2i64, 3i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L633)
@@ -2115,7 +2115,7 @@ Adds an `:Ok` value at the start; an `:Err` leaves the list unchanged.
 
 ```r ry run runtime=ry dput
 List.prepend_if_ok([1], Str.to_i64("x"))
-#> [1]
+#> [1i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L673)
@@ -2202,7 +2202,7 @@ The list with room for `spare` more elements.
 
 ```r ry run runtime=ry dput
 List.reserve([1, 2], 100)
-#> [1, 2]
+#> [1i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L697)
@@ -2232,7 +2232,7 @@ The list with no room beyond its elements, which gives back what `List.reserve` 
 
 ```r ry run runtime=ry dput
 List.release_excess_capacity(List.reserve([1, 2], 100))
-#> [1, 2]
+#> [1i64, 2i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L706)
@@ -2264,7 +2264,7 @@ accumulated like R's `sum()`, with more precision than a plain left-to-right fol
 
 ```r ry run runtime=ry dput
 List.sum([1, 2, 3])
-#> 6
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L717)
@@ -2323,7 +2323,7 @@ The smallest element, or `:Err(:ListWasEmpty)`.
 
 ```r ry run runtime=ry dput
 List.min([3, 1, 2])
-#> :Ok(1)
+#> :Ok(1i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L734)

@@ -1,0 +1,23 @@
+# A user writes typed ry without annotating every literal: each unsuffixed number the checker types
+# as `I64` runs as an `I64`, whether it is a `match` arm result, an unannotated list, or a
+# standard library argument.
+
+requires ry-runtime
+
+file first.R
+| first_or_zero <- function(xs: List<I64>) -> I64 match (List.first(xs)) {
+|   :Ok(x) => x,
+|   :Err(:ListWasEmpty) => 0
+| }
+| print(first_or_zero(List.drop_first([5], 1)))
+| xs <- [1, 2]
+| print(typeof(xs))
+| print(List.sum(List.range(1, 4)))
+| print(typeof(1))
+
+run ry run --runtime ry first.R
+expect exit 0
+expect stdout "0i64"
+expect stdout "\"I64\""
+expect stdout "10i64"
+expect stdout "\"double\""
