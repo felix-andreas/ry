@@ -2430,6 +2430,40 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
     turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
+- **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
+  The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
+  from source on ry: 85 have tests, GNU R passes 84, and ry passes 82 of those 84.
+  - future, `reserved-keyword-functions.R`: GNU R byte-compiles a top-level loop before it runs
+    it, and the compiler inlines base functions such as `<-` and `{`, so an override assigned
+    inside the loop is never called. ry looks `<-` up on every iteration. Repro (GNU R prints
+    `[1] 1`, ry fails with "Boom!"):
+    ```r
+    boom <- function(...) stop("Boom!")
+    for (kk in 1:2) { name <- c("{", "<-")[kk]; assign(name, boom); res <- 1; base::rm(list = name) }
+    print(res)
+    ```
+    GNU R does not inline when the loop body names the override literally
+    (`assign("<-", boom)` fails there too), so matching it means following the compiler's rules
+    for when a base binding counts as shadowed.
+  - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
+    points than degrees of freedom warns "span too small. fewer data values than degrees of
+    freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
+    bigger" and more, and returns NaN fits, so `predict` then errors. ry's
+    `crates/interp/src/stats_loess.rs` fits the points exactly. Port the netlib `lowesd`/`ehg`
+    checks and their `ehg182` warnings. Repro:
+    `fitted(loess(y ~ x, data.frame(x = c(1, 2), y = c(1, 3))))` gives `NaN NaN` and 13 warnings
+    on GNU R, `1 3` on ry.
+  - BiocManager's `test_install.R:166` fails under GNU R too (it needs a writable site library),
+    so it does not count.
+  - Not run: StanHeaders, rstan and shinystan (Stan's C++ takes hours to build), arrow (needs the
+    Arrow C++ library), V8 (needs libv8) and pak (builds its own dependency tree). quantreg
+    passes, but its rgl tests skip because rgl needs libGLU.
+  - `read.dcf` marks a non-ASCII value as UTF-8 where GNU R leaves it "unknown": in a UTF-8
+    locale, `Encoding(read.dcf(textConnection("A: M\u00fcller"))[, 1])` is "unknown" on GNU R
+    and "UTF-8" on ry. Comparisons agree, so nothing fails on it yet.
+  - `oracle packages` reports the first error in a `.Rout`, which can be one `try()` caught; the
+    error that ended the run is the one just before "Execution halted"
+    (`crates/oracle/src/packages.rs`).
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).

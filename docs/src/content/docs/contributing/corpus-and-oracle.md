@@ -137,6 +137,31 @@ measures the container, not ry. With the packages ry installed itself, ry passes
 that GNU R passes (85.4%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
 `MEMORY.md` records the current rate.
 
+### Top CRAN packages
+
+The corpus is the benchmark's dependency closure, so ry is tuned to it. A second set measures
+packages the corpus has not mined: `tools/corpus/top-packages.txt` lists the 100 most-downloaded
+CRAN packages outside the closure, leaving out the few that need a system library the container
+lacks or take hours to build.
+
+```sh
+just top-packages-setup     # GNU R installs them and their Suggests into .corpus-top, with sources
+just top-packages --jobs 3  # ry builds them all from source, then both runtimes run their tests
+```
+
+`just top-packages` reinstalls every package into `.corpus-top/ry-library` with ry's `R CMD
+INSTALL` and then runs `oracle packages --installed` against `.corpus-top`, so the results land
+in `.corpus-top/tests/summary-installed.md`. To rerun one package's tests on ry without
+reinstalling, call the oracle directly:
+
+```sh
+ORACLE_RY=$PWD/target/release/ry ./target/release/oracle packages --corpus .corpus-top \
+  --installed --runtime ry ggplot2
+```
+
+Of the 100 packages, 85 have tests and GNU R passes 84; ry passes 82 of those 84 (97.6%).
+`backlog.md` lists the two that fail and why.
+
 ## Installing on ry
 
 ```sh
