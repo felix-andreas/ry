@@ -2,7 +2,7 @@
 //! action and `ry migrate data-table` applies them to whole files, so both read this one engine.
 //!
 //! A rewrite is offered only for a form whose DataFrame equivalent computes the same table, up to
-//! the differences `guides/from-data-table.md` lists (DataFrame aggregations skip `NA`, and a sort
+//! the differences `reference/from-data-table.md` lists (DataFrame aggregations skip `NA`, and a sort
 //! puts `NA` last), and every other form is left alone: a wrong rewrite would be worse than none. Two facts decide
 //! whether a form qualifies, and both come from the checker. A query `x[...]` is rewritten only
 //! when `x` types as a table (a `data.table` or a `DataFrame`), because the same brackets index

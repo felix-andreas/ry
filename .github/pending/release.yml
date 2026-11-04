@@ -2,7 +2,7 @@
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
 # and smoke-tests every archive without publishing anything. A run started by hand can also limit
 # the release to Linux (`platforms`) and leave out the VS Code extension (`vscode`). The checklist
-# and the one-time Marketplace setup are in docs/src/content/docs/contributing/releasing.md. Past
+# and the one-time Marketplace setup are in docs/src/content/docs/development/releasing.md. Past
 # runner setup, every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs
 # locally.
 name: Release

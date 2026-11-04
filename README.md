@@ -74,7 +74,7 @@ type-mismatch
 Where inference is not enough, you state a type yourself: in a `#:` comment, such as
 `#: fn(price: double, rate: double) -> double` above the function, which keeps the file plain R, or
 inline, as in `function(price: double, rate: double) -> double`.
-[Type checking](https://ry-lang.org/type-checking/overview) explains both.
+[Type checking](https://ry-lang.org/tutorial/types) explains both.
 
 ### Performance
 
@@ -87,7 +87,7 @@ after an edit runs within 10 to 30 ms, where `devtools::load_all()` takes 8.6 s.
 
 Some parts of R are missing from the runtime, and a script that needs one stops with an error that
 names it. `ry R` runs the same script on the GNU R installed on your machine instead.
-[Running and reloading](https://ry-lang.org/guides/running) has the details.
+[Running and reloading](https://ry-lang.org/tutorial/runtime) has the details.
 
 ### Exhaustive `match`
 
@@ -122,7 +122,7 @@ non-exhaustive-match
 ```
 
 Tagged unions and `match` are ry syntax, not R, so code that uses them runs only on ry's runtime.
-[Records and tags](https://ry-lang.org/type-checking/records-and-tags) covers them.
+[Records and tags](https://ry-lang.org/tutorial/runtime#records-tags-and-match) covers them.
 
 ## FAQ
 

@@ -159,7 +159,7 @@ docs-deploy branch:
     	if [ -z "${!variable:-}" ]; then missing="$missing $variable"; fi
     done
     if [ -n "$missing" ]; then
-    	echo "error: docs-deploy needs these environment variables:$missing (contributing/releasing.md, \"Deploying the docs site\")" >&2
+    	echo "error: docs-deploy needs these environment variables:$missing (development/releasing.md, \"Deploying the docs site\")" >&2
     	exit 1
     fi
     commit=$(git rev-parse HEAD)

@@ -1,0 +1,164 @@
+---
+title: Run on ry's runtime
+description: Run R on ry's runtime with a console that reloads your package, plus what only that runtime runs, such as inline types, records, tagged unions and match
+sidebar:
+  label: 3. Run on ry's runtime
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**Goal:** run your R code on ry's own runtime, and use the features GNU R cannot parse: inline type
+annotations that are also checked at run time, and records, tagged unions and `match`.
+
+## Run code
+
+| Command | Runs |
+| --- | --- |
+| `ry run script.R` | a script on ry's runtime; arguments after it reach `commandArgs(TRUE)` |
+| `ry run` | a console on ry's runtime |
+| `ry R script.R`, `ry R` | the same on GNU R, with inline annotations erased |
+| `ry test` | the package's testthat tests; `--filter NAME`, `--watch` |
+| `ry document` | roxygen2, writing the same `man/*.Rd` and `NAMESPACE` byte for byte |
+| `ry load -e EXPR` | loads the package, evaluates `EXPR`, exits |
+
+Inside a package, `ry run` opens a console that loads the package, then reloads exactly the
+definitions you changed before each command. There is no `load_all()` to call and no session to
+restart. Take a package `tally` whose `R/count.R` has a bug:
+
+```r
+count_words <- function(text) length(strsplit(text, " ")[[1]])
+```
+
+```text
+$ ry run
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 6 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
+> count_words("the  quick fox")
+[1] 4
+```
+
+The double space makes an empty word. Change `" "` to `"[[:space:]]+"`, save, and run the same
+command:
+
+```text
+> count_words("the  quick fox")
+Reloaded tally: 1 definition rebound, in 13 ms.
+[1] 3
+```
+
+In RStudio or another R session, `source(pipe("ry load --r-entry"))` defines a `load_all()` that
+loads the same way; put the line in `~/.Rprofile`. ry's runtime is incomplete: code that needs
+something it lacks stops with an error that names it, and `ry R` runs the same code on GNU R.
+
+## Inline annotations
+
+An inline annotation, the **Inline** tab of [step 2](/tutorial/types#annotate), means the same to
+the checker as its `#:` comment. On ry's runtime it is also checked when the code runs:
+
+```r
+scale <- function(values: double, by: double) -> double values * by
+scale("a", 1)
+```
+
+```text ry run runtime=ry
+$ ry run scale.R
+Error in scale("a", 1) :
+  argument `values` must be `double`, not `character`
+```
+
+The check tests the kind of value (`double`, `character`, a list, a function), not its length or
+class, and runs when the argument is first used, so lazy arguments stay lazy. `ry R` erases the
+annotations, so GNU R runs the file as plain R. A project whose files must also run under `Rscript`
+sets `inline-annotations = false` under `[check]`, and ry then reports every inline annotation.
+
+When a statement has both spellings and they disagree, ry uses the inline one and warns with
+`annotation-mismatch`.
+
+## Records, tags and match
+
+ry has its own data types, which a checker can follow completely where R's lists, S4 and R6 classes
+defeat it. They run only on ry's runtime:
+
+```r
+point <- (x = 1, y = 2)       # Record{x: double, y: double}
+pair <- (1L, "a")             # Tuple{integer, character}
+one <- (x = 1,)               # a one-field record needs the trailing comma
+point$x + point$y
+```
+
+```text ry run runtime=ry exact
+[1] 3
+```
+
+A record's fields are fixed and checked, and it has value semantics: `point$x <- 3` changes a copy
+only `point` sees. A *tag* is a name starting with `:`, with an optional payload, and a union of
+tags lists every case a value can be. `match` runs the first arm whose pattern fits, and ry reports
+a case no arm handles:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+  | :Empty
+
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Shape {
+#:   | :Circle(radius: double)
+#:   | :Rect(width: double, height: double)
+#:   | :Empty
+#: }
+
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+non-exhaustive-match
+
+  x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+Add `:Empty => 0` and `area(:Rect(width = 2, height = 3))` returns `6`. Patterns are `_`, a name, a
+literal, a tag with payload patterns, `(p, q)`, `(x = p, ..)`, `p | q`, and a guard
+`p if (cond)`.
+
+R functions do not know these values, so passing one to an R function is an error until you convert
+it with `as.list()`:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text ry check typing
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+`[1, 2, 3]` is an *Array*, ry's strict vector: one item type, no `NA`, no names and no recycling.
+[Type system](/reference/type-system#arrays) has its rules.
+
+**Next:** [go fully typed](/tutorial/fully-typed).

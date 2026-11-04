@@ -1,7 +1,7 @@
 //! Scenario tests: scripted user journeys through the editor and the CLI.
 //!
 //! Each `tests/scenarios/*.scenario` file is one journey, written in the small line-based
-//! language that `docs/src/content/docs/contributing/robustness.md` specifies. Editor steps
+//! language that `docs/src/content/docs/development/robustness.md` specifies. Editor steps
 //! drive the real language server in-process through the deterministic simulator
 //! (`ry::server::simulation`), settling after every step; CLI steps run the real `ry` binary in
 //! the scenario's workspace. When a journey ends, its editor session is held against a server

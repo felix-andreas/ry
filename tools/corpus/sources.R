@@ -3,7 +3,7 @@
 # .corpus/library, into .corpus/sources, and writes .corpus/closure.txt (one package per line).
 # Binary installs carry no tests/ directory, so the package test harness (`oracle packages`)
 # runs each package's tests from these sources. See
-# docs/src/content/docs/contributing/corpus-and-oracle.md.
+# docs/src/content/docs/development/corpus-and-oracle.md.
 #
 # Environment: RY_CORPUS_DIR and RY_CORPUS_SNAPSHOT, as for install.R.
 

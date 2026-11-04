@@ -1,0 +1,19 @@
+[stdout]
+| function () 
+| g("a")
+| (function () 
+| g("a"))(1)
+| function (x = 1) 
+| g("a")
+| g(structure("a", package = "p"))
+| new("Wide", alpha = "a long enough value", beta = "another long value", 
+|     gamma = 1)
+| list(new("Wide", alpha = "a long enough value", beta = "another long value", 
+|     gamma = 1), new("Wide", alpha = "a long enough value", beta = "another long value", 
+|     gamma = 1))
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

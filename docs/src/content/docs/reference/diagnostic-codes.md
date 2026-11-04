@@ -118,7 +118,7 @@ miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unkn
 same way, with the closest column as the suggestion. In `NAMESPACE`, an
 `importFrom` of a name the package does not export and an `export` of a name you never define are
 errors, because R refuses to load such a package. Attaching a package ry knows nothing about turns
-off this check for bare names, as [stubs](/type-checking/unknown#package-stubs) explains, and that includes a near
+off this check for bare names, as [stubs](/development/authoring-stubs) explains, and that includes a near
 miss of one of your own names, because the package may export it.
 
 **`unused`** (warning): an assignment nothing reads. In a package, top-level definitions are exempt,
@@ -201,7 +201,7 @@ was meant for the length. The fix moves it outside, and is unsafe because it cha
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
-runs, but ry checks [records and tagged unions](/type-checking/records-and-tags) statically and
+runs, but ry checks [records and tagged unions](/tutorial/runtime#records-tags-and-match) statically and
 cannot see inside these classes, so it recommends those instead:
 
 ```text
@@ -289,11 +289,11 @@ function from `base`, or from another package, such as defining your own `filter
 **`data-table`** (off by default): a call that creates a data.table, which is `data.table()`,
 `fread()`, `as.data.table()` or `setDT()`, bare or as `data.table::`. data.table code runs
 unchanged, so this only helps you find the code to move to the typed
-[DataFrame](/guides/from-data-table/) when you choose to. A file that defines its own function of
+[DataFrame](/reference/from-data-table/) when you choose to. A file that defines its own function of
 that name is not flagged.
 
 ```text
-! `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+! `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/reference/from-data-table/
 ```
 
 **`redundant-return`** (off by default): `return(x)` as a function's last expression, including
