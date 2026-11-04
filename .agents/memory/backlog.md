@@ -816,6 +816,19 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
 - **`x$name <- v` in tier 0** compiles to the in-place `SubAssign` (kind `Dollar`) when `x` is a
   local, unshared, classless list that already has the name: 0.76 s to 0.16 s per million
   (GNU R 0.09 s). `complex_assign` caches `f<-` symbols per getter and allocates no vectors.
+- **Growing a vector by one element copied it.** `x[[n + 1]] <- v` and `x[n + 1] <- v` on an
+  unshared vector now grow in place into spare capacity (`subset::grow`, 5% headroom on a copy;
+  tier 0's `assign_element_in_place` appends), and computed subscripts (`i + 1`, a formal) and
+  `m[i, j] <- v` (`Op::SubAssignMatrix`) compile to in-place stores. rcp list-for and list-while
+  went from a timeout to 1.26 s and 0.79 s (GNU R 1.40 s and 1.32 s), convolution from 16.9 s to
+  0.20 s (GNU R 0.91 s). matrix-for runs 1.6 s with the JIT against 1.2 s without: the JIT treats
+  `SubAssignMatrix` as an opaque step that flushes its registers.
+- **`perl = TRUE` matching was quadratic.** The `pcre2` crate revalidates the UTF-8 subject on
+  every call, so a global `gsub` on 1 MB took minutes; `crates/interp/src/pcre.rs` binds PCRE2
+  directly with `PCRE2_NO_UTF_CHECK`. regexdna 0.35 s against GNU R's 1.0 s.
+- **A text output connection rebuilt its vector per line**, which made `capture.output` of n lines
+  n squared strings; it appends in place (`connections::push_text_line`). fasta 0.94 s, GNU R
+  0.97 s; reversecomplement 0.18 s, GNU R 1.07 s.
 
 Open, largest first:
 

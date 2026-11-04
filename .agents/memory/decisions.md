@@ -7728,3 +7728,22 @@ Each one trades a narrow class of missed errors for a class of false reports see
   call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
 - **Impact.** One source of truth (the package's R code plus the install output derived from it),
   no invalidation logic, and no hashing at load.
+
+## Vectors grow in place into spare capacity
+
+- **Previous shape.** `x[[length(x) + 1]] <- v` allocated a vector of the new length and copied
+  every element, so a loop that appends n elements was quadratic; rcp's list-for timed out.
+  Subscripts other than a local symbol or a constant fell back to `complex_assign`, and a text
+  output connection rebuilt its character vector from bytes for every line.
+- **Target shape.** Growth uses the heap's resizable vectors (`alloc_resizable_vector`,
+  `resize_vector`), the same flag `SETLENGTH` and `IS_GROWABLE` expose to packages. `subset::grow`
+  extends an unshared, unclassed vector without dims in place when capacity allows, and otherwise
+  copies into a vector with 5% headroom, which keeps a sequence of appends linear at a memory cost
+  of one twentieth. Names grow alongside. Tier 0 compiles side-effect-free subscripts (locals,
+  formals, numeric constants, and `+ - * / ^` of those) and two-subscript matrix stores
+  (`Op::SubAssignMatrix`) to in-place stores, and a formal is read at run time so a missing one
+  still assigns every element. A text connection's lines are the R vector itself, grown with
+  doubling.
+- **Impact.** One source of truth for length and capacity (the heap object), no shadow buffers,
+  and appends that never copy unless R code holds a second reference. GC sizes an object by
+  capacity, so headroom is visible to collection limits. Analysis is unaffected.
