@@ -1098,8 +1098,13 @@ impl<'a> Builder<'a> {
     fn run_r(&self, code: &str, default_packages: &str) -> Result<()> {
         let script = self.work.join("step.R");
         write(&script, code)?;
-        let output = Command::new(self.front_end())
-            .args(["R", "--vanilla", "--no-echo", "-f"])
+        let mut command = Command::new(self.front_end());
+        // `bin/R.exe` is R already, while the Unix front end is `ry-rcmd`, which takes the mode.
+        if self.platform != Platform::Windows {
+            command.arg("R");
+        }
+        let output = command
+            .args(["--vanilla", "--no-echo", "-f"])
             .arg(&script)
             .current_dir(&self.work)
             .env("R_HOME", &self.root)
