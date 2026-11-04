@@ -14,6 +14,10 @@ file empty.R
 | points <- List.map(List.range(3L, 1), \(v) :Point(v))
 | print(typeof(points))
 | print(List.map([1, 2], \(v) v * 2))
+| xs <- List.range(1L, 3L)
+| none <- List.keep_if(xs, \(v) v > 5L)
+| print(c("kept", typeof(none), typeof(List.sublist(xs, 1, 0)), typeof(List.drop_first(xs, 3))))
+| print(none == [])
 
 run ry run --runtime ry empty.R
 expect exit 0
@@ -21,3 +25,5 @@ expect stdout "[1] \"I64\" \"I64\" \"I64\""
 expect stdout "[1] \"double\" \"double\" \"double\" \"I64\""
 expect stdout "[1] \"list\""
 expect stdout "[2i64, 4i64]"
+expect stdout "[1] \"kept\" \"I64\"  \"I64\"  \"I64\" "
+expect stdout "[]"

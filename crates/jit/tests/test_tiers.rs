@@ -2639,6 +2639,11 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(x: List<F64>) -> F64 List.walk(x, 0, function(s: F64, v: F64) -> F64 s + v * v)",
             &["{ a <- [1, 2, 3]; FUNCTION(a) }", "{ a <- List.from_r(0[0L]); FUNCTION(a) }"],
         ),
+        // `.ry_items`, which the preflight wraps around a typed empty list, lowers as its list.
+        (
+            "function(n: I64) -> I64 List.sum(.ry_items(List.map(List.range(1, n), \\(v) v * 2i64), \"I64\"))",
+            &["{ x <- 3i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {

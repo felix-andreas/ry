@@ -357,8 +357,6 @@ pub enum NativeValueKind {
     List,
 }
 
-/// What an operation inside a DataFrame expression takes, as the table engine's own typing
-/// decides before it runs a query.
 /// The run-time storage of a ry list's items, for a list the runtime may build empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum ListItems {
@@ -381,6 +379,8 @@ impl ListItems {
     }
 }
 
+/// What an operation inside a DataFrame expression takes, as the table engine's own typing
+/// decides before it runs a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum ExpressionNeeds {
     /// Arithmetic and numeric aggregations: logical, integer or double columns.
@@ -19073,7 +19073,6 @@ fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
     }
     lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
 }
-
 
 /// Whether a library function returns a `List<B>` whose items no list argument supplies, so its
 /// result's storage when empty is decided by nothing at run time: `List.map`'s `B` comes from the

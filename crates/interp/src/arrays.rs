@@ -85,6 +85,11 @@ pub unsafe fn finish(vector: Sexp) -> Sexp {
     vector
 }
 
+/// An empty Array in `like`'s storage.
+pub unsafe fn empty_like(like: Sexp) -> R<Sexp> {
+    Ok(finish(alloc(like.kind(), 0)?))
+}
+
 /// The first missing value in an atomic vector, by position.
 pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
     let count = length(vector);
