@@ -11,10 +11,11 @@ description: Release announcements and project news
 - **Typed code runs on native values.** A typed function in strict mode compiles before its first
   call to native code over numbers, strings and lists, so typed programs that build strings or
   call local functions run 10 to 120 times faster than on GNU R ([Benchmarks](/benchmarks)).
-- **S4 definitions run natively.** `setClass()`, `setGeneric()`, `setMethod()`,
-  `setClassUnion()` and `methods::cacheMetaData()` run in Rust for the shapes packages usually
-  write, with results identical to the methods package's R code. On a generated package with 2,892
-  S4 definitions, the first `new()` after an uncached load takes about 0.5 s instead of about 6 s.
+- **S4 definitions run natively.** `setClass()`, `setGeneric()`, `setMethod()` (also on
+  primitives such as `length`), `setClassUnion()`, `methods::cacheMetaData()` and inherited single-argument dispatch run in Rust
+  for the shapes packages usually write, with results identical to the methods package's R code.
+  On a generated package with 2,892 S4 definitions, the first `new()` after an uncached load takes
+  about 0.4 s instead of about 6 s.
 - **`format()` shows external pointers** as GNU R does (`<pointer: 0x…>`), so `str()` of a value
   that holds one, such as an S4 class definition, no longer fails with "Found no format() method".
 

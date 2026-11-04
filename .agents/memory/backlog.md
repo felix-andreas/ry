@@ -71,57 +71,28 @@ The quality bar is four things.
 
 ## Open: native methods core
 
-The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
+The methods package's core runs in Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
-`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()`, `setClass()`,
-`setClassUnion()` and `cacheMetaData()` are native when nothing observable would differ. On
-the S4-heavy bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
-lubridate,data.table,xts`) a cold first `new()` costs about 0.47 s (running the definitions about
-245 ms, `cacheMetaData` 16 ms, the cache save about 200 ms) and a warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
-that holds (`decisions.md`). Consider a native class table with dense ids and a bitset extends
-relation instead of porting function by function. A reload after editing a method or a class
-takes 0.2 to 0.45 s, and dispatch costs 2.3 to 4.5 µs per call. Remaining, largest first (per-call
-costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
+`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` (including on
+primitives), `setClass()`, `setClassUnion()`,
+`cacheMetaData()` and single-argument inherited dispatch (`.InheritForDispatch`) are native when
+nothing observable would differ. On the S4-heavy bench package (2,892 definitions, `just
+bench-s4-first-use target/s4heavy lubridate,data.table,xts`) a cold first `new()` costs about
+0.36 to 0.40 s: running the definitions about 145 ms, caches 11 ms, the cache save about 200 ms.
+A warm one costs about 77 ms. The goal is under 100 ms cold without the S4 cache, which is deleted
+once that holds (`decisions.md`, "The S4 cache is interim").
 
-- Native `setClass` itself: about 100 µs per call, 60 ms for 579 classes (callgrind with
-  `--toggle-collect='*do_set_class'` on a build with `CARGO_PROFILE_RELEASE_STRIP=false`). A slot
-  default runs R's `new()` only the first time a class is used, to fill `initialize`'s dispatch
-  cache (about a quarter of the cost, `.InheritForDispatch` in R); then come the templates each
-  direct extension instantiates (`substitute_symbols`) and symbol interning.
-- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing), which goes
-  away with the cache.
-- `setMethod` on a generic that is not yet a standard generic: primitives (`length`, `c`), base
-  functions that get an implicit generic (`as.list`, `print`, `toString`) and `initialize`. About
-  1.8 ms each, 33 ms for 19 calls.
-- Native `setMethod`: about 23 µs per call, 42 ms for 1,867 methods.
-- The first union of a basic class (`setClassUnion("Basic00OrNull", ...)`, about 9 ms), which
-  rebinds the basic member classes in `package:methods` on the R path. Later unions are
-  native (about 190 µs each).
-- `cacheMetaData` delegates a class to `.cacheClass` when its cached definition differs from the
-  bound one (77 classes on `s4plain`, real work) and a union whose members' cached extensions are
-  out of date, and delegates generics of other packages, group generics and primitives.
-- The `setClass` shapes that still bail: supers from another package, several `contains` with
-  data parts, and classes that are virtual for lack of slots.
-- `.checkGroupSigLength` and the imports' `cacheMetaData` (see "Start-up and imports are the
-  floor of a warm `ry load`" below).
-- `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
-  data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
-  `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
-- `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
-  `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
-  union member, a subclass), which costs about 200 µs per `new()`.
-- Inherited dispatch (`.findInheritedMethods`), `getMethod`, `selectMethod` and `existsMethod`.
-- Two methods-package tests fail on both the native and the R path, and pass on GNU R:
-  `basicRefClass.R` (`environment(foo) <- a` with a reference object signals "replacement object
-  is not an environment") and `namesAndSlots.R` (`names(a) <- "A"` on an S4 object without a
-  `names` slot does not signal an error).
-- Matrix's `load_all` from source stops in `load()` with `readChar` on an empty file name, on both
-  paths, after its class definitions have run.
-
-Micro-benchmarks (release, per call): `new()` with three same-class slots 13.7 µs (GNU R 130 µs,
-ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 µs (GNU R 11.8 µs),
-`extends("Point3", "Point")` 2.1 µs (GNU R 6.7 µs), `new("MethodDefinition", f)` 50 µs (ry before
-526 µs), `new()` of a class containing `numeric` with one slot 50 µs (before 418 µs, GNU R 299 µs).
+- **Next: a native class table with dense ids** (`decisions.md`, "The rest of the gap goes to a
+  native class table"). The cold run is about 670M instructions against about 250M allowed, and the
+  profile is flat over metadata lookups, slot reads and extension objects, so porting further
+  functions one by one has stalled.
+- About 24 calls still bail (`RY_TRACE_METHODS_BAILS=1`): `setOldClass` (about 16 ms), the first
+  `setMethod` on `print`, `toString` and `as.list`, which create an implicit generic (about 20 ms),
+  `setMethod("[")` whose method formals need rematching (7 ms), the first union of a basic class
+  (about 8 ms), a few `setClass` shapes, and `cacheMetaData` delegating classes whose cached
+  definition differs, generics of other packages, group generics and primitives (about 14 ms).
+- A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
+  4.5 µs per call.
 
 ## Open: collector throughput on the benchmark suites
 
