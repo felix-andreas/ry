@@ -1,0 +1,90 @@
+[stdout]
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:3] "" "" "w"
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  chr[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:3] "" "" "x"
+|  num[1:3, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  num[1:3, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "" "" "w"
+|   ..$ : NULL
+|  NULL
+|  num[0 , 1:2] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  num[0 , 1:2] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:2] "" "w"
+|  num[0 , 1:2] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:2] "a" "b"
+|  num [1, 1:2] 0 0
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : NULL
+|  num[0 , 1:3] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:3] "" "" "w"
+|  num[1:2, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "" "w"
+|   ..$ : NULL
+| 'data.frame':	0 obs. of  0 variables
+|    a b x
+| r1 1 3 5
+| r2 2 4 6
+|    a b
+| r1 1 3
+| r2 2 4
+| x  5 6
+|   x 7:8
+| u 5   7
+| v 6   8
+|      [,1] [,2]
+| [1,] "1"  "a" 
+| [2,] "2"  "b" 
+| [3,] "3"  "c" 
+|      [,1] [,2]
+| [1,] 1    "a" 
+| [2,] 2    3   
+|      [,1]
+| [1,]    1
+| [2,]    2
+|    a b z
+| r1 1 3 9
+| r2 2 4 9
+|   u v
+| x 5 6
+| y 1 1
+[messages]
+[warnings]
+- number of rows of result is not a multiple of vector length (arg 2) (in cbind(m, 1:2))
+[errors]
+[value]
+double
+| structure(c(5, 1, 6, 1), dim = c(2L, 2L), dimnames = list(c("x", 
+| "y"), c("u", "v")))

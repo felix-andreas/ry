@@ -14,7 +14,7 @@ use {
         unwind::{R, Unwind, error, error_in, errorcall},
         values::{
             self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
-            string_vector, symbol_name, symbols, unbound,
+            symbol_name, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
@@ -4534,14 +4534,10 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             }
         }
     }
-    // Errors and warnings name an argument by its position in the call, NULLs included.
-    let (items, positions): (Vec<Arg>, Vec<usize>) = items
-        .into_iter()
-        .enumerate()
-        .filter(|(_, arg)| arg.value != nil())
-        .map(|(position, arg)| (arg, position + 1))
-        .unzip();
-    if items.is_empty() {
+    // GNU R's `cbind` and `rbind` from its `bind.c`, written once for both directions: the
+    // extent is the length along the bound vectors (rows for `cbind`), and each argument adds
+    // lines across it (columns for `cbind`). Only a call of NULLs alone gives NULL.
+    if items.iter().all(|arg| arg.value == nil()) {
         return Ok(nil());
     }
     // Starting below raw, so that binding only raw vectors gives a raw matrix.
@@ -4552,191 +4548,191 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     if kind == SexpType::Nil {
         kind = SexpType::Logical;
     }
-    // The extent along the bound dimension.
-    // The first matrix fixes it, even at zero; without one, the longest vector does.
-    let has_matrix = items
-        .iter()
-        .any(|arg| values::dims(arg.value).is_some_and(|dims| dims.len() == 2));
-    let extent = items
-        .iter()
-        .find_map(|arg| {
-            values::dims(arg.value)
-                .filter(|dims| dims.len() == 2)
-                .map(|dims| if by_row { dims[1] } else { dims[0] })
-        })
-        .unwrap_or_else(|| items.iter().map(|arg| length(arg.value)).max().unwrap_or(0));
-    let mut pieces: Vec<(Sexp, usize, bool)> = Vec::new();
+    let (along, across) = if by_row { (1, 0) } else { (0, 1) };
+    let matrix_dims = |value: Sexp| values::dims(value).filter(|dims| dims.len() == 2);
+    // A zero-length vector, NULL included, adds a line only when no argument has a nonzero
+    // extent, so that `cbind(matrix(0, 0, 2), NULL)` has three columns.
+    let min_length = usize::from(items.iter().any(|arg| match matrix_dims(arg.value) {
+        Some(dims) => dims[along] > 0,
+        None => length(arg.value) > 0,
+    }));
+    let mut matrix_extent: Option<usize> = None;
+    let mut vector_extent = 0usize;
     let mut total = 0usize;
-    let mut warned = false;
+    for (index, arg) in items.iter().enumerate() {
+        match matrix_dims(arg.value) {
+            Some(dims) => {
+                if matrix_extent.is_some_and(|extent| extent != dims[along]) {
+                    let direction = if by_row { "columns" } else { "rows" };
+                    // Reported against the `rbind` or `cbind` closure call, as GNU R does.
+                    return Err(crate::unwind::error(format!(
+                        "number of {direction} of matrices must match (see arg {})",
+                        index + 1
+                    )));
+                }
+                matrix_extent = Some(dims[along]);
+                total += dims[across];
+            }
+            None if length(arg.value) >= min_length => {
+                vector_extent = vector_extent.max(length(arg.value));
+                total += 1;
+            }
+            None => {}
+        }
+    }
+    let extent = matrix_extent.unwrap_or(vector_extent);
     // The warning names the `rbind` or `cbind` closure call, not the internal.
     let frames = &crate::interp().frames;
     let closure_call = call
         .frame_index()
         .map_or(call.call, |position| frames[position].call);
-    for (arg, &position) in items.iter().zip(&positions) {
-        match values::dims(arg.value).filter(|dims| dims.len() == 2) {
-            Some(dims) => {
-                if (if by_row { dims[1] } else { dims[0] }) != extent {
-                    let direction = if by_row { "columns" } else { "rows" };
-                    // Reported against the `rbind` or `cbind` closure call, as GNU R does.
-                    return Err(crate::unwind::error(format!(
-                        "number of {direction} of matrices must match (see arg {position})"
-                    )));
-                }
-                let count = if by_row { dims[0] } else { dims[1] };
-                pieces.push((arg.value, count, true));
-                total += count;
+    let names_vector = |index: usize| {
+        let expression = expressions[index];
+        items[index].tag != nil()
+            || deparse_level == 2
+            || (deparse_level == 1 && expression.kind() == SexpType::Symbol)
+    };
+    let mut has_bound_names = false;
+    let mut matrix_has_other_names = false;
+    let mut longest_names = 0usize;
+    let mut warned = false;
+    for (index, arg) in items.iter().enumerate() {
+        if matrix_dims(arg.value).is_some() {
+            let dimnames = get_attr(arg.value, symbols().dimnames);
+            if length(dimnames) == 2 {
+                has_bound_names |= dimnames.element(across) != nil();
+                // GNU R records the first matrix's extent here, so a zero extent counts as none.
+                matrix_has_other_names |= dimnames.element(along) != nil() && extent > 0;
             }
-            None => {
-                let source_length = length(arg.value);
-                // A zero-length vector contributes nothing once some argument has fixed a
-                // nonzero extent, rather than a row or column of NA.
-                if source_length == 0 && extent > 0 {
-                    pieces.push((arg.value, 0, false));
-                    continue;
-                }
-                // A vector longer than a matrix's extent is truncated, which GNU R warns about
-                // even when the extent is zero.
-                let uneven = source_length > 0
-                    && (if source_length > extent {
-                        has_matrix || !source_length.is_multiple_of(extent)
-                    } else {
-                        extent % source_length != 0
-                    });
-                if uneven && !warned {
-                    warned = true;
-                    let direction = if by_row { "columns" } else { "rows" };
-                    crate::conditions::warning_call(
-                        closure_call,
-                        format!(
-                            "number of {direction} of result is not a multiple of vector length (arg {position})"
-                        ),
-                    )?;
-                }
-                pieces.push((arg.value, 1, false));
-                total += 1;
-            }
+            continue;
         }
+        let count = length(arg.value);
+        if !warned && count > 0 && (count > extent || extent % count != 0) {
+            warned = true;
+            let direction = if by_row { "columns" } else { "rows" };
+            crate::conditions::warning_call(
+                closure_call,
+                format!(
+                    "number of {direction} of result is not a multiple of vector length (arg {})",
+                    index + 1
+                ),
+            )?;
+        }
+        has_bound_names |= count >= min_length && names_vector(index);
+        longest_names = longest_names.max(length(values::names(arg.value)));
     }
+    let has_other_names = matrix_has_other_names || longest_names == extent;
     let (rows, cols) = if by_row {
         (total, extent)
     } else {
         (extent, total)
     };
     let result = alloc(kind, rows * cols)?;
-    let mut offset = 0usize;
-    let mut bound_names: Vec<String> = Vec::new();
-    let mut matrix_named = false;
-    let mut other_names = nil();
-    for (position, &(value, count, is_matrix)) in pieces.iter().enumerate() {
-        let source_length = length(value);
-        // A matrix names the other dimension even when it adds no line, as a zero-row matrix
-        // of column names does in `rbind(template, ...)`.
-        if is_matrix && other_names == nil() {
-            let dimnames = get_attr(value, symbols().dimnames);
-            if dimnames != nil() {
-                other_names = dimnames.element(if by_row { 1 } else { 0 });
-            }
-        }
-        let source = values::materialize(value)?;
-        let source_rows = if is_matrix {
-            values::dims(value)
-                .and_then(|dims| dims.first().copied())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        for line in 0..count {
-            let line_offset = offset + line;
-            let target = |along: usize| {
-                if by_row {
-                    line_offset + along * rows
-                } else {
-                    along + line_offset * rows
-                }
-            };
-            if source_length == 0 {
-                for along in 0..extent {
-                    set_na(result, target(along));
-                }
-            } else if is_matrix && by_row {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |along| line + along * source_rows,
-                    target,
-                )?;
-            } else if is_matrix {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |along| along + line * source_rows,
-                    target,
-                )?;
-            } else {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |along| along % source_length,
-                    target,
-                )?;
-            }
-            let arg = &items[position];
-            if is_matrix {
-                let dimnames = get_attr(value, symbols().dimnames);
-                let names = if dimnames != nil() {
-                    dimnames.element(if by_row { 0 } else { 1 })
-                } else {
-                    nil()
-                };
-                matrix_named |= names != nil();
-                bound_names.push(if names != nil() {
-                    values::string_at(names, line)
-                        .map(|text| text.into_owned())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                });
-            } else {
-                // Positions count from 1 over the call's arguments, which `expressions` mirrors.
-                let expression = expressions[positions[position] - 1];
-                let name = if arg.tag != nil() {
-                    symbol_name(arg.tag).into_owned()
-                } else if deparse_level >= 1 && expression.kind() == SexpType::Symbol {
-                    symbol_name(expression).into_owned()
-                } else if deparse_level >= 2 && expression != nil() {
-                    crate::deparse::deparse_one_line(expression)
-                } else {
-                    String::new()
-                };
-                bound_names.push(name);
-                if other_names == nil() && source_length == extent {
-                    let names = values::names(value);
-                    if names != nil() {
-                        other_names = names;
-                    }
-                }
-            }
-        }
-        offset += count;
-    }
-    let dim = values::integer_vector(&[rows as i32, cols as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    // GNU R keeps the bound names whenever a matrix argument had names on that axis, even
-    // when every one of them is empty.
-    let bound = if matrix_named || bound_names.iter().any(|name| !name.is_empty()) {
-        string_vector(&bound_names)?
+    let bound_names = if has_bound_names {
+        alloc(SexpType::String, total)?
     } else {
         nil()
     };
-    if bound != nil() || other_names != nil() {
+    let mut other_names = nil();
+    let mut offset = 0usize;
+    for (index, arg) in items.iter().enumerate() {
+        let value = arg.value;
+        if let Some(dims) = matrix_dims(value) {
+            let count = dims[across];
+            let source = values::materialize(value)?;
+            let source_rows = dims[0];
+            for line in 0..count {
+                let line_offset = offset + line;
+                if by_row {
+                    copy_mapped(
+                        source,
+                        result,
+                        extent,
+                        |position| line + position * source_rows,
+                        |position| line_offset + position * rows,
+                    )?;
+                } else {
+                    copy_mapped(
+                        source,
+                        result,
+                        extent,
+                        |position| position + line * source_rows,
+                        |position| position + line_offset * rows,
+                    )?;
+                }
+            }
+            let dimnames = get_attr(value, symbols().dimnames);
+            let names = if dimnames != nil() {
+                dimnames.element(across)
+            } else {
+                nil()
+            };
+            if has_other_names && other_names == nil() && dimnames != nil() {
+                other_names = dimnames.element(along);
+            }
+            if has_bound_names {
+                for line in 0..count {
+                    let name = if names != nil() {
+                        names.element(line)
+                    } else {
+                        values::blank_string()
+                    };
+                    crate::heap().set_element(bound_names, offset + line, name);
+                }
+            }
+            offset += count;
+            continue;
+        }
+        let source_length = length(value);
+        if source_length < min_length {
+            continue;
+        }
+        if source_length > 0 {
+            let source = values::materialize(value)?;
+            if by_row {
+                copy_mapped(
+                    source,
+                    result,
+                    extent,
+                    |position| position % source_length,
+                    |position| offset + position * rows,
+                )?;
+            } else {
+                copy_mapped(
+                    source,
+                    result,
+                    extent,
+                    |position| position % source_length,
+                    |position| position + offset * rows,
+                )?;
+            }
+        }
+        let names = values::names(value);
+        if has_other_names && other_names == nil() && names != nil() && length(names) == extent {
+            other_names = names;
+        }
+        if has_bound_names {
+            let expression = expressions[index];
+            let name = if arg.tag != nil() {
+                values::mkchar(&symbol_name(arg.tag))?
+            } else if deparse_level == 1 && expression.kind() == SexpType::Symbol {
+                values::mkchar(&symbol_name(expression))?
+            } else if deparse_level == 2 {
+                values::mkchar(&crate::deparse::deparse_one_line(expression))?
+            } else {
+                values::blank_string()
+            };
+            crate::heap().set_element(bound_names, offset, name);
+        }
+        offset += 1;
+    }
+    let dim = values::integer_vector(&[rows as i32, cols as i32])?;
+    values::set_attr(result, symbols().dim, dim)?;
+    if has_bound_names || has_other_names {
         let dimnames = if by_row {
-            values::list_vector(&[bound, other_names])?
+            values::list_vector(&[bound_names, other_names])?
         } else {
-            values::list_vector(&[other_names, bound])?
+            values::list_vector(&[other_names, bound_names])?
         };
         values::set_attr(result, symbols().dimnames, dimnames)?;
     }
