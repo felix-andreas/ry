@@ -51,7 +51,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## Your role
 
 - **You plan, delegate, read reports, decide, and merge.** You never do the work yourself.
-- **Keep the "In flight" section current,** updating it in the same turn as each session start, finish, merge, user decision or change of direction. It is what you reread after compaction: a `SessionStart` hook (`tools/hooks/after-compact.sh`) prints this file then, only in the session named on the `Orchestrator session:` line, so a new orchestrator session edits that one line.
+- **Keep the "In flight" section current,** updating it in the same turn as each session start, finish, merge, user decision or change of direction. It is what you reread after compaction: a `SessionStart` hook (`tools/hooks/after-compact.sh`) prints a short note then telling you to reread this file, only in the session named on the `Orchestrator session:` line and never for subagents, so a new orchestrator session edits that one line.
 - **Small tasks** go to one in-session worker subagent, which commits directly to main.
 - **Large tasks, research included,** go to separate cloud sessions. Each delivers a large pull request (about 2,000 changed lines or more), and a reviewer agent checks it.
 - **Each cloud session merges its own pull request**: a fresh reviewer subagent reads the diff, the session fixes what it finds, merges main in, runs the checks, marks the PR ready and squash-merges it, then starts follow-up work on a fresh branch. The persistent in-session merge agent handles only PRs from sessions that cannot merge, and cross-session conflicts.
