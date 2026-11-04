@@ -119,7 +119,8 @@ execute <- function(n=80000) {
 # file). It runs `execute` once at a fixed size and prints one line:
 #   <name> <checksum of printed output and result> <seconds>
 # Run it from this directory: upstream code reads sibling files by relative path.
-local({
+# The guard skips the driver when another program loads this file for `execute`.
+if (!exists(".ry_bench_loading")) local({
   started <- proc.time()[[3]]
   output <- capture.output(value <- execute(80000))
   seconds <- proc.time()[[3]] - started

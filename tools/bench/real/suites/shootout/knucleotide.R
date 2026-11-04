@@ -93,10 +93,12 @@ execute <- function(n=2000) {
 # file). It runs `execute` once at a fixed size and prints one line:
 #   <name> <checksum of printed output and result> <seconds>
 # Run it from this directory: upstream code reads sibling files by relative path.
-local({
+# The guard skips the driver when another program loads this file for `execute`.
+if (!exists(".ry_bench_loading")) local({
   # The program reads ../fasta/fasta<n>.txt, so write that input with this
   # suite's fasta.R into a scratch directory first, outside the timed region.
   generator <- new.env()
+  generator$.ry_bench_loading <- TRUE
   sys.source("fasta.R", envir = generator)
   scratch <- tempfile("shootout-")
   dir.create(file.path(scratch, "fasta"), recursive = TRUE)

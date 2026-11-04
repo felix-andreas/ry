@@ -124,7 +124,8 @@ climb *args:
     python3 -I tools/climb/run.py {{ args }}
 
 # Times the representative workload mix (tools/bench/real) on GNU R and on ry with the JIT on and off,
-# e.g. `just bench-real --repeat 5`, `just bench-real --suites .bench` (adds the generated packages' tests)
+# e.g. `just bench-real --repeat 5`, `just bench-real --suites .bench` (adds the generated packages' tests),
+# `just bench-real --public all` (adds the vendored public programs in tools/bench/real/suites)
 # or `just bench-real --write` (stores tools/bench/real/results.json, the record behind the table in benchmarks.mdx).
 bench-real *args:
     cargo build --release -p ry-lang -p libr -p rcmd
