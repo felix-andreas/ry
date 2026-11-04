@@ -1,0 +1,42 @@
+# A user installs a package whose Makevars builds correctly only with one make job: the
+# header it generates is a sibling prerequisite of the library, not a dependency of the
+# object. ry builds in parallel by default and retries with one job when that fails.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: serialpkg
+| Version: 1.0.0
+| Title: Generates a Header Before Compiling
+| Description: A package whose Makevars is not safe for parallel make.
+| License: MIT
+file pkg/NAMESPACE
+| useDynLib(serialpkg, .registration = TRUE)
+| export(answer)
+file pkg/R/answer.R
+| answer <- function() .Call(answer_c)
+file pkg/src/Makevars
+| all: generated.h $(SHLIB)
+| generated.h:
+| 	sleep 1; echo "#define ANSWER 42" > generated.h
+file pkg/src/answer.c
+| #include <Rinternals.h>
+| #include <R_ext/Rdynload.h>
+| #include "generated.h"
+|
+| SEXP answer_c(void) { return Rf_ScalarInteger(ANSWER); }
+|
+| static const R_CallMethodDef calls[] = {{"answer_c", (DL_FUNC) &answer_c, 0}, {NULL, NULL, 0}};
+|
+| void R_init_serialpkg(DllInfo *info) { R_registerRoutines(info, NULL, calls, NULL, NULL); }
+
+install pkg
+expect exit 0
+
+file use.R
+| library(serialpkg, lib.loc = "library")
+| print(answer())
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 42"
