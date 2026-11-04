@@ -2540,13 +2540,16 @@ unsafe fn add_union_member(
         }
     } else {
         // `.recacheSubclasses(member)` overwrites the member's entry in each subclass's
-        // superclasses with the member's extension for it, which must change nothing.
+        // superclasses with the member's extension for it, re-sorts them by distance, and caches
+        // the result.
         for &(subclass, extension) in &list_entries(slot(member_updated, "subclasses")?) {
             let Some(subclass_definition) = pending.class(subclass)? else {
                 bail!(false);
             };
-            if !recache_unchanged(subclass_definition, member.bytes(), extension)? {
-                bail!(false);
+            match recached(subclass_definition, member, extension)? {
+                Recache::Unchanged => {}
+                Recache::Changed(definition) => pending.cache(subclass, definition, true),
+                Recache::Unsupported => bail!(false),
             }
         }
     }
@@ -2833,7 +2836,10 @@ unsafe fn class_cached(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp
             else {
                 bail!(false);
             };
-            if !recache_unchanged(member_definition, name, extension)? {
+            if !matches!(
+                recached(member_definition, values::install_bytes(name)?, extension)?,
+                Recache::Unchanged
+            ) {
                 bail!(false);
             }
         }
@@ -2841,26 +2847,74 @@ unsafe fn class_cached(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp
     Ok(true)
 }
 
-/// Whether `.recacheSubclasses()` leaves the class `definition` as it is: it overwrites the
-/// entry for `superclass` in the class's `contains` with `extension` and re-sorts by distance,
-/// which changes nothing when the entry is that very extension and the order is already sorted.
-unsafe fn recache_unchanged(definition: Sexp, superclass: &[u8], extension: Sexp) -> R<bool> {
-    let contains = list_entries(slot(definition, "contains")?);
-    if !contains
-        .iter()
-        .any(|entry| entry.0.bytes() == superclass && entry.1 == extension)
+/// What `.recacheSubclasses()` makes of the class `definition` when it gives it `extension` for
+/// `superclass`.
+enum Recache {
+    /// The definition holds that extension, by value, in sorted order already.
+    Unchanged,
+    /// The new definition, to cache under the class's name.
+    Changed(Sexp),
+    /// A distance that is not a number, which the native sort does not order as R's does.
+    Unsupported,
+}
+
+/// `.recacheSubclasses()` for one class: `contains[[superclass]] <- extension`, which replaces an
+/// entry in place or appends one, and a stable sort by distance.
+unsafe fn recached(definition: Sexp, superclass: Sexp, extension: Sexp) -> R<Recache> {
+    let mut contains = list_entries(slot(definition, "contains")?);
+    let mut unchanged = true;
+    match contains
+        .iter_mut()
+        .find(|entry| entry.0.bytes() == superclass.bytes())
     {
-        return Ok(false);
-    }
-    let mut previous = f64::NEG_INFINITY;
-    for &(_, superclass_extension) in &contains {
-        let distance = values::as_real_scalar(slot(superclass_extension, "distance")?);
-        if !(distance >= previous) {
-            return Ok(false);
+        Some(entry) => {
+            if !same_extension(entry.1, extension) {
+                entry.1 = extension;
+                unchanged = false;
+            }
         }
-        previous = distance;
+        None => {
+            contains.push((superclass, extension));
+            unchanged = false;
+        }
     }
-    Ok(true)
+    let mut distances = Vec::with_capacity(contains.len());
+    for &(_, entry_extension) in &contains {
+        let distance = values::as_real_scalar(slot(entry_extension, "distance")?);
+        if distance.is_nan() {
+            return Ok(Recache::Unsupported);
+        }
+        distances.push(distance);
+    }
+    if distances.is_sorted() {
+        if unchanged {
+            return Ok(Recache::Unchanged);
+        }
+    } else {
+        let mut order: Vec<usize> = (0..contains.len()).collect();
+        order.sort_by(|&left, &right| distances[left].total_cmp(&distances[right]));
+        contains = order.into_iter().map(|index| contains[index]).collect();
+    }
+    let updated = values::shallow_duplicate(definition)?;
+    crate::heap().root(updated);
+    crate::subset::assign_slot(updated, install("contains")?, named_list(&contains)?)?;
+    Ok(Recache::Changed(updated))
+}
+
+/// Whether two extension objects hold the same value. Overwriting one with the other is then
+/// invisible, because an extension holds no environment of its own that identity could expose.
+unsafe fn same_extension(left: Sexp, right: Sexp) -> bool {
+    left == right
+        || crate::sort::identical(
+            left,
+            right,
+            &crate::sort::IdenticalFlags {
+                num_eq: false,
+                single_na: false,
+                attributes_as_set: false,
+                ..Default::default()
+            },
+        )
 }
 
 /// The generic loop's body for a standard generic `name` of the package's own, bound in
