@@ -20,10 +20,10 @@ R's startup included:
 <!-- bench-why -->
 | program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 0.832 s | 0.006 s | 0.006 s | 138.7x | 52 / 45 / 45 MiB |
-| `drawdown` | 0.257 s | 0.048 s | 0.048 s | 5.4x | 71 / 132 / 145 MiB |
-| `vector_arith` | 0.174 s | 0.150 s | 0.148 s | 1.2x | 107 / 159 / 161 MiB |
-| `log_rank` | 0.089 s | 0.051 s | 0.053 s | 1.7x | 105 / 57 / 60 MiB |
+| `fib` | 0.946 s | 0.007 s | 0.008 s | 135.1x | 52 / 42 / 43 MiB |
+| `drawdown` | 0.309 s | 0.055 s | 0.056 s | 5.6x | 71 / 124 / 126 MiB |
+| `vector_arith` | 0.176 s | 0.240 s | 0.166 s | 0.7x | 107 / 107 / 85 MiB |
+| `log_rank` | 0.102 s | 0.062 s | 0.061 s | 1.6x | 105 / 57 / 59 MiB |
 <!-- /bench-why -->
 
 The typed column runs the same program with type annotations in strict mode.

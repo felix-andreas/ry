@@ -1217,6 +1217,7 @@ unsafe fn has_compiled_code(name: &str) -> bool {
         function.is_ok_and(|function| {
             function.kind() == heap::object::SexpType::Closure
                 && (jit::has_native(function)
+                    || typed::has_compiled(function)
                     || function.cdr().kind() == heap::object::SexpType::Bytecode
                         && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil())
         })
@@ -2300,4 +2301,110 @@ total@ <- function(n: integer, x: double, k: integer) -> double {{
         right = scalar(rng),
         arms = arms.join("\n"),
     )
+}
+
+/// The bodies of typed closures over vectors: whole-vector arithmetic and comparisons, element
+/// reads and writes in and out of range, reductions of empty and `NA` vectors, and loops that
+/// build vectors by index. `v` is `double[]`, `w` is `integer[]` and `n` is `integer`.
+const VECTOR_BODIES: &[&str] = &[
+    "sum(v * 2 + 1)",
+    "sum(v + w)",
+    "length(v) + length(w)",
+    "max(v)",
+    "min(w)",
+    "sum(w)",
+    "sum(v) / length(v)",
+    "v[[n]]",
+    "w[[n]] + 1L",
+    "sum(v > 1)",
+    "{ out <- rep(0, n); for (i in seq_len(n)) out[[i]] <- i * 0.5; sum(out) }",
+    "{ out <- v; for (i in seq_along(out)) out[[i]] <- out[[i]] * 2; sum(out) + sum(v) }",
+    "{ total <- 0L; for (x in w) total <- total + x; total }",
+    "{ s <- 0; i <- 1L; while (i <= length(v)) { s <- s + v[[i]]; i <- i + 1L }; s }",
+    "{ x <- v * w; y <- x - v; sum(y) / length(y) }",
+    "{ k <- seq_len(n); sum(k * k) }",
+    "{ u <- v; u[[1L]] <- 100; u[[1L]] + v[[1L]] }",
+    "sqrt(sum(abs(v)))",
+    "{ z <- w %% 3L; sum(z == 0L) }",
+    "{ z <- w %/% 2L; sum(z) }",
+    "{ total <- 0; for (i in seq_len(n)) { if (i %% 2L == 0L) next; if (i > 7L) break; total <- total + v[[1L]] }; total }",
+];
+
+const VECTOR_ARGUMENTS: &[(&str, &str, &str)] = &[
+    ("c(1, 2.5, -3, 4)", "c(2L, 5L, 7L, 1L)", "3L"),
+    ("c(0.5, 2)", "1:2", "1L"),
+    ("c(1, NA, 3)", "c(1L, NA, 3L)", "2L"),
+    ("0[0L]", "1L[0L]", "0L"),
+    ("c(1e308, 1e308)", "c(2147483647L, 1L)", "2L"),
+    ("c(3, 4, 5)", "c(1L, 2L, 3L)", "5L"),
+    ("2", "4L", "1L"),
+    ("c(NaN, 1)", "c(-1L, -2L)", "-1L"),
+];
+
+/// Random typed closures over vectors give the same values and errors as tier 0, and leave no
+/// native value alive once they return.
+#[test]
+fn fuzz_typed_vector_closures_agree_with_tier_zero() {
+    with_interpreter(|| {
+        let (mut runs, mut compiled_runs) = (0, 0);
+        for_each_seed(300, |seed| {
+            let mut rng = SplitMix64(seed);
+            let body = VECTOR_BODIES[rng.below(VECTOR_BODIES.len())];
+            let returned = ["double", "integer", ""][rng.below(3)];
+            let arrow = if returned.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {returned}")
+            };
+            let definition =
+                format!("function(v: double[], w: integer[], n: integer){arrow} {{ {body} }}");
+            let calls: Vec<String> = (0..4)
+                .map(|_| {
+                    let (v, w, n) = VECTOR_ARGUMENTS[rng.below(VECTOR_ARGUMENTS.len())];
+                    // The arguments are variables, since the typed core takes values it can read
+                    // without forcing a promise.
+                    format!("{{ v <- {v}; w <- {w}; n <- {n}; FUNCTION(v, w, n) }}")
+                })
+                .collect();
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, typed) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> =
+                        calls.iter().map(|call| run(&call.replace("FUNCTION", name))).collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("vector_reference_{seed}"), Mode::Off);
+                let name = format!("vector_compiled_{seed}");
+                let compiled = run_all(&name, Mode::On);
+                let function = lower::parse_text(&name, "<test>")
+                    .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+                let typed = function.is_ok_and(typed::has_compiled);
+                (reference, compiled, typed)
+            };
+            runs += 1;
+            compiled_runs += usize::from(typed);
+            for (index, (expected, outcome)) in reference.iter().zip(&compiled).enumerate() {
+                assert_eq!(
+                    expected,
+                    outcome,
+                    "seed {seed}, call {}: {} with\nFUNCTION <- {definition}",
+                    index + 1,
+                    calls[index]
+                );
+            }
+            // SAFETY: the typed core's counters are thread-local and only read.
+            let live = unsafe { typed::values::ry_live_objects() };
+            assert_eq!(live, 0, "seed {seed} leaked {live} native values with\nf <- {definition}");
+        });
+        eprintln!("{compiled_runs} of {runs} closures ran on the typed core");
+        assert!(
+            // A third of the closures declare a return type their body does not produce, and the
+            // typed core leaves those to the interpreter, which reports the failed check.
+            runs < 50 || compiled_runs * 2 > runs - runs / 3,
+            "only {compiled_runs} of {runs} closures ran on the typed core"
+        );
+    });
 }
