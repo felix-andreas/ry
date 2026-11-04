@@ -475,8 +475,9 @@ unsafe fn restore_state(
     Ok(())
 }
 
-/// The image file's bytes. On Unix the file is mapped read-only and populated in one call, which
-/// shares the page cache's pages instead of faulting in and filling a private copy of every page.
+/// The image file's bytes. On Unix the file is mapped read-only (and populated in one call on
+/// Linux), which shares the page cache's pages instead of faulting in and filling a private copy
+/// of every page.
 enum ImageFile {
     #[cfg(unix)]
     Mapped {
@@ -497,6 +498,10 @@ impl ImageFile {
             if length == 0 {
                 return Ok(ImageFile::Read(Vec::new()));
             }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let flags = libc::MAP_PRIVATE | libc::MAP_POPULATE;
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let flags = libc::MAP_PRIVATE;
             // SAFETY: a read-only private mapping of an open file. The base tree is build
             // output that nothing rewrites in place, so the bytes do not change under the map.
             let start = unsafe {
@@ -504,7 +509,7 @@ impl ImageFile {
                     std::ptr::null_mut(),
                     length,
                     libc::PROT_READ,
-                    libc::MAP_PRIVATE | libc::MAP_POPULATE,
+                    flags,
                     file.as_raw_fd(),
                     0,
                 )
