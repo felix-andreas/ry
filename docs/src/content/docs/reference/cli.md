@@ -209,7 +209,7 @@ R's own variables, which ry's runtime reads at startup:
 
 `R_GC_MEM_GROW=0` lowers the data.table script's peak from 277 to 239 MiB (GNU R: 282 MiB). It costs
 time where many objects outlive a collection: on a generated package's 1,907 testthat tests it
-runs 66 full collections instead of 5, and collecting takes 4.8 s of the 25 s instead of 0.7 s.
+runs 48 full collections instead of 5, and collecting takes 3.8 s of the 23 s instead of 0.7 s.
 A value outside a variable's range is ignored, as on GNU R.
 
 ## load and server

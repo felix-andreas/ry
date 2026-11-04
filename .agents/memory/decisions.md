@@ -6594,6 +6594,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - `MappedPool::limit` equals the vector limit. Kept mappings never lift the peak, because the pool maps nothing while it holds a mapping, so the limit bounds only idle memory after a peak. It is allocation policy (a free list in the allocator), not cached derived data: nothing in it can go stale.
   - The JIT's `for` over a compact `1:n` expands it in place (`jit_expand_sequence`) instead of deoptimizing on every call.
 - **Measured** against 0.4.1-beta, one sitting (`tools/bench/why/run.py`, ratio to GNU R 4.3.3, peak MiB): `vector_arith` 1.2x/1.2x, 132/165; `loop_sum` 4.2x/4.1x, 82/130; `sales` 1.2-1.7x/1.8x, 128/158 (GNU R 149). `sales` gives back about 8 ms per call to 0.4.1-beta, whose limit of twice the survivors ran 2 majors where GNU R's schedule runs 3 majors and 5 intermediates; that is the price of the lower peak. `runtime_speed_stays_ahead_of_gnu_r` in `crates/ry/tests/test_perf.rs` holds each program above a floor.
+- **Suites** (generated 60,000-line packages, `oracle bench --ry-only`, `RY_GC_LOG`): finbench 360 MiB peak, 0.72 s collecting of 18.4 s (5 major, 11 intermediate, 124 minor); dsbench 382 MiB, 0.88 s; biobench 362 MiB, 0.95 s. `R_GC_MEM_GROW=0` on finbench: 48 majors and 3.8 s, against 66 and 4.8 s with one old generation. Most of that is still full collections, because the tight limit escalates past the intermediate one; GNU R takes 1.6 s there.
 
 ## Large temporaries: freed from their reference counts, tracing stays for cycles
 
