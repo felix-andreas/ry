@@ -2609,6 +2609,27 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ a <- -8; b <- 0.5; FUNCTION(a, b) }",
             ],
         ),
+        // An unsuffixed list literal is an R double list that a `List<I64>` parameter or result
+        // converts item by item.
+        (
+            "function(xs: List<I64>) -> I64 List.sum(xs)",
+            &["{ v <- [1, 2, 3]; FUNCTION(v) }", "{ v <- List.range(1, 4); FUNCTION(v) }"],
+        ),
+        // A counted loop over `List.range` keeps the list length limit.
+        (
+            "function(a: I64) -> I64 { n <- 0i64; for (i in List.range(a, a + 3000000000i64)) { \
+             n <- n + 1i64; if (n > 5i64) break }; n }",
+            &["{ x <- 1i64; FUNCTION(x) }"],
+        ),
+        (
+            "function(a: I64) -> I64 { n <- 0i64; for (i in List.range(a, a + 3i64)) n <- n + i; n }",
+            &["{ x <- 1i64; FUNCTION(x) }"],
+        ),
+        // `Num.pow` is the platform's `pow`, which differs from `^` in the last bit.
+        (
+            "function(x: F64, y: F64) -> F64 Num.pow(x, y) - x ^ y",
+            &["{ a <- 1.3; b <- 3; FUNCTION(a, b) }", "{ a <- 1.1; b <- 4; FUNCTION(a, b) }"],
+        ),
         // `List.count_if` counts TRUE answers and fails on NA, and `List.walk` folds.
         (
             "function(x: List<F64>) -> I64 List.count_if(x, function(v: F64) -> Bool v > 1)",
@@ -2645,6 +2666,28 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             // SAFETY: the typed core's counters are thread-local and only read.
             let live = unsafe { typed::values::ry_live_objects() };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
+        }
+        // A `-> List<I64>` result converts a list literal, which the typed core leaves to the
+        // interpreter because its branches differ in storage.
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            run("literal_result <- function(n: I64) -> List<I64> if (n > 0i64) List.range(1, n) else [1, 2]");
+            assert_eq!(run("{ a <- 0i64; literal_result(a) }"), run("List.range(1, 2)"));
+        }
+        // A library constant the body assigns later is read as the local on the next iteration.
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            let definition = "function(n: I64) -> F64 { total <- 0; \
+                for (i in List.range(1, n)) { total <- total + Num.pi; Num.pi <- 1 }; total }";
+            let mut outcomes = Vec::new();
+            for (name, mode) in [("assigned_reference", Mode::Off), ("assigned_compiled", Mode::On)] {
+                jit::install_mode(mode);
+                run(&format!("{name} <- {definition}"));
+                outcomes.push(run(&format!("{{ k <- 3i64; {name}(k) }}")));
+                outcomes.push(run(&format!("{{ k <- 3i64; {name}(k) }}")));
+                jit::install_mode(Mode::Off);
+            }
+            assert_eq!(outcomes[..2], outcomes[2..], "an assigned Num.pi was read as the constant");
         }
         // A user binding that shadows a library constant must be read instead of the constant.
         // SAFETY: the interpreter is installed.

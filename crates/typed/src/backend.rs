@@ -1312,6 +1312,7 @@ impl Emitter<'_, '_> {
             Arith::Mul => return self.builder.ins().fmul(x, y),
             Arith::Div => return self.builder.ins().fdiv(x, y),
             Arith::Pow => address!(real_power),
+            Arith::NumPow => address!(real_platform_power),
             Arith::Mod => address!(real_modulo),
             Arith::IntDiv => address!(real_integer_divide),
             Arith::Min => address!(real_min),
@@ -1383,7 +1384,9 @@ impl Emitter<'_, '_> {
             }
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
-            Arith::Div | Arith::Pow => return Err(Refusal("an integer division or power")),
+            Arith::Div | Arith::Pow | Arith::NumPow => {
+                return Err(Refusal("an integer division or power"));
+            }
         };
         Ok(self.na_or(na, value))
     }
@@ -1450,6 +1453,7 @@ impl Emitter<'_, '_> {
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
             Arith::Div => return Err(Refusal("a `/` of I64s")),
+            Arith::NumPow => return Err(Refusal("a `Num.pow` of I64s")),
         })
     }
 
@@ -1714,6 +1718,10 @@ fn integer_condition(op: Compare) -> IntCC {
 
 extern "C" fn real_power(x: f64, y: f64) -> f64 {
     interp::rmath::r_pow(x, y)
+}
+
+extern "C" fn real_platform_power(x: f64, y: f64) -> f64 {
+    x.powf(y)
 }
 
 extern "C" fn real_modulo(x: f64, y: f64) -> f64 {

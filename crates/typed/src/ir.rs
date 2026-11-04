@@ -215,6 +215,9 @@ pub enum Arith {
     IntDiv = 6,
     Min = 7,
     Max = 8,
+    /// `Num.pow`: the platform's `pow`, without the multiplication R's `^` uses for small
+    /// whole powers, so the last bit matches the interpreter's `Num.pow`.
+    NumPow = 9,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

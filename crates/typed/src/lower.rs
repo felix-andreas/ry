@@ -366,6 +366,11 @@ impl Lowering<'_> {
             note(&rvalues::symbol_name(symbol));
             return Err(Refusal("a variable that is not a local"));
         };
+        // Locals are bound as lowering reaches their assignment, so a read that a loop runs
+        // again after a later assignment of the same name would keep reading the constant.
+        if assigns(interp::bytecode::closure_body(self.closure), symbol) {
+            return Err(Refusal("a library constant the function assigns"));
+        }
         let local = self.constant(speculation.function)?;
         self.speculations.push(speculation);
         Ok(local)
@@ -957,6 +962,26 @@ impl Lowering<'_> {
                 let to = self.value(to)?;
                 let from = self.to_i64(from)?;
                 let to = self.to_i64(to)?;
+                // The loop allocates no list, but `List.range` refuses one longer than R's
+                // vector limit, so a range that long fails here as it does in the interpreter.
+                let span = self
+                    .builder
+                    .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, to, from));
+                let limit = self
+                    .builder
+                    .emit(Type::I64, Op::Const(Constant::I64(i64::from(i32::MAX))));
+                let too_long = self
+                    .builder
+                    .emit(Type::Bool, Op::Compare(Compare::Ge, Item::I64, span, limit));
+                let (fail, go) = (self.builder.block(), self.builder.block());
+                self.builder.terminate(Terminator::Branch {
+                    condition: too_long,
+                    then: fail,
+                    otherwise: go,
+                });
+                self.builder.switch_to(fail);
+                self.builder.terminate(Terminator::Fail);
+                self.builder.switch_to(go);
                 let step = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
                 Ok(Some((from, to, Step::Inclusive(step))))
             }
@@ -1435,7 +1460,7 @@ impl Lowering<'_> {
                 let [base, exponent] = doubles;
                 let power = self
                     .builder
-                    .emit(Type::Dbl, Op::Arith(Arith::Pow, Item::Dbl, base, exponent));
+                    .emit(Type::Dbl, Op::Arith(Arith::NumPow, Item::Dbl, base, exponent));
                 self.fail_if_nan(power);
                 Ok(power)
             }
@@ -2745,6 +2770,31 @@ unsafe fn constant_string(value: Sexp) -> Option<String> {
 
 /// Every symbol an assignment in `expression` writes, `for` variables included, outside nested
 /// function literals.
+/// Whether `expression`, local functions included, assigns `symbol` with `<-`, `=`, `<<-` or
+/// as a `for` variable.
+unsafe fn assigns(expression: Sexp, symbol: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    let items = rvalues::pairlist_items(expression.cdr());
+    if head.kind() == SexpType::Symbol
+        && matches!(&*rvalues::symbol_name(head), "<-" | "=" | "<<-" | "for")
+        && let Some(&(_, mut target)) = items.first()
+    {
+        while target.kind() == SexpType::Language {
+            match rvalues::pairlist_items(target.cdr()).first() {
+                Some(&(_, inner)) => target = inner,
+                None => break,
+            }
+        }
+        if target == symbol {
+            return true;
+        }
+    }
+    assigns(head, symbol) || items.iter().any(|&(_, item)| assigns(item, symbol))
+}
+
 unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
     if expression.kind() != SexpType::Language {
         return;

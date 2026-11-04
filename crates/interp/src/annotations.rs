@@ -324,11 +324,8 @@ pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> 
         return Ok(value);
     }
     // `-> I64` converts a whole R number, as an `I64` parameter does.
-    if mask & I64 != 0
-        && let Ok(source) = crate::numbers::r_source(value)
-        && let Some(number) = crate::numbers::convert(source)
-    {
-        return crate::numbers::alloc(number);
+    if let Some(converted) = as_i64(mask, value)? {
+        return Ok(converted);
     }
     Err(failure(
         call,
@@ -643,12 +640,8 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     // R has no `I64` literal, so `f(10)` for `n: I64` passes the R double 10, which the checker
     // types as `I64`. The boundary converts every R double or integer that is exactly a whole
     // number, as the `I64` library functions do, so the body always sees an `I64`.
-    if mask & I64 != 0
-        && mask & ARRAY == 0
-        && let Ok(source) = crate::numbers::r_source(value)
-        && let Some(number) = crate::numbers::convert(source)
-    {
-        return crate::numbers::alloc(number);
+    if let Some(converted) = as_i64(mask, value)? {
+        return Ok(converted);
     }
     // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
     // `n: integer`). Storage cannot tell a literal from a computed value, so every whole-number
@@ -672,6 +665,44 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
         format!("argument `{name}` must be `{expected}`, not `{found}`")
     };
     Err(failure(call, message))
+}
+
+/// `value` converted for an `I64` or `List<I64>` annotation, or `None` when the annotation is
+/// neither or a number in `value` is not exactly whole. An unsuffixed list literal is an R double
+/// Array that the checker types `List<I64>`, so the list converts item by item, as an annotated
+/// binding does.
+unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
+    if mask & I64 == 0 {
+        return Ok(None);
+    }
+    if mask & ARRAY == 0 {
+        return match crate::numbers::r_source(value).ok().and_then(crate::numbers::convert) {
+            Some(number) => crate::numbers::alloc(number).map(Some),
+            None => Ok(None),
+        };
+    }
+    if !value.is_array() || value.attrib() != nil() {
+        return Ok(None);
+    }
+    let items: Option<Vec<i64>> = match value.kind() {
+        SexpType::Real => values::reals(value)
+            .iter()
+            .map(|&number| {
+                (!heap::object::is_na_real(number))
+                    .then_some(crate::numbers::Source::F64(number))
+                    .and_then(crate::numbers::convert)
+            })
+            .collect(),
+        SexpType::Integer => values::ints(value)
+            .iter()
+            .map(|&number| (number != heap::object::NA_INTEGER).then_some(i64::from(number)))
+            .collect(),
+        _ => None,
+    };
+    match items {
+        Some(items) => crate::numbers::list(&items).map(Some),
+        None => Ok(None),
+    }
 }
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {

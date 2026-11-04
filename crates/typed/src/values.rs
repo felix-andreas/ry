@@ -1899,6 +1899,8 @@ const SYSTEM_ALIGN: usize = 16;
 const LARGE_CLASS_COUNT: usize = 32;
 /// How many freed blocks each large class keeps: a loop's few live temporaries of one size.
 const LARGE_KEEP: u8 = 4;
+/// The largest block a class keeps, so the pools hold at most a few hundred MiB per thread.
+const LARGE_KEEP_LIMIT: usize = 64 << 20;
 
 const DICT_MIN_CAPACITY: usize = 8;
 const POSITION_BITS: u32 = 25;
@@ -1971,7 +1973,7 @@ unsafe fn block_free(block: *mut u8, size: usize) {
         let class = large_class(size);
         let keep = LARGE_KEPT.with(|kept| {
             let count = kept[class].get();
-            let keep = count < LARGE_KEEP;
+            let keep = count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT;
             if keep {
                 kept[class].set(count + 1);
             }
