@@ -2942,6 +2942,38 @@ impl Heap {
         }
     }
 
+    /// Moves every object into the oldest generation without tracing. Loading a start-up image
+    /// allocates megabytes that live as long as the session, and every collection after it that
+    /// is not major would otherwise trace all of them again only to keep them. The heap then
+    /// holds little else than the image, so the few dead objects tenured with it wait for the
+    /// next major collection.
+    pub unsafe fn promote_young(&mut self) {
+        if self.inhibit > 0 {
+            return;
+        }
+        self.inhibit += 1;
+        let mut cells = self.space.tenure_all();
+        for &object in &self.large {
+            let bits = gc_bits::MARK | gc_bits::OLD | gc_bits::TENURED;
+            if object.gc_bits() & bits != bits {
+                object.set_gc_bit(bits, true);
+            }
+            cells += crate::space::vector_cells(object);
+        }
+        // Every young string is marked, so this only resets the young bookkeeping.
+        self.strings.remove_dead_young(&self.space);
+        self.sweep_young();
+        for parent in self.remembered.drain(..) {
+            parent.set_gc_bit(gc_bits::REMEMBERED, false);
+        }
+        self.young_bytes = 0;
+        self.young_large_bytes = 0;
+        self.refresh_small_trigger();
+        self.tenured_vector_cells = cells;
+        self.stats.live_vector_cells = cells;
+        self.inhibit -= 1;
+    }
+
     unsafe fn sweep_young(&mut self) {
         let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);

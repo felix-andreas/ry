@@ -4066,8 +4066,13 @@ fn decoder<'a>(
 /// A decompressing reader that reads an uncompressed file as it is, as GNU R's gzfile does.
 fn open_inflate(path: &PathBuf) -> std::io::Result<Inflate> {
     let file = BufReader::new(File::open(path)?);
-    let reader = match file_compression(path)? {
-        Some(compression) => decoder(compression, Box::new(file))?,
+    let reader: Box<dyn Read> = match file_compression(path)? {
+        // `unserialize` reads a few bytes at a time, and each read straight from a decoder pays
+        // for a checksum update and a decoder step, so the decoded bytes are buffered.
+        Some(compression) => Box::new(BufReader::with_capacity(
+            1 << 16,
+            decoder(compression, Box::new(file))?,
+        )),
         None => Box::new(file),
     };
     Ok(Inflate {

@@ -405,6 +405,39 @@ impl Space {
         }
     }
 
+    /// Moves every small object into the oldest generation without tracing, and returns their
+    /// vector cells. A tenured object may point only at tenured objects, which holds trivially
+    /// once every object is tenured.
+    pub unsafe fn tenure_all(&mut self) -> u64 {
+        // The unused tail of a cursor's run counts as allocated until it is released.
+        self.release_cursors();
+        let mut cells = 0;
+        for page in 0..self.allocated.len() {
+            let Some(&slot_size) = SLOT_SIZES.get(self.page_class[page] as usize) else {
+                continue;
+            };
+            for word in 0..BITMAP_WORDS {
+                let live = self.allocated[page][word];
+                for bit in set_bits(live) {
+                    let offset = page * PAGE_SIZE + (word * 64 + bit) * slot_size;
+                    // SAFETY: an allocated slot of a committed page holds an object.
+                    unsafe {
+                        let object = Sexp::from_non_null(self.base.add(offset).cast());
+                        if object.gc_bits() & (gc_bits::OLD | gc_bits::TENURED)
+                            != gc_bits::OLD | gc_bits::TENURED
+                        {
+                            object.set_gc_bit(gc_bits::OLD | gc_bits::TENURED, true);
+                        }
+                        cells += vector_cells(object);
+                    }
+                }
+                self.marks[page][word] |= live;
+                self.tenured[page][word] |= live;
+            }
+        }
+        cells
+    }
+
     /// Clears every mark, as a major collection starts.
     pub fn clear_marks(&mut self) {
         self.marks.fill([0; BITMAP_WORDS]);
@@ -701,7 +734,7 @@ fn run_mask(bit: usize, run: usize) -> u64 {
 
 /// The 8-byte cells `object`'s vector data takes, as GNU R's `Vcells` count it, or zero for an
 /// object that is not a vector. An ALTREP vector's data lives in the objects it points at.
-unsafe fn vector_cells(object: Sexp) -> u64 {
+pub(crate) unsafe fn vector_cells(object: Sexp) -> u64 {
     let kind = unsafe { object.kind() };
     if kind.shape() != Shape::Vector || unsafe { object.is_altrep() } {
         return 0;

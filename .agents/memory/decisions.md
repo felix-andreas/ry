@@ -7314,19 +7314,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `methods::is(f, "genericFunction")` is skipped for a value with no class attribute and no S4
   bit, where it is always `FALSE`.
 - **Why a hash guard.** Base R's R code is read from the installed GNU R so that ry behaves like
-  whichever release it finds (licensing record above). The copy follows R 4.3.3, so the runtime
+  whichever release it finds (licensing record above). The copy follows R 4.6.2, so the runtime
   replaces the installed function only when an FNV-1a hash of its formals and body (symbols and
-  strings by their text, attributes ignored) equals the 4.3.3 one; any other release keeps its own
-  function at its own speed. `RY_PRINT_REGISTER_HASH` prints the installed function's hash for
+  strings by their text, attributes ignored) equals the 4.6.2 one. Another release keeps its own
+  function at its own speed, and a mismatch on the bundled 4.6.2 is an error, because it means the
+  copy and the bundled tree drifted apart. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
   updating the constant with the copy.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
   branch: known generics, another package's generic, an overwrite and its message, local plain and
-  S4 generics, delayed registration), and asserts the replacement is in place under R 4.3.3.
+  S4 generics, delayed registration), and asserts the replacement is in place under the bundled release.
 - **Next by cost.** `methods::cacheMetaData` of the imports (about 150 ms, lubridate most of it) is
   dominated by `.checkGroupSigLength`, which `.updateMethodsInTable` runs for every member of a
   group generic and which rescans the whole group tree each time (1.2 ms per call on ry, 0.8 ms on
-  GNU R). The same guarded replacement would apply to it.
+  GNU R). It runs natively ("Installed packages load through native fast paths, not an image").
 
 ## Typed closures run as native functions over records, tags and match
 
@@ -7480,7 +7481,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
   before its last checks, which fills the same `initialize` dispatch cache the R code fills.
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
-  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_FAST_PATH_HASHES=1`
   prints the hashes of the installed functions, for adding a version.
 - **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
   a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
@@ -7587,15 +7588,47 @@ Each one trades a narrow class of missed errors for a class of false reports see
   environment but `image::LOADING_VARIABLES`; a start that sets one runs the slow way. Strings
   under the writer's R home are relocated to the tree the image file lives in
   (`heap::image::Relocation`). The writer fails, failing the build, when start-up warned or left
-  `.Random.seed`. User packages get the same treatment as install-time output of `ry install`
-  (`backlog.md`).
+  `.Random.seed`. User packages get no image ("Installed packages load through native fast
+  paths, not an image" below).
 - **No "existing objects" check.** Rust state that holds heap objects across start-up must be a
   fixed object, a heap root, or saved by `image::save_state`; a check that refused every object
   live before start-up flagged only `package:ry`'s frame, which the loader overwrites safely.
-- **Impact.** Empty `ry run`: about 120 ms to 60 ms median. Re-running the environment steps
-  costs about 12 ms against loading a run-time image (47 ms). `methods::getClass("numeric")` with
+- **Impact.** Empty `ry run`: about 120 ms to 60 ms median, and 48 ms once the re-run was cut
+  (below). Re-running the environment steps cost about 12 ms against loading a run-time image
+  (47 ms). `methods::getClass("numeric")` with
   `R_DEFAULT_PACKAGES=NULL` starts the slow way (63 ms; the run-time image keyed that variable and
   took 56 ms). The four cache bugs cannot occur: no image depends on
   the run-time environment. Options, the search path and namespace paths match a slow start
   (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
   image is rewritten. Analysis is unaffected: the image is runtime-only.
+
+## Installed packages load through native fast paths, not an image
+
+- **Question.** Whether `ry install` should write each installed package's loaded namespace as an
+  image inside the package, as `build-base` does for the base tree, so `library()` skips namespace
+  setup.
+- **Measured.** `library()` of 17 benchmark dependencies (31 namespaces: R6, cachem, cli,
+  data.table, digest, fs, jsonlite, memoise, rappdirs, rlang, bit64, htmltools, knitr, rmarkdown,
+  stringi, yaml, lifecycle and their imports) took about 282 ms on ry and 290 to 350 ms on GNU R.
+  Lazy loading already fetches only 763 of the 7,570 objects the namespaces hold, about 40 ms, and
+  an eager image of the same namespaces would cost 30 to 45 ms to load, so an image would save
+  nothing on that part. The rest was setup work an image would also have to replay or invalidate
+  (S4 `cacheMetaData` 66 ms, S3 registration 26 ms, `.onLoad` hooks).
+- **Decision.** No per-package image. Each setup step that dominates runs natively behind a
+  hash-guarded prologue on GNU R 4.6.2's own function (`RY_PRINT_FAST_PATH_HASHES=1` prints the
+  hashes), so a package that changes, a library edit or another R release needs no invalidation:
+  `.checkGroupSigLength` (`ryS4CheckGroupSigLength` in `methods_core.rs`), `registerS3methods`
+  (ported to 4.6.2, `register_s3_methods.R`) and utils' `osVersion` (`ryOsVersion`, which reads
+  `/etc/os-release` instead of spawning shells). The heap tenures every object once a start-up image
+  loads (`Heap::promote_young`), because the first minor collection otherwise traced all 10 MB of
+  them (5.3 ms), and each intermediate collection would trace them again. The heap then holds
+  little but the image, so tenuring every object keeps the rule that a tenured object points only
+  at tenured ones without tracing. Lazy-load records inflate through one reused
+  inflater straight into the output, and decompressing file connections are buffered, which halves
+  `readRDS` of a gzip file.
+- **Impact.** `library()` of the 31 namespaces: about 282 ms to about 187 ms (GNU R 350 ms); the
+  whole script 341 ms to 250 ms (GNU R 440 ms); empty `ry run` 59 ms to 48 ms (GNU R 129 ms). The
+  S4 cache step fell from 66 ms to 27 ms and S3 registration from 26 ms to about 11 ms. The
+  re-run of the environment steps fell from about 20 ms to about 10 ms; what remains is GNU R's
+  profile (`.expand_R_libs_env_var` about 3 ms, the `Autoloads` attach about 1 ms) and the first
+  S3 dispatch of each generic (about 0.3 ms, method lookup through `UseMethod`).
