@@ -2266,6 +2266,8 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
             let value = values::complexes(operand)[index];
             values::reals_mut(result)[index] = value.r.hypot(value.i);
         }
+        // GNU R computes a complex `abs` as `Mod`, which keeps the operand's attributes.
+        values::copy_most_attributes(operand, result, true)?;
         return Ok(result);
     }
     let result = alloc(SexpType::Complex, count)?;
