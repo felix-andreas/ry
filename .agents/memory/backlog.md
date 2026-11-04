@@ -22,17 +22,15 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: JIT register type for native numbers
+## Open: broken on main
 
-- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. `I64` (which `List.range`, `List.len` and loop counters produce) is a length-1 `I64SXP` vector (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
-- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
-- Fix: an unboxed `I64` register type in the JIT with overflow-checked arithmetic that reads `List<I64>` buffers directly, and `for` over `List.range` lowered to a counted loop.
+- `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
 ## Open: the typed core
 
-- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
-- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
-- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Non-constant defaults.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; it also calls R's `set.seed` and `rnorm`.
+- **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.

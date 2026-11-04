@@ -102,6 +102,10 @@ const RAW: Mask = bit(SexpType::Raw);
 const NULL: Mask = bit(SexpType::Nil);
 const LIST: Mask = bit(SexpType::List);
 const NATIVE: Mask = bit(SexpType::Record);
+/// ry's `I64`. A whole R number converts to one at the boundary (see [`check_value`]).
+const I64: Mask = bit(SexpType::I64);
+/// ry's `F64`, which is an R double without attributes.
+const F64: Mask = bit(SexpType::Real);
 const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(SexpType::Special);
 /// `Array<T>`: the value must carry the Array bit, and its storage must be one the item type
 /// admits (any storage when the item type is not decidable from storage).
@@ -224,7 +228,7 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
                 if let Some(cell) = heap.frame_cell(env, formal.tag()) {
                     let mut dots = cell.cdr();
                     while dots.kind() == SexpType::Dots {
-                        check_argument(call, signature, REST_SLOT, dots.car(), depth)?;
+                        check_argument(call, signature, REST_SLOT, Holder::Dots(dots), dots.car(), depth)?;
                         dots = dots.cdr();
                     }
                 }
@@ -236,7 +240,7 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
                     value = crate::eval::make_promise(value, env)?;
                     heap.set_binding_value(cell, value)?;
                 }
-                check_argument(call, signature, slot, value, depth)?;
+                check_argument(call, signature, slot, Holder::Binding(cell), value, depth)?;
             }
         }
         formal = formal.cdr();
@@ -296,8 +300,12 @@ pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R
         if mask_at(masks, slot) != 0 {
             match values.get(index) {
                 Some(&value) if formal.tag() != values::symbols().dots => {
-                    if value != values::missing_arg() {
-                        check_value(call, signature, slot, value)?;
+                    // A value the check converts must replace the one the caller binds, which
+                    // only `enter` can do.
+                    if value != values::missing_arg()
+                        && check_value(call, signature, slot, value)? != value
+                    {
+                        return Ok(Entry::Unchecked);
                     }
                 }
                 _ => return Ok(Entry::Unchecked),
@@ -309,11 +317,15 @@ pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R
     Ok(Entry::Checked(Some(signature)))
 }
 
-/// Checks a typed closure's value.
-pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<()> {
+/// Checks a typed closure's value, and returns the value the call returns (see [`check_value`]).
+pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
     if mask == 0 || admits(mask, value) {
-        return Ok(());
+        return Ok(value);
+    }
+    // `-> I64` converts a whole R number, as an `I64` parameter does.
+    if let Some(converted) = as_i64(mask, value)? {
+        return Ok(converted);
     }
     Err(failure(
         call,
@@ -345,8 +357,9 @@ pub unsafe fn leave(depth: usize) {
 /// Checks the value a promise is about to hold, against every typed frame it was passed to.
 /// Called only for a promise carrying [`gp::CHECKED_PROMISE`], before the value is stored: a
 /// failed check leaves the promise unforced and still checked, as an error while evaluating it
-/// would, so code that catches the error can never read the value unchecked.
-pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
+/// would, so code that catches the error can never read the value unchecked. Returns the value
+/// to store, which an `I64` annotation may have converted.
+pub unsafe fn check_forced(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     let pending = &interp().annotations.pending;
     // The innermost frame is the most specific, so its failure is the one reported.
     for entry in pending
@@ -354,14 +367,14 @@ pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
         .rev()
         .filter(|entry| entry.promise == promise)
     {
-        check_value(entry.call, entry.signature, entry.slot, value)?;
+        value = check_value(entry.call, entry.signature, entry.slot, value)?;
     }
     promise.set_gp_bits(gp::CHECKED_PROMISE, false);
     interp()
         .annotations
         .pending
         .retain(|entry| entry.promise != promise);
-    Ok(())
+    Ok(value)
 }
 
 /// What an annotation that admits exactly one of `logical`, `integer` or `double` declares
@@ -378,6 +391,38 @@ pub struct Declared {
 pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     let signature = signature_of(function)?;
     declared(mask_at(signature.element(MASKS), RETURN_SLOT))
+}
+
+/// Whether the formal at `position` of a typed closure declares `I64`, so a whole R number
+/// passed there converts to one (see [`check_value`]).
+pub unsafe fn declares_i64(function: Sexp, position: usize) -> bool {
+    signature_of(function).is_some_and(|signature| {
+        mask_at(signature.element(MASKS), FIRST_FORMAL_SLOT + position) == I64 | SCALAR
+    })
+}
+
+/// Which formals of the definition `formals`/`body` declare `I64`, by position, and whether it
+/// declares that it returns `I64`, for a compiler that inlines the definition and converts at
+/// its boundary as a call would.
+pub unsafe fn declared_i64(formals: Sexp, body: Sexp) -> (Vec<bool>, bool) {
+    let Some(signature) = signature_for(formals, body) else {
+        return (Vec::new(), false);
+    };
+    let masks = values::ints(signature.element(MASKS));
+    let is_i64 = |mask: &i32| *mask as Mask == I64 | SCALAR;
+    let formals = masks
+        .get(FIRST_FORMAL_SLOT..)
+        .unwrap_or(&[])
+        .iter()
+        .map(is_i64)
+        .collect();
+    (formals, masks.get(RETURN_SLOT).is_some_and(is_i64))
+}
+
+/// Whether a typed closure declares that it returns `I64`.
+pub unsafe fn returns_i64(function: Sexp) -> bool {
+    signature_of(function)
+        .is_some_and(|signature| mask_at(signature.element(MASKS), RETURN_SLOT) == I64 | SCALAR)
 }
 
 /// Whether the formal at `position` of a typed closure declares a vector, such as `double[]`,
@@ -535,10 +580,22 @@ unsafe fn signature_for(formals: Sexp, body: Sexp) -> Option<Sexp> {
     (signature.element(BODY) == body).then_some(signature)
 }
 
+/// Where an argument's value is bound, so a value the check converts can replace it.
+#[derive(Clone, Copy)]
+enum Holder {
+    /// A frame binding.
+    Binding(Sexp),
+    /// A `...` cell, which holds the element in its car.
+    Dots(Sexp),
+}
+
+/// Checks the argument `value` that `holder` binds. A value the check converts replaces the
+/// binding, or the forced promise's value.
 unsafe fn check_argument(
     call: Sexp,
     signature: Sexp,
     slot: usize,
+    holder: Holder,
     value: Sexp,
     depth: usize,
 ) -> R<()> {
@@ -546,10 +603,21 @@ unsafe fn check_argument(
         if value == values::missing_arg() {
             return Ok(());
         }
-        return check_value(call, signature, slot, value);
+        let checked = check_value(call, signature, slot, value)?;
+        if checked != value {
+            match holder {
+                Holder::Binding(cell) => crate::heap().set_binding_value(cell, checked)?,
+                Holder::Dots(cell) => crate::heap().set_car(cell, checked),
+            }
+        }
+        return Ok(());
     }
     if value.car() != values::unbound() {
-        return check_value(call, signature, slot, value.car());
+        let checked = check_value(call, signature, slot, value.car())?;
+        if checked != value.car() {
+            crate::heap().set_car(value, checked);
+        }
+        return Ok(());
     }
     value.set_gp_bits(gp::CHECKED_PROMISE, true);
     interp().annotations.pending.push(Pending {
@@ -562,10 +630,18 @@ unsafe fn check_argument(
     Ok(())
 }
 
-unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> R<()> {
+/// Checks `value` against the annotation in `slot`, and returns the value to bind: `value`
+/// itself, or the `I64` an `I64` annotation converts a whole R number to.
+unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), slot);
     if mask == 0 || admits(mask, value) {
-        return Ok(());
+        return Ok(value);
+    }
+    // R has no `I64` literal, so `f(10)` for `n: I64` passes the R double 10, which the checker
+    // types as `I64`. The boundary converts every R double or integer that is exactly a whole
+    // number, as the `I64` library functions do, so the body always sees an `I64`.
+    if let Some(converted) = as_i64(mask, value)? {
+        return Ok(converted);
     }
     // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
     // `n: integer`). Storage cannot tell a literal from a computed value, so every whole-number
@@ -576,7 +652,7 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
         && mask & bit(SexpType::Integer) != 0
         && is_whole_double_scalar(value)
     {
-        return Ok(());
+        return Ok(value);
     }
     let expected = text_at(signature, slot);
     let found = describe(value);
@@ -589,6 +665,44 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
         format!("argument `{name}` must be `{expected}`, not `{found}`")
     };
     Err(failure(call, message))
+}
+
+/// `value` converted for an `I64` or `List<I64>` annotation, or `None` when the annotation is
+/// neither or a number in `value` is not exactly whole. An unsuffixed list literal is an R double
+/// Array that the checker types `List<I64>`, so the list converts item by item, as an annotated
+/// binding does.
+unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
+    if mask & I64 == 0 {
+        return Ok(None);
+    }
+    if mask & ARRAY == 0 {
+        return match crate::numbers::r_source(value).ok().and_then(crate::numbers::convert) {
+            Some(number) => crate::numbers::alloc(number).map(Some),
+            None => Ok(None),
+        };
+    }
+    if !value.is_array() || value.attrib() != nil() {
+        return Ok(None);
+    }
+    let items: Option<Vec<i64>> = match value.kind() {
+        SexpType::Real => values::reals(value)
+            .iter()
+            .map(|&number| {
+                (!heap::object::is_na_real(number))
+                    .then_some(crate::numbers::Source::F64(number))
+                    .and_then(crate::numbers::convert)
+            })
+            .collect(),
+        SexpType::Integer => values::ints(value)
+            .iter()
+            .map(|&number| (number != heap::object::NA_INTEGER).then_some(i64::from(number)))
+            .collect(),
+        _ => None,
+    };
+    match items {
+        Some(items) => crate::numbers::list(&items).map(Some),
+        None => Ok(None),
+    }
 }
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {
@@ -610,7 +724,9 @@ unsafe fn text_at(signature: Sexp, slot: usize) -> String {
 unsafe fn admits(mask: Mask, value: Sexp) -> bool {
     if mask & ARRAY != 0 {
         let items = mask & !ARRAY;
-        return value.is_array() && (items == 0 || items & bit(value.kind()) != 0);
+        // An empty list has no item to decide its storage by, and is stored as `logical`.
+        return value.is_array()
+            && (items == 0 || value.length() == 0 || items & bit(value.kind()) != 0);
     }
     mask & bit(value.kind()) != 0
 }
@@ -648,6 +764,8 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             Some("character") => CHARACTER | SCALAR,
             Some("raw") => RAW | SCALAR,
             Some("NULL") | Some("null") => NULL,
+            Some("I64") => I64 | SCALAR,
+            Some("F64") => F64 | SCALAR,
             _ => 0,
         },
         // A vector shape (`integer[]`, `integer[named]`) is not checked, only its storage.
@@ -692,14 +810,17 @@ fn mask_of(node: &SyntaxNode) -> Mask {
         }
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_LIST => LIST,
         SyntaxKind::TYPE_FUNCTION => FUNCTION,
-        SyntaxKind::TYPE_APPLY if applied_name(node).as_deref() == Some("Array") => {
+        SyntaxKind::TYPE_APPLY
+            if matches!(applied_name(node).as_deref(), Some("List" | "Array")) =>
+        {
             let item = node
                 .children()
                 .find(|child| child.kind() == SyntaxKind::TYPE_ARG_LIST)
                 .and_then(|arguments| arguments.children().next())
                 .map_or(0, |item| mask_of(&item));
+            // Records, tags, functions and nested lists are items of an R list.
             ARRAY
-                | if item & ARRAY != 0 {
+                | if item & (ARRAY | NATIVE | LIST | FUNCTION) != 0 {
                     LIST
                 } else {
                     item & !SCALAR

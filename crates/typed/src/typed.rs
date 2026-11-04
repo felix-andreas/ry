@@ -82,6 +82,14 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
     }
     let mut params: SmallVec<[Type; 4]> = SmallVec::new();
     for (position, &value) in values.iter().enumerate() {
+        // An `I64` formal converts a whole R number at the boundary, which `Arguments::push`
+        // does, or gives up for the interpreter to raise the error.
+        if interp::annotations::declares_i64(function, position)
+            && matches!(type_of(value), Some(Type::Int | Type::Dbl | Type::I64))
+        {
+            params.push(Type::I64);
+            continue;
+        }
         let ty = type_of(value)?;
         // A length-one vector passed where the closure declares a vector is that vector, not a
         // scalar.
@@ -176,13 +184,22 @@ pub fn has_compiled(function: Sexp) -> bool {
 /// Whether every function lookup `compiled` assumes still finds the same function.
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
     compiled.speculations.iter().all(|assumed| {
-        lower::resolve_function(assumed.symbol, assumed.env)
+        let resolve = if interp::values::is_function(assumed.function) {
+            lower::resolve_function
+        } else {
+            lower::resolve_value
+        };
+        resolve(assumed.symbol, assumed.env)
             .is_some_and(|now| now.cell == assumed.cell && now.function == assumed.function)
     })
 }
 
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
-    let declared = interp::annotations::declared_return_type(function).and_then(declared_type);
+    let declared = if interp::annotations::returns_i64(function) {
+        Some(Type::I64)
+    } else {
+        interp::annotations::declared_return_type(function).and_then(declared_type)
+    };
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
     let mut refusal = Refusal("the result type depends on the recursion");
     let mut found = None;
@@ -276,6 +293,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
     Some(match ty {
         Type::Int => (SexpType::Integer, false),
         Type::Dbl => (SexpType::Real, false),
+        Type::I64 => (SexpType::I64, false),
         Type::Lgl | Type::Bool => (SexpType::Logical, false),
         Type::Str => (SexpType::String, false),
         Type::Null => (SexpType::Nil, false),
@@ -291,6 +309,7 @@ fn item_storage(item: Item) -> SexpType {
         Item::Dbl => SexpType::Real,
         Item::Lgl => SexpType::Logical,
         Item::Str => SexpType::String,
+        Item::I64 => SexpType::I64,
     }
 }
 
@@ -300,6 +319,7 @@ fn item_kind(item: Item) -> u32 {
         Item::Dbl => values::DBL,
         Item::Lgl => values::LGL,
         Item::Str => values::STR,
+        Item::I64 => values::I64,
     })
 }
 
@@ -316,6 +336,7 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
         SexpType::Integer => Item::Int,
         SexpType::Real => Item::Dbl,
         SexpType::Logical => Item::Lgl,
+        SexpType::I64 => Item::I64,
         SexpType::String => {
             if !(0..length).all(|index| usable_string(value.element(index))) {
                 return None;
@@ -368,6 +389,18 @@ impl Arguments {
         match ty {
             Type::Int | Type::Lgl => self.words.push(rvalues::ints(value)[0] as u32 as u64),
             Type::Dbl => self.words.push(rvalues::reals(value)[0].to_bits()),
+            Type::I64 => {
+                let number = match interp::numbers::read(value) {
+                    Some(number) => Some(number),
+                    None => interp::numbers::r_source(value)
+                        .ok()
+                        .and_then(interp::numbers::convert),
+                };
+                let Some(number) = number else {
+                    return false;
+                };
+                self.words.push(number as u64);
+            }
             Type::Str => {
                 let string = str_of(value.element(0));
                 self.strings.push(string);
@@ -407,6 +440,7 @@ impl Arguments {
                             *(slot as *mut i32).add(index) = rvalues::ints(element)[0]
                         }
                         Item::Dbl => *(slot as *mut f64).add(index) = rvalues::reals(element)[0],
+                        Item::I64 => *(slot as *mut i64).add(index) = element.slice::<i64>()[0],
                         Item::Str => *(slot as *mut Str).add(index) = str_of(element.element(0)),
                     }
                 }
@@ -460,6 +494,7 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
         Type::Int => rvalues::scalar_integer(word as u32 as i32),
         Type::Lgl | Type::Bool => rvalues::scalar_logical(word as u32 as i32),
         Type::Dbl => rvalues::scalar_real(f64::from_bits(word)),
+        Type::I64 => interp::numbers::alloc(word as i64),
         Type::Null => Ok(rvalues::nil()),
         Type::Str => {
             let string = Str {
@@ -484,6 +519,10 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                     let items = std::slice::from_raw_parts(data as *const f64, length);
                     rvalues::reals_mut(vector).copy_from_slice(items);
                 }
+                Item::I64 => {
+                    let items = std::slice::from_raw_parts(data as *const i64, length);
+                    vector.slice_mut::<i64>().copy_from_slice(items);
+                }
                 Item::Str => {
                     let items = std::slice::from_raw_parts(data as *const Str, length);
                     for (index, &string) in items.iter().enumerate() {
@@ -504,6 +543,7 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                     Item::Int => rvalues::scalar_integer(*(data as *const i32).add(index))?,
                     Item::Lgl => rvalues::scalar_logical(*(data as *const i32).add(index))?,
                     Item::Dbl => rvalues::scalar_real(*(data as *const f64).add(index))?,
+                    Item::I64 => interp::numbers::alloc(*(data as *const i64).add(index))?,
                     Item::Str => {
                         let string = rvalues::alloc(SexpType::String, 1)?;
                         interp::heap().set_element(
