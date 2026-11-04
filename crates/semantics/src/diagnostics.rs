@@ -3830,6 +3830,8 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Frac => "an `F64`",
         Constraint::Eq => "a value `==` can compare (anything but a function)",
         Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
+        Constraint::StrLiteral => "a string",
+        Constraint::BoolLiteral => "`TRUE` or `FALSE`",
     }
 }
 

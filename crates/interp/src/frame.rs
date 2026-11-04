@@ -444,6 +444,20 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
         }
         SexpType::Real => RVector::Double(values::reals(value).to_vec()),
         SexpType::String => RVector::Character(values::strings(value)),
+        // An `I64` column is an R `integer` column when every item fits, and `double` otherwise,
+        // the same conversion `Num.to_r` makes, so a typed `[3, 5]` builds the column R's `3L`
+        // would.
+        SexpType::I64 => {
+            let items = value.slice::<i64>();
+            match items
+                .iter()
+                .map(|item| i32::try_from(*item).ok().filter(|item| *item != NA_INTEGER))
+                .collect::<Option<Vec<i32>>>()
+            {
+                Some(integers) => RVector::Integer(integers),
+                None => RVector::Double(items.iter().map(|item| *item as f64).collect()),
+            }
+        }
         _ => return Ok(None),
     }))
 }

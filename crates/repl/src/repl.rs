@@ -99,11 +99,13 @@ pub fn run(options: RunOptions) -> Result<(), ReplError> {
 }
 
 /// Runs R code on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
-/// beside the executable), evaluates `input`, then the script `file`. Both are optional, and
+/// beside the executable), evaluates `input`, then the script `file`, whose bytes are `source`
+/// when given (the program `ry run` checked) and the file's contents otherwise. Both are optional, and
 /// `load_all()` is attached before either runs. With a `verdict`, the loader calls it before the
 /// package's first effect and exits with its status unless that is 0. Returns the exit status.
 pub fn run_on_ry_runtime(
     file: Option<&std::path::Path>,
+    source: Option<&[u8]>,
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
@@ -129,6 +131,14 @@ pub fn run_on_ry_runtime(
         c_int,
     ) -> c_int;
     let run = runtime_entry::<Run>(library, "ry_run")?;
+    if let Some(source) = source {
+        type SetSource = unsafe extern "C" fn(*const c_char);
+        let set_source = runtime_entry::<SetSource>(library, "ry_set_script_source")?;
+        let source =
+            CString::new(source).map_err(|_| ReplError("the script contains a NUL byte".into()))?;
+        // SAFETY: the entry point has this signature in every runtime of this build.
+        unsafe { set_source(source.as_ptr()) };
+    }
     let path = file
         .map(|file| CString::new(file.to_string_lossy().as_bytes()))
         .transpose()
