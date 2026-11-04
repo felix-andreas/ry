@@ -12,7 +12,7 @@
 
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// The categories of the time split, in the order the summary prints them.
@@ -166,6 +166,13 @@ static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] = [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
+static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
+static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
+
+/// The deepest closure frame the sampler sees; a sample deeper than this is attributed to the
+/// frame at this depth.
+pub const FRAME_SLOTS: usize = 1024;
 
 /// Whether a profile summary is being collected.
 #[inline(always)]
@@ -268,4 +275,65 @@ pub fn label_name(id: u32) -> Option<String> {
         Err(poisoned) => poisoned.into_inner(),
     };
     labels.get(id as usize).cloned()
+}
+
+/// A closure frame published by [`push_frame`], popped when dropped.
+#[must_use]
+pub struct FrameScope {
+    depth: u32,
+    active: bool,
+}
+
+/// Publishes a closure call for the sampler: `owner` is a [`label`] for the package (or other top
+/// level) the closure belongs to, and `name` is the address of the symbol the call used, which is
+/// never freed, or 0 for an anonymous function.
+///
+/// The sampler reads the stack without synchronizing with the R thread, so a sample taken during
+/// a push or pop can see one frame too many or too few. That is noise of one sample, and it keeps
+/// the push to three stores.
+#[inline(always)]
+pub fn push_frame(owner: u32, name: usize) -> FrameScope {
+    let depth = FRAME_DEPTH.load(Ordering::Relaxed);
+    if let (Some(owner_slot), Some(name_slot)) = (
+        FRAME_OWNERS.get(depth as usize),
+        FRAME_NAMES.get(depth as usize),
+    ) {
+        owner_slot.store(owner, Ordering::Relaxed);
+        name_slot.store(name, Ordering::Relaxed);
+    }
+    FRAME_DEPTH.store(depth + 1, Ordering::Release);
+    FrameScope {
+        depth,
+        active: true,
+    }
+}
+
+/// A scope that publishes nothing, for when no summary is being collected.
+pub fn no_frame() -> FrameScope {
+    FrameScope {
+        depth: 0,
+        active: false,
+    }
+}
+
+impl Drop for FrameScope {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // Restoring the saved depth rather than decrementing heals the stack after a non-local
+        // exit through native code skipped the drops of inner frames.
+        if self.active {
+            FRAME_DEPTH.store(self.depth, Ordering::Release);
+        }
+    }
+}
+
+/// Copies the published closure frames, outermost first, into `owners` and `names`.
+pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>) {
+    owners.clear();
+    names.clear();
+    let depth = (FRAME_DEPTH.load(Ordering::Acquire) as usize).min(FRAME_SLOTS);
+    for index in 0..depth {
+        owners.push(FRAME_OWNERS[index].load(Ordering::Relaxed));
+        names.push(FRAME_NAMES[index].load(Ordering::Relaxed));
+    }
 }

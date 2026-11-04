@@ -11,9 +11,14 @@ use {
     crate::{
         interp,
         unwind::{R, error},
+        values,
     },
-    heap::activity::{self, Activity, Counter},
+    heap::{
+        object::{Header, Sexp, SexpType},
+        activity::{self, Activity, Counter},
+    },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::{
         fmt::Write as _,
         sync::{
@@ -45,6 +50,90 @@ struct Samples {
     startup: u64,
     /// Samples by activity word.
     words: FxHashMap<u32, u64>,
+    /// Samples by closure, keyed by owner label and symbol address.
+    closures: FxHashMap<(u32, usize), Attribution>,
+    /// Samples by package label.
+    packages: FxHashMap<u32, PackageTime>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Attribution {
+    /// Samples where this closure is the innermost frame.
+    own: u64,
+    /// Samples where this closure is anywhere on the stack.
+    inclusive: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct PackageTime {
+    /// Samples running the package's R code: tier 0, the evaluator, compiled code and builtins
+    /// called from it.
+    code: u64,
+    /// Samples in the package's native library.
+    native: u64,
+    /// Samples the interpreter spends on the package's behalf: call setup, lookups, method
+    /// dispatch, collection and compilation.
+    overhead: u64,
+    /// Samples where the package is anywhere on the stack.
+    inclusive: u64,
+}
+
+impl Samples {
+    fn record(&mut self, word: u32, owners: &[u32], names: &[usize], global: u32) {
+        *self.words.entry(word).or_insert(0) += 1;
+        let innermost_owner = owners.last().copied().unwrap_or(global);
+        let innermost_name = names.last().copied().unwrap_or(0);
+        if !owners.is_empty() {
+            self.closures
+                .entry((innermost_owner, innermost_name))
+                .or_default()
+                .own += 1;
+        }
+        let activity = Activity::from_word(word);
+        let (package, slot) = match activity {
+            Activity::Native => (word >> 8, Slot::Native),
+            Activity::CallSetup
+            | Activity::Lookup
+            | Activity::S3Dispatch
+            | Activity::S4Dispatch
+            | Activity::Collector
+            | Activity::JitCompile => (innermost_owner, Slot::Overhead),
+            _ => (innermost_owner, Slot::Code),
+        };
+        let time = self.packages.entry(package).or_default();
+        match slot {
+            Slot::Code => time.code += 1,
+            Slot::Native => time.native += 1,
+            Slot::Overhead => time.overhead += 1,
+        }
+        // Stacks are short, so a linear scan for an earlier occurrence beats building a set.
+        let mut seen_packages: SmallVec<[u32; 16]> = SmallVec::new();
+        seen_packages.push(package);
+        for (index, (&owner, &name)) in owners.iter().zip(names).enumerate() {
+            let earlier = owners[..index]
+                .iter()
+                .zip(&names[..index])
+                .any(|(&other_owner, &other_name)| other_owner == owner && other_name == name);
+            if !earlier {
+                self.closures.entry((owner, name)).or_default().inclusive += 1;
+            }
+            if !seen_packages.contains(&owner) {
+                seen_packages.push(owner);
+            }
+        }
+        if owners.is_empty() && !seen_packages.contains(&global) {
+            seen_packages.push(global);
+        }
+        for package in seen_packages {
+            self.packages.entry(package).or_default().inclusive += 1;
+        }
+    }
+}
+
+enum Slot {
+    Code,
+    Native,
+    Overhead,
 }
 
 static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
@@ -63,12 +152,17 @@ pub fn start_from_environment() {
     // SAFETY: the session starts before R code can start threads that read the environment.
     unsafe { std::env::remove_var(VARIABLE) };
     activity::set_enabled(true);
-    let thread = std::thread::spawn(|| {
+    let global = activity::label(GLOBAL_LABEL);
+    let thread = std::thread::spawn(move || {
         let mut samples = Samples::default();
+        let mut owners = Vec::with_capacity(activity::FRAME_SLOTS);
+        let mut names = Vec::with_capacity(activity::FRAME_SLOTS);
         while !STOP.load(Ordering::Relaxed) {
             std::thread::sleep(INTERVAL);
             if READY.load(Ordering::Relaxed) {
-                *samples.words.entry(activity::current()).or_insert(0) += 1;
+                let word = activity::current();
+                activity::read_frames(&mut owners, &mut names);
+                samples.record(word, &owners, &names, global);
             } else {
                 samples.startup += 1;
             }
@@ -82,6 +176,54 @@ pub fn start_from_environment() {
         thread,
     });
 }
+
+/// The label of code whose top level is the global environment: scripts and the console.
+const GLOBAL_LABEL: &str = "R_GlobalEnv";
+
+/// Publishes a call of the closure `function` through `call` for the sampler, until the scope
+/// drops.
+pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope {
+    if !activity::enabled() {
+        return activity::no_frame();
+    }
+    let owner = crate::dispatch::top_env(function.tag());
+    let owner = {
+        let mut labels = lock(&OWNER_LABELS);
+        match labels.get(&(owner.as_ptr() as usize)) {
+            Some(&label) => label,
+            None => {
+                let name = if owner == values::global_env() {
+                    GLOBAL_LABEL.to_owned()
+                } else {
+                    crate::envir::namespace_name(owner).unwrap_or_else(|| "other".to_owned())
+                };
+                let label = activity::label(&name);
+                labels.insert(owner.as_ptr() as usize, label);
+                label
+            }
+        }
+    };
+    let mut head = call.car();
+    if head.kind() == SexpType::Language
+        && head.car().kind() == SexpType::Symbol
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+    {
+        head = head.cdr().cdr().car();
+    }
+    let name = if head.kind() == SexpType::Symbol {
+        head.as_ptr() as usize
+    } else {
+        0
+    };
+    activity::push_frame(owner, name)
+}
+
+/// Owner labels by environment address. Namespaces and the global environment live for the whole
+/// session, so an address names one owner; another top level (an environment `sys.source` used)
+/// can be freed and its address reused, which at worst merges two such owners under "other".
+static OWNER_LABELS: Mutex<FxHashMap<usize, u32>> = Mutex::new(FxHashMap::with_hasher(
+    rustc_hash::FxBuildHasher,
+));
 
 /// Marks the end of start-up: samples after this count toward the time split.
 pub fn mark_ready() {
@@ -347,6 +489,32 @@ const PUBLIC_PACKAGES: &[&str] = &[
     "lpSolveAPI",
 ];
 
+/// The packages of the R distribution, whose closures the summary ranks by name.
+const BASE_PACKAGES: &[&str] = &[
+    "base",
+    "compiler",
+    "graphics",
+    "grDevices",
+    "grid",
+    "methods",
+    "parallel",
+    "splines",
+    "stats",
+    "stats4",
+    "tcltk",
+    "tools",
+    "utils",
+];
+
+fn owner_display(label: u32) -> String {
+    match activity::label_name(label) {
+        Some(name) if name == GLOBAL_LABEL => "(scripts and the console)".to_owned(),
+        Some(name) if name == "other" => "(other top levels)".to_owned(),
+        Some(name) => package_display(&name),
+        None => "unknown".to_owned(),
+    }
+}
+
 fn package_display(name: &str) -> String {
     if PUBLIC_PACKAGES.contains(&name) {
         return name.to_owned();
@@ -381,20 +549,12 @@ fn report(
     };
     let mut categories = [0u64; Activity::ALL.len()];
     let mut builtins: FxHashMap<usize, u64> = FxHashMap::default();
-    let mut natives: FxHashMap<String, u64> = FxHashMap::default();
     for (&word, &count) in &samples.words {
-        let activity = Activity::from_word(word);
         categories[category(word) as usize] += count;
-        match activity {
-            Activity::Builtin => *builtins.entry((word >> 8) as usize).or_insert(0) += count,
-            Activity::Native => {
-                let name = activity::label_name(word >> 8).unwrap_or_else(|| "unknown".into());
-                *natives.entry(package_display(&name)).or_insert(0) += count;
-            }
-            _ => {}
+        if Activity::from_word(word) == Activity::Builtin {
+            *builtins.entry((word >> 8) as usize).or_insert(0) += count;
         }
     }
-
     let mut out = String::new();
     writeln!(out, "# ry profile summary\n")?;
     writeln!(
@@ -464,17 +624,75 @@ fn report(
         )?;
     }
 
-    if !natives.is_empty() {
-        writeln!(out, "\n## Native code by package\n")?;
-        writeln!(out, "| package | share | seconds |\n| --- | ---: | ---: |")?;
-        let mut packages: Vec<(String, u64)> = natives.into_iter().collect();
-        packages.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        for (name, count) in packages {
+    writeln!(out, "\n## Packages by inclusive time\n")?;
+    writeln!(
+        out,
+        "Self time is split into the package's R code (with the builtins it calls), its native \
+         code, and the interpreter's overhead on its behalf (call setup, lookups, method \
+         dispatch, collection, compilation).\n"
+    )?;
+    writeln!(
+        out,
+        "| package | inclusive | self | R code | native | overhead |\n\
+         | --- | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+    let mut packages: Vec<(String, PackageTime)> = samples
+        .packages
+        .iter()
+        .map(|(&label, &time)| (owner_display(label), time))
+        .collect();
+    packages.sort_by(|left, right| {
+        right
+            .1
+            .inclusive
+            .cmp(&left.1.inclusive)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    for (name, time) in &packages {
+        writeln!(
+            out,
+            "| {name} | {:.1}% | {:.1}% | {:.1}% | {:.1}% | {:.1}% |",
+            percent(time.inclusive),
+            percent(time.code + time.native + time.overhead),
+            percent(time.code),
+            percent(time.native),
+            percent(time.overhead),
+        )?;
+    }
+
+    let base_closures: Vec<(String, Attribution)> = samples
+        .closures
+        .iter()
+        .filter_map(|(&(owner, name), &time)| {
+            let package = activity::label_name(owner)?;
+            if !BASE_PACKAGES.contains(&package.as_str()) {
+                return None;
+            }
+            // SAFETY: a nonzero `name` is the address of a symbol, and symbols are never freed.
+            let function = match unsafe { Sexp::from_raw(name as *mut Header) } {
+                Some(symbol) => unsafe { values::symbol_name(symbol).into_owned() },
+                None => "(anonymous)".to_owned(),
+            };
+            Some((format!("{package}::{function}"), time))
+        })
+        .collect();
+    for (title, inclusive) in [("self", false), ("inclusive", true)] {
+        writeln!(out, "\n## Base R closures by {title} time (top 30)\n")?;
+        writeln!(
+            out,
+            "| closure | self | inclusive |\n| --- | ---: | ---: |"
+        )?;
+        let mut ranked = base_closures.clone();
+        ranked.sort_by(|left, right| {
+            let key = |time: &Attribution| if inclusive { time.inclusive } else { time.own };
+            key(&right.1).cmp(&key(&left.1)).then_with(|| left.0.cmp(&right.0))
+        });
+        for (name, time) in ranked.iter().take(30) {
             writeln!(
                 out,
-                "| {name} | {:.1}% | {:.3} |",
-                percent(count),
-                seconds(count)
+                "| `{name}` | {:.1}% | {:.1}% |",
+                percent(time.own),
+                percent(time.inclusive)
             )?;
         }
     }

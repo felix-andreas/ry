@@ -103,7 +103,7 @@ by native code without regard for its reference count.
 | Compile to one C file, call C through `extern fn` or spliced effects | goose, Bend | **Reject** | ry hosts the existing C ABI; it does not emit C |
 | Even-split parallel forks with no work stealing | Bend | **Reject** | R code makes no balance promise |
 | Residency of data as a tracked fact | Vx | **Adopt the idea, not the syntax** | Table columns: Arrow buffer or R vector, plus a lint |
-| Content-hashed identifiers | Vx | **Adopt for on-disk caches only** | Cache keys for bytecode and runtime summaries |
+| Content-hashed identifiers | Vx | **Reject** | Bytecode and runtime summaries are install-time build output, so no cache needs a key |
 | LLVM and MLIR as the JIT backend | Vx | **Reject** | Compile latency; Cranelift is the choice |
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
@@ -362,15 +362,13 @@ compiles the module with `llc` to an object file, links it with `clang` and runs
   at compile time; ry keeps the transfer implicit, because R users should not have to write it, and
   borrows the checking side instead: a lint when typed code forces a column to materialize inside a
   loop.
-- **Content hashes as on-disk cache keys.** The runtime caches bytecode and per-function summaries
-  across processes. Salsa's interned ids are stable only inside one database, so these caches need a
-  key derived from content, which is what Vx's identifiers are. A hash derived from content is not a
-  second source of truth.
 
 **What ry rejects.**
 
-- **Content hashes as the in-memory identity,** because salsa's interned ids already give every item
-  and type a stable identity within a session.
+- **Content hashes as identities,** in memory or on disk. Salsa's interned ids already give every
+  item and type a stable identity within a session, and bytecode and runtime summaries leave a
+  session only as install-time build output stamped with the ry build (`r-runtime.md`, "Where
+  bytecode comes from"), so no on-disk cache needs a key derived from content.
 - **MLIR and LLVM as the JIT backend,** for the compile-latency reasons in the runtime design.
 - **Placement types as a language feature,** because no benchmark code base targets accelerators.
 

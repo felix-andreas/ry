@@ -7711,3 +7711,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
   Matrix's compile takes about 134 s serially and about 33 s with four jobs, so for packages with
   compiled code the C and C++ compiler is the floor. Analysis is unaffected.
+
+## Bytecode is build output, not a cache
+
+- **Previous shape.** `r-runtime.md` planned to cache bytecode and runtime summaries on disk under
+  content hashes; no code implemented it. Installs do not byte-compile today: every closure
+  compiles at its first call.
+- **What was weak.** A cache is a second copy of each package's code that needs invalidation and a
+  key computation on every load, and the performance principles in `AGENTS.md` treat a cache as a
+  sign of a slow design.
+- **Target shape.** `ry install` / `R CMD INSTALL` write bytecode beside the lazy-load database,
+  stamped with the ry build; a different build ignores the stamp and compiles at first call. Base R
+  is compiled into a section of the base image keyed by the runtime hash (`base-image.md`). `ry
+  load` and scripts compile at first call, so that tier must be cheap. `r-runtime.md`, "Where
+  bytecode comes from", is the spec. Not implemented yet: the bytecode format changes with the
+  call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
+- **Impact.** One source of truth (the package's R code plus the install output derived from it),
+  no invalidation logic, and no hashing at load.

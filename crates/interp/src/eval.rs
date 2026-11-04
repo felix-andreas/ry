@@ -1150,6 +1150,7 @@ pub unsafe fn run_closure(
 ) -> R<Sexp> {
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
+    let _frame = crate::profile_summary::enter_closure(call, function);
     moves::entering_closure(function, env)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {

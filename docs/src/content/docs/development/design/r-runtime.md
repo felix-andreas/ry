@@ -535,8 +535,9 @@ assumption breaks. Bun adds fast startup (a transpiler cache by default, and opt
 `bun build --bytecode`), and it implements its hot
 builtins in a systems language instead of in JavaScript. ry's equivalents are:
 
-- **A fast first tier and cached bytecode,** so `ry run script.R` starts in milliseconds and a
-  package's compiled code is reused across sessions.
+- **A fast first tier and bytecode built ahead of time,** so `ry run script.R` starts in
+  milliseconds and a package's compiled code is reused across sessions (see "Where bytecode comes
+  from" below).
 - **Base R's primitives in Rust,** with vectorized kernels (SIMD where it pays) for arithmetic,
   comparison, subsetting, `sum`, `cumsum`, `match`, `order` and `paste`. Much real R code is a
   sequence of calls to these, and no JIT can make a slow primitive fast.
@@ -551,10 +552,25 @@ closures run too few times to reach tier 1, which is why `prior-art.md` puts cal
 and allocation ahead of more JIT work. The workloads will be recalibrated against profile
 summaries from real code bases (`ry run --profile-summary`).
 
+### Where bytecode comes from
+
+Bytecode is build output, never a cache, so nothing checks whether a stored copy is still valid:
+
+- **Installed packages.** `ry install` and `R CMD INSTALL` compile every closure of the package and
+  write the bytecode beside its lazy-load database, stamped with the ry build that wrote it. A
+  different ry build ignores a stamp it did not write and compiles at first call instead, which is
+  always correct; reinstalling refreshes it.
+- **Base R.** The base and recommended packages are compiled when the base image is built and live
+  in a section of the image beside the heap arenas, keyed by the same runtime hash that keys the
+  image (`base-image.md`).
+- **Code under development.** `ry load` and scripts compile each closure at its first call. That
+  first tier must be cheap enough that compiling a session's working set costs less than reading a
+  cache would, which is the bar `ry load`'s lazy loading sets.
+
 ### Tiers
 
 **Tier 0 is a register-based bytecode interpreter.** R code compiles to bytecode when a closure is
-first called (or when a package is installed, cached on disk). Each call site, variable lookup and
+first called, unless its bytecode was built ahead of time. Each call site, variable lookup and
 arithmetic operation carries an inline cache and a small type profile: observed `SEXPTYPE`, length
 one or not, attributes or none, NA seen or not.
 
@@ -699,7 +715,7 @@ treats them in two ways, depending on whether a guarantee exists:
 The ideas above that come from Roc, Bend and goose, and the ones from those languages and from Vx
 that ry rejects, are argued in [prior art from new language implementations](/development/design/prior-art/).
 The JIT never reads the checker's internal data structures. It consumes the per-function summaries
-of section 8, which the analysis computes and which are cached with the bytecode.
+of section 8, which the analysis computes and which are stored with the bytecode.
 
 ## 6. Lazy package loading
 
@@ -1095,8 +1111,9 @@ runtime receives two small, owned, serializable values per function, computed by
   so an edit deoptimizes the callers that relied on the old facts instead of widening the interface,
   which keeps the interface firewall that makes incremental analysis cheap.
 
-Both are cached with the bytecode, keyed by a content hash so the cache stays valid across processes
-(salsa's ids are stable only inside one database). This keeps a single source of truth (the
+Both are written with a package's bytecode when it is installed (see "Where bytecode comes from"),
+so no process needs a cache keyed by content, and salsa's ids, stable only inside one database,
+never leave the analysis. This keeps a single source of truth (the
 checker's types and the syntax tree) and makes the runtime's copies derived, recomputable
 projections. The same summary drives strict mode's boundary checks, the JIT's initial
 profiles, and the table type's column checks.
