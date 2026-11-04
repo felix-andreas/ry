@@ -681,6 +681,21 @@ fn linear_algebra_matches_gnu_r() {
             );
             return;
         };
+        if live.is_none() {
+            // On the reference libraries the host BLAS gives the same bits as ry's kernels, so
+            // the products pass through `dgemm`, `dgemv`, `dsyrk` and `zgemm` unchanged.
+            evaluate(r#".Internal(options(list(ry.blas = "host")))"#)
+                .unwrap_or_else(|failure| panic!("selecting the host BLAS failed: {failure}"));
+            for (name, expression, expected) in PRODUCTS {
+                assert_eq!(
+                    &result_bits(name, expression),
+                    expected,
+                    "{name} on the host BLAS: `{expression}`"
+                );
+            }
+            evaluate(r#".Internal(options(list(ry.blas = "reference")))"#)
+                .unwrap_or_else(|failure| panic!("selecting ry's kernels failed: {failure}"));
+        }
         for (name, expression, pinned) in CASES {
             let expected = match &live {
                 Some(live) => live

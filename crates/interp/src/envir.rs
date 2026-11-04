@@ -1273,6 +1273,13 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             Ok(value)
         }
+        "ry.blas" => {
+            let choice = values::first_string(value).unwrap_or_default();
+            if !matches!(&*choice, "reference" | "host") {
+                return Err(error("invalid value for 'ry.blas'"));
+            }
+            Ok(value)
+        }
         "warn" => {
             let number = if length(value) == 1
                 && matches!(
