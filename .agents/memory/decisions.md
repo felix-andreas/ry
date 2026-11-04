@@ -7633,7 +7633,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   profile (`.expand_R_libs_env_var` about 3 ms, the `Autoloads` attach about 1 ms) and the first
   S3 dispatch of each generic (about 0.3 ms, method lookup through `UseMethod`).
 
-## The start-up image carries the host's environment, and regex automata are built lazily without a full DFA
+## The start-up image carries the host's environment, regex automata are built lazily, and the heap uses huge pages
 
 - **Previous shape.** Every start parsed and evaluated the loader's runtime source to build
   `tools:ry`, and every compiled regex that needed leftmost-longest or minimal matching built two
@@ -7648,5 +7648,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   lazy DFA searches as fast (same ns per string in a standalone benchmark; ry's `gsub`/`grepl`/`sub`
   micro-benchmark 800 ms against GNU R's 1012 ms). The image reader's primitive reads are
   `#[inline(always)]` and its "object existed before the load" flags are a bitset.
-- **Impact.** Empty `ry run` 181M to 123M instructions, 52 ms to 43 ms median on the same machine
-  (GNU R `Rscript` 150 ms). The image load (79M) is the remaining floor. Analysis is unaffected.
+- **Page faults, not instructions, were the larger cost.** A minor fault costs about 2.5 µs in a
+  VM, and an empty run took 7,838 of them (21 ms of system time). The heap's reservation starts at
+  a 2 MiB boundary, commits 2 MiB at a time and is advised `MADV_HUGEPAGE`, so the kernel
+  (`transparent_hugepage=madvise`) backs it with huge pages. The image file is mapped read-only
+  with `MAP_POPULATE` (`image::ImageFile`) instead of read into a private buffer. Faults fell to
+  about 3,500 and resident memory is unchanged (39 MB). `MADV_POPULATE_WRITE` on small pages gave
+  nothing: it pays the same per-page cost up front.
+- **Impact.** Empty `ry run` 181M to 123M instructions, 52 ms to 34 ms median on the same machine
+  (GNU R `Rscript` 152 ms). The image load (79M instructions) and the remaining faults are the
+  floor. Analysis is unaffected.

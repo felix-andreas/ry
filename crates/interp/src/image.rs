@@ -93,7 +93,7 @@ pub(crate) enum LoadError {
 /// the runtime wrote it, and the caller starts the slow way.
 pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
     let path = &path(home);
-    let bytes = match std::fs::read(path) {
+    let bytes = match ImageFile::open(path) {
         Ok(bytes) => bytes,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(failure) => {
@@ -103,7 +103,9 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
             )));
         }
     };
-    let mut input = Reader { bytes: &bytes };
+    let mut input = Reader {
+        bytes: bytes.bytes(),
+    };
     let untouched = |error: ImageError| LoadError::Untouched(error.to_string());
     if input.take(MAGIC.len()).map_err(untouched)? != MAGIC {
         return Err(LoadError::Untouched(format!(
@@ -471,4 +473,76 @@ unsafe fn restore_state(
         return Err(invalid("the session state has bytes past its end"));
     }
     Ok(())
+}
+
+/// The image file's bytes. On Unix the file is mapped read-only and populated in one call, which
+/// shares the page cache's pages instead of faulting in and filling a private copy of every page.
+enum ImageFile {
+    #[cfg(unix)]
+    Mapped {
+        start: *mut libc::c_void,
+        length: usize,
+    },
+    Read(Vec<u8>),
+}
+
+impl ImageFile {
+    fn open(path: &Path) -> std::io::Result<ImageFile> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let file = std::fs::File::open(path)?;
+            let length = usize::try_from(file.metadata()?.len())
+                .map_err(|_| std::io::Error::other("the image does not fit in memory"))?;
+            if length == 0 {
+                return Ok(ImageFile::Read(Vec::new()));
+            }
+            // SAFETY: a read-only private mapping of an open file. The base tree is build
+            // output that nothing rewrites in place, so the bytes do not change under the map.
+            let start = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE | libc::MAP_POPULATE,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            if start == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(ImageFile::Mapped { start, length })
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::read(path).map(ImageFile::Read)
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            // SAFETY: the mapping is `length` readable bytes and lives until `self` drops.
+            #[cfg(unix)]
+            ImageFile::Mapped { start, length } => unsafe {
+                std::slice::from_raw_parts(start.cast::<u8>(), *length)
+            },
+            ImageFile::Read(bytes) => bytes,
+        }
+    }
+}
+
+impl Drop for ImageFile {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let ImageFile::Mapped { start, length } = *self {
+            // SAFETY: the mapping was made by `open` and nothing borrows it past `self`.
+            if unsafe { libc::munmap(start, length) } != 0 {
+                panic!(
+                    "cannot unmap the start-up image: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    }
 }

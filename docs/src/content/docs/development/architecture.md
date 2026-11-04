@@ -623,8 +623,9 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   directory) and its canonical form. The loader moves every string under either prefix to the
   directory the image file really lives in, which is where a slow start's resolved namespace paths
   and lazy-load databases point.
-- **Loaded in one bulk pass, not mapped.** The heap image lists every reachable object with
-  references as dense positions, and the loader allocates them all and then fills them in a second
+- **Loaded in one bulk pass.** The file is mapped read-only and populated in one call, and its
+  objects are copied into the heap rather than used in place. The heap image lists every reachable
+  object with references as dense positions, and the loader allocates them all and then fills them in a second
   pass. Fixed objects (the heap's well-known objects, the primitives by index, `package:ry` and
   libR's ALTREP classes) are referred to by position, because both processes create them before
   start-up. Strings, symbols and base bindings are interned again, weak references load empty,

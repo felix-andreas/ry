@@ -170,7 +170,8 @@ nothing about C.
 - **`object.rs`**: `Sexp`, the type codes, the header and payload layouts, and the raw accessors.
 - **`space.rs`**: the small-object space: one reserved address range cut into 64 KiB pages of one
   size class each, with the mark, allocated and finalize bits in per-page bitmaps outside the
-  objects, and the platform's page reservation (`mmap` or `VirtualAlloc`).
+  objects, and the platform's page reservation (`mmap` or `VirtualAlloc`). The range starts at a
+  2 MiB boundary and is committed 2 MiB at a time, advised for transparent huge pages on Linux.
 - **`records.rs`**: the tag-name and layout interners behind records, tuples, tags, dictionaries
   and sets.
 - **`strings.rs`**: the weak `CHARSXP` intern table and the encodings.
