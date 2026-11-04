@@ -357,6 +357,28 @@ pub enum NativeValueKind {
     List,
 }
 
+/// The run-time storage of a ry list's items, for a list the runtime may build empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum ListItems {
+    I64,
+    F64,
+    Str,
+    /// Records, tuples, tags, dictionaries, sets and lists, stored in an R list.
+    RyValues,
+}
+
+impl ListItems {
+    /// The name `.ry_items` takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            ListItems::I64 => "I64",
+            ListItems::F64 => "F64",
+            ListItems::Str => "Str",
+            ListItems::RyValues => "list",
+        }
+    }
+}
+
 /// What an operation inside a DataFrame expression takes, as the table engine's own typing
 /// decides before it runs a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -399,6 +421,12 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
+    /// The list expressions whose item type only this check knows: an empty `[]`, and a call to
+    /// a library function whose result items come from a callback rather than from a list it
+    /// was given (`List.map`). An empty list is stored by its items' storage, and one built
+    /// from no items is `logical`, so the code ry's runtime runs passes each of these through
+    /// `.ry_items` with the item type (`preflight` in the `ry` crate). In id order.
+    pub typed_lists: ThinVec<(ExprId, ListItems)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// one-shot check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
@@ -962,6 +990,39 @@ fn check_item_in<'db>(
                 .then_some(id)
         })
         .collect();
+    let mut typed_lists: ThinVec<(ExprId, ListItems)> = recorded
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let id = ExprId::new(index);
+            let candidate = match module.kind(id) {
+                ExpressionKind::Array(items) => module[items].is_empty(),
+                // `.ry_items` returns any other value unchanged, so a library name a project
+                // function shadows is wrapped harmlessly.
+                ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => {
+                        !naming.resolutions.contains_key(callee)
+                            && context
+                                .globals
+                                .and_then(|globals| globals.library_candidates(name))
+                                .is_some_and(|candidates| {
+                                    candidates
+                                        .iter()
+                                        .any(|scheme| builds_fresh_items(db, scheme))
+                                })
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !candidate {
+                return None;
+            }
+            let ty = context.table.resolve(db, (*slot)?);
+            list_items(db, crate::types::array_element(db, ty)?).map(|items| (id, items))
+        })
+        .collect();
+    typed_lists.sort_unstable_by_key(|(id, _)| id.index());
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
@@ -1067,6 +1128,7 @@ fn check_item_in<'db>(
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         i64_literals,
+        typed_lists,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
@@ -19010,6 +19072,37 @@ fn operator_value<'db>(db: &'db dyn Db, name: &str) -> Option<TypeScheme<'db>> {
         return None;
     }
     lower_type_text(db, "fn(e1: Any, [e2]: Any) -> Any")
+}
+
+/// Whether a library function returns a `List<B>` whose items no list argument supplies, so its
+/// result's storage when empty is decided by nothing at run time: `List.map`'s `B` comes from the
+/// callback, while `List.keep_if` returns the `List<A>` it was given.
+fn builds_fresh_items<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
+    let TyKind::Function(function) = scheme.body.kind(db) else {
+        return false;
+    };
+    let Some(item) = crate::types::array_element(db, function.ret) else {
+        return false;
+    };
+    matches!(item.kind(db), TyKind::Rigid(_))
+        && !function
+            .positional
+            .iter()
+            .chain(function.named.iter().map(|parameter| &parameter.ty))
+            .any(|&parameter| crate::types::array_element(db, parameter) == Some(item))
+}
+
+/// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's
+/// default, and for an item type left open.
+fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
+    match item.kind(db) {
+        TyKind::Native(NativeScalar::I64) => Some(ListItems::I64),
+        TyKind::Native(NativeScalar::F64) => Some(ListItems::F64),
+        TyKind::Native(NativeScalar::Str) => Some(ListItems::Str),
+        TyKind::Native(NativeScalar::Bool) => None,
+        _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

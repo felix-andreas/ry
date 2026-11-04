@@ -2639,6 +2639,11 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(x: List<F64>) -> F64 List.walk(x, 0, function(s: F64, v: F64) -> F64 s + v * v)",
             &["{ a <- [1, 2, 3]; FUNCTION(a) }", "{ a <- List.from_r(0[0L]); FUNCTION(a) }"],
         ),
+        // `.ry_items`, which the preflight wraps around a typed empty list, lowers as its list.
+        (
+            "function(n: I64) -> I64 List.sum(.ry_items(List.map(List.range(1, n), \\(v) v * 2i64), \"I64\"))",
+            &["{ x <- 3i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {
@@ -2673,6 +2678,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         unsafe {
             run("literal_result <- function(n: I64) -> List<I64> if (n > 0i64) List.range(1, n) else [1, 2]");
             assert_eq!(run("{ a <- 0i64; literal_result(a) }"), run("List.range(1, 2)"));
+        }
+        // An empty list built at run time is stored as `logical`, so a `List<I64>` parameter or
+        // result supplies its item type.
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            run("empty_items <- function(xs: List<I64>) .Internal(typeof(xs))");
+            run("empty_result <- function() -> List<I64> List.map(List.range(7L, 6), \\(v) v * 4i64)");
+            assert_eq!(run("empty_items(List.map(List.range(7L, 6), \\(v) v * 4i64))"), run("\"I64\""));
+            assert_eq!(run(".Internal(typeof(empty_result()))"), run("\"I64\""));
         }
         // A library constant the body assigns later is read as the local on the next iteration.
         // SAFETY: the interpreter is installed.

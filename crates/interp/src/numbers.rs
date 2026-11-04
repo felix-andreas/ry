@@ -184,6 +184,10 @@ impl Operands<'_> {
 unsafe fn operands<'a>(call: &Call<'_>, left: Sexp, right: Sexp) -> R<Operands<'a>> {
     let (left_operand, right_operand) = match (native_operand(left), native_operand(right)) {
         (Some(first), Some(second)) => (first, second),
+        // An empty list of another storage holds no item that could disagree with an `I64`, and
+        // a typed empty list meets an unannotated `[]`, which is `logical(0)`.
+        (Some(first), None) if is_empty_list(right) => (first, Operand::Items(&[])),
+        (None, Some(second)) if is_empty_list(left) => (Operand::Items(&[]), second),
         (Some(first), None) => (first, Operand::Single(r_operand(call, right)?)),
         (None, Some(second)) => (Operand::Single(r_operand(call, left)?), second),
         (None, None) => return Err(refusal(call)),
@@ -206,6 +210,10 @@ unsafe fn operands<'a>(call: &Call<'_>, left: Sexp, right: Sexp) -> R<Operands<'
         count,
         list: left.is_array() || right.is_array(),
     })
+}
+
+unsafe fn is_empty_list(value: Sexp) -> bool {
+    value.is_array() && value.length() == 0
 }
 
 /// An `I64` operand: a single number, or the items of a list.

@@ -320,7 +320,7 @@ pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R
 /// Checks a typed closure's value, and returns the value the call returns (see [`check_value`]).
 pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
-    if mask == 0 || admits(mask, value) {
+    if mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value)) {
         return Ok(value);
     }
     // `-> I64` converts a whole R number, as an `I64` parameter does.
@@ -635,7 +635,7 @@ unsafe fn check_argument(
 /// itself, or the `I64` an `I64` annotation converts a whole R number to.
 unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), slot);
-    if mask == 0 || admits(mask, value) {
+    if mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value)) {
         return Ok(value);
     }
     // R has no `I64` literal, so `f(10)` for `n: I64` passes the R double 10, which the checker
@@ -698,12 +698,23 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
             .iter()
             .map(|&number| (number != heap::object::NA_INTEGER).then_some(i64::from(number)))
             .collect(),
+        SexpType::Logical if value.length() == 0 => Some(Vec::new()),
         _ => None,
     };
     match items {
         Some(items) => crate::numbers::list(&items).map(Some),
         None => Ok(None),
     }
+}
+
+/// Whether `value` is an empty list built without an item type (stored as `logical`, as
+/// `List.map` over no items builds it) where the annotation expects `I64` items, which
+/// [`as_i64`] then supplies.
+unsafe fn lacks_item_type(mask: Mask, value: Sexp) -> bool {
+    mask & I64 != 0
+        && mask & ARRAY != 0
+        && value.kind() == SexpType::Logical
+        && value.length() == 0
 }
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {

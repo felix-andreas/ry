@@ -16,6 +16,7 @@ pub mod types;
 
 use {
     crate::{
+        check::ListItems,
         hir::{ExpressionKind, Symbol},
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
@@ -1212,31 +1213,66 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
         || sites.any(SiteRole::InlineAnnotation)
 }
 
-/// The file ranges of the unsuffixed number literals the checker typed as `I64`, in source
-/// order. ry's runtime reads each one as its suffixed form, because R would read `5` as a
-/// `double` whatever type the checker gave it.
-pub fn file_i64_literals(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
-    let mut ranges = Vec::new();
+/// One rewrite the code ry's runtime runs needs, because R would read the text with a type other
+/// than the one the checker gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elaboration {
+    /// An unsuffixed number literal the checker typed as `I64`, which R reads as a `double`.
+    I64Literal(TextRange),
+    /// A list expression the runtime may build empty, whose item storage only the checker
+    /// knows (`ItemCheck::typed_lists`).
+    TypedList(TextRange, ListItems),
+}
+
+impl Elaboration {
+    pub fn range(self) -> TextRange {
+        match self {
+            Elaboration::I64Literal(range) | Elaboration::TypedList(range, _) => range,
+        }
+    }
+
+    /// The same rewrite at `range`.
+    pub fn at(self, range: TextRange) -> Elaboration {
+        match self {
+            Elaboration::I64Literal(_) => Elaboration::I64Literal(range),
+            Elaboration::TypedList(_, items) => Elaboration::TypedList(range, items),
+        }
+    }
+}
+
+/// The rewrites ry's runtime needs in `file`, by start offset and, for nested lists, outermost
+/// first.
+pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
+    let mut elaborations = Vec::new();
     for span in item_spans(db, file) {
         let Some(check) = item_check(db, span.item) else {
             continue;
         };
-        if check.i64_literals.is_empty() {
+        if check.i64_literals.is_empty() && check.typed_lists.is_empty() {
             continue;
         }
         let Some(module) = item_hir(db, span.item) else {
             continue;
         };
         let offset = span.range.start();
-        ranges.extend(
+        elaborations.extend(
             check
                 .i64_literals
                 .iter()
-                .map(|&id| module.range(id) + offset),
+                .map(|&id| Elaboration::I64Literal(module.range(id) + offset)),
+        );
+        elaborations.extend(
+            check
+                .typed_lists
+                .iter()
+                .map(|&(id, items)| Elaboration::TypedList(module.range(id) + offset, items)),
         );
     }
-    ranges.sort_unstable_by_key(|range| range.start());
-    ranges
+    elaborations.sort_unstable_by_key(|elaboration| {
+        let range = elaboration.range();
+        (range.start(), std::cmp::Reverse(range.end()))
+    });
+    elaborations
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.
@@ -3568,6 +3604,7 @@ mod tests {
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
+            typed_lists: ThinVec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
