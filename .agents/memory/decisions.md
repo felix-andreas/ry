@@ -7673,7 +7673,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   (GNU R `Rscript` 152 ms). The image load (79M instructions) and the remaining faults are the
   floor. Analysis is unaffected.
 
-## Package builds run `make` in parallel and link BLAS and LAPACK through the R home
+## Package builds run `make` in parallel and link BLAS and LAPACK by versioned file
 
 - **Previous shape.** `R CMD INSTALL` ran `make` with one job, as GNU R does, and the Linux
   default toolchain linked `-lblas -llapack`, which needs the unversioned `libblas.so` that only
@@ -7682,13 +7682,16 @@ Each one trades a narrow class of missed errors for a class of false reports see
   library also broke dependency lookup, because the R half runs in the build directory.
 - **Target shape.** `run_make` sets `MAKEFLAGS=-j<processors>` unless the user set `MAKEFLAGS`,
   and a failed parallel build runs again with one job (make reuses the built objects), so a
-  `Makevars` that is not parallel-safe still installs (`install-serial-makevars.scenario`). The
-  assembled home links `lib/libRblas.so` and `lib/libRlapack.so` to the files the dynamic loader
-  resolves `libblas.so.3` and `liblapack.so.3` to (`dlopen`, then `dladdr` on `dgemm_` or `dgesv_`),
-  and its Makeconf names them as GNU R's does (`-L"$(R_HOME)/lib" -lRblas`); a package linked so
-  records the soname of the file the link resolves to (which may be the file that defines the
-  routine, such as `libopenblas.so.0`, rather than `libblas.so.3`). The lookup closes its handle,
-  so an install process does not keep OpenBLAS's thread pool. `install` makes the library path absolute.
+  `Makevars` that is not parallel-safe still installs (`install-serial-makevars.scenario`). Where
+  the toolchain says exactly `-lblas` or `-llapack` on Linux, the home's Makeconf writes
+  `-l:libblas.so.3` and `-l:liblapack.so.3` (`versioned_linear_algebra`), so the linker finds the
+  file the runtime opens when the package links, and the package records that file's soname
+  (`libblas.so.3` for Debian's reference BLAS; a distribution whose `libblas.so.3` is a link to
+  OpenBLAS may record `libopenblas.so.0`). Nothing in the home depends on what the system had
+  installed: a `dlopen` probe at home build would freeze the result into a cached home. A system
+  with only an unversioned `libblas.so` fails to link (unverified whether any distribution ships
+  that). `bfd`, `gold` and `lld` all take `-l:file` on the command line; `gold` rejects it inside
+  a linker script, which ruled out a `libRblas.so` script. `install` makes the library path absolute.
 - **What is not the bottleneck.** Installs never byte-compile (ry compiles closures when they
   run), and writing the lazy-load database is fast: 0.06 s for MASS against GNU R's 0.10 s on the
   same driver. The R half spends its time in Rd processing and help indices (MASS: 0.55 s and

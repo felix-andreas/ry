@@ -384,9 +384,10 @@ first use: `libblas.so.3` and `liblapack.so.3` on Linux, Accelerate on macOS. Wi
 also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds them on NixOS),
 then for GNU R's own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every
 place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas.dll` and
-`Rlapack.dll`. Compiled package code links the same libraries: on Linux, ry's R home links them as
-`lib/libRblas.so` and `lib/libRlapack.so`, as GNU R's home holds its own, so a package that uses
-them (Matrix, quadprog) builds without the distribution's BLAS and LAPACK development packages.
+`Rlapack.dll`. Compiled package code links the same libraries: on Linux, where the toolchain would link
+`-lblas -llapack`, ry's `Makeconf` names the versioned files instead (`-l:libblas.so.3` and
+`-l:liblapack.so.3`), so a package that uses them (Matrix, quadprog) builds without the
+distribution's BLAS and LAPACK development packages.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged: it loads a copy
 of each package library, cached under `~/Library/Caches/ry/rebound/`, that names ry's runtime
