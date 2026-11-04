@@ -25,7 +25,8 @@ use {
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, NA_REAL_BITS, is_na_real},
     interp::{
         arith::{
-            long_double_mean, long_double_mean_from_total, power, real_integer_divide, real_modulo,
+            long_double_mean, long_double_mean_from_total, modulus_loses_accuracy, power,
+            real_integer_divide, real_modulo,
         },
         format::format_real_alone,
         long_double::{LongDouble, add_all},
@@ -246,7 +247,10 @@ pub unsafe extern "C" fn ry_list_new(kind: u32, length: u64) -> *mut List {
 pub unsafe extern "C" fn ry_list_seq_len(count: u64) -> *mut List {
     let length = count as usize;
     let list = list_alloc(INT, length, length);
-    for (offset, slot) in slice_mut::<i32>((*list).data, length).iter_mut().enumerate() {
+    for (offset, slot) in slice_mut::<i32>((*list).data, length)
+        .iter_mut()
+        .enumerate()
+    {
         *slot = offset as i32 + 1;
     }
     list
@@ -2104,7 +2108,20 @@ unsafe fn arith(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
             MUL => binary::<f64, f64>(a, b, DBL, length, |x, y| x * y),
             DIV => binary::<f64, f64>(a, b, DBL, length, |x, y| x / y),
             POW => binary::<f64, f64>(a, b, DBL, length, power),
-            MOD => binary::<f64, f64>(a, b, DBL, length, real_modulo),
+            MOD => {
+                // A quotient too large for the remainder to mean anything makes R warn, which
+                // only the interpreter can do.
+                let mut lost = false;
+                let result = binary::<f64, f64>(a, b, DBL, length, |x, y| {
+                    lost |= modulus_loses_accuracy(x, y);
+                    real_modulo(x, y)
+                });
+                if lost {
+                    ry_list_drop(result);
+                    return null_mut();
+                }
+                result
+            }
             IDIV => binary::<f64, f64>(a, b, DBL, length, real_integer_divide),
             // GNU R's `pmin` keeps the first of two equal values (so `pmin(-0, 0)` is `-0`), and
             // a NaN on the right outranks one on the left.

@@ -44,10 +44,16 @@ pub enum Type {
     Null,
     /// An R atomic vector of these items. `array` marks an `Array<T>`, which has no `NA` and
     /// carries the Array bit when it crosses back to R.
-    Vector { item: Item, array: bool },
+    Vector {
+        item: Item,
+        array: bool,
+    },
     /// An R list whose elements are scalars of these items.
     List(Item),
-    Dict { key: Item, value: Item },
+    Dict {
+        key: Item,
+        value: Item,
+    },
 }
 
 impl Type {
@@ -61,7 +67,10 @@ impl Type {
 
     /// Whether a value of this type is a pointer to a counted object with the shared header.
     pub fn is_object(self) -> bool {
-        matches!(self, Type::Vector { .. } | Type::List(_) | Type::Dict { .. })
+        matches!(
+            self,
+            Type::Vector { .. } | Type::List(_) | Type::Dict { .. }
+        )
     }
 
     /// The scalar type of one of these items.
@@ -338,12 +347,27 @@ impl Op {
         use Op::*;
         match self {
             Const(_) | Poll => SmallVec::new(),
-            Copy(a) | Not(a) | Math(_, _, a) | ToDbl(a) | LglToInt(a) | Truth(a) | Length(a)
-            | NewVector(_, a) | SeqLen(a) | VectorNot(a) | VectorMath(_, _, a) | Coerce(a, _)
-            | Reduce(_, _, a) | Relabel(a, _) | Text(_, a) | VectorText(_, a) | Format(a)
-            | FormatFixed(a, _) | FormatPadded(a, _, _) | Dup(a) | Drop(a) => {
-                SmallVec::from_slice(&[*a])
-            }
+            Copy(a)
+            | Not(a)
+            | Math(_, _, a)
+            | ToDbl(a)
+            | LglToInt(a)
+            | Truth(a)
+            | Length(a)
+            | NewVector(_, a)
+            | SeqLen(a)
+            | VectorNot(a)
+            | VectorMath(_, _, a)
+            | Coerce(a, _)
+            | Reduce(_, _, a)
+            | Relabel(a, _)
+            | Text(_, a)
+            | VectorText(_, a)
+            | Format(a)
+            | FormatFixed(a, _)
+            | FormatPadded(a, _, _)
+            | Dup(a)
+            | Drop(a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
@@ -392,12 +416,15 @@ impl Op {
         match self {
             Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
-            | Text(..) | Affix(..) | Format(_) | FormatFixed(..) | FormatPadded(..)
-            | VectorText(..) | VectorAffix(..) | RoundDigits(..) | Same(..) | Step(..) => false,
-            // Integer arithmetic overflows; a math function warns about NaNs.
-            Arith(_, item, ..) | Math(_, item, _) => {
-                *item == Item::Int || matches!(self, Math(..))
-            }
+            | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
+            | Same(..) | Step(..) => false,
+            // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
+            // warns about NaNs.
+            Arith(op, item, ..) => *item == Item::Int || *op == self::Arith::Mod,
+            Math(..) => true,
+            // `NA` formats differently in `as.character`, `paste` and `sprintf`, so the
+            // interpreter formats it.
+            Format(_) | FormatFixed(..) | FormatPadded(..) => true,
             _ => true,
         }
     }

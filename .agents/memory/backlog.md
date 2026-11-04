@@ -30,6 +30,10 @@ The quality bar is four things.
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
+- **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
+- **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
+- **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
+- **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
 ## Open: two Renviron readers
 

@@ -226,7 +226,11 @@ fn owned_unique_operands_are_reused() {
         assert_eq!(negated, scaled);
         for count in [0u64, 1, 3] {
             let sequence = ry_list_seq_len(count);
-            assert_eq!(read(sequence), Model::Int((1..=count as i32).collect()), "seq_len({count})");
+            assert_eq!(
+                read(sequence),
+                Model::Int((1..=count as i32).collect()),
+                "seq_len({count})"
+            );
             ry_list_drop(sequence);
         }
         let ints = ry_list_seq(1, 4);

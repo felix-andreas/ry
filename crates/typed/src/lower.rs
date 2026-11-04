@@ -68,7 +68,9 @@ pub unsafe fn lower(
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
     if formals.len() != params.len() {
-        return Err(Refusal("the call does not supply every formal positionally"));
+        return Err(Refusal(
+            "the call does not supply every formal positionally",
+        ));
     }
     let body = interp::bytecode::closure_body(closure);
     if tail_invisible(body) {
@@ -87,6 +89,8 @@ pub unsafe fn lower(
         inlined: Vec::new(),
         speculations: Vec::new(),
         nesting: 0,
+        control: 0,
+        unusable: SmallVec::new(),
     };
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
@@ -106,6 +110,7 @@ pub unsafe fn lower(
     }
     let value = lowering.expression(body)?;
     if let Some(value) = value {
+        lowering.usable(value)?;
         let result = lowering.builder.ty(value);
         lowering.builder.function.result = result;
         lowering.builder.terminate(Terminator::Return(value));
@@ -122,8 +127,9 @@ pub unsafe fn lower(
 #[derive(Clone, Copy, Debug)]
 enum Binding {
     Value(Local),
-    /// A local function: its formals and body, inlined at each call.
-    Function(Sexp, Sexp),
+    /// A local function: its formals, its body and the index of the scope that defines it, whose
+    /// names are the only ones the body sees when it is inlined.
+    Function(Sexp, Sexp, usize),
 }
 
 #[derive(Default)]
@@ -151,6 +157,10 @@ struct Lowering<'c> {
     inlined: Vec<Inlined>,
     speculations: Vec<Speculation>,
     nesting: usize,
+    /// How many branches and loop bodies enclose the current point in the current scope.
+    control: usize,
+    /// The results of an `if` whose branches have different types, which nothing may read.
+    unusable: SmallVec<[Local; 4]>,
 }
 
 /// An argument of a call, by name or position.
@@ -164,7 +174,8 @@ impl Arguments {
             items: rvalues::pairlist_items(call.cdr())
                 .into_iter()
                 .map(|(tag, value)| {
-                    let name = (tag != rvalues::nil()).then(|| rvalues::symbol_name(tag).into_owned());
+                    let name =
+                        (tag != rvalues::nil()).then(|| rvalues::symbol_name(tag).into_owned());
                     (name, value)
                 })
                 .collect(),
@@ -233,13 +244,60 @@ impl Lowering<'_> {
 
     /// Lowers `expression` that must complete.
     unsafe fn value(&mut self, expression: Sexp) -> Result<Local, Refusal> {
-        self.expression(expression)?
-            .ok_or(Refusal("an argument that never completes"))
+        let value = self
+            .expression(expression)?
+            .ok_or(Refusal("an argument that never completes"))?;
+        self.usable(value)?;
+        Ok(value)
+    }
+
+    fn usable(&self, value: Local) -> Result<(), Refusal> {
+        if self.unusable.contains(&value) {
+            return Err(Refusal(
+                "a value whose type depends on the branch an `if` takes",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Enters a branch or a loop body, which may not run, giving the current scope's names to
+    /// hand back to [`Lowering::leave_control`].
+    fn enter_control(&mut self) -> FxHashMap<Sexp, Binding> {
+        self.control += 1;
+        self.scopes
+            .last()
+            .map(|scope| scope.names.clone())
+            .unwrap_or_default()
+    }
+
+    /// Leaves a branch or loop body: the names it created go out of scope, since they are unset
+    /// on a path that skips it, and come back as a list for an `if` to join.
+    fn leave_control(&mut self, saved: FxHashMap<Sexp, Binding>) -> SmallVec<[(Sexp, Local); 4]> {
+        self.control -= 1;
+        let Some(scope) = self.scopes.last_mut() else {
+            return SmallVec::new();
+        };
+        let mut created: SmallVec<[(Sexp, Local); 4]> = scope
+            .names
+            .iter()
+            .filter(|(symbol, _)| !saved.contains_key(symbol))
+            .filter_map(|(&symbol, &binding)| match binding {
+                Binding::Value(local) => Some((symbol, local)),
+                Binding::Function(..) => None,
+            })
+            .collect();
+        // The join emits copies in this order, which must not depend on hashing.
+        created.sort_by_key(|&(_, local)| local);
+        scope.names = saved;
+        created
     }
 
     unsafe fn expression_inner(&mut self, expression: Sexp) -> Result<Option<Local>, Refusal> {
         match expression.kind() {
-            SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::String
+            SexpType::Integer
+            | SexpType::Real
+            | SexpType::Logical
+            | SexpType::String
             | SexpType::Nil => self.constant(expression).map(Some),
             SexpType::Symbol => self.read(expression).map(Some),
             SexpType::Language => self.call(expression),
@@ -259,8 +317,7 @@ impl Lowering<'_> {
             SexpType::Logical => (Type::Lgl, Constant::Lgl(rvalues::ints(value)[0])),
             SexpType::Real => (Type::Dbl, Constant::Dbl(rvalues::reals(value)[0])),
             SexpType::String => {
-                let text = rvalues::string_at(value, 0)
-                    .ok_or(Refusal("an NA string constant"))?;
+                let text = rvalues::string_at(value, 0).ok_or(Refusal("an NA string constant"))?;
                 return Ok(self.string(&text));
             }
             _ => return Err(Refusal("a constant of an unsupported type")),
@@ -280,36 +337,10 @@ impl Lowering<'_> {
             Some(Binding::Value(local)) => Ok(local),
             Some(Binding::Function(..)) => Err(Refusal("a local function used as a value")),
             None => {
-                let name = rvalues::symbol_name(symbol);
-                match &*name {
-                    "pi" if self.is_base_value(symbol) => Ok(self
-                        .builder
-                        .emit(Type::Dbl, Op::Const(Constant::Dbl(std::f64::consts::PI)))),
-                    _ => {
-                        note(&name);
-                        Err(Refusal("a variable that is not a local"))
-                    }
-                }
+                note(&rvalues::symbol_name(symbol));
+                Err(Refusal("a variable that is not a local"))
             }
         }
-    }
-
-    /// Whether `symbol` finds base R's own binding from the closure's environment.
-    unsafe fn is_base_value(&self, symbol: Sexp) -> bool {
-        let heap = interp::heap();
-        let base = heap.known().base_env;
-        let mut env = self.env;
-        let empty = heap.known().empty_env;
-        while env != empty {
-            if env == base {
-                return true;
-            }
-            if heap.frame_cell(env, symbol).is_some() {
-                return false;
-            }
-            env = env.enclosure();
-        }
-        false
     }
 
     unsafe fn assign(&mut self, symbol: Sexp, value: Local) -> Result<Local, Refusal> {
@@ -325,6 +356,16 @@ impl Lowering<'_> {
                 Ok(variable)
             }
             None => {
+                if self.control > 0
+                    && matches!(
+                        self.scopes
+                            .last()
+                            .and_then(|scope| scope.names.get(&symbol)),
+                        Some(Binding::Function(..))
+                    )
+                {
+                    return Err(Refusal("a local function rebound in a branch or loop"));
+                }
                 let variable = self.builder.emit(ty, Op::Copy(value));
                 self.bind(symbol, Binding::Value(variable));
                 Ok(variable)
@@ -363,7 +404,11 @@ impl Lowering<'_> {
             "break" | "next" => {
                 let &(continue_to, break_to) =
                     self.loops.last().ok_or(Refusal("`break` outside a loop"))?;
-                let target = if name == "break" { break_to } else { continue_to };
+                let target = if name == "break" {
+                    break_to
+                } else {
+                    continue_to
+                };
                 self.builder.terminate(Terminator::Jump(target));
                 let unreachable = self.builder.block();
                 self.builder.switch_to(unreachable);
@@ -390,10 +435,10 @@ impl Lowering<'_> {
             }
             _ => {}
         }
-        if let Some(Binding::Function(formals, body)) = self.lookup(head) {
+        if let Some(Binding::Function(formals, body, scope)) = self.lookup(head) {
             let arguments = Arguments::of(call);
             let values = self.call_arguments(&arguments)?;
-            return self.inline(formals, body, &values);
+            return self.inline(formals, body, scope, &values);
         }
         if self.lookup(head).is_some() {
             return Err(Refusal("a call of a local variable"));
@@ -414,19 +459,25 @@ impl Lowering<'_> {
                 return Err(Refusal("a typed call with named arguments"));
             }
             let values = self.call_arguments(&arguments)?;
-            let types: SmallVec<[Type; 4]> = values.iter().map(|&value| self.builder.ty(value)).collect();
+            let types: SmallVec<[Type; 4]> =
+                values.iter().map(|&value| self.builder.ty(value)).collect();
             let (index, result) = if function == self.closure && types[..] == self.params[..] {
                 (crate::lower::SELF, self.guess)
             } else {
                 self.callees.callee(function, &types)?
             };
-            return Ok(Some(self.builder.emit(result, Op::CallTyped(index, values))));
+            return Ok(Some(
+                self.builder.emit(result, Op::CallTyped(index, values)),
+            ));
         }
         note(&name);
         Err(Refusal("a call of a function the typed core does not know"))
     }
 
-    unsafe fn call_arguments(&mut self, arguments: &Arguments) -> Result<SmallVec<[Local; 4]>, Refusal> {
+    unsafe fn call_arguments(
+        &mut self,
+        arguments: &Arguments,
+    ) -> Result<SmallVec<[Local; 4]>, Refusal> {
         let mut values = SmallVec::new();
         for &(_, argument) in &arguments.items {
             values.push(self.value(argument)?);
@@ -470,7 +521,9 @@ impl Lowering<'_> {
         let items = rvalues::pairlist_items(call.cdr());
         let mut last = None;
         if items.is_empty() {
-            return Ok(Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))));
+            return Ok(Some(
+                self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+            ));
         }
         for (_, item) in items {
             last = self.expression(item)?;
@@ -495,7 +548,11 @@ impl Lowering<'_> {
                 let (Some(&(_, formals)), Some(&(_, body))) = (parts.first(), parts.get(1)) else {
                     return Err(Refusal("a malformed function literal"));
                 };
-                self.bind(target, Binding::Function(formals, body));
+                if self.control > 0 {
+                    return Err(Refusal("a local function defined in a branch or loop"));
+                }
+                let scope = self.scopes.len() - 1;
+                self.bind(target, Binding::Function(formals, body, scope));
                 return Ok(self.builder.emit(Type::Null, Op::Const(Constant::Null)));
             }
             let value = self.value(value)?;
@@ -511,9 +568,9 @@ impl Lowering<'_> {
                 if vector.kind() != SexpType::Symbol {
                     return Err(Refusal("an indexed assignment into an expression"));
                 }
-                let variable = self
-                    .lookup_assignable(vector)
-                    .ok_or(Refusal("an indexed assignment into a parameter or a non-local"))?;
+                let variable = self.lookup_assignable(vector).ok_or(Refusal(
+                    "an indexed assignment into a parameter or a non-local",
+                ))?;
                 let index = self.value(index)?;
                 let index = self.integer_index(index)?;
                 let value = self.value(value)?;
@@ -545,9 +602,13 @@ impl Lowering<'_> {
     unsafe fn convert_scalar(&mut self, value: Local, item: Item) -> Result<Local, Refusal> {
         let ty = self.builder.ty(value);
         match (ty, item) {
-            (Type::Int, Item::Int) | (Type::Dbl, Item::Dbl) | (Type::Lgl, Item::Lgl)
+            (Type::Int, Item::Int)
+            | (Type::Dbl, Item::Dbl)
+            | (Type::Lgl, Item::Lgl)
             | (Type::Str, Item::Str) => Ok(value),
-            (Type::Int | Type::Lgl, Item::Dbl) => Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value))),
+            (Type::Int | Type::Lgl, Item::Dbl) => {
+                Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value)))
+            }
             (Type::Lgl, Item::Int) => Ok(self.builder.emit(Type::Int, Op::LglToInt(value))),
             _ => Err(Refusal("an item of another type")),
         }
@@ -579,19 +640,57 @@ impl Lowering<'_> {
             otherwise: else_block,
         });
         self.builder.switch_to(then_block);
+        let saved = self.enter_control();
         let then_value = self.expression(then)?;
+        let then_created = self.leave_control(saved);
         let then_end = self.builder.current;
         self.builder.switch_to(else_block);
+        let saved = self.enter_control();
         let else_value = match otherwise {
             Some(otherwise) => self.expression(otherwise)?,
             None => Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))),
         };
+        let else_created = self.leave_control(saved);
         let else_end = self.builder.current;
+        // A name the `if` creates is set after it when every branch that completes sets it,
+        // with the same type.
+        match (then_value.is_some(), else_value.is_some()) {
+            (true, false) => then_created
+                .iter()
+                .for_each(|&(symbol, local)| self.bind(symbol, Binding::Value(local))),
+            (false, true) => else_created
+                .iter()
+                .for_each(|&(symbol, local)| self.bind(symbol, Binding::Value(local))),
+            (true, true) => {
+                for &(symbol, then_local) in &then_created {
+                    let Some(&(_, else_local)) =
+                        else_created.iter().find(|&&(other, _)| other == symbol)
+                    else {
+                        continue;
+                    };
+                    let ty = self.builder.ty(then_local);
+                    if self.builder.ty(else_local) != ty {
+                        continue;
+                    }
+                    let joined = self.builder.local(ty);
+                    self.builder.switch_to(then_end);
+                    self.builder.push(Some(joined), Op::Copy(then_local));
+                    self.builder.switch_to(else_end);
+                    self.builder.push(Some(joined), Op::Copy(else_local));
+                    self.bind(symbol, Binding::Value(joined));
+                }
+            }
+            (false, false) => {}
+        }
         let result = match (then_value, else_value) {
             (None, None) => None,
             (Some(value), None) | (None, Some(value)) => {
                 let result = self.builder.local(self.builder.ty(value));
-                let end = if then_value.is_some() { then_end } else { else_end };
+                let end = if then_value.is_some() {
+                    then_end
+                } else {
+                    else_end
+                };
                 self.builder.switch_to(end);
                 self.builder.push(Some(result), Op::Copy(value));
                 Some(result)
@@ -611,6 +710,7 @@ impl Lowering<'_> {
                         self.builder.switch_to(end);
                         self.builder.push(Some(result), Op::Const(Constant::Null));
                     }
+                    self.unusable.push(result);
                     Some(result)
                 }
             }
@@ -649,7 +749,8 @@ impl Lowering<'_> {
             None => {
                 let vector = self.value(sequence)?;
                 let ty = self.builder.ty(vector);
-                ty.items().ok_or(Refusal("a `for` over something that is not a vector"))?;
+                ty.items()
+                    .ok_or(Refusal("a `for` over something that is not a vector"))?;
                 // The loop reads the value the sequence had when it started.
                 let held = self.builder.emit(ty, Op::Copy(vector));
                 let one = self.int(1);
@@ -659,6 +760,8 @@ impl Lowering<'_> {
             }
         };
         let counter = self.builder.emit(Type::Int, Op::Copy(start));
+        // The body may assign the variable that held the end, which must not move it.
+        let end = self.builder.emit(Type::Int, Op::Copy(end));
         let exit = self.builder.block();
         let step = match step {
             // `seq_len`, `seq_along` and a vector count up from 1 to an end that is not `NA` and
@@ -667,20 +770,34 @@ impl Lowering<'_> {
                 let zero = self.int(0);
                 let empty = self.builder.emit(Type::Bool, Op::Same(end, zero));
                 let go = self.builder.block();
-                self.builder.terminate(Terminator::Branch { condition: empty, then: exit, otherwise: go });
+                self.builder.terminate(Terminator::Branch {
+                    condition: empty,
+                    then: exit,
+                    otherwise: go,
+                });
                 self.builder.switch_to(go);
                 step
             }
             // `a:b` always holds at least one item and counts down when `b < a`. The comparison
             // fails on an `NA` end, as `:` does.
             None => {
-                let down = self.builder.emit(Type::Lgl, Op::Compare(Compare::Lt, Item::Int, end, start));
+                let down = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::Int, end, start));
                 let down = self.builder.emit(Type::Bool, Op::Truth(down));
                 let minus = self.int(-1);
                 let plus = self.int(1);
                 let step = self.builder.local(Type::Int);
-                let (a, b, join) = (self.builder.block(), self.builder.block(), self.builder.block());
-                self.builder.terminate(Terminator::Branch { condition: down, then: a, otherwise: b });
+                let (a, b, join) = (
+                    self.builder.block(),
+                    self.builder.block(),
+                    self.builder.block(),
+                );
+                self.builder.terminate(Terminator::Branch {
+                    condition: down,
+                    then: a,
+                    otherwise: b,
+                });
                 self.builder.switch_to(a);
                 self.builder.push(Some(step), Op::Copy(minus));
                 self.builder.terminate(Terminator::Jump(join));
@@ -693,9 +810,15 @@ impl Lowering<'_> {
         };
         // The latch leaves once the counter has reached the end, so stepping never passes it.
         let header = self.loop_header();
+        let saved = self.enter_control();
         let item = match items {
             Some(held) => self.builder.emit(
-                Type::of_item(self.builder.ty(held).items().ok_or(Refusal("a loop over a non-vector"))?),
+                Type::of_item(
+                    self.builder
+                        .ty(held)
+                        .items()
+                        .ok_or(Refusal("a loop over a non-vector"))?,
+                ),
                 Op::Get(held, counter),
             ),
             None => counter,
@@ -705,19 +828,26 @@ impl Lowering<'_> {
         self.loops.push((latch, exit));
         let completed = self.expression(body)?;
         self.loops.pop();
+        self.leave_control(saved);
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(latch));
         }
         self.builder.switch_to(latch);
         let done = self.builder.emit(Type::Bool, Op::Same(counter, end));
         let next_block = self.builder.block();
-        self.builder.terminate(Terminator::Branch { condition: done, then: exit, otherwise: next_block });
+        self.builder.terminate(Terminator::Branch {
+            condition: done,
+            then: exit,
+            otherwise: next_block,
+        });
         self.builder.switch_to(next_block);
         let next = self.builder.emit(Type::Int, Op::Step(counter, step));
         self.builder.push(Some(counter), Op::Copy(next));
         self.builder.terminate(Terminator::Jump(header));
         self.builder.switch_to(exit);
-        Ok(Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))))
+        Ok(Some(
+            self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+        ))
     }
 
     /// The start, end and step (`None` for `a:b`, whose direction depends on its ends) of a
@@ -753,7 +883,9 @@ impl Lowering<'_> {
                 let end = if name == "seq_len" {
                     let count = self.integer_count(value)?;
                     let zero = self.int(0);
-                    let negative = self.builder.emit(Type::Lgl, Op::Compare(Compare::Lt, Item::Int, count, zero));
+                    let negative = self
+                        .builder
+                        .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::Int, count, zero));
                     self.fail_if(negative);
                     count
                 } else {
@@ -780,7 +912,11 @@ impl Lowering<'_> {
     fn fail_if(&mut self, condition: Local) {
         let truth = self.builder.emit(Type::Bool, Op::Truth(condition));
         let (fail, go) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch { condition: truth, then: fail, otherwise: go });
+        self.builder.terminate(Terminator::Branch {
+            condition: truth,
+            then: fail,
+            otherwise: go,
+        });
         self.builder.switch_to(fail);
         self.builder.terminate(Terminator::Fail);
         self.builder.switch_to(go);
@@ -792,7 +928,9 @@ impl Lowering<'_> {
         match self.builder.ty(value) {
             Type::Int => Ok(value),
             Type::Dbl => {
-                let constant = self.constant_double(value).ok_or(Refusal("a `:` of computed doubles"))?;
+                let constant = self
+                    .constant_double(value)
+                    .ok_or(Refusal("a `:` of computed doubles"))?;
                 if constant.fract() != 0.0 || constant.abs() > 1e9 {
                     return Err(Refusal("a `:` of fractional doubles"));
                 }
@@ -816,7 +954,9 @@ impl Lowering<'_> {
         match self.builder.ty(value) {
             Type::Int => Ok(value),
             Type::Dbl => {
-                let constant = self.constant_double(value).ok_or(Refusal("a count that is a computed double"))?;
+                let constant = self
+                    .constant_double(value)
+                    .ok_or(Refusal("a count that is a computed double"))?;
                 if constant.fract() != 0.0 || !(0.0..=2e9).contains(&constant) {
                     return Err(Refusal("a count that is not a whole number"));
                 }
@@ -833,16 +973,24 @@ impl Lowering<'_> {
         let header = self.loop_header();
         let condition = self.condition(condition)?;
         let (body_block, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch { condition, then: body_block, otherwise: exit });
+        self.builder.terminate(Terminator::Branch {
+            condition,
+            then: body_block,
+            otherwise: exit,
+        });
         self.builder.switch_to(body_block);
         self.loops.push((header, exit));
+        let saved = self.enter_control();
         let completed = self.expression(body)?;
+        self.leave_control(saved);
         self.loops.pop();
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(header));
         }
         self.builder.switch_to(exit);
-        Ok(Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))))
+        Ok(Some(
+            self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+        ))
     }
 
     unsafe fn repeat_loop(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
@@ -852,13 +1000,17 @@ impl Lowering<'_> {
         let header = self.loop_header();
         let exit = self.builder.block();
         self.loops.push((header, exit));
+        let saved = self.enter_control();
         let completed = self.expression(body)?;
+        self.leave_control(saved);
         self.loops.pop();
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(header));
         }
         self.builder.switch_to(exit);
-        Ok(Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))))
+        Ok(Some(
+            self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+        ))
     }
 
     /// Inlines a local function or function literal called with `arguments`.
@@ -866,6 +1018,7 @@ impl Lowering<'_> {
         &mut self,
         formals: Sexp,
         body: Sexp,
+        scope_index: usize,
         arguments: &[Local],
     ) -> Result<Option<Local>, Refusal> {
         if self.inlined.len() >= MAX_INLINE_DEPTH {
@@ -873,7 +1026,9 @@ impl Lowering<'_> {
         }
         let formals = rvalues::pairlist_items(formals);
         if formals.len() != arguments.len() {
-            return Err(Refusal("a local function called with another number of arguments"));
+            return Err(Refusal(
+                "a local function called with another number of arguments",
+            ));
         }
         let mut scope = Scope::default();
         for (&(symbol, _), &argument) in formals.iter().zip(arguments) {
@@ -886,6 +1041,14 @@ impl Lowering<'_> {
             self.builder.push(Some(variable), Op::Copy(argument));
             scope.names.insert(symbol, Binding::Value(variable));
         }
+        // The body sees the names of the scope that defines the function, as R's lexical scoping
+        // does, not those of the inlined functions that call it. A `break` or `next` in it does
+        // not reach the caller's loops, and its own branches start at its own top level.
+        let hidden = self
+            .scopes
+            .split_off((scope_index + 1).min(self.scopes.len()));
+        let loops = std::mem::take(&mut self.loops);
+        let control = std::mem::replace(&mut self.control, 0);
         self.scopes.push(scope);
         let exit = self.builder.block();
         // The result's type is the body's, which a `return` before the end must match: the
@@ -899,9 +1062,13 @@ impl Lowering<'_> {
         };
         self.inlined.pop();
         self.scopes.pop();
+        self.scopes.extend(hidden);
+        self.loops = loops;
+        self.control = control;
         let value = value?;
         match value {
             Some(value) => {
+                self.usable(value)?;
                 let result = self.builder.local(self.builder.ty(value));
                 self.builder.push(Some(result), Op::Copy(value));
                 self.builder.terminate(Terminator::Jump(exit));
@@ -917,14 +1084,15 @@ impl Lowering<'_> {
     }
 
     fn int(&mut self, value: i32) -> Local {
-        self.builder.emit(Type::Int, Op::Const(Constant::Int(value)))
+        self.builder
+            .emit(Type::Int, Op::Const(Constant::Int(value)))
     }
 
     fn length(&mut self, value: Local) -> Local {
-        if self.builder.ty(value).items().is_some() {
-            self.builder.emit(Type::Int, Op::Length(value))
-        } else {
-            self.int(1)
+        match self.builder.ty(value) {
+            Type::Null => self.int(0),
+            ty if ty.items().is_some() => self.builder.emit(Type::Int, Op::Length(value)),
+            _ => self.int(1),
         }
     }
 
@@ -990,9 +1158,9 @@ impl Lowering<'_> {
                 let a = self.value(a)?;
                 match self.builder.ty(a) {
                     Type::Lgl | Type::Bool => Ok(self.builder.emit(Type::Lgl, Op::Not(a))),
-                    Type::Vector { item: Item::Lgl, .. } => {
-                        Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorNot(a)))
-                    }
+                    Type::Vector {
+                        item: Item::Lgl, ..
+                    } => Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorNot(a))),
                     _ => Err(Refusal("a `!` of something other than logicals")),
                 }
             }
@@ -1007,12 +1175,25 @@ impl Lowering<'_> {
                     (Type::Lgl | Type::Bool, Type::Lgl | Type::Bool) => Ok(self
                         .builder
                         .emit(Type::Lgl, if and { Op::And(a, b) } else { Op::Or(a, b) })),
-                    (Type::Vector { item: Item::Lgl, .. } | Type::Lgl, Type::Vector { item: Item::Lgl, .. } | Type::Lgl) => {
+                    (
+                        Type::Vector {
+                            item: Item::Lgl, ..
+                        }
+                        | Type::Lgl,
+                        Type::Vector {
+                            item: Item::Lgl, ..
+                        }
+                        | Type::Lgl,
+                    ) => {
                         let a = self.as_vector(a)?;
                         let b = self.as_vector(b)?;
-                        Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorLogic(and, a, b)))
+                        Ok(self
+                            .builder
+                            .emit(Type::vector(Item::Lgl), Op::VectorLogic(and, a, b)))
                     }
-                    _ => Err(Refusal("a logical operator on something other than logicals")),
+                    _ => Err(Refusal(
+                        "a logical operator on something other than logicals",
+                    )),
                 }
             }
             "&&" | "||" => {
@@ -1021,18 +1202,31 @@ impl Lowering<'_> {
                 };
                 let a = self.condition(a)?;
                 let result = self.builder.local(Type::Lgl);
-                let (evaluate, short, join) = (self.builder.block(), self.builder.block(), self.builder.block());
-                let (then, otherwise) = if name == "&&" { (evaluate, short) } else { (short, evaluate) };
-                self.builder.terminate(Terminator::Branch { condition: a, then, otherwise });
-                self.builder.switch_to(short);
-                let constant = self.builder.emit(
-                    Type::Lgl,
-                    Op::Const(Constant::Lgl(i32::from(name == "||"))),
+                let (evaluate, short, join) = (
+                    self.builder.block(),
+                    self.builder.block(),
+                    self.builder.block(),
                 );
+                let (then, otherwise) = if name == "&&" {
+                    (evaluate, short)
+                } else {
+                    (short, evaluate)
+                };
+                self.builder.terminate(Terminator::Branch {
+                    condition: a,
+                    then,
+                    otherwise,
+                });
+                self.builder.switch_to(short);
+                let constant = self
+                    .builder
+                    .emit(Type::Lgl, Op::Const(Constant::Lgl(i32::from(name == "||"))));
                 self.builder.push(Some(result), Op::Copy(constant));
                 self.builder.terminate(Terminator::Jump(join));
                 self.builder.switch_to(evaluate);
+                let saved = self.enter_control();
                 let b = self.condition(b)?;
+                self.leave_control(saved);
                 let b = self.builder.emit(Type::Lgl, Op::Copy(b));
                 self.builder.function.locals[b.0 as usize] = Type::Lgl;
                 self.builder.push(Some(result), Op::Copy(b));
@@ -1045,9 +1239,6 @@ impl Lowering<'_> {
                     return Err(Refusal("a malformed `length`"));
                 };
                 let a = self.value(a)?;
-                if matches!(self.builder.ty(a), Type::Null) {
-                    return Ok(self.int(0));
-                }
                 Ok(self.length(a))
             }
             "seq_len" => {
@@ -1074,10 +1265,14 @@ impl Lowering<'_> {
                 let to = self.value(to)?;
                 let from = self.range_end(from)?;
                 let to = self.range_end(to)?;
-                Ok(self.builder.emit(Type::vector(Item::Int), Op::Range(from, to)))
+                Ok(self
+                    .builder
+                    .emit(Type::vector(Item::Int), Op::Range(from, to)))
             }
             "rep" | "rep.int" | "List.repeat" => {
-                if !arguments.only_names(&["x", "times", "value", "count"]) || arguments.items.len() != 2 {
+                if !arguments.only_names(&["x", "times", "value", "count"])
+                    || arguments.items.len() != 2
+                {
                     return Err(Refusal("a `rep` of an unsupported form"));
                 }
                 let value = arguments
@@ -1098,22 +1293,25 @@ impl Lowering<'_> {
                     .item()
                     .ok_or(Refusal("a `rep` of a vector"))?;
                 let value = self.convert_scalar(value, item)?;
-                let ty = if name == "List.repeat" { Type::List(item) } else { Type::vector(item) };
+                let ty = if name == "List.repeat" {
+                    Type::List(item)
+                } else {
+                    Type::vector(item)
+                };
                 Ok(self.builder.emit(ty, Op::Repeat(value, times)))
             }
             "as.Array" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal("an `as.Array` of an unsupported form"));
                 };
-                // An Array holds no NA. A fresh vector from a constructor holds zeros, empty
-                // strings or `FALSE`, so it converts without the check the interpreter runs.
-                let fresh = a.kind() == SexpType::Language
-                    && a.car().kind() == SexpType::Symbol
-                    && matches!(
-                        &*rvalues::symbol_name(a.car()),
-                        "numeric" | "double" | "integer" | "logical" | "character"
-                    );
+                // An Array holds no NA. A fresh vector from base R's constructor holds zeros,
+                // empty strings or `FALSE`, so it converts without the check the interpreter runs.
                 let a = self.value(a)?;
+                let block = &self.builder.function.blocks[self.builder.current.0 as usize];
+                let fresh = block
+                    .insts
+                    .iter()
+                    .any(|inst| inst.dest == Some(a) && matches!(inst.op, Op::NewVector(..)));
                 match self.builder.ty(a) {
                     Type::Vector { array: true, .. } => Ok(a),
                     Type::Vector { item, array: false } if fresh => {
@@ -1138,7 +1336,9 @@ impl Lowering<'_> {
                     }
                     _ => return Err(Refusal("a vector constructor of an unsupported form")),
                 };
-                Ok(self.builder.emit(Type::vector(item), Op::NewVector(item, count)))
+                Ok(self
+                    .builder
+                    .emit(Type::vector(item), Op::NewVector(item, count)))
             }
             "sum" | "prod" | "mean" | "List.sum" | "List.product" => {
                 let [a] = arguments.exactly(1)?[..] else {
@@ -1154,7 +1354,11 @@ impl Lowering<'_> {
             }
             "max" | "min" => {
                 let operands = arguments.exactly(arguments.items.len())?;
-                let reduce = if name == "max" { Reduce::Max } else { Reduce::Min };
+                let reduce = if name == "max" {
+                    Reduce::Max
+                } else {
+                    Reduce::Min
+                };
                 match operands[..] {
                     [a] => {
                         let a = self.value(a)?;
@@ -1163,10 +1367,16 @@ impl Lowering<'_> {
                     [a, b] => {
                         let a = self.value(a)?;
                         let b = self.value(b)?;
-                        if self.builder.ty(a).items().is_some() || self.builder.ty(b).items().is_some() {
+                        if self.builder.ty(a).items().is_some()
+                            || self.builder.ty(b).items().is_some()
+                        {
                             return Err(Refusal("a `max` of vectors"));
                         }
-                        let op = if name == "max" { Arith::Max } else { Arith::Min };
+                        let op = if name == "max" {
+                            Arith::Max
+                        } else {
+                            Arith::Min
+                        };
                         self.arith(op, a, b)
                     }
                     _ => Err(Refusal("a `max` of an unsupported form")),
@@ -1177,12 +1387,18 @@ impl Lowering<'_> {
                     return Err(Refusal("a malformed `any`"));
                 };
                 let a = self.value(a)?;
-                let reduce = if name == "any" { Reduce::Any } else { Reduce::All };
+                let reduce = if name == "any" {
+                    Reduce::Any
+                } else {
+                    Reduce::All
+                };
                 match self.builder.ty(a) {
                     Type::Lgl => Ok(a),
-                    Type::Vector { item: Item::Lgl, .. } => {
-                        Ok(self.builder.emit(Type::Lgl, Op::Reduce(reduce, Item::Lgl, a)))
-                    }
+                    Type::Vector {
+                        item: Item::Lgl, ..
+                    } => Ok(self
+                        .builder
+                        .emit(Type::Lgl, Op::Reduce(reduce, Item::Lgl, a))),
                     _ => Err(Refusal("an `any` of something other than logicals")),
                 }
             }
@@ -1210,7 +1426,9 @@ impl Lowering<'_> {
                 self.math(op, a)
             }
             "round" => {
-                let value = arguments.get("x", 0).ok_or(Refusal("a `round` without a value"))?;
+                let value = arguments
+                    .get("x", 0)
+                    .ok_or(Refusal("a `round` without a value"))?;
                 let value = self.value(value)?;
                 let value = self.as_double(value)?;
                 match arguments.get("digits", 1) {
@@ -1223,7 +1441,9 @@ impl Lowering<'_> {
                             _ => return Err(Refusal("a `round` to digits that are not a number")),
                         };
                         if self.builder.ty(value).items().is_some() {
-                            Ok(self.builder.emit(self.builder.ty(value), Op::VectorRound(value, digits)))
+                            Ok(self
+                                .builder
+                                .emit(self.builder.ty(value), Op::VectorRound(value, digits)))
                         } else {
                             Ok(self.builder.emit(Type::Dbl, Op::RoundDigits(value, digits)))
                         }
@@ -1250,13 +1470,17 @@ impl Lowering<'_> {
                 if !arguments.only_names(&["x", "width", "flag"]) {
                     return Err(Refusal("a `formatC` of an unsupported form"));
                 }
-                let value = arguments.get("x", 0).ok_or(Refusal("a `formatC` without a value"))?;
+                let value = arguments
+                    .get("x", 0)
+                    .ok_or(Refusal("a `formatC` without a value"))?;
                 let value = self.value(value)?;
                 if self.builder.ty(value) != Type::Int {
                     return Err(Refusal("a `formatC` of something other than an integer"));
                 }
                 let width = match arguments.named("width") {
-                    Some(width) => constant_integer(width).ok_or(Refusal("a computed `formatC` width"))?,
+                    Some(width) => {
+                        constant_integer(width).ok_or(Refusal("a computed `formatC` width"))?
+                    }
                     None => 0,
                 };
                 let zero = match arguments.named("flag") {
@@ -1267,17 +1491,22 @@ impl Lowering<'_> {
                     },
                     None => false,
                 };
-                Ok(self.builder.emit(Type::Str, Op::FormatPadded(value, width, zero)))
+                Ok(self
+                    .builder
+                    .emit(Type::Str, Op::FormatPadded(value, width, zero)))
             }
             "sprintf" => {
                 let [format, value] = arguments.exactly(2)?[..] else {
                     return Err(Refusal("a `sprintf` of an unsupported form"));
                 };
-                let format = constant_string(format).ok_or(Refusal("a computed `sprintf` format"))?;
+                let format =
+                    constant_string(format).ok_or(Refusal("a computed `sprintf` format"))?;
                 let value = self.value(value)?;
                 let ty = self.builder.ty(value);
                 match (format.as_str(), ty) {
-                    ("%d", Type::Int) | ("%s", Type::Int | Type::Dbl | Type::Str) => self.as_string(value),
+                    ("%d", Type::Int) | ("%s", Type::Int | Type::Dbl | Type::Str) => {
+                        self.as_string(value)
+                    }
                     (format, Type::Dbl | Type::Int) => {
                         let decimals = format
                             .strip_prefix("%.")
@@ -1286,7 +1515,9 @@ impl Lowering<'_> {
                             .filter(|&digits| (0..=15).contains(&digits))
                             .ok_or(Refusal("a `sprintf` format the typed core does not know"))?;
                         let value = self.as_double(value)?;
-                        Ok(self.builder.emit(Type::Str, Op::FormatFixed(value, decimals)))
+                        Ok(self
+                            .builder
+                            .emit(Type::Str, Op::FormatFixed(value, decimals)))
                     }
                     _ => Err(Refusal("a `sprintf` format the typed core does not know")),
                 }
@@ -1301,12 +1532,20 @@ impl Lowering<'_> {
                     "toupper" => Text::Upper,
                     _ => Text::Lower,
                 };
-                let result_item = if text == Text::Nchar { Item::Int } else { Item::Str };
+                let result_item = if text == Text::Nchar {
+                    Item::Int
+                } else {
+                    Item::Str
+                };
                 match self.builder.ty(a) {
-                    Type::Str => Ok(self.builder.emit(Type::of_item(result_item), Op::Text(text, a))),
-                    Type::Vector { item: Item::Str, .. } => {
-                        Ok(self.builder.emit(Type::vector(result_item), Op::VectorText(text, a)))
-                    }
+                    Type::Str => Ok(self
+                        .builder
+                        .emit(Type::of_item(result_item), Op::Text(text, a))),
+                    Type::Vector {
+                        item: Item::Str, ..
+                    } => Ok(self
+                        .builder
+                        .emit(Type::vector(result_item), Op::VectorText(text, a))),
                     _ => Err(Refusal("a string function of something other than strings")),
                 }
             }
@@ -1322,9 +1561,11 @@ impl Lowering<'_> {
                 let starts = name == "startsWith";
                 match self.builder.ty(a) {
                     Type::Str => Ok(self.builder.emit(Type::Lgl, Op::Affix(starts, a, affix))),
-                    Type::Vector { item: Item::Str, .. } => {
-                        Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorAffix(starts, a, affix)))
-                    }
+                    Type::Vector {
+                        item: Item::Str, ..
+                    } => Ok(self
+                        .builder
+                        .emit(Type::vector(Item::Lgl), Op::VectorAffix(starts, a, affix))),
                     _ => Err(Refusal("a `startsWith` of something other than strings")),
                 }
             }
@@ -1336,11 +1577,15 @@ impl Lowering<'_> {
                 let index = self.value(index)?;
                 let index = self.integer_index(index)?;
                 let ty = self.builder.ty(vector);
-                let item = ty.items().ok_or(Refusal("an index into something other than a vector"))?;
+                let item = ty
+                    .items()
+                    .ok_or(Refusal("an index into something other than a vector"))?;
                 if name == "[" && matches!(ty, Type::List(_)) {
                     return Err(Refusal("a `[` of a list"));
                 }
-                Ok(self.builder.emit(Type::of_item(item), Op::Get(vector, index)))
+                Ok(self
+                    .builder
+                    .emit(Type::of_item(item), Op::Get(vector, index)))
             }
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             "unlist" => {
@@ -1349,9 +1594,13 @@ impl Lowering<'_> {
                 };
                 let a = self.value(a)?;
                 match self.builder.ty(a) {
-                    Type::List(item) => Ok(self.builder.emit(Type::vector(item), Op::Relabel(a, Type::vector(item)))),
+                    Type::List(item) => Ok(self
+                        .builder
+                        .emit(Type::vector(item), Op::Relabel(a, Type::vector(item)))),
                     Type::Vector { .. } => Ok(a),
-                    _ => Err(Refusal("an `unlist` of something other than a list of scalars")),
+                    _ => Err(Refusal(
+                        "an `unlist` of something other than a list of scalars",
+                    )),
                 }
             }
             _ => {
@@ -1364,17 +1613,27 @@ impl Lowering<'_> {
     /// `lapply(x, f)`, `List.map(x, f)` and `vapply(x, f, value)` with `f` a function literal or
     /// a local function, inlined into a loop over the items.
     unsafe fn map(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
-        let (vector, function, template) = match (name, &arguments.exactly(arguments.items.len())?[..]) {
-            ("vapply", &[vector, function, template]) => (vector, function, Some(template)),
-            ("lapply" | "List.map", &[vector, function]) => (vector, function, None),
-            _ => return Err(Refusal("a map of an unsupported form")),
-        };
-        let (formals, body) = self.function_argument(function)?;
+        let (vector, function, template) =
+            match (name, &arguments.exactly(arguments.items.len())?[..]) {
+                ("vapply", &[vector, function, template]) => (vector, function, Some(template)),
+                ("lapply" | "List.map", &[vector, function]) => (vector, function, None),
+                _ => return Err(Refusal("a map of an unsupported form")),
+            };
+        let (formals, body, scope) = self.function_argument(function)?;
         let vector = self.value(vector)?;
         let ty = self.builder.ty(vector);
-        let item = ty.items().ok_or(Refusal("a map over something that is not a vector"))?;
+        let item = ty
+            .items()
+            .ok_or(Refusal("a map over something that is not a vector"))?;
+        if name == "vapply" && item == Item::Str {
+            // `vapply` names its result by a character input, which the typed vector cannot hold.
+            return Err(Refusal("a `vapply` over strings"));
+        }
         let declared = match template {
-            Some(template) => Some(template_item(template).ok_or(Refusal("a `vapply` template the typed core does not know"))?),
+            Some(template) => Some(
+                template_item(template)
+                    .ok_or(Refusal("a `vapply` template the typed core does not know"))?,
+            ),
             None => None,
         };
         let held = self.builder.emit(ty, Op::Copy(vector));
@@ -1387,14 +1646,23 @@ impl Lowering<'_> {
         let one = self.int(1);
         self.builder.push(Some(counter), Op::Copy(one));
         let header = self.loop_header();
-        let past = self.builder.emit(Type::Lgl, Op::Compare(Compare::Gt, Item::Int, counter, count));
+        let past = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Gt, Item::Int, counter, count),
+        );
         let past = self.builder.emit(Type::Bool, Op::Truth(past));
         let (body_block, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch { condition: past, then: exit, otherwise: body_block });
+        self.builder.terminate(Terminator::Branch {
+            condition: past,
+            then: exit,
+            otherwise: body_block,
+        });
         self.builder.switch_to(body_block);
-        let element = self.builder.emit(Type::of_item(item), Op::Get(held, counter));
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::Get(held, counter));
         let value = self
-            .inline(formals, body, &[element])?
+            .inline(formals, body, scope, &[element])?
             .ok_or(Refusal("a mapped function that never completes"))?;
         let value_item = self
             .builder
@@ -1403,16 +1671,26 @@ impl Lowering<'_> {
             .ok_or(Refusal("a mapped function whose value is not a scalar"))?;
         let result_item = declared.unwrap_or(value_item);
         let value = self.convert_scalar(value, result_item)?;
-        let output_ty = if name == "vapply" { Type::vector(result_item) } else { Type::List(result_item) };
+        let output_ty = if name == "vapply" {
+            Type::vector(result_item)
+        } else {
+            Type::List(result_item)
+        };
         self.builder.function.locals[output.0 as usize] = output_ty;
-        let updated = self.builder.emit(output_ty, Op::Set(output, counter, value));
+        let updated = self
+            .builder
+            .emit(output_ty, Op::Set(output, counter, value));
         self.builder.push(Some(output), Op::Copy(updated));
-        let next = self.builder.emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
+        let next = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
         self.builder.push(Some(counter), Op::Copy(next));
         self.builder.terminate(Terminator::Jump(header));
         // The output is allocated before the loop, now that its type is known.
         self.builder.switch_to(preheader);
-        let fresh = self.builder.emit(Type::vector(result_item), Op::NewVector(result_item, count));
+        let fresh = self
+            .builder
+            .emit(Type::vector(result_item), Op::NewVector(result_item, count));
         let fresh = if name == "vapply" {
             fresh
         } else {
@@ -1424,10 +1702,10 @@ impl Lowering<'_> {
     }
 
     /// The formals and body of a function argument: a literal or a local function.
-    unsafe fn function_argument(&mut self, function: Sexp) -> Result<(Sexp, Sexp), Refusal> {
+    unsafe fn function_argument(&mut self, function: Sexp) -> Result<(Sexp, Sexp, usize), Refusal> {
         if function.kind() == SexpType::Symbol {
             return match self.lookup(function) {
-                Some(Binding::Function(formals, body)) => Ok((formals, body)),
+                Some(Binding::Function(formals, body, scope)) => Ok((formals, body, scope)),
                 _ => Err(Refusal("a mapped function that is not a local function")),
             };
         }
@@ -1437,7 +1715,7 @@ impl Lowering<'_> {
         {
             let parts = rvalues::pairlist_items(function.cdr());
             if let (Some(&(_, formals)), Some(&(_, body))) = (parts.first(), parts.get(1)) {
-                return Ok((formals, body));
+                return Ok((formals, body, self.scopes.len() - 1));
             }
         }
         Err(Refusal("a mapped function that is not a function literal"))
@@ -1451,10 +1729,14 @@ impl Lowering<'_> {
             (true, Some(_)) => return Err(Refusal("a `paste0` with `sep`")),
             (true, None) => String::new(),
             (false, None) => String::from(" "),
-            (false, Some(separator)) => constant_string(separator).ok_or(Refusal("a computed `paste` separator"))?,
+            (false, Some(separator)) => {
+                constant_string(separator).ok_or(Refusal("a computed `paste` separator"))?
+            }
         };
         let collapse = match arguments.named("collapse") {
-            Some(collapse) => Some(constant_string(collapse).ok_or(Refusal("a computed `paste` collapse"))?),
+            Some(collapse) => {
+                Some(constant_string(collapse).ok_or(Refusal("a computed `paste` collapse"))?)
+            }
             None => None,
         };
         let mut parts: SmallVec<[Local; 4]> = SmallVec::new();
@@ -1474,15 +1756,19 @@ impl Lowering<'_> {
             for part in parts {
                 vector_parts.push(self.as_vector(part)?);
             }
-            self.builder
-                .emit(Type::vector(Item::Str), Op::PasteVectors(vector_parts, separator))
+            self.builder.emit(
+                Type::vector(Item::Str),
+                Op::PasteVectors(vector_parts, separator),
+            )
         } else if collapse.is_some() {
             let mut vector_parts = SmallVec::new();
             for part in parts {
                 vector_parts.push(self.as_vector(part)?);
             }
-            self.builder
-                .emit(Type::vector(Item::Str), Op::PasteVectors(vector_parts, separator))
+            self.builder.emit(
+                Type::vector(Item::Str),
+                Op::PasteVectors(vector_parts, separator),
+            )
         } else {
             self.builder.emit(Type::Str, Op::Concat(parts, separator))
         };
@@ -1500,12 +1786,16 @@ impl Lowering<'_> {
         let ty = self.builder.ty(value);
         match ty {
             Type::Vector { .. } => Ok(value),
-            Type::List(item) => Ok(self.builder.emit(Type::vector(item), Op::Relabel(value, Type::vector(item)))),
+            Type::List(item) => Ok(self
+                .builder
+                .emit(Type::vector(item), Op::Relabel(value, Type::vector(item)))),
             _ => {
                 let item = ty.item().ok_or(Refusal("a value that is not a scalar"))?;
                 let value = self.convert_scalar(value, item)?;
                 let one = self.int(1);
-                Ok(self.builder.emit(Type::vector(item), Op::Repeat(value, one)))
+                Ok(self
+                    .builder
+                    .emit(Type::vector(item), Op::Repeat(value, one)))
             }
         }
     }
@@ -1513,22 +1803,36 @@ impl Lowering<'_> {
     /// A number, string or vector of them as strings, as `paste` and `as.character` give them.
     unsafe fn as_string(&mut self, value: Local) -> Result<Local, Refusal> {
         match self.builder.ty(value) {
-            Type::Str | Type::Vector { item: Item::Str, .. } => Ok(value),
+            Type::Str
+            | Type::Vector {
+                item: Item::Str, ..
+            } => Ok(value),
             Type::Int | Type::Dbl => Ok(self.builder.emit(Type::Str, Op::Format(value))),
-            Type::Vector { item: Item::Int | Item::Dbl, .. } => {
-                Ok(self.builder.emit(Type::vector(Item::Str), Op::Coerce(value, Item::Str)))
-            }
+            Type::Vector {
+                item: Item::Int | Item::Dbl,
+                ..
+            } => Ok(self
+                .builder
+                .emit(Type::vector(Item::Str), Op::Coerce(value, Item::Str))),
             _ => Err(Refusal("a value `paste` cannot turn into a string here")),
         }
     }
 
     unsafe fn as_double(&mut self, value: Local) -> Result<Local, Refusal> {
         match self.builder.ty(value) {
-            Type::Dbl | Type::Vector { item: Item::Dbl, .. } => Ok(value),
-            Type::Int | Type::Lgl | Type::Bool => Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value))),
-            Type::Vector { item: Item::Int | Item::Lgl, .. } => {
-                Ok(self.builder.emit(Type::vector(Item::Dbl), Op::Coerce(value, Item::Dbl)))
+            Type::Dbl
+            | Type::Vector {
+                item: Item::Dbl, ..
+            } => Ok(value),
+            Type::Int | Type::Lgl | Type::Bool => {
+                Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value)))
             }
+            Type::Vector {
+                item: Item::Int | Item::Lgl,
+                ..
+            } => Ok(self
+                .builder
+                .emit(Type::vector(Item::Dbl), Op::Coerce(value, Item::Dbl))),
             _ => Err(Refusal("a value that is not a number")),
         }
     }
@@ -1536,13 +1840,20 @@ impl Lowering<'_> {
     unsafe fn reduce(&mut self, reduce: Reduce, value: Local) -> Result<Local, Refusal> {
         let ty = self.builder.ty(value);
         match ty {
-            Type::Int | Type::Dbl if matches!(reduce, Reduce::Sum | Reduce::Prod | Reduce::Max | Reduce::Min) => {
+            Type::Int | Type::Dbl
+                if matches!(
+                    reduce,
+                    Reduce::Sum | Reduce::Prod | Reduce::Max | Reduce::Min
+                ) =>
+            {
                 if reduce == Reduce::Prod && ty == Type::Int {
                     return Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value)));
                 }
                 Ok(value)
             }
-            Type::Lgl if reduce == Reduce::Sum => Ok(self.builder.emit(Type::Int, Op::LglToInt(value))),
+            Type::Lgl if reduce == Reduce::Sum => {
+                Ok(self.builder.emit(Type::Int, Op::LglToInt(value)))
+            }
             Type::Vector { item, .. } => {
                 let (item, result) = match (item, reduce) {
                     (Item::Str, _) => return Err(Refusal("a reduction of strings")),
@@ -1552,7 +1863,11 @@ impl Lowering<'_> {
                     (Item::Int, Reduce::Max | Reduce::Min) => (Item::Int, Type::Int),
                     _ => return Err(Refusal("a reduction the typed core does not know")),
                 };
-                let value = if item == Item::Dbl { self.as_double(value)? } else { value };
+                let value = if item == Item::Dbl {
+                    self.as_double(value)?
+                } else {
+                    value
+                };
                 Ok(self.builder.emit(result, Op::Reduce(reduce, item, value)))
             }
             _ => Err(Refusal("a reduction of something other than numbers")),
@@ -1563,7 +1878,9 @@ impl Lowering<'_> {
         let ty = self.builder.ty(value);
         let keeps_integers = matches!(op, Math::Neg | Math::Abs);
         match ty {
-            Type::Int if keeps_integers => Ok(self.builder.emit(Type::Int, Op::Math(op, Item::Int, value))),
+            Type::Int if keeps_integers => {
+                Ok(self.builder.emit(Type::Int, Op::Math(op, Item::Int, value)))
+            }
             Type::Lgl if keeps_integers => {
                 let value = self.builder.emit(Type::Int, Op::LglToInt(value));
                 Ok(self.builder.emit(Type::Int, Op::Math(op, Item::Int, value)))
@@ -1572,12 +1889,21 @@ impl Lowering<'_> {
                 let value = self.as_double(value)?;
                 Ok(self.builder.emit(Type::Dbl, Op::Math(op, Item::Dbl, value)))
             }
-            Type::Vector { item: Item::Int, .. } if keeps_integers => {
-                Ok(self.builder.emit(Type::vector(Item::Int), Op::VectorMath(op, Item::Int, value)))
-            }
-            Type::Vector { item: Item::Int | Item::Lgl | Item::Dbl, .. } => {
+            Type::Vector {
+                item: Item::Int, ..
+            } if keeps_integers => Ok(self.builder.emit(
+                Type::vector(Item::Int),
+                Op::VectorMath(op, Item::Int, value),
+            )),
+            Type::Vector {
+                item: Item::Int | Item::Lgl | Item::Dbl,
+                ..
+            } => {
                 let value = self.as_double(value)?;
-                Ok(self.builder.emit(Type::vector(Item::Dbl), Op::VectorMath(op, Item::Dbl, value)))
+                Ok(self.builder.emit(
+                    Type::vector(Item::Dbl),
+                    Op::VectorMath(op, Item::Dbl, value),
+                ))
             }
             _ => Err(Refusal("a math function of something other than numbers")),
         }
@@ -1586,8 +1912,17 @@ impl Lowering<'_> {
     unsafe fn arith(&mut self, op: Arith, a: Local, b: Local) -> Result<Local, Refusal> {
         let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
         let numeric_item = |ty: Type| match ty {
-            Type::Int | Type::Lgl | Type::Bool | Type::Vector { item: Item::Int | Item::Lgl, .. } => Some(Item::Int),
-            Type::Dbl | Type::Vector { item: Item::Dbl, .. } => Some(Item::Dbl),
+            Type::Int
+            | Type::Lgl
+            | Type::Bool
+            | Type::Vector {
+                item: Item::Int | Item::Lgl,
+                ..
+            } => Some(Item::Int),
+            Type::Dbl
+            | Type::Vector {
+                item: Item::Dbl, ..
+            } => Some(Item::Dbl),
             _ => None,
         };
         let (Some(ia), Some(ib)) = (numeric_item(ta), numeric_item(tb)) else {
@@ -1603,9 +1938,13 @@ impl Lowering<'_> {
         let b = self.operand(b, item)?;
         let vectors = ta.items().is_some() || tb.items().is_some();
         if vectors {
-            Ok(self.builder.emit(Type::vector(item), Op::VectorArith(op, item, a, b)))
+            Ok(self
+                .builder
+                .emit(Type::vector(item), Op::VectorArith(op, item, a, b)))
         } else {
-            Ok(self.builder.emit(Type::of_item(item), Op::Arith(op, item, a, b)))
+            Ok(self
+                .builder
+                .emit(Type::of_item(item), Op::Arith(op, item, a, b)))
         }
     }
 
@@ -1613,10 +1952,21 @@ impl Lowering<'_> {
     unsafe fn operand(&mut self, value: Local, item: Item) -> Result<Local, Refusal> {
         let ty = self.builder.ty(value);
         match (ty, item) {
-            (Type::Vector { item: Item::Dbl, .. }, Item::Dbl) | (Type::Vector { item: Item::Int, .. }, Item::Int) => Ok(value),
-            (Type::Vector { item: from, .. }, _) if from != item => {
-                Ok(self.builder.emit(Type::vector(item), Op::Coerce(value, item)))
-            }
+            (
+                Type::Vector {
+                    item: Item::Dbl, ..
+                },
+                Item::Dbl,
+            )
+            | (
+                Type::Vector {
+                    item: Item::Int, ..
+                },
+                Item::Int,
+            ) => Ok(value),
+            (Type::Vector { item: from, .. }, _) if from != item => Ok(self
+                .builder
+                .emit(Type::vector(item), Op::Coerce(value, item))),
             (Type::Bool, _) => {
                 let lgl = self.builder.emit(Type::Lgl, Op::Copy(value));
                 self.convert_scalar(lgl, item)
@@ -1630,22 +1980,34 @@ impl Lowering<'_> {
         let vectors = ta.items().is_some() || tb.items().is_some();
         let item_of = |ty: Type| ty.item().or_else(|| ty.items());
         let (Some(ia), Some(ib)) = (item_of(ta), item_of(tb)) else {
-            return Err(Refusal("a comparison of something other than scalars or vectors"));
+            return Err(Refusal(
+                "a comparison of something other than scalars or vectors",
+            ));
         };
         let item = match (ia, ib) {
             (Item::Str, Item::Str) => {
                 if !matches!(op, Compare::Eq | Compare::Ne) {
-                    return Err(Refusal("an ordering comparison of strings, which depends on the locale"));
+                    return Err(Refusal(
+                        "an ordering comparison of strings, which depends on the locale",
+                    ));
                 }
                 Item::Str
             }
-            (Item::Str, _) | (_, Item::Str) => return Err(Refusal("a comparison of a string and a number")),
+            (Item::Str, _) | (_, Item::Str) => {
+                return Err(Refusal("a comparison of a string and a number"));
+            }
             (Item::Dbl, _) | (_, Item::Dbl) => Item::Dbl,
             _ => Item::Int,
         };
-        let (a, b) = if item == Item::Str { (a, b) } else { (self.operand(a, item)?, self.operand(b, item)?) };
+        let (a, b) = if item == Item::Str {
+            (a, b)
+        } else {
+            (self.operand(a, item)?, self.operand(b, item)?)
+        };
         if vectors {
-            Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorCompare(op, item, a, b)))
+            Ok(self
+                .builder
+                .emit(Type::vector(Item::Lgl), Op::VectorCompare(op, item, a, b)))
         } else {
             Ok(self.builder.emit(Type::Lgl, Op::Compare(op, item, a, b)))
         }
@@ -1687,7 +2049,10 @@ unsafe fn constant_integer(value: Sexp) -> Option<i32> {
 }
 
 unsafe fn constant_string(value: Sexp) -> Option<String> {
-    if value.kind() != SexpType::String || rvalues::length(value) != 1 || value.attrib() != rvalues::nil() {
+    if value.kind() != SexpType::String
+        || rvalues::length(value) != 1
+        || value.attrib() != rvalues::nil()
+    {
         return None;
     }
     rvalues::string_at(value, 0).map(|text| text.into_owned())
@@ -1758,7 +2123,14 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
     match &*rvalues::symbol_name(expression.car()) {
         "<-" | "=" | "invisible" | "for" | "while" | "repeat" => true,
         "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
-        "if" => args.iter().skip(1).any(|&(_, branch)| tail_invisible(branch)),
+        // An `if` without `else` whose condition is false gives an invisible `NULL`.
+        "if" => {
+            args.len() < 3
+                || args
+                    .iter()
+                    .skip(1)
+                    .any(|&(_, branch)| tail_invisible(branch))
+        }
         _ => false,
     }
 }
@@ -1773,7 +2145,8 @@ unsafe fn is_base_function(speculation: &Speculation) -> bool {
         // identifies the binding.
         SexpType::Closure => {
             let heap = interp::heap();
-            heap.frame_cell(heap.known().base_namespace, speculation.symbol) == Some(speculation.cell)
+            heap.frame_cell(heap.known().base_namespace, speculation.symbol)
+                == Some(speculation.cell)
         }
         _ => false,
     }

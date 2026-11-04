@@ -86,7 +86,9 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
         // A length-one vector passed where the closure declares a vector is that vector, not a
         // scalar.
         let ty = match ty.item() {
-            Some(item) if interp::annotations::declares_vector(function, position) => Type::vector(item),
+            Some(item) if interp::annotations::declares_vector(function, position) => {
+                Type::vector(item)
+            }
             _ => ty,
         };
         params.push(ty);
@@ -371,7 +373,9 @@ impl Arguments {
                 self.strings.push(string);
                 self.words.extend([string.lo, string.hi]);
             }
-            Type::Vector { item: Item::Str, .. } => {
+            Type::Vector {
+                item: Item::Str, ..
+            } => {
                 let list = string_list(value);
                 if list.is_null() {
                     return false;
@@ -381,7 +385,8 @@ impl Arguments {
             }
             Type::Vector { item, .. } => {
                 let data = value.data();
-                let view = values::ry_list_view(item_kind(item), data, rvalues::length(value) as u64);
+                let view =
+                    values::ry_list_view(item_kind(item), data, rvalues::length(value) as u64);
                 if view.is_null() {
                     return false;
                 }
@@ -398,7 +403,9 @@ impl Arguments {
                     let element = value.element(index);
                     let slot = (*list).data;
                     match item {
-                        Item::Int | Item::Lgl => *(slot as *mut i32).add(index) = rvalues::ints(element)[0],
+                        Item::Int | Item::Lgl => {
+                            *(slot as *mut i32).add(index) = rvalues::ints(element)[0]
+                        }
                         Item::Dbl => *(slot as *mut f64).add(index) = rvalues::reals(element)[0],
                         Item::Str => *(slot as *mut Str).add(index) = str_of(element.element(0)),
                     }
@@ -499,7 +506,11 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                     Item::Dbl => rvalues::scalar_real(*(data as *const f64).add(index))?,
                     Item::Str => {
                         let string = rvalues::alloc(SexpType::String, 1)?;
-                        interp::heap().set_element(string, 0, charsxp_of(*(data as *const Str).add(index))?);
+                        interp::heap().set_element(
+                            string,
+                            0,
+                            charsxp_of(*(data as *const Str).add(index))?,
+                        );
                         string
                     }
                 };
@@ -507,7 +518,9 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
             }
             Ok(vector)
         }
-        Type::Dict { .. } => Err(interp::unwind::error("a typed function returned a dictionary")),
+        Type::Dict { .. } => Err(interp::unwind::error(
+            "a typed function returned a dictionary",
+        )),
     }
 }
 

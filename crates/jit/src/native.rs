@@ -346,10 +346,14 @@ unsafe fn tail_invisible(expression: Sexp) -> bool {
     match &*values::symbol_name(expression.car()) {
         "<-" | "=" | "invisible" => true,
         "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
-        "if" => args
-            .iter()
-            .skip(1)
-            .any(|&(_, branch)| tail_invisible(branch)),
+        // An `if` without `else` whose condition is false gives an invisible `NULL`.
+        "if" => {
+            args.len() < 3
+                || args
+                    .iter()
+                    .skip(1)
+                    .any(|&(_, branch)| tail_invisible(branch))
+        }
         ".ry_match" => args.iter().skip(1).any(|&(_, arm)| {
             arm.kind() == SexpType::Language
                 && values::pairlist_items(arm.cdr())
