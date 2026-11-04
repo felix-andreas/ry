@@ -249,7 +249,17 @@ unsafe fn install_register_s3_methods() -> R<()> {
     if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
         eprintln!("registerS3methods {hash:#018x}");
     }
+    let replacement = || eval_text(include_str!("register_s3_methods.R"), base_namespace());
     if hash != GNU_REGISTER_S3_METHODS {
+        // Base R's lazy-load database is written by a session that already runs the
+        // replacement, so a base R tree built by ry holds the replacement itself.
+        let installed = replacement()?;
+        let mut installed_hash = FNV_OFFSET;
+        stable_hash(installed.car(), &mut installed_hash);
+        stable_hash(crate::bytecode::closure_body(installed), &mut installed_hash);
+        if hash == installed_hash {
+            return Ok(());
+        }
         if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
             return Err(crate::unwind::error(format!(
                 "base R's registerS3methods() hashes to {hash:#018x}, not the GNU R {} \
@@ -259,8 +269,7 @@ unsafe fn install_register_s3_methods() -> R<()> {
         }
         return Ok(());
     }
-    let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
-    eval::define(symbol, replacement, base_namespace())
+    eval::define(symbol, replacement()?, base_namespace())
 }
 
 /// GNU R 4.6.2's `utils:::.osVersion()`, as [`stable_hash`] of its formals and body. Setting
