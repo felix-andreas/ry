@@ -64,10 +64,11 @@ Found by `ORACLE_R=<GNU R 4.6.2>/bin/R oracle compare --engine ry` on the cases 
 The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
 `initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` and `setClass()`
-are native when nothing observable would differ. On `target/s4plain` (2,877 definitions, no
-imports beyond R6) a cold first `new()` costs about 0.9 s (running the definitions 550 ms,
-`cacheMetaData` 131 ms, the cache save 219 ms) and a warm one about 62 ms; the goal is under 100 ms
-cold. Remaining, largest first:
+are native when nothing observable would differ. On `target/s4plain` (2,892 definitions, no
+imports beyond R6) a cold first `new()` costs about 0.85 s (running the definitions 530 ms,
+`cacheMetaData` 125 ms, the cache save 190 ms) and a warm one about 62 ms; the goal is under 100 ms
+cold. A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
+4.5 µs per call. Remaining, largest first:
 
 - `setClassUnion` (297 ms for 25 unions). `setIs` copies basic member classes into the methods
   namespace (`.findOrCopyClass`, `.assignOverBinding`), `completeExtends` runs a nested `setIs` for
@@ -76,9 +77,9 @@ cold. Remaining, largest first:
 - The `setClass` shapes that still bail (`RY_TRACE_METHODS_BAILS=1`): a classRepresentation passed
   in by `setClassUnion`, supers from another package, several `contains` with data parts, and
   classes that are virtual for lack of slots.
-- `cacheMetaData` and `.checkGroupSigLength` (131 ms cold, and the import cost, see "Start-up and
+- `cacheMetaData` and `.checkGroupSigLength` (about 125 ms cold, 45 ms warm, and the import cost, see "Start-up and
   imports are the floor of a warm `ry load`" below).
-- The S4 cache save (219 ms uncompressed, mostly `makeLazyLoadDB` serializing).
+- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.

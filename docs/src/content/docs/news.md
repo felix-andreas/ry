@@ -8,6 +8,10 @@ description: Release announcements and project news
 - **ry needs no GNU R to run R.** `ry run`, `ry load`, `ry test`, `ry document` and `ry install`
   use a build of base R 4.6.2 that ships inside `ry`, so `R.version` reports R 4.6.2. Set
   `R_HOME` to a GNU R installation to emulate that release instead ([Installation](/installation#r)).
+- **S4 definitions run natively.** `setClass()`, `setGeneric()` and `setMethod()` run in Rust for
+  the shapes packages usually write, with results identical to the methods package's R code. On a
+  generated package with 2,892 S4 definitions, the first `new()` after an uncached load takes about
+  0.85 s instead of about 6 s.
 
 ### Known limitations
 

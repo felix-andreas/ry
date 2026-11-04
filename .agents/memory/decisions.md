@@ -7456,7 +7456,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
   (`backlog.md`, "Open: native methods core").
 - **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s with the native
-  queries, and native definitions bring the generated `target/s4plain` package (2,877 definitions)
+  queries, and native definitions bring the generated `target/s4plain` package (2,892 definitions)
   from about 2.2 s of S4 work to about 0.9 s. `crates/oracle/cases/s4__native_core_queries.R` and
   `s4__native_definitions.R` pin the covered functions, including their error messages and calls,
   against GNU R.
