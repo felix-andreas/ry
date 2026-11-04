@@ -7632,3 +7632,21 @@ Each one trades a narrow class of missed errors for a class of false reports see
   re-run of the environment steps fell from about 20 ms to about 10 ms; what remains is GNU R's
   profile (`.expand_R_libs_env_var` about 3 ms, the `Autoloads` attach about 1 ms) and the first
   S3 dispatch of each generic (about 0.3 ms, method lookup through `UseMethod`).
+
+## The start-up image carries the host's environment, and regex automata are built lazily without a full DFA
+
+- **Previous shape.** Every start parsed and evaluated the loader's runtime source to build
+  `tools:ry`, and every compiled regex that needed leftmost-longest or minimal matching built two
+  `regex-automata` meta regexes eagerly, each with a full (dense) DFA. The 17 patterns start-up
+  compiles (8 of them in `.expand_R_libs_env_var`) spent about 29M of 181M instructions there.
+- **Target shape.** `ImageHost::environment` builds the host's environment when the image is
+  written; `Globals::host_environment` roots it and `image::save_state` carries it, and
+  `ry_runtime::attach` takes it from the image (`image::host_environment`) or builds it on a slow
+  start. `Matcher::Automaton` holds a `LazyAutomata` that builds both automata on first use, so a
+  `sub`/`gsub` whose replacement refers to groups (which only runs the backtracking regex) never
+  builds them, and builds them with `dfa(false)`: the full DFA was most of the build cost, and the
+  lazy DFA searches as fast (same ns per string in a standalone benchmark; ry's `gsub`/`grepl`/`sub`
+  micro-benchmark 800 ms against GNU R's 1012 ms). The image reader's primitive reads are
+  `#[inline(always)]` and its "object existed before the load" flags are a bitset.
+- **Impact.** Empty `ry run` 181M to 123M instructions, 52 ms to 43 ms median on the same machine
+  (GNU R `Rscript` 150 ms). The image load (79M) is the remaining floor. Analysis is unaffected.

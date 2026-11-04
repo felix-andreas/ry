@@ -231,6 +231,9 @@ pub struct Globals {
     pub implicit_classes: FxHashMap<(u8, SexpType), Sexp>,
     /// S4 definitions a package loader holds back until a lookup needs them.
     pub deferred_definitions: Vec<crate::methods::DeferredDefinitions>,
+    /// The environment the host's sessions attach beside base R, as a start-up image carries it
+    /// ([`crate::image::ImageHost::environment`]); nil when the session started without one.
+    pub host_environment: Sexp,
 }
 
 impl Globals {
@@ -245,6 +248,7 @@ impl Globals {
             s4_extends: rustc_hash::FxHashMap::default(),
             implicit_classes: rustc_hash::FxHashMap::default(),
             deferred_definitions: Vec::new(),
+            host_environment: Sexp::dangling(),
         }
     }
 
@@ -253,11 +257,13 @@ impl Globals {
         let globals = &mut interp().globals;
         globals.methods_namespace = nil;
         globals.methods_templates = nil;
+        globals.host_environment = nil;
     }
 
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
         marker.mark(self.methods_namespace);
         marker.mark(self.methods_templates);
+        marker.mark(self.host_environment);
         for methods in self.primitive_methods.values() {
             marker.mark(methods.generic);
             marker.mark(methods.methods);

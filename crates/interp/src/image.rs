@@ -14,7 +14,10 @@
 //! image is written.
 
 use {
-    crate::{builtin_libraries, bytecode, data_table, dispatch, format, heap, interp, values::nil},
+    crate::{
+        builtin_libraries, bytecode, data_table, dispatch, format, heap, interp, unwind::R,
+        values::nil,
+    },
     heap::{
         Fixed, ImageError, Relocation,
         image::{Reader, Writer},
@@ -32,9 +35,22 @@ pub struct ImageHost {
     /// position, in an order every process of the build agrees on; or why the host's state
     /// rules out an image.
     pub fixed_objects: unsafe fn() -> Result<Vec<Sexp>, String>,
+    /// Builds the environment the host attaches to every session once base R has started, which
+    /// the image carries built so that a start from it skips building it.
+    pub environment: unsafe fn() -> R<Sexp>,
 }
 
-const MAGIC: &[u8; 8] = b"RYSTART\x03";
+/// The environment the start-up image carried for the host ([`ImageHost::environment`]), or
+/// `None` when the session started without an image.
+///
+/// # Safety
+/// Called on the interpreter's thread once the session has started.
+pub unsafe fn host_environment() -> Option<Sexp> {
+    let environment = interp().globals.host_environment;
+    (environment.kind() == SexpType::Environment).then_some(environment)
+}
+
+const MAGIC: &[u8; 8] = b"RYSTART\x04";
 
 /// The variables that change which namespaces start-up loads or how it loads them, which the
 /// image holds as the fixed build environment loaded them.
@@ -312,6 +328,7 @@ unsafe fn save_state(roots: &mut Vec<Sexp>) -> Vec<u8> {
         roots.len() as u32 - 1
     };
     let globals = &interp().globals;
+    out.u32(root(globals.host_environment));
     out.u32(root(globals.methods_namespace));
     out.u32(root(globals.methods_templates));
     out.u8(u8::from(globals.methods_dispatch));
@@ -387,6 +404,7 @@ unsafe fn restore_state(
     };
 
     let globals = &mut interp().globals;
+    globals.host_environment = root(&mut input)?;
     globals.methods_namespace = root(&mut input)?;
     globals.methods_templates = root(&mut input)?;
     globals.methods_dispatch = input.u8()? != 0;

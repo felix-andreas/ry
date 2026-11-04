@@ -646,7 +646,9 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 
 Interpreter state outside the heap is saved beside it: methods' dispatch globals, templates and
 primitive method tables, the S4 extends and implicit-class tables, the loaded builtin libraries
-and data.table's namespace. Per-process state, such as the command line, the temporary directory,
+and data.table's namespace. The host's environment beside base R (`tools:ry`, the loader's
+runtime functions) is built when the image is written and carried in it, so a start attaches it
+without parsing or evaluating its source. Per-process state, such as the command line, the temporary directory,
 the RNG seed and the start time, is never in the image.
 
 ## Correctness and performance instruments
