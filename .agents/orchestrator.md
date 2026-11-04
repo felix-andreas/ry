@@ -78,7 +78,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 
 | Session | Work | State |
 | --- | --- | --- |
-| session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | #331 merged; dry run: Linux passes, macOS fails building grid (`libintl.h`), Windows fails extracting the R tarball (symlinks) | fixing both in one PR, self-merges, then the dry run is rerun |
+| session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | #334/#336 merged; dry run 3 (e446a96): Linux and macOS green, Windows fails in build-base on an R step (`ARGUMENT 'R' __ignored__`, sysdata2LazyLoadDB) | fixing Windows R-step invocation plus lattice/Recommended, self-merges, then the dry run is rerun |
 | session_0111kWqBiUsHhdvToMM3XK3p (untyped speed) | #304 merged: argument arena, in-place `[[<-`/`[<-` growth, matrix subassign bytecode, a direct PCRE2 binding, in-place textConnection output | bench-real before/after pending; next the `<-`/rep/`[[<-` builtin costs and the JIT matrix store, then re-profile the call-heavy workloads (objects, validation, functional) |
 | session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | merged as #333: first new() on an S4-heavy package 80-87 ms cold, S4 cache deleted, fixes the S4 forcing that #332 broke | done |
 | session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); the vector_arith swing is GNU R and machine noise | done, idle |
@@ -87,8 +87,6 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 | session_0111kWqCm1CEW7RN3igU6Tzk (top CRAN, draft #312) | top-100 run; future and ggplot2 loess gaps in backlog.md | done, unmerged |
 
 Scheduled tasks: session babysit trig_01LuX97P7ZbAg4TRxYu7c1tu (minute 11) is on; the goal reread trig_01AqDtgjMPTkniw7hzX4x4d1 and the dry-run reminder trig_01SHeL8HM3b3p3DHgS7MJF9c are paused to save budget.
-
-Waiting on the user: `git pull && just accept`, which activates `.github/pending/nightly.yml`, the on-demand Linux nightly published as `nightly.<date>.<HHMM>.<sha6>`.
 
 Later: `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN installs are denied by the session network policy.
 
