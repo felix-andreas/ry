@@ -131,6 +131,13 @@ bench-real *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/real/run.py {{ args }}
 
+# Times the test suites of real CRAN packages, pinned in tools/bench/packages/lock.tsv, on GNU R and ry's runtime:
+# `just bench-packages install` fetches and installs the corpus from the rrepo CRAN mirror into .corpus/packages,
+# then `just bench-packages run [--filter NAME] [--repeat N] [--write]`; `just bench-packages lock` re-pins it.
+bench-packages *args:
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/packages/run.py {{ args }}
+
 # Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
 bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd

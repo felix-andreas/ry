@@ -1,0 +1,31 @@
+# Packages whose test suites `run.py` times, from the benchmark dependency set in AGENTS.md. Each
+# line is a package, optionally followed by packages its tests need beyond its Depends, Imports and
+# LinkingTo (its Suggests are otherwise left out, so tests that need one skip on both engines).
+# `run.py lock` resolves these and their dependencies into lock.tsv.
+abind
+assertthat
+brio
+cachem
+cli
+data.table
+DBI
+digest
+foreach
+fs
+jsonlite
+lgr
+lubridate
+memoise
+PerformanceAnalytics
+progress
+purrr
+R6
+rappdirs
+rlang
+snakecase
+stringr
+uuid
+withr
+xts
+zeallot
+zoo
