@@ -173,3 +173,46 @@ version that differs from any of the three.
    release from the workflow that means: each archive holds `ry` alone, with the runtime built in,
    and the Windows archive is `ry-x86_64-pc-windows-gnullvm.zip` (say that `ry run` and `ry load`
    work on Windows only if the Windows smoke test passed).
+9. Append this release's rows to the progress dashboard, as the next section describes.
+
+## The progress dashboard
+
+The progress dashboard (https://claude.ai/artifact/HXbZ3kVWhfrM47TJZ68aq7) charts ry across
+releases: speed and peak memory against GNU R, the cold check, compatibility, the mandate checklist
+and the size of the code base. Its data lives in the dashboard's own store as one JSON file of rows
+per dataset, and a release appends rows to those files. The page itself does not change.
+
+`tools/bench/progress.py` measures a release. Each suite runs GNU R (`Rscript` on `PATH`) in the
+same sitting as the ry binaries it is given, and the dashboard divides each ry figure by the GNU R
+figure of its own sitting, so rows from different machines or days never mix. Each command prints
+a JSON object that maps a dataset id to its new rows:
+
+```bash
+ry=release/X.Y.Z-beta/ry   # the unpacked Linux archive
+export R_HOME=/usr/lib/R   # needed only by a build without an embedded base R
+tools/bench/progress.py programs --release X.Y.Z-beta=$ry > programs.json
+tools/bench/progress.py startup  --release X.Y.Z-beta=$ry > startup.json
+tools/bench/progress.py memory   --release X.Y.Z-beta=$ry > memory.json
+tools/bench/progress.py s4       --release X.Y.Z-beta=$ry > s4.json
+tools/bench/progress.py check    --release X.Y.Z-beta=$ry --project benches/finbench > check.json
+tools/bench/progress.py code     --rev X.Y.Z-beta > code.json
+```
+
+`check` needs the finance code base, from `tools/bench/generate.py --out benches --domain finance
+--lines 300000 --files 500 --ry $ry`. Pass several `--release` flags to measure more than one build
+in the sitting; a build of the checked-out commit is `--release main=target/release/ry`, which is
+recorded as `main@<commit>`. Run on an otherwise idle machine, because the timings are wall times.
+
+| Dataset | Rows come from |
+| --- | --- |
+| `perf_programs`, `perf_startup`, `perf_memory`, `perf_s4`, `perf_check` | `progress.py programs`, `startup`, `memory`, `s4` and `check` |
+| `codebase_loc`, `codebase_tests` | `progress.py code --rev TAG` |
+| `compat_records` | one row per changed figure (oracle cases, corpus package tests, installs, suite tests) from `oracle compare --engine ry`, `oracle packages` and `oracle bench`, with `origin: "recorded"` and a link to where the figure is recorded |
+| `perf_suites`, `check_records` | the same, for suite times against GNU R and the cold check of the three benches |
+| `features`, `deps`, `cran_popular` | edited rows: a feature's status and evidence, a dependency's install and test result, a CRAN package's test result |
+
+To append, an agent with the Artifact tools reads each dataset's document `datasets/<id>` from the
+dashboard's store, downloads the file its `source.url` names, runs
+`tools/bench/progress.py merge programs.json DIR` (which skips rows already present), uploads the
+merged file as an asset, and updates the document's `source` and `updated`. Never edit or drop a
+measured row; a new sitting adds rows, and the dashboard shows each release's newest sitting.
