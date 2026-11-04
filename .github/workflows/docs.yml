@@ -5,7 +5,7 @@
 #
 # Deploys the docs site when started by hand from the Actions tab, since Cloudflare's automatic
 # deploys are off. Deploying `main` updates https://ry-lang.org; any other branch gets a preview. The
-# secrets and the project variable are described in docs/src/content/docs/contributing/releasing.md.
+# secrets and the project variable are described in docs/src/content/docs/development/releasing.md.
 name: Docs
 
 on:
