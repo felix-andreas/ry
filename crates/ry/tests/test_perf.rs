@@ -1,6 +1,7 @@
 //! Budgets that need a release build, so they are ignored by default: the cold check of the
 //! three synthetic benchmark code bases, which generates about 900,000 lines, and the peak memory
-//! and speed of scripts on ry's runtime against GNU R's, which need `libR` built beside the
+//! and speed of scripts on ry's runtime against GNU R's (including the typed `array_dot`
+//! benchmark's peak), which need `libR` built beside the
 //! binary and a GNU R installation, and skip without either:
 //!
 //! ```sh
@@ -156,6 +157,70 @@ fn runtime_peak_memory_stays_near_gnu_r() {
         over.is_empty(),
         "ry's runtime over {RUNTIME_PEAK_RATIO} times GNU R's peak: {}",
         over.join(", ")
+    );
+}
+
+/// The most the typed `array_dot` benchmark's peak resident set may exceed the untyped program's
+/// on GNU R. Both hold two million doubles. The typed program once peaked at more than twice
+/// GNU R's: `List.reverse` boxed each of a million items, and its first call ran on tier 0
+/// because the typed core refused a literal `I64` argument, so every `x[[i]]` boxed a double.
+const TYPED_ARRAY_DOT_PEAK_RATIO: f64 = 1.25;
+
+#[test]
+#[ignore = "needs a release build with libR beside it; run in release with --ignored"]
+fn typed_array_dot_peak_memory_stays_near_gnu_r() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
+    if !binary.with_file_name("libR.so").exists() {
+        eprintln!("skipped: ry's runtime library is not built beside the binary");
+        return;
+    }
+    if !Command::new("Rscript")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipped: no GNU R installation on this machine");
+        return;
+    }
+    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why");
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let script = |variant: &str| {
+        let folder = directory.path().join(variant);
+        fs::create_dir_all(&folder).expect("create the program's directory");
+        let source = programs.join(variant);
+        let harness = fs::read_to_string(source.join("harness.R")).expect("read the harness");
+        let program = fs::read_to_string(source.join("array_dot.R")).expect("read array_dot.R");
+        // The typed program runs in strict mode, which its directory's `ry.toml` turns on.
+        if source.join("ry.toml").exists() {
+            fs::copy(source.join("ry.toml"), folder.join("ry.toml")).expect("copy ry.toml");
+        }
+        let script = folder.join("array_dot.R");
+        fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
+        script
+    };
+    let peak = |command: &mut Command| {
+        let child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run the program");
+        let (exit, peak) = wait_with_peak(child);
+        assert_eq!(exit, 0, "the program failed: {command:?}");
+        peak
+    };
+    let gnu_r = peak(Command::new("Rscript").arg("--vanilla").arg(script("untyped")));
+    let ry = peak(Command::new(binary).args(["run", "--runtime", "ry"]).arg(script("typed")));
+    let ratio = ry as f64 / gnu_r as f64;
+    eprintln!(
+        "array_dot: peak {} MiB typed on ry, {} MiB untyped on GNU R ({ratio:.2}x)",
+        ry / 1024,
+        gnu_r / 1024
+    );
+    assert!(
+        ratio <= TYPED_ARRAY_DOT_PEAK_RATIO,
+        "typed array_dot peaked at {} MiB, over {TYPED_ARRAY_DOT_PEAK_RATIO} times GNU R's {} MiB",
+        ry / 1024,
+        gnu_r / 1024
     );
 }
 

@@ -2998,7 +2998,13 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
     let symbol = value.cdr();
     if matches!(
         symbol.kind(),
-        SexpType::Integer | SexpType::Real | SexpType::Logical
+        SexpType::Integer
+            | SexpType::Real
+            | SexpType::Logical
+            | SexpType::I64
+            | SexpType::String
+            | SexpType::Complex
+            | SexpType::Raw
     ) {
         // A promise of a constant evaluates to the constant itself.
         return Some(symbol);
