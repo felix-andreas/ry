@@ -51,6 +51,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4SetGeneric", 1, do_set_generic),
     internal("ryS4SetMethod", 1, do_set_method),
     internal("ryS4SetClass", 1, do_set_class),
+    internal("ryS4SetClassUnion", 1, do_set_class_union),
 ];
 
 /// The methods package's functions that get a fast path, with the [`stable_hash`] of the formals
@@ -67,6 +68,7 @@ const FAST_PATHS: &[(&str, &[u64])] = &[
     ("setGeneric", &[0xe3ac_b876_a896_9c54]),
     ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
     ("setClass", &[0x3a03_d885_5064_d505]),
+    ("setClassUnion", &[0x432d_d49c_dabe_37aa]),
 ];
 
 /// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
@@ -1920,20 +1922,21 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         for (index, ancestor) in ancestors.iter().enumerate() {
             let to_extension = extensions.element(index);
             let plain = values::scalar_string_charsxp(first.name)?;
-            through_contains.push(combine_extensions(
-                direct,
-                to_extension,
-                plain,
-                values::scalar_string_charsxp(ancestor.name)?,
-                first,
-            )?);
-            through_subclasses.push(combine_extensions(
-                direct,
-                to_extension,
-                first_class_name,
-                values::scalar_string_charsxp(ancestor.name)?,
-                first,
-            )?);
+            let ancestor_name = values::scalar_string_charsxp(ancestor.name)?;
+            let (Some(contained), Some(subclass)) = (
+                combine_extensions(direct, to_extension, plain, ancestor_name, first.definition)?,
+                combine_extensions(
+                    direct,
+                    to_extension,
+                    first_class_name,
+                    ancestor_name,
+                    first.definition,
+                )?,
+            ) else {
+                bail!(skip);
+            };
+            through_contains.push(contained);
+            through_subclasses.push(subclass);
         }
     }
 
@@ -1982,8 +1985,14 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     }
 
     let mut rebuilt = Vec::with_capacity(supers.len());
+    let lookup = |class: Sexp| -> R<Option<Sexp>> {
+        if class.bytes() == name.bytes() {
+            return Ok(None);
+        }
+        cached_class(values::scalar_string_charsxp(class)?)
+    };
     for (known, &direct) in supers.iter().zip(&directs) {
-        let Some(subclasses) = walked_subclasses(known, name, direct)? else {
+        let Some(subclasses) = walked_subclasses(known.definition, name, direct, &lookup)? else {
             bail!(skip);
         };
         rebuilt.push(subclasses);
@@ -2002,12 +2011,24 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         cache_extends(name, contains_list)?;
     }
 
-    let generator_formals = cons_tagged(missing_arg(), nil(), symbols().dots)?;
-    let generator_body = lcons(
+    let generator = class_generator(class_name, package, place)?;
+    if trace_bails() {
+        eprintln!(
+            "methods fast path completes setClass(\"{}\")",
+            String::from_utf8_lossy(name.bytes())
+        );
+    }
+    Ok(generator)
+}
+
+/// `classGeneratorFunction(definition, place)`: the function that calls `new()` for the class.
+unsafe fn class_generator(class_name: Sexp, package: Sexp, place: Sexp) -> R<Sexp> {
+    let formals = cons_tagged(missing_arg(), nil(), symbols().dots)?;
+    let body = lcons(
         install("new")?,
         cons(class_name, cons(symbols().dots, nil())?)?,
     )?;
-    let generator = values::triple(SexpType::Closure, generator_formals, generator_body, place)?;
+    let generator = values::triple(SexpType::Closure, formals, body, place)?;
     for (attribute, value) in [
         ("className", class_name),
         ("package", package),
@@ -2016,13 +2037,617 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(generator, install(attribute)?, value)?;
     }
     generator.set_gp_bits(gp::S4_OBJECT, true);
+    Ok(generator)
+}
+
+/// `setClassUnion(name, members, where)` for a new union of the package `where` belongs to.
+/// Builds the union's definition as `setClass()` does for the `ClassUnionRepresentation` the R
+/// code makes, then does what `setIs(member, name)` does for each member in turn, `NULL` first:
+/// adds the member and its subclasses to the union's subclasses, puts the union among the
+/// superclasses of each of them in the class cache, rebinds the member's definition with the
+/// union among its superclasses where `findClass()` finds it, and, for a member of the same
+/// package, rebinds its subclasses' definitions too, as `.checkSubclasses()` does.
+///
+/// Each member's step reads the definitions the earlier steps changed, so the fast path keeps
+/// its changes in a [`Pending`] overlay and writes them only once every step has succeeded.
+unsafe fn do_set_class_union(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let skip = values::scalar_bool(false)?;
+    if !native_definitions() {
+        bail!(skip);
+    }
+    let Some(class) = forced_arg(frame, "name")? else {
+        bail!(skip);
+    };
+    if !is_plain_name(class) {
+        bail!(skip);
+    }
+    let Some(members) = forced_arg(frame, "members")? else {
+        bail!(skip);
+    };
+    if members.kind() != SexpType::String || members.attrib() != nil() || length(members) == 0 {
+        bail!(skip);
+    }
+    let mut member_names: Vec<Sexp> = (0..length(members))
+        .map(|index| members.element(index))
+        .collect();
+    if !distinct_names(&member_names) {
+        bail!(skip);
+    }
+    if let Some(index) = member_names
+        .iter()
+        .position(|member| member.bytes() == b"NULL")
+    {
+        let null = member_names.remove(index);
+        member_names.insert(0, null);
+    }
+    let Some(place) = forced_arg(frame, "where")? else {
+        bail!(skip);
+    };
+    if place.kind() != SexpType::Environment
+        || place.has_gp(gp::FRAME_LOCKED)
+        || !crate::envir::is_namespace(place)
+    {
+        bail!(skip);
+    }
+    let Some(package) = package_name(place)? else {
+        bail!(skip);
+    };
+    let registry = crate::heap().known().namespace_registry;
+    if quiet_value(install_text(package.element(0))?, registry)? != Some(place) {
+        bail!(skip);
+    }
+    if !cache_on_assign(place)? || duplicate_classes()? {
+        bail!(skip);
+    }
+    let Some(class_table) = methods_value(".classTable")? else {
+        bail!(skip);
+    };
+    if class_table.kind() != SexpType::Environment
+        || crate::methods::cached_class_definition(class, class_table)? != nil()
+    {
+        bail!(skip);
+    }
+    let name = class.element(0);
+    let meta = class_meta_symbol(name.bytes())?;
+    if bound_from(meta, place) || !assignable(place, meta) {
+        bail!(skip);
+    }
+    if member_names
+        .iter()
+        .any(|member| member.bytes() == name.bytes())
+    {
+        bail!(skip);
+    }
+    if !definition_caches(name.bytes(), &member_names, false)?
+        || !initialize_cached(b"ClassUnionRepresentation")?
+    {
+        bail!(skip);
+    }
+    let (Some(union_class), Some(extension_class)) = (
+        cached_class(values::scalar_string("ClassUnionRepresentation")?)?,
+        cached_class(values::scalar_string("SClassExtension")?)?,
+    ) else {
+        bail!(skip);
+    };
+    let package_symbol = install("package")?;
+    let class_name = values::scalar_string_charsxp(name)?;
+    values::set_attr(class_name, package_symbol, package)?;
+
+    // `makeClassRepresentation(name, package = package)` wrapped as a union, which `setClass()`
+    // completes unchanged and binds.
+    let definition = crate::methods::new_object(union_class)?;
+    crate::heap().root(definition);
+    let version = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
+    crate::heap().root(version);
+    for (slot_name, value) in [
+        ("className", class_name),
+        ("slots", values::alloc(SexpType::List, 0)?),
+        ("contains", values::alloc(SexpType::List, 0)?),
+        ("prototype", nil()),
+        ("virtual", values::scalar_bool(true)?),
+        ("validity", nil()),
+        ("access", values::alloc(SexpType::List, 0)?),
+        ("package", package),
+        ("versionKey", version),
+        ("sealed", values::scalar_bool(false)?),
+        ("subclasses", values::alloc(SexpType::List, 0)?),
+    ] {
+        crate::subset::assign_slot(definition, install(slot_name)?, value)?;
+    }
+    let mut pending = Pending::default();
+    pending.bind(place, meta, definition);
+    pending.cache(name, definition, false);
+
+    for &member in &member_names {
+        if !add_union_member(
+            &mut pending,
+            member,
+            name,
+            package,
+            place,
+            extension_class,
+        )? {
+            bail!(skip);
+        }
+    }
+
+    pending.commit(class_table)?;
+    let generator = class_generator(class_name, package, place)?;
     if trace_bails() {
         eprintln!(
-            "methods fast path completes setClass(\"{}\")",
+            "methods fast path completes setClassUnion(\"{}\")",
             String::from_utf8_lossy(name.bytes())
         );
     }
     Ok(generator)
+}
+
+/// Changes to class definitions that a definition fast path has made but not yet written: the
+/// bindings of class metadata objects and the entries of the class cache, in the order the R
+/// code makes them. Reads go through the overlay, so a later step sees an earlier one's changes.
+#[derive(Default)]
+struct Pending {
+    bindings: Vec<(Sexp, Sexp, Sexp)>,
+    /// A class name, its definition, and whether `.cacheClass()` also calls `.cache_class()`,
+    /// which it does when it replaces an entry.
+    cached: Vec<(Sexp, Sexp, bool)>,
+}
+
+impl Pending {
+    unsafe fn bind(&mut self, env: Sexp, symbol: Sexp, definition: Sexp) {
+        crate::heap().root(definition);
+        self.bindings.push((env, symbol, definition));
+    }
+
+    unsafe fn cache(&mut self, name: Sexp, definition: Sexp, extends: bool) {
+        crate::heap().root(definition);
+        self.cached.push((name, definition, extends));
+    }
+
+    /// `getClassDef(name)` when the class cache answers it.
+    unsafe fn class(&self, name: Sexp) -> R<Option<Sexp>> {
+        if let Some(&(_, definition, _)) = self
+            .cached
+            .iter()
+            .rev()
+            .find(|entry| entry.0.bytes() == name.bytes())
+        {
+            return Ok(Some(definition));
+        }
+        cached_class(values::scalar_string_charsxp(name)?)
+    }
+
+    /// The value bound to `symbol` in `env`'s own frame.
+    unsafe fn bound(&self, env: Sexp, symbol: Sexp) -> R<Option<Sexp>> {
+        if let Some(&(_, _, definition)) = self
+            .bindings
+            .iter()
+            .rev()
+            .find(|entry| entry.0 == env && entry.1 == symbol)
+        {
+            return Ok(Some(definition));
+        }
+        quiet_value(symbol, env)
+    }
+
+    /// Writes the changes. A locked binding is assigned over, as `assignClassDef(force = TRUE)`
+    /// does, and stays locked.
+    unsafe fn commit(self, class_table: Sexp) -> R<()> {
+        for (env, symbol, definition) in self.bindings {
+            match crate::heap().frame_cell(env, symbol) {
+                Some(cell) if cell.has_gp(gp::BINDING_LOCKED) => {
+                    cell.set_gp_bits(gp::BINDING_LOCKED, false);
+                    let written = crate::heap().set_binding_value(cell, definition);
+                    cell.set_gp_bits(gp::BINDING_LOCKED, true);
+                    written.map_err(|error| crate::unwind::error(error.to_string()))?;
+                }
+                _ => eval::define(symbol, definition, env)?,
+            }
+        }
+        for (name, definition, extends) in self.cached {
+            eval::define(install_text(name)?, definition, class_table)?;
+            if extends {
+                cache_extends(name, slot(definition, "contains")?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `setIs(member, union, where = place)` for a member of a union `setClassUnion()` is defining,
+/// recorded in `pending`. `false` when the step takes a shape the native core does not build.
+unsafe fn add_union_member(
+    pending: &mut Pending,
+    member: Sexp,
+    union: Sexp,
+    package: Sexp,
+    place: Sexp,
+    extension_class: Sexp,
+) -> R<bool> {
+    let Some(union_definition) = pending.class(union)? else {
+        bail!(false);
+    };
+    let Some(member_definition) = pending.class(member)? else {
+        bail!(false);
+    };
+    let member_contains = slot(member_definition, "contains")?;
+    let union_subclasses = slot(union_definition, "subclasses")?;
+    // A member that already extends the union, through an earlier member, has a relation for
+    // `setIs()` to revise.
+    if element(member_contains, union.bytes()).is_some()
+        || element(union_subclasses, member.bytes()).is_some()
+        || !matches!(
+            values::class_attr(member_definition).element(0).bytes(),
+            b"classRepresentation"
+        )
+    {
+        bail!(false);
+    }
+    let member_package = slot(member_definition, "package")?;
+    let member_class_name = values::scalar_string_charsxp(member)?;
+    values::set_attr(member_class_name, install("package")?, member_package)?;
+    let union_super = Super {
+        name: union,
+        definition: union_definition,
+    };
+    let extension = direct_extension(
+        extension_class,
+        member_class_name,
+        package,
+        &[],
+        &union_super,
+        place,
+    )?;
+    let lookup = |class: Sexp| pending.class(class);
+    let Some(subclasses) = walked_subclasses(union_definition, member, extension, &lookup)? else {
+        bail!(false);
+    };
+    let union_updated = values::shallow_duplicate(union_definition)?;
+    crate::heap().root(union_updated);
+    crate::subset::assign_slot(union_updated, install("subclasses")?, named_list(&subclasses)?)?;
+    // The union's prototype: `NULL` once `NULL` is a member, otherwise the first member's.
+    let member_virtual = is_true(slot(member_definition, "virtual")?);
+    if member.bytes() == b"NULL" || element(member_contains, b"NULL").is_some() {
+        crate::subset::assign_slot(union_updated, install("prototype")?, nil())?;
+    } else if slot(union_definition, "prototype")? == nil()
+        && !subclasses.iter().any(|entry| entry.0.bytes() == b"NULL")
+    {
+        let prototype = if member_virtual {
+            slot(member_definition, "prototype")?
+        } else {
+            crate::methods::new_object(member_definition)?
+        };
+        crate::subset::assign_slot(union_updated, install("prototype")?, prototype)?;
+    }
+
+    // `assignClassDef(union, ...)`: binds it, then `.recacheSubclasses()` puts the union among
+    // the superclasses of each subclass in the cache, ordered by distance.
+    pending.bind(place, class_meta_symbol(union.bytes())?, union_updated);
+    for &(subclass, subclass_extension) in &subclasses {
+        let Some(subclass_definition) = pending.class(subclass)? else {
+            bail!(false);
+        };
+        let mut contains = list_entries(slot(subclass_definition, "contains")?);
+        if contains.iter().any(|entry| entry.0.bytes() == union.bytes()) {
+            continue;
+        }
+        contains.push((union, subclass_extension));
+        sort_by_distance(&mut contains)?;
+        let recached = values::shallow_duplicate(subclass_definition)?;
+        crate::heap().root(recached);
+        crate::subset::assign_slot(recached, install("contains")?, named_list(&contains)?)?;
+        pending.cache(subclass, recached, true);
+    }
+    pending.cache(union, union_updated, true);
+
+    // `.findOrCopyClass(member)`: the first environment from `place` outward that binds the
+    // member's metadata object, of the member's package when more than one does.
+    let member_meta = class_meta_symbol(member.bytes())?;
+    let mut homes = Vec::new();
+    let mut frame = place;
+    while frame != values::empty_env() {
+        if crate::heap().frame_cell(frame, member_meta).is_some() {
+            homes.push(frame);
+        }
+        frame = frame.enclosure();
+    }
+    let home = if homes.len() == 1 {
+        homes.first().copied()
+    } else {
+        let mut found = None;
+        for &frame in &homes {
+            let Some(bound) = pending.bound(frame, member_meta)? else {
+                bail!(false);
+            };
+            if !bound.has_gp(gp::S4_OBJECT) {
+                bail!(false);
+            }
+            if slot_text(bound, "package")? == member_package.element(0).bytes() {
+                found = Some(frame);
+                break;
+            }
+        }
+        found
+    };
+    let Some(home) = home else {
+        bail!(false);
+    };
+    if !cache_on_assign(home)? {
+        bail!(false);
+    }
+
+    // `.newDirectSuperclass()` appends the union, which has no superclasses, and
+    // `completeExtends()` walks the superclasses again.
+    if get_attr(member_contains, install("conflicts")?) != nil() {
+        bail!(false);
+    }
+    let mut directs: Vec<(Sexp, Sexp)> = Vec::new();
+    for (superclass, superclass_extension) in list_entries(member_contains) {
+        if length(slot(superclass_extension, "by")?) == 0 {
+            directs.push((superclass, superclass_extension));
+        }
+    }
+    directs.push((union, extension));
+    let mut contains = directs.clone();
+    for &(superclass, superclass_extension) in &directs {
+        let Some(by_definition) = pending.class(superclass)? else {
+            bail!(false);
+        };
+        let ancestors = slot(by_definition, "contains")?;
+        if get_attr(ancestors, install("conflicts")?) != nil() {
+            bail!(false);
+        }
+        let plain = values::scalar_string_charsxp(superclass)?;
+        for (ancestor, ancestor_extension) in list_entries(ancestors) {
+            if directs
+                .iter()
+                .any(|known| known.0.bytes() == ancestor.bytes())
+            {
+                continue;
+            }
+            let Some(combined) = combine_extensions(
+                superclass_extension,
+                ancestor_extension,
+                plain,
+                values::scalar_string_charsxp(ancestor)?,
+                by_definition,
+            )?
+            else {
+                bail!(false);
+            };
+            contains.push((ancestor, combined));
+        }
+    }
+    sort_by_distance(&mut contains)?;
+    if contains.iter().any(|entry| entry.0.bytes() == member.bytes()) {
+        bail!(false);
+    }
+    let contains_names: Vec<Sexp> = contains.iter().map(|entry| entry.0).collect();
+    if !distinct_names(&contains_names) {
+        let Some(removed) = resolved_superclasses(pending, member, &directs, &contains)? else {
+            bail!(false);
+        };
+        let mut position = 0;
+        contains.retain(|_| {
+            position += 1;
+            !removed.contains(&(position - 1))
+        });
+    }
+    // `.S3Extends()`, for an extension of an S3 class with slots of its own, rewrites the
+    // coerce and replace methods of each indirect superclass that is itself a registered S3
+    // class listed in its own `.S3Class`.
+    if contains.iter().any(|entry| entry.0.bytes() == b"oldClass")
+        && length(slot(member_definition, "slots")?) > 1
+    {
+        for &(superclass, superclass_extension) in &contains {
+            if values::as_real_scalar(slot(superclass_extension, "distance")?) == 1.0 {
+                continue;
+            }
+            let Some(superclass_definition) = pending.class(superclass)? else {
+                bail!(false);
+            };
+            if element(slot(superclass_definition, "slots")?, b".S3Class").is_some() {
+                let s3_class = get_attr(
+                    slot(superclass_definition, "prototype")?,
+                    install(".S3Class")?,
+                );
+                if s3_class.kind() == SexpType::String
+                    && (0..length(s3_class))
+                        .any(|index| s3_class.element(index).bytes() == superclass.bytes())
+                {
+                    bail!(false);
+                }
+            }
+        }
+    }
+    let member_updated = values::shallow_duplicate(member_definition)?;
+    crate::heap().root(member_updated);
+    crate::subset::assign_slot(member_updated, install("contains")?, named_list(&contains)?)?;
+
+    // `completeExtends()` calls `setIs()` for each subclass of the member that does not extend
+    // the union yet; the recaching above gave every one the union.
+    let member_subclasses = list_entries(slot(member_definition, "subclasses")?);
+    for &(subclass, _) in &member_subclasses {
+        if !subclasses
+            .iter()
+            .any(|entry| entry.0.bytes() == subclass.bytes())
+        {
+            bail!(false);
+        }
+    }
+
+    let same_package = member_package.element(0).bytes() == package.element(0).bytes()
+        && length(member_package) == 1;
+    if same_package {
+        // `.checkSubclasses()`: the member's subclasses of the same package get the union in
+        // their bound definitions, appended.
+        for &(subclass, subclass_extension) in &member_subclasses {
+            if subclass.bytes() == union.bytes() {
+                continue;
+            }
+            let subclass_package = get_attr(slot(subclass_extension, "subClass")?, install("package")?);
+            if subclass_package.kind() != SexpType::String
+                || length(subclass_package) != 1
+                || subclass_package.element(0).bytes() != member_package.element(0).bytes()
+            {
+                continue;
+            }
+            let subclass_meta = class_meta_symbol(subclass.bytes())?;
+            if crate::heap().frame_cell(place, subclass_meta).is_none() {
+                bail!(false);
+            }
+            let Some(bound) = pending.bound(place, subclass_meta)? else {
+                bail!(false);
+            };
+            let Some(union_extension) = element(slot(union_updated, "subclasses")?, subclass.bytes())
+            else {
+                bail!(false);
+            };
+            let mut bound_contains = list_entries(slot(bound, "contains")?);
+            if bound_contains.iter().any(|entry| entry.0.bytes() == union.bytes()) {
+                continue;
+            }
+            if !is_plain_representation(bound) || pending.class(subclass)?.is_none() {
+                bail!(false);
+            }
+            bound_contains.push((union, union_extension));
+            let rebound = values::shallow_duplicate(bound)?;
+            crate::heap().root(rebound);
+            crate::subset::assign_slot(rebound, install("contains")?, named_list(&bound_contains)?)?;
+            pending.bind(place, subclass_meta, rebound);
+            pending.cache(subclass, rebound, true);
+        }
+    } else {
+        // `.recacheSubclasses(member)` puts the member among its subclasses' superclasses, where
+        // it already is.
+        for &(subclass, _) in &member_subclasses {
+            let Some(subclass_definition) = pending.class(subclass)? else {
+                bail!(false);
+            };
+            if element(slot(subclass_definition, "contains")?, member.bytes()).is_none() {
+                bail!(false);
+            }
+        }
+    }
+    pending.bind(home, member_meta, member_updated);
+    pending.cache(member, member_updated, true);
+    Ok(true)
+}
+
+/// `.resolveSuperclasses()`: the positions in `contains`, sorted by distance, to drop so that
+/// each superclass appears once, choosing the first combination of kept occurrences whose order
+/// agrees with the superclass order of every direct superclass. `None` when there is no such
+/// combination, which GNU R records as a conflict, or when a conditional extension takes part.
+unsafe fn resolved_superclasses(
+    pending: &Pending,
+    member: Sexp,
+    directs: &[(Sexp, Sexp)],
+    contains: &[(Sexp, Sexp)],
+) -> R<Option<Vec<usize>>> {
+    let is_simple = |extension: Sexp| {
+        matches!(values::class_attr(extension).element(0).bytes(), b"SClassExtension")
+    };
+    if !contains.iter().all(|entry| is_simple(entry.1)) {
+        return Ok(None);
+    }
+    // Each duplicated name, in order of its first occurrence, with all its positions.
+    let mut duplicates: Vec<Vec<usize>> = Vec::new();
+    for (index, entry) in contains.iter().enumerate() {
+        if contains[..index]
+            .iter()
+            .any(|earlier| earlier.0.bytes() == entry.0.bytes())
+        {
+            continue;
+        }
+        let positions: Vec<usize> = (index..contains.len())
+            .filter(|&later| contains[later].0.bytes() == entry.0.bytes())
+            .collect();
+        if positions.len() > 1 {
+            duplicates.push(positions);
+        }
+    }
+    let mut orderings: Vec<Vec<Sexp>> = Vec::new();
+    for (index, &(direct, extension)) in directs.iter().enumerate() {
+        if values::as_real_scalar(slot(extension, "distance")?) != 1.0
+            || directs[..index]
+                .iter()
+                .any(|earlier| earlier.0.bytes() == direct.bytes())
+        {
+            continue;
+        }
+        let ordering = match pending.class(direct)? {
+            Some(definition) => {
+                let mut names = Vec::new();
+                for (name, superclass_extension) in list_entries(slot(definition, "contains")?) {
+                    if is_simple(superclass_extension) {
+                        names.push(name);
+                    }
+                }
+                names
+            }
+            None => vec![direct],
+        };
+        orderings.push(ordering);
+    }
+    let combinations = duplicates
+        .iter()
+        .try_fold(1usize, |product, positions| product.checked_mul(positions.len()));
+    let Some(combinations) = combinations.filter(|&count| count <= 4096) else {
+        return Ok(None);
+    };
+    // `.choosePos()` enumerates the combinations with the first duplicate varying fastest.
+    for combination in 0..combinations {
+        let mut removed = Vec::new();
+        let mut rest = combination;
+        for positions in &duplicates {
+            let kept = rest % positions.len();
+            rest /= positions.len();
+            removed.extend(
+                positions
+                    .iter()
+                    .enumerate()
+                    .filter(|&(index, _)| index != kept)
+                    .map(|(_, &position)| position),
+            );
+        }
+        let names: Vec<Sexp> = std::iter::once(member)
+            .chain(
+                contains
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !removed.contains(index))
+                    .map(|(_, entry)| entry.0),
+            )
+            .collect();
+        let mut consistent = true;
+        for ordering in &orderings {
+            let mut previous = 0;
+            for name in ordering {
+                let Some(position) = names.iter().position(|known| known.bytes() == name.bytes())
+                else {
+                    return Ok(None);
+                };
+                if position < previous {
+                    consistent = false;
+                }
+                previous = position;
+            }
+        }
+        if consistent {
+            return Ok(Some(removed));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the default `initialize` method is cached for objects of the class `label`, so that
+/// `new()` of that class leaves the dispatch tables as they are.
+unsafe fn initialize_cached(label: &[u8]) -> R<bool> {
+    let Some((_, all_table)) = generic_tables("initialize")? else {
+        return Ok(false);
+    };
+    Ok(quiet_value(values::install_bytes(label)?, all_table)?.is_some())
 }
 
 /// A class the new one extends, by name, with its definition.
@@ -2077,55 +2702,63 @@ unsafe fn plain_extension(extension: Sexp) -> R<bool> {
         && is_false(slot(extension, "dataPart")?))
 }
 
-/// The subclass list of `known` once the class `name` is its direct subclass through
-/// `direct`, as `setIs()` builds it with `completeSubclasses()`: it drops the indirect entries,
-/// then `.walkClassGraph()` adds each direct subclass's own subclasses that are not direct ones,
-/// combined with `.combineExtends()`, and orders the list by distance. Every indirect entry is
-/// rebuilt, and a class reached through two direct subclasses appears twice. `None` when an
-/// entry is not a plain extension, whose combination the native core does not build.
+/// The subclass list of the class `definition` defines once the class `name` is its direct
+/// subclass through `direct`, as `setIs()` builds it with `completeSubclasses()`: it drops the
+/// indirect entries, then `.walkClassGraph()` adds each direct subclass's own subclasses that are
+/// not direct ones, combined with `.combineExtends()`, and orders the list by distance. Every
+/// indirect entry is rebuilt, and a class reached through two direct subclasses appears twice.
+/// `lookup` gives the definition `getClassDef()` finds for a class name; a `name` that `lookup`
+/// does not know is a new class, without subclasses. `None` when a definition is unknown or an
+/// extension is one the native core does not combine.
 unsafe fn walked_subclasses(
-    known: &Super,
+    definition: Sexp,
     name: Sexp,
     direct: Sexp,
+    lookup: &dyn Fn(Sexp) -> R<Option<Sexp>>,
 ) -> R<Option<Vec<(Sexp, Sexp)>>> {
-    let mut directs = Vec::new();
-    for (subclass, extension) in list_entries(slot(known.definition, "subclasses")?) {
-        if !plain_extension(extension)? {
-            return Ok(None);
-        }
+    // `subclasses[[name]] <- direct` replaces an entry in place or appends one.
+    let mut entries = list_entries(slot(definition, "subclasses")?);
+    match entries.iter_mut().find(|entry| entry.0.bytes() == name.bytes()) {
+        Some(entry) => entry.1 = direct,
+        None => entries.push((name, direct)),
+    }
+    let mut directs: Vec<(Sexp, Sexp)> = Vec::new();
+    for (subclass, extension) in entries {
         if length(slot(extension, "by")?) == 0 {
             directs.push((subclass, extension));
         }
     }
-    directs.push((name, direct));
-    let class_name = slot(known.definition, "className")?;
+    let class_name = slot(definition, "className")?;
     let mut walked = directs.clone();
     for &(subclass, extension) in &directs {
-        if subclass.bytes() == name.bytes() {
-            continue;
-        }
-        let Some(definition) = cached_class(values::scalar_string_charsxp(subclass)?)? else {
-            return Ok(None);
-        };
-        let by = Super {
-            name: subclass,
-            definition,
+        let by_definition = match lookup(subclass)? {
+            Some(by_definition) => by_definition,
+            None if subclass.bytes() == name.bytes() => continue,
+            None => return Ok(None),
         };
         let plain = values::scalar_string_charsxp(subclass)?;
-        for (deeper, deeper_extension) in list_entries(slot(definition, "subclasses")?) {
+        for (deeper, deeper_extension) in list_entries(slot(by_definition, "subclasses")?) {
             if directs
                 .iter()
                 .any(|known| known.0.bytes() == deeper.bytes())
             {
                 continue;
             }
-            if !plain_extension(deeper_extension)? {
+            // `.walkClassGraph()` stops at a class that would become its own subclass.
+            if deeper.bytes() == class_name.element(0).bytes() {
                 return Ok(None);
             }
-            walked.push((
-                deeper,
-                combine_extensions(deeper_extension, extension, plain, class_name, &by)?,
-            ));
+            let Some(combined) = combine_extensions(
+                deeper_extension,
+                extension,
+                plain,
+                class_name,
+                by_definition,
+            )?
+            else {
+                return Ok(None);
+            };
+            walked.push((deeper, combined));
         }
     }
     sort_by_distance(&mut walked)?;
@@ -2313,44 +2946,74 @@ unsafe fn direct_extension(
     Ok(extension)
 }
 
-/// `.combineExtends(by_extension, to_extension, by, to, TRUE)` for two simple extensions that
-/// are not to a data part: from the new class through `known` (named `by`) to the class `to`, a
-/// character vector kept with its attributes.
+/// `.combineExtends(by_extension, to_extension, by, to, TRUE)`: the extension from the subclass
+/// of `by_extension` through the class `by` (whose definition is `by_definition`) to the class
+/// `to` of `to_extension`. `by` and `to` are character vectors kept with their attributes. `None`
+/// for a conditional extension, or a simple one into a data part, which the native core does not
+/// combine.
 unsafe fn combine_extensions(
     by_extension: Sexp,
     to_extension: Sexp,
     by: Sexp,
     to: Sexp,
-    known: &Super,
-) -> R<Sexp> {
+    by_definition: Sexp,
+) -> R<Option<Sexp>> {
+    for extension in [by_extension, to_extension] {
+        let class = values::class_attr(extension);
+        if length(class) != 1 || class.element(0).bytes() != b"SClassExtension" {
+            return Ok(None);
+        }
+    }
     let from = install("from")?;
     let to_coerce = slot(to_extension, "coerce")?;
     let to_body = crate::bytecode::closure_body(to_coerce);
     let by_body = crate::bytecode::closure_body(slot(by_extension, "coerce")?);
-    let coerce_body = if by_body == from && to_body == from {
-        from
+    let both_simple = simple(by_extension)? && simple(to_extension)?;
+    let coerce = if both_simple {
+        let body = if is_true(slot(by_extension, "dataPart")?) {
+            template(Template::CombineCoerceDataPart, &[("EXPR", to_body)])?
+        } else if is_true(slot(to_extension, "dataPart")?) {
+            return Ok(None);
+        } else if by_body == from && to_body == from {
+            from
+        } else {
+            template(Template::CombineCoerce, &[("E1", by_body), ("E2", to_body)])?
+        };
+        values::triple(SexpType::Closure, to_coerce.car(), body, to_coerce.tag())?
+    } else if by_body != from {
+        let body = template(Template::CombineCoerceAs, &[("BY", by), ("TO", to_body)])?;
+        values::triple(SexpType::Closure, to_coerce.car(), body, to_coerce.tag())?
     } else {
-        template(Template::CombineCoerce, &[("E1", by_body), ("E2", to_body)])?
+        to_coerce
     };
-    let coerce = values::triple(
-        SexpType::Closure,
-        to_coerce.car(),
-        coerce_body,
-        to_coerce.tag(),
-    )?;
+    let to_test = slot(to_extension, "test")?;
+    let by_test_body = crate::bytecode::closure_body(slot(by_extension, "test")?);
+    let test = if is_true(by_test_body) {
+        to_test
+    } else if is_true(crate::bytecode::closure_body(to_test)) {
+        values::triple(SexpType::Closure, to_test.car(), by_test_body, to_test.tag())?
+    } else {
+        return Ok(None);
+    };
     let by_replace = slot(by_extension, "replace")?;
     let by_replace_body = crate::bytecode::closure_body(by_replace);
-    let replace_body = if is_true(slot(known.definition, "virtual")?) {
-        let skip_replace = slot(to_extension, "replace")?;
-        template(
-            Template::CombineReplaceVirtual,
-            &[
-                ("BODY", crate::bytecode::closure_body(skip_replace)),
-                ("TO", slot(by_extension, "subClass")?),
-            ],
-        )?
+    let replace = if is_true(slot(by_definition, "virtual")?) {
+        // The replace method goes through the extension from `by` to `to`, when `by` has one.
+        match element(slot(by_definition, "contains")?, to.element(0).bytes()) {
+            Some(skip) => {
+                let body = template(
+                    Template::CombineReplaceVirtual,
+                    &[
+                        ("BODY", crate::bytecode::closure_body(slot(skip, "replace")?)),
+                        ("TO", slot(by_extension, "subClass")?),
+                    ],
+                )?;
+                values::triple(SexpType::Closure, by_replace.car(), body, by_replace.tag())?
+            }
+            None => by_replace,
+        }
     } else {
-        template(
+        let body = template(
             Template::CombineReplace,
             &[
                 ("BY", by),
@@ -2358,20 +3021,19 @@ unsafe fn combine_extensions(
                 ("STRICT", values::scalar_bool(true)?),
                 ("BYEXPR", by_replace_body),
             ],
-        )?
+        )?;
+        values::triple(SexpType::Closure, by_replace.car(), body, by_replace.tag())?
     };
-    let replace = values::triple(
-        SexpType::Closure,
-        by_replace.car(),
-        replace_body,
-        by_replace.tag(),
-    )?;
     let distance = values::as_real_scalar(slot(to_extension, "distance")?)
         + values::as_real_scalar(slot(by_extension, "distance")?);
     let combined = values::shallow_duplicate(to_extension)?;
     crate::heap().root(combined);
+    if !both_simple {
+        crate::subset::assign_slot(combined, install("simple")?, values::scalar_bool(false)?)?;
+    }
     for (slot_name, value) in [
         ("coerce", coerce),
+        ("test", test),
         ("replace", replace),
         ("by", slot(to_extension, "subClass")?),
         ("subClass", slot(by_extension, "subClass")?),
@@ -2380,7 +3042,7 @@ unsafe fn combine_extensions(
     ] {
         crate::subset::assign_slot(combined, install(slot_name)?, value)?;
     }
-    Ok(combined)
+    Ok(Some(combined))
 }
 
 /// Rebinds the definition of a class the new one extends, with `subclasses` as its list of
@@ -2540,6 +3202,8 @@ enum Template {
     CombineReplace,
     CoerceStrip,
     ReplaceClass,
+    CombineCoerceDataPart,
+    CombineCoerceAs,
 }
 
 /// The expressions of `.simpleCoerceExpr()`, `.simpleReplaceExpr()`, `makeExtends()` and
@@ -2570,7 +3234,9 @@ const METHODS_TEMPLATES: &str = r#"list(
         BYEXPR
     }),
     quote({ attributes(from) <- NULL; class(from) <- CLASS; from}),
-    quote({class(value) <- FROM; value})
+    quote({class(value) <- FROM; value}),
+    quote({if(strict) from <- from@.Data; EXPR}),
+    quote({from <- as(from, BY, strict = strict); TO})
 )"#;
 
 /// The template `which` with its placeholders replaced, as `substitute()` replaces them: every
