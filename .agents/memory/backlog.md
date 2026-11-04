@@ -67,7 +67,9 @@ methods package's core runs natively behind hash-guarded prologues"). `new()`, t
 are native when nothing observable would differ. On `target/s4plain` (2,892 definitions, no
 imports beyond R6) a cold first `new()` costs about 0.85 s (running the definitions 530 ms,
 `cacheMetaData` 125 ms, the cache save 190 ms) and a warm one about 62 ms; the goal is under 100 ms
-cold. A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
+cold without the S4 cache, which is deleted once that holds (`decisions.md`). Consider a native
+class table with dense ids and a bitset extends relation instead of porting function by function.
+A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
 4.5 µs per call. Remaining, largest first:
 
 - `setClassUnion` (297 ms for 25 unions). `setIs` copies basic member classes into the methods

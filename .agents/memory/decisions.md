@@ -7444,13 +7444,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
   it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
   prints the hashes of the installed functions, for adding a version.
-- **The S4 cache stays.** Restoring the cache is about 10 times faster than running the definitions,
-  even natively (s4plain: 61 ms restored against about 900 ms run), so it survives, and incremental
-  reload of it is not needed while that ratio holds. It is saved uncompressed: the save fell from
-  344 to 219 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
+- **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
+  a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
+  slow design"). Until then it stays, because restoring is about 10 times faster than running the
+  definitions natively (61 ms against about 850 ms), and incremental reload of it is not worth
+  building for a cache that is going away. It is saved uncompressed: the save fell from 344 to
+  about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
   exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
-  during a session and the saved state would depend on what ran. Revisit when running the
-  definitions is about as fast as restoring them.
+  during a session and the saved state would depend on what ran.
 - **Order.** Object creation and class queries came first because they are the run-time hot path
   (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
   the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
