@@ -1072,6 +1072,10 @@ unsafe fn do_check_group_sig_length(call: &Call<'_>) -> R<Sexp> {
         }
         lengths.push(crate::subset::numeric_element(value, 0));
     }
+    // `max()` of a missing length is NA, and GNU R's `if (any(reset))` then fails.
+    if lengths.iter().any(|length| length.is_nan()) {
+        bail!(skip)
+    }
     let longest = lengths.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if lengths
         .iter()
@@ -1184,7 +1188,12 @@ unsafe fn methods_generic(name: Sexp) -> R<Option<Sexp>> {
     }
     let symbol = values::install_charsxp(name.element(0))?;
     let found = crate::methods::find_generic(symbol, interp().globals.methods_namespace, "")?;
-    if found != nil() {
+    // GNU R's C lookup skips a primitive's generic and lets `getGeneric()` reach
+    // `.BasicFunsList`, whose `.cacheGeneric()` is checked below.
+    let primitive = quiet_value(symbol, values::base_env())?
+        .and_then(|base| crate::dispatch::primitive_methods(base))
+        .is_some_and(|(generic, _)| generic == found);
+    if found != nil() && !primitive {
         // `.getGeneric()` caches a generic the global environment also binds.
         return Ok(
             match crate::heap().frame_cell(values::global_env(), symbol) {

@@ -7302,15 +7302,16 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `methods::is(f, "genericFunction")` is skipped for a value with no class attribute and no S4
   bit, where it is always `FALSE`.
 - **Why a hash guard.** Base R's R code is read from the installed GNU R so that ry behaves like
-  whichever release it finds (licensing record above). The copy follows R 4.3.3, so the runtime
+  whichever release it finds (licensing record above). The copy follows R 4.6.2, so the runtime
   replaces the installed function only when an FNV-1a hash of its formals and body (symbols and
-  strings by their text, attributes ignored) equals the 4.3.3 one; any other release keeps its own
-  function at its own speed. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
+  strings by their text, attributes ignored) equals the 4.6.2 one. Another release keeps its own
+  function at its own speed, and a mismatch on the bundled 4.6.2 is an error, because it means the
+  copy and the bundled tree drifted apart. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
   updating the constant with the copy.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
   branch: known generics, another package's generic, an overwrite and its message, local plain and
-  S4 generics, delayed registration), and asserts the replacement is in place under R 4.3.3.
+  S4 generics, delayed registration), and asserts the replacement is in place under the bundled release.
 - **Next by cost.** `methods::cacheMetaData` of the imports (about 150 ms, lubridate most of it) is
   dominated by `.checkGroupSigLength`, which `.updateMethodsInTable` runs for every member of a
   group generic and which rescans the whole group tree each time (1.2 ms per call on ry, 0.8 ms on
@@ -7572,7 +7573,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   hash-guarded prologue on GNU R 4.6.2's own function (`RY_PRINT_FAST_PATH_HASHES=1` prints the
   hashes), so a package that changes, a library edit or another R release needs no invalidation:
   `.checkGroupSigLength` (`ryS4CheckGroupSigLength` in `methods_core.rs`), `registerS3methods`
-  (ported to 4.6.2, `register_S3_methods.R`) and utils' `osVersion` (`ryOsVersion`, which reads
+  (ported to 4.6.2, `register_s3_methods.R`) and utils' `osVersion` (`ryOsVersion`, which reads
   `/etc/os-release` instead of spawning shells). The heap promotes every object a start-up image
   loads to the old generation (`Heap::promote_young`), because the first minor collection
   otherwise traced all 10 MB of them (5.3 ms). Lazy-load records inflate through one reused

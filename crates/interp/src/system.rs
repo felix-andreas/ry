@@ -536,9 +536,14 @@ unsafe fn do_os_version(_call: &Call<'_>) -> R<Sexp> {
     if !cfg!(target_os = "linux") || find_program("uname").is_none() {
         return Ok(nil());
     }
+    // `readLines()` warns on an incomplete last line or a NUL, splits at a lone carriage return,
+    // and leaves a non-ASCII name unmarked, so such a file takes GNU R's own code.
     let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
         return Ok(nil());
     };
+    if !text.is_ascii() || !text.ends_with('\n') || text.contains(['\r', '\0']) {
+        return Ok(nil());
+    }
     let named = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
     let name = if let Some(name) = named("PRETTY_NAME=") {
         name
