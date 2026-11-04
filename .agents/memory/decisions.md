@@ -7786,3 +7786,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Cost.** On Linux the fifteen packages add about 85 s to the build and 34 MB to the base R tree (63 MB in all).
 - **Windows.** The unversioned `Recommended/*.tgz` names are symlinks, which tar cannot create on
   Windows, so the build extracts only the versioned tarballs.
+
+## Numeric routines are exact ports of GNU R 4.6.2, and LINPACK lives in the interpreter crate
+
+- **Previous state.** nmath, smooth.spline, lowess and loess used textbook formulas or earlier algorithms and differed from GNU R in the last bits (1468 of 12210 distribution grid points, tens of ulps in loess). LINPACK's `dnrm2`, `drotg` and `dsvdc` followed older reference versions and sat in `libr`.
+- **Decision.** Each routine is ported from the 4.6.2 source with its evaluation order, including `dnrm2` and `drotg` from LAPACK 3.10 and R's modified `dsvdc` test. `linpack.rs` moved to `crates/interp`, which `libr` re-exports, so the interpreter's stats code and the C API share one copy.
+- **Impact.** The grid sweep has 0 mismatches of 12210, a random sweep 0 of 2400, and the loess, smooth.spline and lowess matrices are identical to GNU R. Consumers of the shared routines (such as `lm` through `dqrdc2`) move toward GNU R as well.

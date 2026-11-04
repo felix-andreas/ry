@@ -77,6 +77,7 @@ pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
+pub mod linpack;
 pub mod standard_library;
 pub mod stats;
 pub mod stats_arima;
