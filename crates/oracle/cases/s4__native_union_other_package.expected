@@ -1,0 +1,14 @@
+[stdout]
+| [1] FALSE
+| [1] TRUE
+| $package
+| [1] "pone"
+| 
+| [1] 9
+| B A U 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

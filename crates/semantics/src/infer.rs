@@ -411,6 +411,20 @@ impl<'db> InferenceTable<'db> {
                 else {
                     unreachable!("shallow resolve leaves only unbound variables")
                 };
+                // A text or logical literal that meets a `List` item takes the ry type, the only
+                // member of its constraint a `List` holds.
+                let literal_item = match (left_constraint, right_constraint) {
+                    (Constraint::StrLiteral, Constraint::ArrayItem)
+                    | (Constraint::ArrayItem, Constraint::StrLiteral) => Some(NativeScalar::Str),
+                    (Constraint::BoolLiteral, Constraint::ArrayItem)
+                    | (Constraint::ArrayItem, Constraint::BoolLiteral) => Some(NativeScalar::Bool),
+                    _ => None,
+                };
+                if let Some(native) = literal_item {
+                    let item = native_scalar(db, native);
+                    self.bind(db, left, item)?;
+                    return self.bind(db, right, item);
+                }
                 let Some(constraint) = left_constraint.join(right_constraint) else {
                     return Err(UnifyError::Mismatch(a, b));
                 };
@@ -1837,6 +1851,22 @@ fn constraint_rejects<'db>(
         Constraint::FracLiteral => match ty.kind(db) {
             TyKind::Native(native) => native.is_fraction(),
             TyKind::Scalar(Atomic::Double) | TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::StrLiteral => match ty.kind(db) {
+            TyKind::Native(NativeScalar::Str)
+            | TyKind::Scalar(Atomic::Character)
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::BoolLiteral => match ty.kind(db) {
+            TyKind::Native(NativeScalar::Bool)
+            | TyKind::Scalar(Atomic::Logical)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
         },

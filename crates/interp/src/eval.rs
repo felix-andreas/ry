@@ -351,9 +351,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         eval(promise.cdr(), promise.tag())
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
-    let value = result?;
+    let mut value = result?;
     if promise.has_gp(gp::CHECKED_PROMISE) {
-        crate::annotations::check_forced(promise, value)?;
+        value = crate::annotations::check_forced(promise, value)?;
     }
     let heap = crate::heap();
     heap.set_car(promise, value);
@@ -1172,7 +1172,7 @@ pub unsafe fn run_closure(
     let result = stray_loop_jump(call, env, catch_return(env, result));
     let result = match (signature, result) {
         (Some(signature), Ok(value)) => {
-            crate::annotations::check_return(call, signature, value).map(|()| value)
+            crate::annotations::check_return(call, signature, value)
         }
         (_, result) => result,
     };

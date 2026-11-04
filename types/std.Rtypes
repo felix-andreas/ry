@@ -171,7 +171,7 @@ List.set : <T> fn(list: List<T>, index: I64, value: T) -> List<T>
 #'
 #' ```r dput
 #' List.update([1, 2], 1, function(x) x + 10)
-#' #> [11, 2]
+#' #> [11i64, 2i64]
 #' ```
 List.update : <T> fn(list: List<T>, index: I64, f: fn(T) -> T) -> List<T>
 
@@ -179,7 +179,7 @@ List.update : <T> fn(list: List<T>, index: I64, f: fn(T) -> T) -> List<T>
 #'
 #' ```r dput
 #' List.append([1, 2], 3)
-#' #> [1, 2, 3]
+#' #> [1i64, 2i64, 3i64]
 #' ```
 List.append : <T> fn(list: List<T>, value: T) -> List<T>
 
@@ -187,7 +187,7 @@ List.append : <T> fn(list: List<T>, value: T) -> List<T>
 #'
 #' ```r dput
 #' List.prepend([1, 2], 0)
-#' #> [0, 1, 2]
+#' #> [0i64, 1i64, 2i64]
 #' ```
 List.prepend : <T> fn(list: List<T>, value: T) -> List<T>
 
@@ -195,7 +195,7 @@ List.prepend : <T> fn(list: List<T>, value: T) -> List<T>
 #'
 #' ```r dput
 #' List.concat([1], [2, 3])
-#' #> [1, 2, 3]
+#' #> [1i64, 2i64, 3i64]
 #' ```
 List.concat : <T> fn(first: List<T>, second: List<T>) -> List<T>
 
@@ -233,7 +233,7 @@ List.range : fn(start: I64, end: I64) -> List<I64>
 #'
 #' ```r dput
 #' List.reverse([1, 2, 3])
-#' #> [3, 2, 1]
+#' #> [3i64, 2i64, 1i64]
 #' ```
 List.reverse : <T> fn(list: List<T>) -> List<T>
 
@@ -241,7 +241,7 @@ List.reverse : <T> fn(list: List<T>) -> List<T>
 #'
 #' ```r dput
 #' List.join([[1], [], [2, 3]])
-#' #> [1, 2, 3]
+#' #> [1i64, 2i64, 3i64]
 #' ```
 List.join : <T> fn(lists: List<List<T>>) -> List<T>
 
@@ -249,7 +249,7 @@ List.join : <T> fn(lists: List<List<T>>) -> List<T>
 #'
 #' ```r dput
 #' List.map([1, 2, 3], function(x) x * 2)
-#' #> [2, 4, 6]
+#' #> [2i64, 4i64, 6i64]
 #' ```
 List.map : <A, B: item> fn(list: List<A>, f: fn(A) -> B) -> List<B>
 
@@ -265,7 +265,7 @@ List.map_with_index : <A, B: item> fn(list: List<A>, f: fn(A, I64) -> B) -> List
 #'
 #' ```r dput
 #' List.map2([1, 2, 3], [10, 20], function(a, b) a + b)
-#' #> [11, 22]
+#' #> [11i64, 22i64]
 #' ```
 List.map2 : <A, B, C: item> fn(first: List<A>, second: List<B>, f: fn(A, B) -> C) -> List<C>
 
@@ -273,7 +273,7 @@ List.map2 : <A, B, C: item> fn(first: List<A>, second: List<B>, f: fn(A, B) -> C
 #'
 #' ```r dput
 #' List.map3([1, 2], [10, 20], [100, 200], function(a, b, c) a + b + c)
-#' #> [111, 222]
+#' #> [111i64, 222i64]
 #' ```
 List.map3 : <A, B, C, D: item> fn(first: List<A>, second: List<B>, third: List<C>, f: fn(A, B, C) -> D) -> List<D>
 
@@ -281,7 +281,7 @@ List.map3 : <A, B, C, D: item> fn(first: List<A>, second: List<B>, third: List<C
 #'
 #' ```r dput
 #' List.map4([1], [2], [3], [4], function(a, b, c, d) a * b * c * d)
-#' #> [24]
+#' #> [24i64]
 #' ```
 List.map4 : <A, B, C, D, E: item> fn(first: List<A>, second: List<B>, third: List<C>, fourth: List<D>, f: fn(A, B, C, D) -> E) -> List<E>
 
@@ -289,7 +289,7 @@ List.map4 : <A, B, C, D, E: item> fn(first: List<A>, second: List<B>, third: Lis
 #'
 #' ```r dput
 #' List.join_map([1, 2], function(x) [x, x])
-#' #> [1, 1, 2, 2]
+#' #> [1i64, 1i64, 2i64, 2i64]
 #' ```
 List.join_map : <A, B> fn(list: List<A>, f: fn(A) -> List<B>) -> List<B>
 
@@ -297,7 +297,7 @@ List.join_map : <A, B> fn(list: List<A>, f: fn(A) -> List<B>) -> List<B>
 #'
 #' ```r dput
 #' List.keep_if([1, 5, 2], function(x) x > 1)
-#' #> [5, 2]
+#' #> [5i64, 2i64]
 #' ```
 List.keep_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> List<T>
 
@@ -315,7 +315,7 @@ List.keep_if_try : <T, E> fn(list: List<T>, predicate: fn(T) -> Result<Bool, E>)
 #'
 #' ```r dput
 #' List.drop_if([1, 5, 2], function(x) x > 1)
-#' #> [1]
+#' #> [1i64]
 #' ```
 List.drop_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> List<T>
 
@@ -347,7 +347,7 @@ List.map_try : <A, B: item, E> fn(list: List<A>, f: fn(A) -> Result<B, E>) -> Re
 #'
 #' ```r dput
 #' List.walk([1, 2, 3], 0, function(total, x) total + x)
-#' #> 6
+#' #> 6i64
 #' ```
 List.walk : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> S) -> S
 
@@ -363,7 +363,7 @@ List.walk_backwards : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> S) -> S
 #'
 #' ```r dput
 #' List.walk_until([1, 2, 3, 4], 0, function(total, x) if (total >= 3) :Break(total) else :Continue(total + x))
-#' #> 3
+#' #> 3i64
 #' ```
 List.walk_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
@@ -371,7 +371,7 @@ List.walk_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> :Continue(S)
 #'
 #' ```r dput
 #' List.walk_backwards_until([1, 5, 2, 3], 0, function(total, x) if (x > 4) :Break(total) else :Continue(total + x))
-#' #> 5
+#' #> 5i64
 #' ```
 List.walk_backwards_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
@@ -395,7 +395,7 @@ List.walk_with_index_until : <T, S> fn(list: List<T>, state: S, f: fn(S, T, I64)
 #'
 #' ```r dput
 #' List.walk_from([1, 2, 3, 4], 3, 0, function(total, x) total + x)
-#' #> 7
+#' #> 7i64
 #' ```
 List.walk_from : <T, S> fn(list: List<T>, index: I64, state: S, f: fn(S, T) -> S) -> S
 
@@ -403,7 +403,7 @@ List.walk_from : <T, S> fn(list: List<T>, index: I64, state: S, f: fn(S, T) -> S
 #'
 #' ```r dput
 #' List.walk_from_until([1, 2, 3, 4], 2, 0, function(total, x) if (total >= 5) :Break(total) else :Continue(total + x))
-#' #> 5
+#' #> 5i64
 #' ```
 List.walk_from_until : <T, S> fn(list: List<T>, index: I64, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
@@ -428,7 +428,7 @@ List.for_each : <T> fn(list: List<T>, f: fn(T) -> Any) -> NULL
 #'
 #' ```r dput
 #' List.for_each_try([1, -2, 3], function(x) if (x < 0) :Err(:Negative(x)) else :Ok(NULL))
-#' #> :Err(:Negative(-2))
+#' #> :Err(:Negative(-2i64))
 #' ```
 List.for_each_try : <T, E> fn(list: List<T>, f: fn(T) -> Result<Any, E>) -> Result<NULL, E>
 
@@ -468,7 +468,7 @@ List.count_if : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> I64
 #'
 #' ```r dput
 #' List.find_first([1, 5, 7], function(x) x > 4)
-#' #> :Ok(5)
+#' #> :Ok(5i64)
 #' ```
 List.find_first : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<T, :NotFound>
 
@@ -476,7 +476,7 @@ List.find_first : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<T, :
 #'
 #' ```r dput
 #' List.find_last([1, 5, 7], function(x) x > 4)
-#' #> :Ok(7)
+#' #> :Ok(7i64)
 #' ```
 List.find_last : <T> fn(list: List<T>, predicate: fn(T) -> Bool) -> Result<T, :NotFound>
 
@@ -516,7 +516,7 @@ List.last : <T> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 #'
 #' ```r dput
 #' List.take_first([1, 2, 3], 2)
-#' #> [1, 2]
+#' #> [1i64, 2i64]
 #' ```
 List.take_first : <T> fn(list: List<T>, count: I64) -> List<T>
 
@@ -524,7 +524,7 @@ List.take_first : <T> fn(list: List<T>, count: I64) -> List<T>
 #'
 #' ```r dput
 #' List.take_last([1, 2, 3], 2)
-#' #> [2, 3]
+#' #> [2i64, 3i64]
 #' ```
 List.take_last : <T> fn(list: List<T>, count: I64) -> List<T>
 
@@ -532,7 +532,7 @@ List.take_last : <T> fn(list: List<T>, count: I64) -> List<T>
 #'
 #' ```r dput
 #' List.drop_first([1, 2, 3], 2)
-#' #> [3]
+#' #> [3i64]
 #' ```
 List.drop_first : <T> fn(list: List<T>, count: I64) -> List<T>
 
@@ -540,7 +540,7 @@ List.drop_first : <T> fn(list: List<T>, count: I64) -> List<T>
 #'
 #' ```r dput
 #' List.drop_last([1, 2, 3], 2)
-#' #> [1]
+#' #> [1i64]
 #' ```
 List.drop_last : <T> fn(list: List<T>, count: I64) -> List<T>
 
@@ -556,7 +556,7 @@ List.drop_at : <T> fn(list: List<T>, index: I64) -> List<T>
 #'
 #' ```r dput
 #' List.sublist([1, 2, 3, 4], 2, 2)
-#' #> [2, 3]
+#' #> [2i64, 3i64]
 #' ```
 List.sublist : <T> fn(list: List<T>, start: I64, count: I64) -> List<T>
 
@@ -564,7 +564,7 @@ List.sublist : <T> fn(list: List<T>, start: I64, count: I64) -> List<T>
 #'
 #' ```r dput
 #' List.split_at([1, 2, 3], 1)
-#' #> (before = [1], others = [2, 3])
+#' #> (before = [1i64], others = [2i64, 3i64])
 #' ```
 List.split_at : <T> fn(list: List<T>, count: I64) -> Record{before: List<T>, others: List<T>}
 
@@ -588,7 +588,7 @@ List.split_last : <T> fn(list: List<T>, delimiter: T) -> Result<Record{before: L
 #'
 #' ```r dput
 #' List.split_on([1, 0, 2, 3, 0, 4], 0)
-#' #> [[1], [2, 3], [4]]
+#' #> [[1i64], [2i64, 3i64], [4i64]]
 #' ```
 List.split_on : <T> fn(list: List<T>, delimiter: T) -> List<List<T>>
 
@@ -596,7 +596,7 @@ List.split_on : <T> fn(list: List<T>, delimiter: T) -> List<List<T>>
 #'
 #' ```r dput
 #' List.split_on_list([1, 0, 0, 2, 0, 3], [0, 0])
-#' #> [[1], [2, 0, 3]]
+#' #> [[1i64], [2i64, 0i64, 3i64]]
 #' ```
 List.split_on_list : <T> fn(list: List<T>, delimiter: List<T>) -> List<List<T>>
 
@@ -604,7 +604,7 @@ List.split_on_list : <T> fn(list: List<T>, delimiter: List<T>) -> List<List<T>>
 #'
 #' ```r dput
 #' List.chunks_of([1, 2, 3], 2)
-#' #> [[1, 2], [3]]
+#' #> [[1i64, 2i64], [3i64]]
 #' ```
 List.chunks_of : <T> fn(list: List<T>, size: I64) -> List<List<T>>
 
@@ -620,7 +620,7 @@ List.intersperse : <T> fn(list: List<T>, separator: T) -> List<T>
 #'
 #' ```r dput
 #' List.sort_with([3, 1, 2], Num.compare)
-#' #> [1, 2, 3]
+#' #> [1i64, 2i64, 3i64]
 #' ```
 List.sort_with : <T> fn(list: List<T>, compare: fn(T, T) -> :LT | :EQ | :GT) -> List<T>
 
@@ -628,7 +628,7 @@ List.sort_with : <T> fn(list: List<T>, compare: fn(T, T) -> :LT | :EQ | :GT) -> 
 #'
 #' ```r dput
 #' List.sort_asc([3, 1, 2])
-#' #> [1, 2, 3]
+#' #> [1i64, 2i64, 3i64]
 #' ```
 List.sort_asc : <T: number> fn(list: List<T>) -> List<T>
 
@@ -668,7 +668,7 @@ List.append_if_ok : <T, E> fn(list: List<T>, result: Result<T, E>) -> List<T>
 #'
 #' ```r dput
 #' List.prepend_if_ok([1], Str.to_i64("x"))
-#' #> [1]
+#' #> [1i64]
 #' ```
 List.prepend_if_ok : <T, E> fn(list: List<T>, result: Result<T, E>) -> List<T>
 
@@ -692,7 +692,7 @@ List.with_capacity : <T> fn(capacity: I64) -> List<T>
 #'
 #' ```r dput
 #' List.reserve([1, 2], 100)
-#' #> [1, 2]
+#' #> [1i64, 2i64]
 #' ```
 List.reserve : <T> fn(list: List<T>, spare: I64) -> List<T>
 
@@ -701,7 +701,7 @@ List.reserve : <T> fn(list: List<T>, spare: I64) -> List<T>
 #'
 #' ```r dput
 #' List.release_excess_capacity(List.reserve([1, 2], 100))
-#' #> [1, 2]
+#' #> [1i64, 2i64]
 #' ```
 List.release_excess_capacity : <T> fn(list: List<T>) -> List<T>
 
@@ -712,7 +712,7 @@ List.release_excess_capacity : <T> fn(list: List<T>) -> List<T>
 #'
 #' ```r dput
 #' List.sum([1, 2, 3])
-#' #> 6
+#' #> 6i64
 #' ```
 List.sum : <T: number> fn(list: List<T>) -> T
 
@@ -729,7 +729,7 @@ List.product : <T: number> fn(list: List<T>) -> T
 #'
 #' ```r dput
 #' List.min([3, 1, 2])
-#' #> :Ok(1)
+#' #> :Ok(1i64)
 #' ```
 List.min : <T: number> fn(list: List<T>) -> Result<T, :ListWasEmpty>
 
@@ -1083,7 +1083,7 @@ Num.compare : <T: number> fn(first: T, second: T) -> :LT | :EQ | :GT
 #'
 #' ```r dput
 #' Num.min(2, 1)
-#' #> 1
+#' #> 1i64
 #' ```
 Num.min : <T: number> fn(first: T, second: T) -> T
 
@@ -1204,7 +1204,7 @@ Num.is_infinite : fn(number: F64) -> Bool
 #'
 #' ```r dput
 #' Num.abs(-3)
-#' #> 3
+#' #> 3i64
 #' ```
 Num.abs : <T: number> fn(number: T) -> T
 
@@ -1212,7 +1212,7 @@ Num.abs : <T: number> fn(number: T) -> T
 #'
 #' ```r dput
 #' Num.abs_diff(3, 10)
-#' #> 7
+#' #> 7i64
 #' ```
 Num.abs_diff : <T: number> fn(first: T, second: T) -> T
 
@@ -1261,7 +1261,7 @@ Num.truncate : fn(number: F64) -> I64
 #'
 #' ```r dput
 #' Num.pow(2, 10)
-#' #> 1024
+#' #> 1024i64
 #' ```
 Num.pow : <T: number> fn(base: T, exponent: T) -> T
 
@@ -1310,7 +1310,7 @@ Num.add_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :
 #'
 #' ```r dput
 #' Num.sub_checked(10, 3)
-#' #> :Ok(7)
+#' #> :Ok(7i64)
 #' ```
 Num.sub_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
 
@@ -1383,7 +1383,7 @@ Num.div_checked : fn(first: F64, second: F64) -> Result<F64, :DivByZero | :Undef
 #'
 #' ```r dput
 #' Num.div_trunc_checked(-7, 2)
-#' #> :Ok(-3)
+#' #> :Ok(-3i64)
 #' Num.div_trunc_checked(Inf, Inf)
 #' #> :Err(:Undefined)
 #' ```
@@ -1393,7 +1393,7 @@ Num.div_trunc_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | 
 #'
 #' ```r dput
 #' Num.div_ceil_checked(7, 2)
-#' #> :Ok(4)
+#' #> :Ok(4i64)
 #' ```
 Num.div_ceil_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 
@@ -1401,7 +1401,7 @@ Num.div_ceil_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :
 #'
 #' ```r dput
 #' Num.rem_checked(-7, 2)
-#' #> :Ok(-1)
+#' #> :Ok(-1i64)
 #' ```
 Num.rem_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 
@@ -1472,7 +1472,7 @@ Num.to_i64 : <T: number> fn(number: T) -> I64
 #'
 #' ```r dput
 #' List.walk([1, 2, 3], 0, Num.add)
-#' #> 6
+#' #> 6i64
 #' ```
 Num.add : <T: number> fn(first: T, second: T) -> T
 
@@ -1481,7 +1481,7 @@ Num.add : <T: number> fn(first: T, second: T) -> T
 #'
 #' ```r dput
 #' Num.sub(10, 4)
-#' #> 6
+#' #> 6i64
 #' ```
 Num.sub : <T: number> fn(first: T, second: T) -> T
 
@@ -1489,7 +1489,7 @@ Num.sub : <T: number> fn(first: T, second: T) -> T
 #'
 #' ```r dput
 #' Num.mul(6, 7)
-#' #> 42
+#' #> 42i64
 #' ```
 Num.mul : <T: number> fn(first: T, second: T) -> T
 
@@ -1506,7 +1506,7 @@ Num.div : fn(first: F64, second: F64) -> F64
 #'
 #' ```r dput
 #' Num.div_trunc(-7, 2)
-#' #> -3
+#' #> -3i64
 #' ```
 Num.div_trunc : fn(first: I64, second: I64) -> I64
 
@@ -1514,7 +1514,7 @@ Num.div_trunc : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.div_ceil(7, 2)
-#' #> 4
+#' #> 4i64
 #' ```
 Num.div_ceil : fn(first: I64, second: I64) -> I64
 
@@ -1522,7 +1522,7 @@ Num.div_ceil : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.rem(-7, 2)
-#' #> -1
+#' #> -1i64
 #' ```
 Num.rem : fn(first: I64, second: I64) -> I64
 
@@ -1531,7 +1531,7 @@ Num.rem : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.pow_int(3, 4)
-#' #> 81L
+#' #> 81i64
 #' ```
 Num.pow_int : fn(base: I64, exponent: I64) -> I64
 
@@ -1770,7 +1770,7 @@ Bool.or : fn(first: Bool, second: Bool) -> Bool
 #'
 #' ```r dput
 #' List.keep_if([1, 2, 3], function(x) Bool.not(Num.is_even(x)))
-#' #> [1, 3]
+#' #> [1i64, 3i64]
 #' ```
 Bool.not : fn(value: Bool) -> Bool
 
@@ -2047,7 +2047,7 @@ Set.single : <T: key> fn(element: T) -> Set<T>
 #'
 #' ```r dput
 #' Set.from_list([2, 1, 2])
-#' #> Set.from_list([2, 1])
+#' #> Set.from_list([2i64, 1i64])
 #' ```
 Set.from_list : <T: key> fn(list: List<T>) -> Set<T>
 
@@ -2095,7 +2095,7 @@ Set.insert : <T: key> fn(set: Set<T>, element: T) -> Set<T>
 #'
 #' ```r dput
 #' Set.remove(Set.from_list([1, 2]), 1)
-#' #> Set.from_list([2])
+#' #> Set.from_list([2i64])
 #' ```
 Set.remove : <T: key> fn(set: Set<T>, element: T) -> Set<T>
 
@@ -2103,7 +2103,7 @@ Set.remove : <T: key> fn(set: Set<T>, element: T) -> Set<T>
 #'
 #' ```r dput
 #' Set.union(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#' #> Set.from_list([1, 2, 3])
+#' #> Set.from_list([1i64, 2i64, 3i64])
 #' ```
 Set.union : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
@@ -2111,7 +2111,7 @@ Set.union : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 #'
 #' ```r dput
 #' Set.intersection(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#' #> Set.from_list([2])
+#' #> Set.from_list([2i64])
 #' ```
 Set.intersection : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
@@ -2119,7 +2119,7 @@ Set.intersection : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 #'
 #' ```r dput
 #' Set.difference(Set.from_list([1, 2]), Set.from_list([2, 3]))
-#' #> Set.from_list([1])
+#' #> Set.from_list([1i64])
 #' ```
 Set.difference : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 
@@ -2127,7 +2127,7 @@ Set.difference : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
 #'
 #' ```r dput
 #' Set.walk(Set.from_list([1, 2, 3]), 0, function(total, x) total + x)
-#' #> 6
+#' #> 6i64
 #' ```
 Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
 
@@ -2135,7 +2135,7 @@ Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
 #'
 #' ```r dput
 #' Set.walk_until(Set.from_list([1, 2, 3]), 0, function(total, x) if (x > 2) :Break(total) else :Continue(total + x))
-#' #> 3
+#' #> 3i64
 #' ```
 Set.walk_until : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
 
@@ -2143,7 +2143,7 @@ Set.walk_until : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> :Continue(
 #'
 #' ```r dput
 #' Set.map(Set.from_list([1, 2, 3]), function(x) x %% 2)
-#' #> Set.from_list([1, 0])
+#' #> Set.from_list([1i64, 0i64])
 #' ```
 Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 
@@ -2151,7 +2151,7 @@ Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 #'
 #' ```r dput
 #' Set.join_map(Set.from_list([1, 2]), function(x) Set.from_list([x, x * 10]))
-#' #> Set.from_list([1, 10, 2, 20])
+#' #> Set.from_list([1i64, 10i64, 2i64, 20i64])
 #' ```
 Set.join_map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> Set<B>) -> Set<B>
 
@@ -2159,7 +2159,7 @@ Set.join_map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> Set<B>) -> Set<B>
 #'
 #' ```r dput
 #' Set.keep_if(Set.from_list([1, 2, 3]), function(x) x > 1)
-#' #> Set.from_list([2, 3])
+#' #> Set.from_list([2i64, 3i64])
 #' ```
 Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 
@@ -2167,7 +2167,7 @@ Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 #'
 #' ```r dput
 #' Set.drop_if(Set.from_list([1, 2, 3]), function(x) x > 1)
-#' #> Set.from_list([1])
+#' #> Set.from_list([1i64])
 #' ```
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> Bool) -> Set<T>
 

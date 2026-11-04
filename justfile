@@ -117,6 +117,12 @@ bench-why *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/why/run.py {{ args }}
 
+# Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
+# `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
+climb *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/climb/run.py {{ args }}
+
 # Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
 bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd

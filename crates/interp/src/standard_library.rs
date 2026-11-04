@@ -423,15 +423,14 @@ pub enum Constant {
     I64(i64),
 }
 
-thread_local! {
-    static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
-}
-
 /// The environment the builtins of `package:ry` are bound in. S3 method lookup falls back to it,
 /// because lookup from the global environment skips the search path, and with base R loaded the
 /// environment is no longer on it.
-pub(crate) fn builtins_env() -> Option<Sexp> {
-    BUILTINS_ENV.with(std::cell::Cell::get)
+pub fn builtins_env() -> Option<Sexp> {
+    if !crate::is_installed() {
+        return None;
+    }
+    crate::interp().builtins_env
 }
 
 /// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
@@ -446,7 +445,7 @@ pub(crate) unsafe fn attach() -> Sexp {
         .unwrap_or_else(|failure| panic!("cannot create `package:ry`: {failure}"));
     heap.set_enclosure(global, env);
     heap.preserve(env);
-    BUILTINS_ENV.with(|cell| cell.set(Some(env)));
+    crate::interp().builtins_env = Some(env);
     let name = values::install("name")
         .and_then(|symbol| Ok((symbol, scalar_string("package:ry")?)))
         .and_then(|(symbol, value)| values::set_attr(env, symbol, value));

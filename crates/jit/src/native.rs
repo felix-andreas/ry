@@ -2910,8 +2910,26 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
         arguments.push(value);
         formal = formal.cdr();
     }
-    if formal.kind() == SexpType::Pairlist {
-        return None;
+    // A missing argument whose default is a constant scalar is that constant, since evaluating
+    // it in the call's frame could give nothing else.
+    while formal.kind() == SexpType::Pairlist {
+        let default = formal.car();
+        if formal.tag() == values::symbols().dots
+            || !matches!(
+                default.kind(),
+                SexpType::Real
+                    | SexpType::Integer
+                    | SexpType::I64
+                    | SexpType::Logical
+                    | SexpType::String
+            )
+            || default.length() != 1
+            || default.attrib() != values::nil()
+        {
+            return None;
+        }
+        arguments.push(default);
+        formal = formal.cdr();
     }
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.

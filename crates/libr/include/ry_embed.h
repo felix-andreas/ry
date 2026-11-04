@@ -19,6 +19,7 @@ extern "C" {
 
 typedef struct {
     uint64_t minor_collections;
+    uint64_t intermediate_collections;
     uint64_t major_collections;
     uint64_t objects_freed;
     uint64_t live_objects;

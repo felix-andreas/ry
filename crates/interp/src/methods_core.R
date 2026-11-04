@@ -11,5 +11,7 @@ list(
     setGeneric = quote(if (.Internal(ryS4SetGeneric(environment()))) return(name)),
     setMethod = quote(if (.Internal(ryS4SetMethod(environment()))) return(invisible(f))),
     setClass = quote(if (is.function(value <- .Internal(ryS4SetClass(environment())))) return(invisible(value))),
-    .checkGroupSigLength = quote(if (.Internal(ryS4CheckGroupSigLength(environment()))) return(funs))
+    .checkGroupSigLength = quote(if (.Internal(ryS4CheckGroupSigLength(environment()))) return(funs)),
+    setClassUnion = quote(if (is.function(value <- .Internal(ryS4SetClassUnion(environment())))) return(invisible(value))),
+    cacheMetaData = quote(if (.Internal(ryS4CacheMetaData(environment()))) return(invisible(NULL)))
 )

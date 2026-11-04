@@ -386,16 +386,26 @@ through Cranelift's stack maps. A minor collection marks only the root-stack ent
 the previous collection, because marks stay set until the next major one, so the cost of a minor
 collection does not grow with the roots that lazy-loading base leaves behind.
 
-Collections run on GNU R's schedule, so a script's peak memory follows GNU R's. A minor collection
-promotes everything it marks, which means a temporary that was live when it ran dies only in a
-major collection. A major collection therefore runs when the heap reaches one limit on all of its
-bytes, or when a minor one leaves less than a fifth of the smallest limit (64 MB) free. After each
-major collection the limit moves with GNU R's fractions: it grows by a fifth when the survivors fill
-more than 70% of it and shrinks by a fifth when they fill less than 30%. GNU R's `R_GC_MEM_GROW`
-and its fraction variables set the same numbers ([CLI reference](/reference/cli#memory)). The
-nursery's budget for small objects scales with the old small objects only, as GNU R's cons-cell
-trigger ignores vector memory, so a few big live vectors do not let as many bytes of small garbage
-pile up.
+Collections run on GNU R's schedule, so a script's peak memory follows GNU R's. Objects age one
+generation per collection: a minor collection makes a young survivor old, and a deeper collection
+makes an old survivor tenured. An intermediate collection frees dead old objects that are not yet
+tenured and takes tenured ones as roots through the remembered set. A major collection frees
+everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do: one on large
+vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
+less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
+that is still not enough. After each major collection the limits move with GNU R's fractions: a
+limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
+a fifth when they fill less than 30%. A major collection that escalation forced before the program
+allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
+promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fraction variables
+set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
+objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
+so a few big live vectors do not let as many bytes of small garbage pile up.
+
+Vectors of 1 MB or more get an anonymous mapping each. A dead one's mapping is kept for the next
+large vector while the kept mappings fit the vector limit, and resized with `mremap`, so a loop's
+temporaries reuse resident pages instead of page-faulting in fresh ones. Keeping them never raises
+the peak, because a kept mapping is reused before any new one is mapped.
 
 Reference counts also free large temporaries before any collection finds them. A store that
 drops a list's or a large atomic vector's count to zero puts it in a zero-count table, and once the

@@ -1193,6 +1193,33 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
     }
 }
 
+/// The file ranges of the unsuffixed number literals the checker typed as `I64`, in source
+/// order. ry's runtime reads each one as its suffixed form, because R would read `5` as a
+/// `double` whatever type the checker gave it.
+pub fn file_i64_literals(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
+    let mut ranges = Vec::new();
+    for span in item_spans(db, file) {
+        let Some(check) = item_check(db, span.item) else {
+            continue;
+        };
+        if check.i64_literals.is_empty() {
+            continue;
+        }
+        let Some(module) = item_hir(db, span.item) else {
+            continue;
+        };
+        let offset = span.range.start();
+        ranges.extend(
+            check
+                .i64_literals
+                .iter()
+                .map(|&id| module.range(id) + offset),
+        );
+    }
+    ranges.sort_unstable_by_key(|range| range.start());
+    ranges
+}
+
 /// Package files first, in path order; the order decides last-writer-wins winners.
 #[salsa::input(singleton, debug)]
 pub struct ProjectFiles {
@@ -3520,6 +3547,7 @@ mod tests {
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
+            i64_literals: ThinVec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

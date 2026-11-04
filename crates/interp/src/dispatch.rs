@@ -254,7 +254,7 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
     let stats = heap.stats();
     let stamp = (
         heap.binding_epoch(),
-        stats.minor_collections + stats.major_collections,
+        stats.collections(),
     );
     let key = (name, top, table.unwrap_or(values::empty_env()), search_top);
     let cache = &mut interp().method_cache;

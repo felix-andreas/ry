@@ -320,6 +320,12 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
 /// `R_do_new_object`: a new object of the class `class_def` defines, a copy of its prototype,
 /// marked as S4 when the prototype is a plain S4 object or the class comes from a package.
 pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
+    new_object_copying(class_def, true)
+}
+
+/// `new_object` with a shallow copy of the prototype when `deep` is false, for a value that is
+/// only stored, never modified in place, so sharing the prototype's elements is not observable.
+pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
     if class_def == nil() {
         return Err(error(
             "C level NEW macro called with null class definition pointer",
@@ -334,7 +340,11 @@ pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
         )));
     }
     let prototype = slot_value(class_def, "prototype")?;
-    let value = values::duplicate(prototype)?;
+    let value = if deep {
+        values::duplicate(prototype)?
+    } else {
+        values::shallow_duplicate(prototype)?
+    };
     let package = values::get_attr(class_name, values::install("package")?);
     if value.kind() == SexpType::Object || package != nil() {
         values::set_attr(value, symbols().class, class_name)?;

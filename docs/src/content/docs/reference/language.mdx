@@ -1,0 +1,270 @@
+---
+title: Typed ry
+description: A short tour of typed ry, the small language ry's runtime runs with sound types and no R data types
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Typed ry is a small language inside R files: numbers, `Bool`, `Str`, `List`, records, tuples, tags,
+functions and a standard library, with sound static types and no `NA`. A program written in it never
+touches an R data type, so ry's runtime can run it on native values. It runs only on ry's runtime
+(`ry run`), and strict mode (`strict = true`) proves every value has a known type. This page is a
+tour of the settled features; the [type system reference](/reference/type-system) holds the rules.
+
+## Values
+
+```r
+count <- 3i64                    # I64, a 64-bit integer
+price <- 2.5f64                  # F64, a 64-bit float
+total <- count * 4               # the literal 4 becomes an I64
+mean <- Num.to_f64(total) / 8    # `/` takes F64
+name <- "ry"
+print(f"{name}: {total} items, mean {mean}")
+print(total > 10 && name == "ry")
+```
+
+```text ry run runtime=ry strict exact
+[1] "ry: 12 items, mean 1.5"
+[1] TRUE
+```
+
+`I64` and `F64` are the only number types. An unsuffixed literal takes the type the context asks
+for: a parameter, a declared result, the other operand, or its first later use. The two number types
+never mix, and `/` on an `I64` is an error, because an integer has no exact quotient:
+
+```r
+count <- 3i64
+price <- 2.5f64
+count * price
+```
+
+```text ry check typing strict
+type-mismatch
+
+  x `*` is not defined between `I64` and `F64`. Number types are never converted into each other: convert one side, as in `Num.to_i64(x)`
+```
+
+`I64` arithmetic that overflows stops with an error instead of wrapping. `Bool` is `TRUE` or
+`FALSE`, `Str` is one string, and `f"..."` builds a `Str` from the values in its braces.
+
+## Lists
+
+`[...]` builds a `List<T>`: one item type, any length, no names, no `NA`. Operators work item by
+item on lists of the same length and never recycle. `xs[[i]]` reads one item, and positions start
+at 1:
+
+```r
+xs <- [1, 2, 3]
+print(xs * 2)
+print(xs[[2]])
+print(List.map(xs, \(x) x * x))
+print(List.walk(xs, 0, \(sum, x) sum + x))
+```
+
+```text ry run runtime=ry strict exact
+[2i64, 4i64, 6i64]
+2i64
+[1i64, 4i64, 9i64]
+6i64
+```
+
+## Functions
+
+A function declares its parameter and result types. A generic function names its type variables,
+and inference fills them in at each call:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+clamp <- function(v: I64, low: I64, high: I64) -> I64 {
+  if (v < low) low else if (v > high) high else v
+}
+
+first_or <- function<T>(xs: List<T>, fallback: T) -> T {
+  match (List.first(xs)) {
+    :Ok(x) => x,
+    :Err(_) => fallback
+  }
+}
+
+print(clamp(15, 0, 10))
+print(first_or([], 7))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(v: I64, low: I64, high: I64) -> I64
+clamp <- function(v, low, high) {
+  if (v < low) low else if (v > high) high else v
+}
+
+#: <T> fn(xs: List<T>, fallback: T) -> T
+first_or <- function(xs, fallback) {
+  match (List.first(xs)) {
+    :Ok(x) => x,
+    :Err(_) => fallback
+  }
+}
+
+print(clamp(15, 0, 10))
+print(first_or([], 7))
+```
+
+</TabItem>
+</Tabs>
+
+```text ry run runtime=ry strict exact
+10i64
+7i64
+```
+
+`\(x) x * x` is a lambda, and its types come from where it is used. There is no overloading and no
+method dispatch: a function is called by its plain name, and a standard library function by its
+module and name, such as `List.map`.
+
+## Records and tuples
+
+```r
+p <- (x = 1.5f64, y = 2.0f64)    # Record{x: F64, y: F64}
+q <- (..p, y = 3.0f64)           # a copy with `y` replaced
+pair <- (1i64, "a")              # Tuple{I64, Str}
+print(q$y)
+print(pair)
+```
+
+```text ry run runtime=ry strict exact
+[1] 3
+(1i64, "a")
+```
+
+Records and tuples are values: updating one makes a copy, and nothing can change a value that
+another name holds. A misspelled field is an error before the code runs.
+
+## Tags and `match`
+
+A tag is a name with an optional payload, such as `:Circle(radius = 1)`. A union of tags models a
+value that is one of several cases, and `match` takes it apart:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+alias Shape =
+  | :Circle(radius: F64)
+  | :Rect(width: F64, height: F64)
+
+area <- function(s: Shape) -> F64 {
+  match (s) {
+    :Circle(radius = r) => 3.14159 * r * r
+    :Rect(width = w, height = h) => w * h
+  }
+}
+
+print(area(:Rect(width = 2, height = 3)))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Shape {:Circle(radius: F64) | :Rect(width: F64, height: F64)}
+
+#: fn(s: Shape) -> F64
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => 3.14159 * r * r
+    :Rect(width = w, height = h) => w * h
+  }
+}
+
+print(area(:Rect(width = 2, height = 3)))
+```
+
+</TabItem>
+</Tabs>
+
+```text ry run runtime=ry strict exact
+[1] 6
+```
+
+A `match` must handle every case. Leaving out the `:Rect` arm is an error, and
+`ry check --fix --unsafe-fixes` adds the missing arm:
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Rect(height = _, width = _)`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+Patterns nest. Besides tags, a pattern can be `_`, a name, a literal, a tuple `(p, q)`, a record
+`(x = p, ..)`, a list `[first, ..rest]`, `p as name`, alternatives `p | q`, and a guard
+`p if (cond)`:
+
+```r
+describe <- function(xs: List<I64>) -> Str {
+  match (xs) {
+    [] => "empty"
+    [only] => f"one: {only}"
+    [first, ..rest] if (first > 0) => f"starts positive, {List.len(rest)} more"
+    _ => "other"
+  }
+}
+print(describe([5, 6, 7]))
+```
+
+```text ry run runtime=ry strict exact
+[1] "starts positive, 2 more"
+```
+
+## Errors as values
+
+A function that can fail returns a `Result<T, E>`, which is `:Ok(value)` or `:Err(error)`. The
+standard library reports every failure this way. `try f(x)` unwraps an `:Ok`, and on an `:Err`
+returns it from the enclosing function at once:
+
+```r
+add_strings <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+print(add_strings("4", "5"))
+print(add_strings("4", "five"))
+```
+
+```text ry run runtime=ry strict exact
+:Ok(9i64)
+:Err(:InvalidNumStr)
+```
+
+## The R boundary
+
+A typed program meets R values only through explicit conversions: `Num.from_r`, `Str.from_r` and
+`List.from_r` bring an R value in, and `Num.to_r` and `List.to_r` take a ry value out. Each one
+checks its input, so an `NA` or a vector of the wrong length stops at the boundary instead of
+spreading:
+
+```r
+prices <- List.from_r(c(10.5, 12, 9.75))
+cheap <- List.keep_if(prices, \(p) p < 11)
+print(List.to_r(cheap))
+```
+
+```text ry run runtime=ry strict exact
+[1] 10.50  9.75
+```
+
+An R function given an `I64` stops with an error that names `Num.to_r()`.
+[Crossing between R and ry scalars](/reference/type-system#crossing-between-r-and-ry-scalars) has
+the rules.
+
+## Where to go next
+
+- [Standard library](/reference/standard-library): `Result`, `List`, `Str`, `Num`, `Bool`, `Dict`
+  and `Set`.
+- [Type system](/reference/type-system): the full contract, including
+  [numbers](/reference/type-system#numbers-bool-and-str) and [lists](/reference/type-system#lists).
+- [Go fully typed](/tutorial/fully-typed): nominal types and strict mode, step by step.

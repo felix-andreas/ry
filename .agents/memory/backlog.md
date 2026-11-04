@@ -22,17 +22,15 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: JIT register type for native numbers
+## Open: broken on main
 
-- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. `I64` (which `List.range`, `List.len` and loop counters produce) is a length-1 `I64SXP` vector (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
-- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
-- Fix: an unboxed `I64` register type in the JIT with overflow-checked arithmetic that reads `List<I64>` buffers directly, and `for` over `List.range` lowered to a counted loop.
+- `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
 ## Open: the typed core
 
-- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
-- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
-- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Non-constant defaults.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; it also calls R's `set.seed` and `rnorm`.
+- **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
@@ -73,25 +71,37 @@ The quality bar is four things.
 
 The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
-`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` and `setClass()`
-are native when nothing observable would differ. On `target/s4plain` (2,892 definitions, no
-imports beyond R6) a cold first `new()` costs about 0.85 s (running the definitions 530 ms,
-`cacheMetaData` 125 ms, the cache save 190 ms) and a warm one about 62 ms; the goal is under 100 ms
-cold without the S4 cache, which is deleted once that holds (`decisions.md`). Consider a native
-class table with dense ids and a bitset extends relation instead of porting function by function.
-A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
-4.5 µs per call. Remaining, largest first:
+`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()`, `setClass()`,
+`setClassUnion()` and `cacheMetaData()` are native when nothing observable would differ. On
+the S4-heavy bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
+lubridate,data.table,xts`) a cold first `new()` costs about 0.47 s (running the definitions about
+245 ms, `cacheMetaData` 16 ms, the cache save about 200 ms) and a warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
+that holds (`decisions.md`). Consider a native class table with dense ids and a bitset extends
+relation instead of porting function by function. A reload after editing a method or a class
+takes 0.2 to 0.45 s, and dispatch costs 2.3 to 4.5 µs per call. Remaining, largest first (per-call
+costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
 
-- `setClassUnion` (297 ms for 25 unions). `setIs` copies basic member classes into the methods
-  namespace (`.findOrCopyClass`, `.assignOverBinding`), `completeExtends` runs a nested `setIs` for
-  every subclass of a member, and `.recacheSubclasses` follows. Start with unions whose members
-  are all local classes.
-- The `setClass` shapes that still bail (`RY_TRACE_METHODS_BAILS=1`): a classRepresentation passed
-  in by `setClassUnion`, supers from another package, several `contains` with data parts, and
-  classes that are virtual for lack of slots.
-- `cacheMetaData` (`.checkGroupSigLength` runs natively; about 2.9 ms per namespace against
-  GNU R's 16 ms, see "Start-up and imports are the floor of a warm `ry load`" below).
-- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing).
+- Native `setClass` itself: about 100 µs per call, 60 ms for 579 classes (callgrind with
+  `--toggle-collect='*do_set_class'` on a build with `CARGO_PROFILE_RELEASE_STRIP=false`). A slot
+  default runs R's `new()` only the first time a class is used, to fill `initialize`'s dispatch
+  cache (about a quarter of the cost, `.InheritForDispatch` in R); then come the templates each
+  direct extension instantiates (`substitute_symbols`) and symbol interning.
+- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing), which goes
+  away with the cache.
+- `setMethod` on a generic that is not yet a standard generic: primitives (`length`, `c`), base
+  functions that get an implicit generic (`as.list`, `print`, `toString`) and `initialize`. About
+  1.8 ms each, 33 ms for 19 calls.
+- Native `setMethod`: about 23 µs per call, 42 ms for 1,867 methods.
+- The first union of a basic class (`setClassUnion("Basic00OrNull", ...)`, about 9 ms), which
+  rebinds the basic member classes in `package:methods` on the R path. Later unions are
+  native (about 190 µs each).
+- `cacheMetaData` delegates a class to `.cacheClass` when its cached definition differs from the
+  bound one (77 classes on `s4plain`, real work) and a union whose members' cached extensions are
+  out of date, and delegates generics of other packages, group generics and primitives.
+- The `setClass` shapes that still bail: supers from another package, several `contains` with
+  data parts, and classes that are virtual for lack of slots.
+- The imports' `cacheMetaData` (`.checkGroupSigLength` runs natively; see "Start-up and imports
+  are the floor of a warm `ry load`" below).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
@@ -115,7 +125,8 @@ ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 �
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
 - **Free a closure's frame at return** (GNU R's `R_CleanupEnvir`): large vectors bound only in a returned call's frame wait for a collection, because environments are traced and enclosures are not counted. Counting enclosures would let a frame whose count is zero at return give up its bindings to the zero-count table (`decisions.md`, "Large temporaries: freed from their reference counts"). Measure first: subset, data.table and `rep` loops already peak below GNU R.
-- **A second old generation.** A minor collection promotes everything it marks, so a temporary live at one dies only in a full collection. GNU R has two old generations and collects the younger one first, which is why `R_GC_MEM_GROW=0` costs GNU R almost nothing on finbench (collector 1.56 s to 1.59 s) and ry 0.7 s to 4.8 s (66 full collections instead of 5). Aging objects through one minor collection before promotion, or an intermediate generation, is the fix to measure (`decisions.md`, "Collections run on GNU R's schedule").
+- **Intermediate collections sweep the whole heap.** An intermediate one costs about 7 ms against a major one's 17 ms on `sales`, because `sweep_all` walks tenured slots too. Sweeping only untenured pages would make the extra collections GNU R's schedule runs nearly free, and win back the 8 ms per call `sales` pays against 0.4.1-beta (`decisions.md`, "Two old generations").
+- **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.

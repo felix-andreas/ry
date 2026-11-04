@@ -486,7 +486,10 @@ not handle stays exact. When the methods package's version is the bundled one, e
 install, so a mismatch stops start-up with an error; on any other version a mismatch only leaves
 GNU R's body in place.
 The covered functions are the object operations (`new`, the default `initialize`, `validObject`,
-`is`, `extends`) and the definitions (`setGeneric`, `setMethod`, `setClass`).
+`is`, `extends`), the definitions (`setGeneric`, `setMethod`, `setClass`, `setClassUnion`) and
+`cacheMetaData`. A prologue may also do part of the work and hand the rest to GNU R's code one item
+at a time: `cacheMetaData` handles the classes and generics that need nothing or only a table merge,
+and runs GNU R's loop body for each of the others, so the order of effects is GNU R's.
 
 ### Diagnostics
 

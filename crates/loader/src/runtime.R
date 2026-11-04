@@ -551,7 +551,15 @@ View <- function(x, title) {
       assign(name, utils::read.table(file, header = TRUE, as.is = FALSE, ...), envir = lazydata)
     }
     switch(tolower(sub("^.*\\.", "", path)),
-      r = sys.source(file, envir = lazydata, chdir = TRUE),
+      r = {
+        # `data()` runs a script in a child of the global environment, which reaches the
+        # `system.file()` shim on `tools:ry`; `lazydata`'s parent is the base environment.
+        scratch <- new.env(parent = globalenv())
+        sys.source(file, envir = scratch, chdir = TRUE)
+        for (object in ls(scratch, all.names = TRUE)) {
+          assign(object, get(object, envir = scratch), envir = lazydata)
+        }
+      },
       rda = , rdata = load(file, envir = lazydata),
       csv = table(sep = ";"),
       tab = , txt = table()

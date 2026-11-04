@@ -885,12 +885,38 @@ impl<'p, 'b> Translator<'p, 'b> {
                     boxed
                 } else {
                     let value = self.load_register(src);
-                    if let Some(expected) = refine {
-                        let fits = self.check(value, expected);
-                        let failed = self.deopt(pc, before.id, None, position, reason::SPECULATION);
-                        self.guard(fits, failed);
+                    match refine {
+                        Some(expected) => {
+                            // A compact sequence such as `1:n` is ALTREP, which the check
+                            // rejects, so it is expanded here, as tier 0 expands it, instead of
+                            // leaving compiled code on every call of a loop over `1:n`.
+                            let fits = self.check(value, expected);
+                            let expand = self.builder.create_block();
+                            let join = self.builder.create_block();
+                            self.builder.append_block_param(join, I64);
+                            self.builder
+                                .ins()
+                                .brif(fits, join, &[value.into()], expand, &[]);
+                            self.builder.switch_to_block(expand);
+                            let expanded = self
+                                .call(
+                                    runtime::jit_expand_sequence as *const () as usize,
+                                    &[I64, I64],
+                                    Some(I64),
+                                    &[self.activation, value],
+                                )
+                                .ok_or(Refusal("a helper without a result"))?;
+                            let fits = self.check(expanded, expected);
+                            let failed =
+                                self.deopt(pc, before.id, None, position, reason::SPECULATION);
+                            self.guard(fits, failed);
+                            self.store_register(src, expanded);
+                            self.builder.ins().jump(join, &[expanded.into()]);
+                            self.builder.switch_to_block(join);
+                            self.builder.block_params(join)[0]
+                        }
+                        None => value,
                     }
-                    value
                 };
                 // The body must see the sequence as shared, as in the interpreter, so that
                 // modifying the variable it came from copies it.

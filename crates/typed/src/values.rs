@@ -73,6 +73,8 @@ pub const INT: u8 = 0;
 pub const DBL: u8 = 1;
 pub const LGL: u8 = 2;
 pub const STR: u8 = 3;
+/// ry's `I64`: 8-byte integers without `NA`, laid out as an R `I64` object's data.
+pub const I64: u8 = 4;
 pub const DICT: u8 = 16;
 
 /// The list's items belong to someone else (an R vector the compiler borrows).
@@ -90,6 +92,9 @@ pub const MOD: u32 = 5;
 pub const IDIV: u32 = 6;
 pub const MIN2: u32 = 7;
 pub const MAX2: u32 = 8;
+/// Set on an arithmetic operation over ry lists, which never recycle and hold no missing
+/// value, so a length mismatch, an overflow or a `NaN` item is an error.
+pub const LIST_ARITH: u32 = 1 << 8;
 
 pub const EQ: u32 = 0;
 pub const NE: u32 = 1;
@@ -272,6 +277,61 @@ pub unsafe extern "C" fn ry_list_seq(from: i32, to: i32) -> *mut List {
     list
 }
 
+/// `List.range(from, to)`: the `I64`s from `from` to `to`, empty when `to < from`. Null when
+/// the list would be longer than the standard library builds one.
+pub unsafe extern "C" fn ry_list_range_i64(from: i64, to: i64) -> *mut List {
+    let length = if to < from {
+        0
+    } else {
+        (to as i128 - from as i128 + 1) as u128
+    };
+    if length > MAX_RANGE {
+        return null_mut();
+    }
+    let length = length as usize;
+    let list = list_alloc(I64, length, length);
+    for (offset, slot) in slice_mut::<i64>((*list).data, length)
+        .iter_mut()
+        .enumerate()
+    {
+        *slot = from + offset as i64;
+    }
+    list
+}
+
+/// The longest list `List.range` builds, as the standard library limits it.
+const MAX_RANGE: u128 = i32::MAX as u128;
+
+/// `List.sum` of an `I64` list. Status 0 with the total, and 2 for an empty list (whose sum
+/// the standard library gives as an R integer) or an overflow, where it raises an error.
+pub unsafe extern "C" fn ry_sum_i64(a: *mut List, out: *mut i64) -> u32 {
+    let data = items::<i64>(a);
+    if data.is_empty() {
+        return 2;
+    }
+    let mut total: i64 = 0;
+    for &item in data {
+        match total.checked_add(item) {
+            Some(next) => total = next,
+            None => return 2,
+        }
+    }
+    *out = total;
+    0
+}
+
+/// `x ^ y` of two `I64`s. Status 0 with the power, and 2 for a negative exponent or an overflow,
+/// where the standard library raises an error.
+pub unsafe extern "C" fn ry_power_i64(x: i64, y: i64, out: *mut i64) -> u32 {
+    match interp::numbers::binary("^", interp::arith::Op::Power, x, y) {
+        Ok(value) => {
+            *out = value;
+            0
+        }
+        Err(_) => 2,
+    }
+}
+
 /// One item repeated `times` times. A string item is borrowed and gains one count per copy.
 pub unsafe extern "C" fn ry_list_rep(kind: u32, word0: u64, word1: u64, times: u64) -> *mut List {
     let Some(kind) = list_kind(kind) else {
@@ -281,6 +341,7 @@ pub unsafe extern "C" fn ry_list_rep(kind: u32, word0: u64, word1: u64, times: u
     let list = list_alloc(kind, length, length);
     match kind {
         DBL => slice_mut::<f64>((*list).data, length).fill(f64::from_bits(word0)),
+        I64 => slice_mut::<i64>((*list).data, length).fill(word0 as i64),
         STR => {
             let item = Str {
                 lo: word0,
@@ -473,6 +534,228 @@ pub unsafe extern "C" fn ry_arith_sv(
 ) -> *mut List {
     let mut scalar = [a, 0];
     arith(op, kind, scalar_side(&mut scalar), list_side(b, b_owned))
+}
+
+/// The most steps and inputs a fused elementwise program has.
+pub const ELEMENTWISE_STEPS: usize = 16;
+pub const ELEMENTWISE_INPUTS: usize = 16;
+
+/// Items per chunk of a fused elementwise program, small enough that every step's chunk stays
+/// in the first-level cache.
+const CHUNK: usize = 128;
+
+/// Evaluates arithmetic over ry lists in one pass, a chunk of items at a time, with no list
+/// for any intermediate result. `program` has `steps` steps, each `op | left << 8 | right << 16`
+/// over operands numbered inputs first (`k < input_count` is input `k`) and earlier steps after
+/// them. `inputs` holds each input's word: a list pointer where bit `k` of `lists` is set, else
+/// a scalar's bits. Every step is a list operation, so a `NaN` item or an `I64` overflow is an
+/// error, and the lists must have one length.
+///
+/// Status 0 leaves the last step's items in `out`: a fresh list of `kind`, or their sum's bits
+/// with `sum`. Status 1 gives up, for the interpreter to raise the error or handle the case.
+pub unsafe extern "C" fn ry_elementwise(
+    kind: u32,
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    sum: u32,
+    out: *mut u64,
+) -> u32 {
+    let (steps, input_count) = (steps as usize, input_count as usize);
+    if steps == 0 || steps > ELEMENTWISE_STEPS || input_count > ELEMENTWISE_INPUTS {
+        return 1;
+    }
+    let program = raw_slice(program, steps);
+    let inputs = raw_slice(inputs, input_count);
+    let kind = match list_kind(kind) {
+        Some(kind @ (DBL | I64)) => kind,
+        _ => return 1,
+    };
+    let mut length = None;
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            continue;
+        }
+        let list = word as *mut List;
+        if (*list).kind != kind || length.is_some_and(|length| length != (*list).length) {
+            return 1;
+        }
+        length = Some((*list).length);
+    }
+    for (step, &encoded) in program.iter().enumerate() {
+        let reach = input_count + step;
+        if (encoded >> 8 & 0xFF) as usize >= reach || (encoded >> 16 & 0xFF) as usize >= reach {
+            return 1;
+        }
+    }
+    // An empty result's type is one only the interpreter knows, except for a sum of doubles.
+    let length = match length {
+        Some(length) if length > 0 || (sum != 0 && kind == DBL) => length as usize,
+        _ => return 1,
+    };
+    let sum = sum != 0;
+    let result = if sum { null_mut() } else { list_alloc(kind, length, length) };
+    let status = if kind == DBL {
+        elementwise_dbl(program, inputs, lists, length, result, out)
+    } else {
+        elementwise_i64(program, inputs, lists, length, result, out)
+    };
+    if status != 0 {
+        if !result.is_null() {
+            ry_list_drop(result);
+        }
+        return status;
+    }
+    if !sum {
+        *out = result as u64;
+    }
+    0
+}
+
+/// The operand slice of item chunk `start..start + chunk`: an input list's items, a scalar's
+/// copies, or an earlier step's chunk.
+unsafe fn operand<'a, T: Copy>(
+    index: usize,
+    inputs: &[u64],
+    lists: u32,
+    scalars: &'a [[T; CHUNK]],
+    done: &'a [[T; CHUNK]],
+    start: usize,
+    chunk: usize,
+) -> &'a [T] {
+    if index >= inputs.len() {
+        &done[index - inputs.len()][..chunk]
+    } else if lists & (1 << index) != 0 {
+        let list = inputs[index] as *const List;
+        raw_slice(((*list).data as *const T).add(start), chunk)
+    } else {
+        &scalars[index][..chunk]
+    }
+}
+
+unsafe fn elementwise_dbl(
+    program: &[u32],
+    inputs: &[u64],
+    lists: u32,
+    length: usize,
+    result: *mut List,
+    out: *mut u64,
+) -> u32 {
+    let mut scalars = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            scalars[index] = [f64::from_bits(word); CHUNK];
+        }
+    }
+    let mut buffers = [[0.0f64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut total = LongDouble::ZERO;
+    let last = program.len() - 1;
+    let mut start = 0;
+    while start < length {
+        let chunk = CHUNK.min(length - start);
+        for (step, &encoded) in program.iter().enumerate() {
+            let (done, rest) = buffers.split_at_mut(step);
+            let target = &mut rest[0][..chunk];
+            let left = operand(encoded as usize >> 8 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let right = operand(encoded as usize >> 16 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let pairs = target.iter_mut().zip(left.iter().zip(right));
+            let mut lost = false;
+            match encoded & 0xFF {
+                ADD => pairs.for_each(|(slot, (&x, &y))| *slot = x + y),
+                SUB => pairs.for_each(|(slot, (&x, &y))| *slot = x - y),
+                MUL => pairs.for_each(|(slot, (&x, &y))| *slot = x * y),
+                DIV => pairs.for_each(|(slot, (&x, &y))| *slot = x / y),
+                POW => pairs.for_each(|(slot, (&x, &y))| *slot = power(x, y)),
+                MOD => pairs.for_each(|(slot, (&x, &y))| {
+                    // A quotient too large for the remainder to mean anything makes R warn.
+                    lost |= modulus_loses_accuracy(x, y);
+                    *slot = real_modulo(x, y);
+                }),
+                IDIV => pairs.for_each(|(slot, (&x, &y))| *slot = real_integer_divide(x, y)),
+                _ => return 1,
+            }
+            let undefined = target.iter().fold(false, |found, &value| found | value.is_nan());
+            if lost || undefined {
+                return 1;
+            }
+        }
+        let items = &buffers[last][..chunk];
+        if result.is_null() {
+            total = add_all(total, items);
+        } else {
+            ptr::copy_nonoverlapping(items.as_ptr(), ((*result).data as *mut f64).add(start), chunk);
+        }
+        start += chunk;
+    }
+    if result.is_null() {
+        *out = (0.0 + total.to_f64()).to_bits();
+    }
+    0
+}
+
+unsafe fn elementwise_i64(
+    program: &[u32],
+    inputs: &[u64],
+    lists: u32,
+    length: usize,
+    result: *mut List,
+    out: *mut u64,
+) -> u32 {
+    let mut scalars = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            scalars[index] = [word as i64; CHUNK];
+        }
+    }
+    let mut buffers = [[0i64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut total: i64 = 0;
+    let last = program.len() - 1;
+    let mut start = 0;
+    while start < length {
+        let chunk = CHUNK.min(length - start);
+        for (step, &encoded) in program.iter().enumerate() {
+            let (done, rest) = buffers.split_at_mut(step);
+            let target = &mut rest[0][..chunk];
+            let left = operand(encoded as usize >> 8 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let right = operand(encoded as usize >> 16 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let pairs = target.iter_mut().zip(left.iter().zip(right));
+            let mut overflow = false;
+            let apply = |combine: fn(i64, i64) -> (i64, bool)| {
+                for (slot, (&x, &y)) in pairs {
+                    let (value, overflowed) = combine(x, y);
+                    overflow |= overflowed;
+                    *slot = value;
+                }
+            };
+            match encoded & 0xFF {
+                ADD => apply(i64::overflowing_add),
+                SUB => apply(i64::overflowing_sub),
+                MUL => apply(i64::overflowing_mul),
+                _ => return 1,
+            }
+            if overflow {
+                return 1;
+            }
+        }
+        let items = &buffers[last][..chunk];
+        if result.is_null() {
+            for &item in items {
+                let Some(next) = total.checked_add(item) else {
+                    return 1;
+                };
+                total = next;
+            }
+        } else {
+            ptr::copy_nonoverlapping(items.as_ptr(), ((*result).data as *mut i64).add(start), chunk);
+        }
+        start += chunk;
+    }
+    if result.is_null() {
+        *out = total as u64;
+    }
+    0
 }
 
 /// `a op b` elementwise as a logical list; `NA` or `NaN` on either side gives `NA`. Strings
@@ -1613,6 +1896,11 @@ const CLASS_COUNT: usize = 12;
 const SLAB_BYTES: usize = 1 << 16;
 const SLAB_ALIGN: usize = 64;
 const SYSTEM_ALIGN: usize = 16;
+const LARGE_CLASS_COUNT: usize = 32;
+/// How many freed blocks each large class keeps: a loop's few live temporaries of one size.
+const LARGE_KEEP: u8 = 4;
+/// The largest block a class keeps, so the pools hold at most a few hundred MiB per thread.
+const LARGE_KEEP_LIMIT: usize = 64 << 20;
 
 const DICT_MIN_CAPACITY: usize = 8;
 const POSITION_BITS: u32 = 25;
@@ -1634,15 +1922,33 @@ thread_local! {
     static FREE_STACKS: [Cell<*mut FreeBlock>; CLASS_COUNT] =
         const { [const { Cell::new(null_mut()) }; CLASS_COUNT] };
     static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
+    /// Freed blocks above 64 KiB by power-of-two class, kept so a loop that makes a large list
+    /// every iteration reuses memory whose pages are already mapped.
+    static LARGE_STACKS: [Cell<*mut FreeBlock>; LARGE_CLASS_COUNT] =
+        const { [const { Cell::new(null_mut()) }; LARGE_CLASS_COUNT] };
+    static LARGE_KEPT: [Cell<u8>; LARGE_CLASS_COUNT] =
+        const { [const { Cell::new(0) }; LARGE_CLASS_COUNT] };
 }
 
 // Allocation.
 
 /// A block of at least `size` bytes, 16-byte aligned: a pooled power of two up to 64 KiB, else
-/// straight from the system allocator.
+/// a larger power of two that a freed block of its class provides when there is one.
 unsafe fn block_alloc(size: usize) -> *mut u8 {
     if size > MAX_BLOCK {
-        let layout = system_layout(size);
+        let class = large_class(size);
+        let kept = LARGE_STACKS.with(|stacks| {
+            let top = stacks[class].get();
+            if !top.is_null() {
+                stacks[class].set((*top).next);
+                LARGE_KEPT.with(|kept| kept[class].set(kept[class].get() - 1));
+            }
+            top
+        });
+        if !kept.is_null() {
+            return kept as *mut u8;
+        }
+        let layout = large_layout(size);
         let block = alloc::alloc(layout);
         if block.is_null() {
             alloc::handle_alloc_error(layout);
@@ -1664,7 +1970,24 @@ unsafe fn block_alloc(size: usize) -> *mut u8 {
 /// Returns a block from `block_alloc(size)`; `size` must be the size it was allocated with.
 unsafe fn block_free(block: *mut u8, size: usize) {
     if size > MAX_BLOCK {
-        alloc::dealloc(block, system_layout(size));
+        let class = large_class(size);
+        let keep = LARGE_KEPT.with(|kept| {
+            let count = kept[class].get();
+            let keep = count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT;
+            if keep {
+                kept[class].set(count + 1);
+            }
+            keep
+        });
+        if keep {
+            let block = block as *mut FreeBlock;
+            LARGE_STACKS.with(|stacks| {
+                (*block).next = stacks[class].get();
+                stacks[class].set(block);
+            });
+        } else {
+            alloc::dealloc(block, large_layout(size));
+        }
         return;
     }
     let class = size_class(size);
@@ -1679,9 +2002,13 @@ unsafe fn block_free(block: *mut u8, size: usize) {
 /// Moves a block to a new size, keeping the first `min(old, new)` bytes.
 unsafe fn block_realloc(block: *mut u8, old_size: usize, new_size: usize) -> *mut u8 {
     if old_size > MAX_BLOCK && new_size > MAX_BLOCK {
-        let moved = alloc::realloc(block, system_layout(old_size), new_size);
+        if large_class(old_size) == large_class(new_size) {
+            return block;
+        }
+        let new_layout = large_layout(new_size);
+        let moved = alloc::realloc(block, large_layout(old_size), new_layout.size());
         if moved.is_null() {
-            alloc::handle_alloc_error(system_layout(new_size));
+            alloc::handle_alloc_error(new_layout);
         }
         return moved;
     }
@@ -1728,6 +2055,20 @@ unsafe fn refill(class: usize) -> *mut FreeBlock {
     let first = slab as *mut FreeBlock;
     (*first).next = next;
     first
+}
+
+/// The class of a block above 64 KiB: its size rounded up to a power of two, counted from
+/// 128 KiB.
+fn large_class(size: usize) -> usize {
+    let class = (size.next_power_of_two().trailing_zeros() - MAX_BLOCK.trailing_zeros() - 1) as usize;
+    if class >= LARGE_CLASS_COUNT {
+        panic!("typed value allocation of {size} bytes");
+    }
+    class
+}
+
+fn large_layout(size: usize) -> Layout {
+    system_layout(size.next_power_of_two())
 }
 
 fn system_layout(size: usize) -> Layout {
@@ -1885,6 +2226,7 @@ unsafe fn slice_mut<'a, T>(data: *mut u8, length: usize) -> &'a mut [T] {
 unsafe fn write_item(data: *mut u8, kind: u8, index: usize, word0: u64, word1: u64) {
     match kind {
         DBL => *(data as *mut f64).add(index) = f64::from_bits(word0),
+        I64 => *(data as *mut i64).add(index) = word0 as i64,
         STR => {
             *(data as *mut Str).add(index) = Str {
                 lo: word0,
@@ -1897,14 +2239,14 @@ unsafe fn write_item(data: *mut u8, kind: u8, index: usize, word0: u64, word1: u
 
 fn list_kind(kind: u32) -> Option<u8> {
     match kind {
-        0..=3 => Some(kind as u8),
+        0..=4 => Some(kind as u8),
         _ => None,
     }
 }
 
 fn item_size(kind: u8) -> usize {
     match kind {
-        DBL => 8,
+        DBL | I64 => 8,
         STR => 16,
         _ => 4,
     }
@@ -2085,21 +2427,54 @@ unsafe fn math_checked(a: Side, produced_nan: &mut bool, f: impl Fn(f64) -> f64)
 }
 
 unsafe fn arith(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
+    let lists = op & LIST_ARITH != 0;
+    let op = op & !LIST_ARITH;
     let kind = match list_kind(kind) {
         Some(LGL) => Some(INT),
         Some(STR) | None => None,
         other => other,
     };
     let length = result_length(a.length, b.length);
-    let (Some(kind), Some(length)) = (kind, length) else {
+    let recycled = lists && !a.list.is_null() && !b.list.is_null() && a.length != b.length;
+    let (Some(kind), Some(length), false) = (kind, length, recycled) else {
         release(a);
         release(b);
         return null_mut();
     };
-    if !side_has(a, kind) || !side_has(b, kind) || op > MAX2 {
+    if !side_has(a, kind) || !side_has(b, kind) || op > MAX2 || (kind == I64) != lists {
         release(a);
         release(b);
         return null_mut();
+    }
+    if kind == I64 {
+        let mut overflow = false;
+        let mut checked = |value: Option<i64>| {
+            overflow |= value.is_none();
+            value.unwrap_or(0)
+        };
+        let result = match op {
+            ADD => binary::<i64, i64>(a, b, I64, length, |x, y| checked(x.checked_add(y))),
+            SUB => binary::<i64, i64>(a, b, I64, length, |x, y| checked(x.checked_sub(y))),
+            MUL => binary::<i64, i64>(a, b, I64, length, |x, y| checked(x.checked_mul(y))),
+            _ => {
+                release(a);
+                release(b);
+                return null_mut();
+            }
+        };
+        if overflow {
+            ry_list_drop(result);
+            return null_mut();
+        }
+        return result;
+    }
+    if kind == DBL && lists {
+        let result = arith(op, u32::from(DBL), a, b);
+        if !result.is_null() && raw_slice((*result).data as *const f64, length).iter().any(|x| x.is_nan()) {
+            ry_list_drop(result);
+            return null_mut();
+        }
+        return result;
     }
     if kind == DBL {
         return match op {
