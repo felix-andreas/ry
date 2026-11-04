@@ -7431,16 +7431,22 @@ Each one trades a narrow class of missed errors for a class of false reports see
   that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
   calls) could see it.
 - **Versions.** `FAST_PATHS` lists the hashes each function may have, one per `methods` version the
-  fast path was checked against; the bundled GNU R 4.6.2 is the primary target. A miss against
-  the bundled base is an error at start-up, because it means the base changed under the core; a
-  miss against an `R_HOME` base silently keeps the R code. Functions whose fast path needs R-level helpers keep them as R text in
-  `methods_core.R` (`METHODS_TEMPLATES`), parsed once at install time.
+  fast path was checked against; the bundled GNU R 4.6.2 is the primary target. A miss on a
+  methods package whose version is the bundled one is an error at start-up, because it means the
+  base changed under the core; a miss on any other version keeps the R code. The R expressions the
+  native definitions fill in (coerce and replace methods) are R text in `METHODS_TEMPLATES` in
+  `methods_core.rs`, parsed once at install time.
 - **Definitions.** `setGeneric`, `setMethod` and `setClass` are native for the shapes a package
   usually writes: local supers only, no `setClassUnion` member classes passed as a
   classRepresentation, a `validity` that is `NULL` or a function of `object`. Anything else bails
   to the R code before any effect. The native results are byte-identical to the R path (classes,
   generics, method tables and `serialize()` output, compared on the generated S4 packages, the
-  Matrix sources and the methods package's own tests).
+  Matrix sources and the methods package's own tests). Adding a direct subclass rebuilds the
+  superclass's whole subclass list as `completeSubclasses()` does, regenerating every indirect
+  extension (whose `by` and `to` carry the package attribute differently from the first time) and
+  repeating a class reached through two direct subclasses; appending would differ. One benign
+  exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
+  before its last checks, which fills the same `initialize` dispatch cache the R code fills.
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
   it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
   prints the hashes of the installed functions, for adding a version.

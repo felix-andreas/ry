@@ -1769,11 +1769,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             bail!(skip);
         }
     }
-    for known in &supers {
-        if !walk_keeps_subclasses(slot(known.definition, "subclasses")?, name)? {
-            bail!(skip);
-        }
-    }
+
     if let Some(needed) = methods_value(".NeedPrimitiveMethods")? {
         let needed = values::names(needed);
         if lineage
@@ -1931,14 +1927,14 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                 direct,
                 to_extension,
                 plain,
-                ancestor.name,
+                values::scalar_string_charsxp(ancestor.name)?,
                 first,
             )?);
             through_subclasses.push(combine_extensions(
                 direct,
                 to_extension,
                 first_class_name,
-                ancestor.name,
+                values::scalar_string_charsxp(ancestor.name)?,
                 first,
             )?);
         }
@@ -1988,11 +1984,15 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         crate::subset::assign_slot(definition, install(slot_name)?, value)?;
     }
 
+    let mut rebuilt = Vec::with_capacity(supers.len());
     for (known, &direct) in supers.iter().zip(&directs) {
-        let mut subclasses = list_entries(slot(known.definition, "subclasses")?);
-        subclasses.push((name, direct));
-        sort_by_distance(&mut subclasses)?;
-        record_subclasses(known, &subclasses, place, class_table)?;
+        let Some(subclasses) = walked_subclasses(known, name, direct)? else {
+            bail!(skip);
+        };
+        rebuilt.push(subclasses);
+    }
+    for (known, subclasses) in supers.iter().zip(&rebuilt) {
+        record_subclasses(known, subclasses, place, class_table)?;
     }
     for (known, &extension) in ancestors.iter().zip(&through_subclasses) {
         let mut subclasses = list_entries(slot(known.definition, "subclasses")?);
@@ -2078,65 +2078,59 @@ unsafe fn plain_extension(extension: Sexp) -> R<bool> {
         && is_false(slot(extension, "dataPart")?))
 }
 
-/// Whether adding the class `name` as a direct subclass leaves the same list of names that
-/// `setIs()` builds. Adding the class appends it and orders the list by distance, but
-/// `setIs()` rebuilds the list with `completeSubclasses()`: it drops the indirect entries, then
-/// `.walkClassGraph()` adds each direct subclass's own subclasses that are not direct ones, so a
-/// class reached through two direct subclasses appears twice.
-unsafe fn walk_keeps_subclasses(subclasses: Sexp, name: Sexp) -> R<bool> {
-    let mut entries = Vec::with_capacity(length(subclasses) + 1);
-    let names = values::names(subclasses);
-    for index in 0..length(subclasses) {
-        let extension = subclasses.element(index);
-        let class = values::class_attr(extension);
-        if length(class) != 1 || class.element(0).bytes() != b"SClassExtension" {
-            return Ok(false);
+/// The subclass list of `known` once the class `name` is its direct subclass through
+/// `direct`, as `setIs()` builds it with `completeSubclasses()`: it drops the indirect entries,
+/// then `.walkClassGraph()` adds each direct subclass's own subclasses that are not direct ones,
+/// combined with `.combineExtends()`, and orders the list by distance. Every indirect entry is
+/// rebuilt, and a class reached through two direct subclasses appears twice. `None` when an
+/// entry is not a plain extension, whose combination the native core does not build.
+unsafe fn walked_subclasses(
+    known: &Super,
+    name: Sexp,
+    direct: Sexp,
+) -> R<Option<Vec<(Sexp, Sexp)>>> {
+    let mut directs = Vec::new();
+    for (subclass, extension) in list_entries(slot(known.definition, "subclasses")?) {
+        if !plain_extension(extension)? {
+            return Ok(None);
         }
-        let distance = values::as_real_scalar(slot(extension, "distance")?);
-        let direct = length(slot(extension, "by")?) == 0;
-        entries.push((names.element(index), distance, direct));
+        if length(slot(extension, "by")?) == 0 {
+            directs.push((subclass, extension));
+        }
     }
-    entries.push((name, 1.0, true));
-    let mut appended: Vec<(Sexp, f64)> = entries
-        .iter()
-        .map(|&(name, distance, _)| (name, distance))
-        .collect();
-    appended.sort_by(|left, right| left.1.total_cmp(&right.1));
-
-    let directs: Vec<(Sexp, f64)> = entries
-        .iter()
-        .filter(|entry| entry.2)
-        .map(|&(name, distance, _)| (name, distance))
-        .collect();
+    directs.push((name, direct));
+    let class_name = slot(known.definition, "className")?;
     let mut walked = directs.clone();
-    for &(direct, distance) in &directs {
-        if direct.bytes() == name.bytes() {
+    for &(subclass, extension) in &directs {
+        if subclass.bytes() == name.bytes() {
             continue;
         }
-        let Some(definition) = cached_class(values::scalar_string_charsxp(direct)?)? else {
-            return Ok(false);
+        let Some(definition) = cached_class(values::scalar_string_charsxp(subclass)?)? else {
+            return Ok(None);
         };
-        let deeper = slot(definition, "subclasses")?;
-        let deeper_names = values::names(deeper);
-        for inner in 0..length(deeper) {
-            let deeper_name = deeper_names.element(inner);
+        let by = Super {
+            name: subclass,
+            definition,
+        };
+        let plain = values::scalar_string_charsxp(subclass)?;
+        for (deeper, deeper_extension) in list_entries(slot(definition, "subclasses")?) {
             if directs
                 .iter()
-                .any(|known| known.0.bytes() == deeper_name.bytes())
+                .any(|known| known.0.bytes() == deeper.bytes())
             {
                 continue;
             }
-            let extension = deeper.element(inner);
-            let deeper_distance = values::as_real_scalar(slot(extension, "distance")?);
-            walked.push((deeper_name, distance + deeper_distance));
+            if !plain_extension(deeper_extension)? {
+                return Ok(None);
+            }
+            walked.push((
+                deeper,
+                combine_extensions(deeper_extension, extension, plain, class_name, &by)?,
+            ));
         }
     }
-    walked.sort_by(|left, right| left.1.total_cmp(&right.1));
-    Ok(walked.len() == appended.len()
-        && walked
-            .iter()
-            .zip(&appended)
-            .all(|(left, right)| left.0.bytes() == right.0.bytes()))
+    sort_by_distance(&mut walked)?;
+    Ok(Some(walked))
 }
 
 /// Whether the dispatch caches the R code fills while defining the class are full already,
@@ -2313,7 +2307,8 @@ unsafe fn direct_extension(
 }
 
 /// `.combineExtends(by_extension, to_extension, by, to, TRUE)` for two simple extensions that
-/// are not to a data part: from the new class through `known` (named `by`) to the class `to`.
+/// are not to a data part: from the new class through `known` (named `by`) to the class `to`, a
+/// character vector kept with its attributes.
 unsafe fn combine_extensions(
     by_extension: Sexp,
     to_extension: Sexp,
@@ -2352,7 +2347,7 @@ unsafe fn combine_extensions(
             Template::CombineReplace,
             &[
                 ("BY", by),
-                ("TO", values::scalar_string_charsxp(to)?),
+                ("TO", to),
                 ("STRICT", values::scalar_bool(true)?),
                 ("BYEXPR", by_replace_body),
             ],
