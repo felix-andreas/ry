@@ -131,10 +131,20 @@ crates/interp/src/rmath.rs
     GNU R src/nmath/lgamma.c (lgammafn_sign)
         Copyright (C) 2000-2020 The R Core Team
         Copyright (C) 1998 Ross Ihaka
-    GNU R src/nmath/pgamma.c (log1pmx, logspace_sub)
+    GNU R src/nmath/pgamma.c (pgamma_raw and its helpers, logcf, log1pmx, lgamma1p, logspace_sub)
         Copyright (C) 2006-2019 The R Core Team
         Copyright (C) 2005-6 Morten Welinder <terra@gnome.org>
         Copyright (C) 2005-10 The R Foundation
+    GNU R src/nmath/bd0.c (ebd0 and its scale table)
+        Copyright (C) 2000-2025 The R Core Team
+        Copyright (C) 2014 Morten Welinder
+        Copyright (C) 2000 Catherine Loader
+    GNU R src/nmath/stirlerr.c (stirlerr)
+        Copyright (C) 2000-2025 The R Core Team
+        Copyright (C) 2000 Catherine Loader
+    GNU R src/nmath/dpois.c (dpois_raw)
+        Copyright (C) 2000-2021 The R Core Team
+        Copyright (C) 2000 Catherine Loader
     GNU R src/nmath/cospi.c (cospi_, sinpi_, tanpi_)
         Copyright (C) 2013-2022 The R Core Team
     GNU R src/nmath/stirlerr.c (stirlerr)
