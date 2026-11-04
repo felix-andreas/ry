@@ -1150,7 +1150,7 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
 /// GNU R's `R_getS4DataSlot`: the data part of an S4 object whose class extends a basic type,
 /// held in `.Data` or, for an environment such as a reference class object, in `.xData`.
 /// `NULL` when the class extends none.
-unsafe fn s4_data_part(object: Sexp) -> Sexp {
+pub(crate) unsafe fn s4_data_part(object: Sexp) -> Sexp {
     let data = get_attr(object, symbols().dot_data);
     if data != nil() {
         return data;
@@ -3420,6 +3420,16 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
             return Ok(nil());
         }
         return Err(call.error("attempt to set an attribute on NULL"));
+    }
+    if names == nil() && get_attr(object, symbols().names) == nil() {
+        return Ok(object);
+    }
+    if object.kind() == SexpType::Object {
+        let class = get_attr(object, symbols().class);
+        let class = if class == nil() { "S4".to_string() } else { char_str(class.element(0)).to_string() };
+        return Err(call.error(format!(
+            "invalid to use names()<- on an S4 object of class '{class}'"
+        )));
     }
     let object = modifiable(object)?;
     // GNU R's `names<-` turns any value but a plain character vector into text with a
