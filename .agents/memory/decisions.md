@@ -7691,3 +7691,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   run), and writing the lazy-load database is fast: 0.06 s for MASS against GNU R's 0.10 s on the
   same driver. The R half spends its time in Rd processing and help indices (MASS: 0.55 s and
   0.27 s, about 10% slower than GNU R) and, for an S4 package, in sourcing the code (Matrix: 2.7 s).
+- **Impact.** Whole `R CMD INSTALL` wall time on a 4-processor container:
+
+  | Package | ry | GNU R | GNU R, `MAKEFLAGS=-j4` |
+  |---|---|---|---|
+  | MASS | 2.0 s | 6.6 s | |
+  | lattice | 1.5 s | 8.1 s | |
+  | Matrix | 39 s (failed to link before) | 177 s | 74 s |
+
+  Matrix's compile takes about 134 s serially and about 33 s with four jobs, so for packages with
+  compiled code the C and C++ compiler is the floor. Analysis is unaffected.
