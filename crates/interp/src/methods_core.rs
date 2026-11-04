@@ -1214,10 +1214,11 @@ unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Se
     lcons(fallback, arguments)
 }
 
-/// `setMethod(f, signature, definition)` for a standard generic found from `where`, a closure
-/// with the generic's formals, and a signature of class names the class cache defines. Does what
-/// the R code does: caches the method in the generic's tables and in `where`'s `.__T__`
-/// metadata, then resets the inherited methods, without the quadratic table rebuild.
+/// `setMethod(f, signature, definition)` for a standard generic found from `where`, or a
+/// primitive whose methods are on, a closure with the generic's formals, and a signature of
+/// class names the class cache defines. Does what the R code does: caches the method in the
+/// generic's tables and in `where`'s `.__T__` metadata, then resets the inherited methods
+/// (and marks a primitive's methods for reset), without the quadratic table rebuild.
 unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
@@ -1243,6 +1244,25 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     if !is_standard_generic(generic, true)? {
         bail!(skip);
     }
+    // A primitive whose methods are on: the function visible from `where` is the primitive,
+    // and the generic the methods package set up for it is its default method's generic.
+    let visible = visible_function(name_symbol, place)?;
+    let primitive = match visible {
+        Visible::Function(function)
+            if matches!(function.kind(), SexpType::Builtin | SexpType::Special) =>
+        {
+            if crate::dispatch::primitive_methods(function).map(|(found, _)| found) != Some(generic)
+                || get_attr(generic, install("default")?) != function
+            {
+                bail!(skip);
+            }
+            Some(function)
+        }
+        _ => None,
+    };
+    if primitive.is_none() && !has_closure_default(generic)? {
+        bail!(skip);
+    }
     // `getGeneric()` caches a generic it finds that is also the global binding.
     if let Some(global) = quiet_value(name_symbol, values::global_env())? {
         if values::is_function(global) {
@@ -1259,8 +1279,9 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         slot_text(generic, "generic")?,
         slot_text(generic, "package")?,
     )?;
-    let sealed_check_table = match visible_function(name_symbol, place)? {
+    let sealed_check_table = match visible {
         Visible::None => None,
+        Visible::Function(function) if primitive == Some(function) => None,
         Visible::Function(function) if function == generic => {
             match quiet_value(table_symbol, place)? {
                 Some(table) if table.kind() == SexpType::Environment => Some(table),
@@ -1278,6 +1299,9 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         bail!(skip);
     };
     crate::heap().root(signature);
+    if primitive.is_some() && sealed_primitive_method(name.element(0).bytes(), signature)? {
+        bail!(skip);
+    }
     let Some(definition) = forced_arg(frame, "definition")? else {
         bail!(skip);
     };
@@ -1354,7 +1378,27 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     };
     eval::define(label, method, meta_table)?;
     reset_inherited_methods(methods_table, all_table)?;
+    if let Some(primitive) = primitive {
+        crate::dispatch::set_primitive_methods(primitive, "reset", generic, nil())?;
+    }
     values::scalar_bool(true)
+}
+
+/// `.isSealedMethod()` for a primitive: a method on basic classes only is sealed, because the
+/// primitive dispatches only when an argument is an S4 object. Subset operators look at every
+/// argument class, the others at the first one. `%*%` and the cross products take the second
+/// argument into account too, so they count as sealed here.
+unsafe fn sealed_primitive_method(name: &[u8], signature: Sexp) -> R<bool> {
+    if length(signature) == 0 || matches!(name, b"%*%" | b"crossprod" | b"tcrossprod") {
+        return Ok(true);
+    }
+    let basic = basic_classes()?;
+    let is_basic = |index: usize| basic.contains(&signature.element(index).bytes());
+    Ok(if matches!(name, b"[" | b"[[" | b"[<-" | b"[[<-") {
+        (0..length(signature)).all(is_basic)
+    } else {
+        is_basic(0)
+    })
 }
 
 /// `.resetInheritedMethods(fenv, mtable)` once no kept method is a `MethodWithNext`: drops the
@@ -2978,7 +3022,10 @@ unsafe fn cache_own_generic(
     let Some(generic) = quiet_value(symbol, place)? else {
         bail!(false);
     };
-    if !is_standard_generic(generic, false)? || slot_text(generic, "package")? != package {
+    if !is_standard_generic(generic, false)?
+        || !has_closure_default(generic)?
+        || slot_text(generic, "package")? != package
+    {
         bail!(false);
     }
     let default = slot(generic, "default")?;
@@ -4229,7 +4276,7 @@ unsafe fn append_attributes(from: Sexp, to: Sexp) -> R<()> {
 
 /// Whether `generic` is a plain `standardGeneric`, or with `nonstandard` also a
 /// `nonstandardGenericFunction`, whose methods dispatch through its own tables: not a group
-/// generic, a member of a group, or the generic of a primitive.
+/// generic or a member of a group.
 unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
     if generic.kind() != SexpType::Closure || !generic.has_gp(gp::S4_OBJECT) {
         return Ok(false);
@@ -4247,12 +4294,6 @@ unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
     if group.kind() != SexpType::List || length(group) != 0 {
         return Ok(false);
     }
-    let default = get_attr(generic, install("default")?);
-    if matches!(default.kind(), SexpType::Builtin | SexpType::Special)
-        || values::inherits(default, "internalDispatchMethod")
-    {
-        return Ok(false);
-    }
     for name in ["generic", "package"] {
         let value = get_attr(generic, install(name)?);
         if value.kind() != SexpType::String || length(value) != 1 {
@@ -4260,6 +4301,14 @@ unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
         }
     }
     Ok(get_attr(generic, install("signature")?).kind() == SexpType::String)
+}
+
+/// Whether the default method of `generic` is an R function, not a primitive or the
+/// `.Internal` function of an internal generic, which dispatch from C code.
+unsafe fn has_closure_default(generic: Sexp) -> R<bool> {
+    let default = get_attr(generic, install("default")?);
+    Ok(!matches!(default.kind(), SexpType::Builtin | SexpType::Special)
+        && !values::inherits(default, "internalDispatchMethod"))
 }
 
 /// The text of a slot that holds a single string.
