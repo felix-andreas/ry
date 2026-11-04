@@ -289,6 +289,8 @@ pub struct Interp {
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
     pub forks: fork::Forks,
+    /// The environment of `package:ry` (see [`crate::standard_library::builtins_env`]).
+    pub builtins_env: Option<Sexp>,
 }
 
 struct InterpState {
@@ -402,6 +404,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
         #[cfg(unix)]
         forks: fork::Forks::default(),
+        builtins_env: None,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

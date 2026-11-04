@@ -5,274 +5,274 @@
   "programs": [
     {
       "program": "array_dot",
-      "gnu_r": 0.196,
-      "ry": 0.033,
+      "gnu_r": 0.195,
+      "ry": 0.035,
       "ry_typed": 0.005,
       "cold": {
-        "gnu_r": 0.208,
-        "ry": 0.047,
-        "ry_typed": 0.008
+        "gnu_r": 0.239,
+        "ry": 0.049,
+        "ry_typed": 2.906
       },
       "peak_mib": {
-        "gnu_r": 78.7,
-        "ry": 98.5,
-        "ry_typed": 129.2
+        "gnu_r": 78.8,
+        "ry": 99.7,
+        "ry_typed": 182.5
       }
     },
     {
       "program": "array_filter",
-      "gnu_r": 0.169,
+      "gnu_r": 0.173,
       "ry": 0.022,
       "ry_typed": 0.011,
       "cold": {
-        "gnu_r": 0.185,
-        "ry": 0.034,
-        "ry_typed": 0.012
+        "gnu_r": 0.176,
+        "ry": 0.037,
+        "ry_typed": 0.62
       },
       "peak_mib": {
         "gnu_r": 78.8,
-        "ry": 96.9,
-        "ry_typed": 71.9
+        "ry": 97.4,
+        "ry_typed": 80.3
       }
     },
     {
       "program": "array_map",
-      "gnu_r": 0.264,
-      "ry": 0.04,
+      "gnu_r": 0.262,
+      "ry": 0.039,
       "ry_typed": 0.008,
       "cold": {
-        "gnu_r": 0.284,
-        "ry": 0.048,
-        "ry_typed": 0.01
+        "gnu_r": 0.274,
+        "ry": 0.051,
+        "ry_typed": 0.049
       },
       "peak_mib": {
         "gnu_r": 91.6,
-        "ry": 94.9,
-        "ry_typed": 71.7
+        "ry": 95.5,
+        "ry_typed": 92.1
       }
     },
     {
       "program": "array_sum",
-      "gnu_r": 0.122,
-      "ry": 0.023,
+      "gnu_r": 0.125,
+      "ry": 0.024,
       "ry_typed": 0.013,
       "cold": {
-        "gnu_r": 0.131,
-        "ry": 0.036,
-        "ry_typed": 0.013
+        "gnu_r": 0.125,
+        "ry": 0.037,
+        "ry_typed": 0.492
       },
       "peak_mib": {
-        "gnu_r": 78.7,
-        "ry": 97.4,
-        "ry_typed": 72.1
+        "gnu_r": 78.8,
+        "ry": 97.9,
+        "ry_typed": 80.2
       }
     },
     {
       "program": "bond_book",
-      "gnu_r": 0.447,
-      "ry": 0.595,
-      "ry_typed": 0.054,
+      "gnu_r": 0.453,
+      "ry": 0.601,
+      "ry_typed": 0.06,
       "cold": {
-        "gnu_r": 0.451,
-        "ry": 0.604,
-        "ry_typed": 0.06
+        "gnu_r": 0.468,
+        "ry": 0.704,
+        "ry_typed": 4.102
       },
       "peak_mib": {
-        "gnu_r": 53.2,
-        "ry": 51.6,
-        "ry_typed": 45.5
+        "gnu_r": 53.0,
+        "ry": 52.0,
+        "ry_typed": 66.4
       }
     },
     {
       "program": "closures",
-      "gnu_r": 0.576,
-      "ry": 0.306,
+      "gnu_r": 0.681,
+      "ry": 0.411,
       "ry_typed": 0.003,
       "cold": {
-        "gnu_r": 0.593,
-        "ry": 0.382,
-        "ry_typed": 0.01
+        "gnu_r": 0.65,
+        "ry": 0.413,
+        "ry_typed": 0.838
       },
       "peak_mib": {
-        "gnu_r": 96.6,
-        "ry": 113.0,
-        "ry_typed": 52.7
+        "gnu_r": 96.8,
+        "ry": 113.2,
+        "ry_typed": 112.8
       }
     },
     {
       "program": "drawdown",
-      "gnu_r": 0.255,
-      "ry": 0.046,
-      "ry_typed": 0.005,
+      "gnu_r": 0.278,
+      "ry": 0.051,
+      "ry_typed": 0.007,
       "cold": {
-        "gnu_r": 0.267,
-        "ry": 0.051,
-        "ry_typed": 0.008
+        "gnu_r": 0.319,
+        "ry": 0.056,
+        "ry_typed": 0.009
       },
       "peak_mib": {
-        "gnu_r": 71.0,
-        "ry": 125.2,
-        "ry_typed": 129.4
+        "gnu_r": 71.1,
+        "ry": 125.6,
+        "ry_typed": 129.8
       }
     },
     {
       "program": "expr_tree",
-      "gnu_r": 0.317,
-      "ry": 0.329,
-      "ry_typed": 0.222,
+      "gnu_r": 0.425,
+      "ry": 0.382,
+      "ry_typed": 0.333,
       "cold": {
-        "gnu_r": 0.49,
-        "ry": 0.318,
-        "ry_typed": 0.26
+        "gnu_r": 0.719,
+        "ry": 0.374,
+        "ry_typed": 0.356
       },
       "peak_mib": {
         "gnu_r": 201.4,
-        "ry": 138.6,
-        "ry_typed": 71.9
+        "ry": 139.2,
+        "ry_typed": 72.3
       }
     },
     {
       "program": "fib",
-      "gnu_r": 0.765,
+      "gnu_r": 0.85,
       "ry": 0.006,
-      "ry_typed": 0.005,
+      "ry_typed": 0.006,
       "cold": {
-        "gnu_r": 0.799,
-        "ry": 0.009,
-        "ry_typed": 0.006
+        "gnu_r": 0.839,
+        "ry": 0.01,
+        "ry_typed": 1.773
       },
       "peak_mib": {
-        "gnu_r": 51.6,
-        "ry": 44.3,
-        "ry_typed": 45.0
+        "gnu_r": 51.7,
+        "ry": 44.8,
+        "ry_typed": 50.7
       }
     },
     {
       "program": "log_rank",
-      "gnu_r": 0.087,
-      "ry": 0.056,
-      "ry_typed": 1.507,
+      "gnu_r": 0.095,
+      "ry": 0.059,
+      "ry_typed": 1.599,
       "cold": {
-        "gnu_r": 0.128,
-        "ry": 0.07,
-        "ry_typed": 1.595
+        "gnu_r": 0.136,
+        "ry": 0.081,
+        "ry_typed": 1.624
       },
       "peak_mib": {
-        "gnu_r": 105.2,
-        "ry": 58.7,
-        "ry_typed": 100.8
+        "gnu_r": 105.1,
+        "ry": 59.3,
+        "ry_typed": 101.2
       }
     },
     {
       "program": "loop_sum",
-      "gnu_r": 0.22,
-      "ry": 0.059,
+      "gnu_r": 0.235,
+      "ry": 0.069,
       "ry_typed": 0.007,
       "cold": {
-        "gnu_r": 0.238,
-        "ry": 0.06,
-        "ry_typed": 0.008
+        "gnu_r": 0.241,
+        "ry": 0.067,
+        "ry_typed": 2.298
       },
       "peak_mib": {
-        "gnu_r": 48.2,
-        "ry": 82.4,
-        "ry_typed": 45.1
+        "gnu_r": 48.1,
+        "ry": 82.7,
+        "ry_typed": 129.7
       }
     },
     {
       "program": "orders",
-      "gnu_r": 0.488,
-      "ry": 0.426,
-      "ry_typed": 0.663,
+      "gnu_r": 0.51,
+      "ry": 0.428,
+      "ry_typed": 0.649,
       "cold": {
-        "gnu_r": 0.512,
-        "ry": 0.474,
-        "ry_typed": 0.681
+        "gnu_r": 0.524,
+        "ry": 0.473,
+        "ry_typed": 0.672
       },
       "peak_mib": {
-        "gnu_r": 52.6,
-        "ry": 52.4,
-        "ry_typed": 57.1
+        "gnu_r": 52.5,
+        "ry": 53.1,
+        "ry_typed": 57.6
       }
     },
     {
       "program": "report",
-      "gnu_r": 0.507,
-      "ry": 0.598,
-      "ry_typed": 0.208,
+      "gnu_r": 0.472,
+      "ry": 0.631,
+      "ry_typed": 0.211,
       "cold": {
-        "gnu_r": 0.44,
-        "ry": 0.665,
-        "ry_typed": 0.222
+        "gnu_r": 0.458,
+        "ry": 0.655,
+        "ry_typed": 0.212
       },
       "peak_mib": {
-        "gnu_r": 59.1,
-        "ry": 66.7,
-        "ry_typed": 71.1
+        "gnu_r": 59.2,
+        "ry": 67.2,
+        "ry_typed": 73.7
       }
     },
     {
       "program": "sales",
-      "gnu_r": 0.075,
-      "ry": 0.043,
-      "ry_typed": 0.04,
+      "gnu_r": 0.076,
+      "ry": 0.051,
+      "ry_typed": 0.042,
       "cold": {
-        "gnu_r": 0.107,
-        "ry": 0.078,
+        "gnu_r": 0.106,
+        "ry": 0.083,
         "ry_typed": 0.045
       },
       "peak_mib": {
-        "gnu_r": 148.5,
-        "ry": 146.8,
-        "ry_typed": 260.6
+        "gnu_r": 148.4,
+        "ry": 147.0,
+        "ry_typed": 260.8
       }
     },
     {
       "program": "validate",
-      "gnu_r": 0.758,
-      "ry": 0.709,
-      "ry_typed": 0.374,
+      "gnu_r": 0.817,
+      "ry": 0.72,
+      "ry_typed": 0.375,
       "cold": {
-        "gnu_r": 0.823,
-        "ry": 0.712,
-        "ry_typed": 0.375
+        "gnu_r": 0.831,
+        "ry": 0.723,
+        "ry_typed": 0.366
       },
       "peak_mib": {
-        "gnu_r": 106.0,
-        "ry": 116.9,
-        "ry_typed": 116.4
+        "gnu_r": 106.1,
+        "ry": 117.5,
+        "ry_typed": 116.7
       }
     },
     {
       "program": "vasicek",
       "gnu_r": 0.033,
-      "ry": 0.02,
-      "ry_typed": 0.017,
+      "ry": 0.022,
+      "ry_typed": 0.018,
       "cold": {
-        "gnu_r": 0.039,
-        "ry": 0.03,
-        "ry_typed": 0.025
+        "gnu_r": 0.04,
+        "ry": 0.033,
+        "ry_typed": 0.027
       },
       "peak_mib": {
         "gnu_r": 104.2,
-        "ry": 63.0,
-        "ry_typed": 53.0
+        "ry": 63.5,
+        "ry_typed": 53.3
       }
     },
     {
       "program": "vector_arith",
-      "gnu_r": 0.136,
-      "ry": 0.133,
+      "gnu_r": 0.152,
+      "ry": 0.147,
       "ry_typed": 0.057,
       "cold": {
         "gnu_r": 0.171,
-        "ry": 0.229,
-        "ry_typed": 0.059
+        "ry": 0.238,
+        "ry_typed": 0.304
       },
       "peak_mib": {
-        "gnu_r": 106.9,
-        "ry": 108.4,
-        "ry_typed": 71.9
+        "gnu_r": 106.8,
+        "ry": 108.6,
+        "ry_typed": 111.0
       }
     }
   ]
