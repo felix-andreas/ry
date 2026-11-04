@@ -73,6 +73,7 @@
 | 39:      b     2    NA  1.201   TRUE     lo
 | 40:      c     2    NA -1.111   TRUE     lo
 |          g     h     x      y   flag      f
+|     <char> <int> <int>  <num> <lgcl> <fctr>
 |          g     h     x     y   flag      f
 |     <char> <int> <int> <num> <lgcl> <fctr>
 |  1:      b     2    12 0.080     NA     lo
@@ -170,6 +171,7 @@
 | 20:      b -0.004
 | 21:      b -0.856
 |          g      z
+|     <char>  <num>
 |        x      y
 |    <int>  <num>
 | 1:     8 -0.217
@@ -191,9 +193,9 @@
 | [4] "names"            
 | [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
+| [1] "row.names"         "class"             "sorted"           
+| [4] "names"             ".internal.selfref"
 | [1] "row.names"         "class"             "names"            
-| [4] "sorted"            ".internal.selfref"
-| [1] "names"             "row.names"         "class"            
 | [4] ".internal.selfref"
 |         g      s     n
 |    <char>  <num> <int>
@@ -201,6 +203,8 @@
 | 2:      b -3.212    14
 | 3:      c  1.356     7
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
 [errors]
 [value]

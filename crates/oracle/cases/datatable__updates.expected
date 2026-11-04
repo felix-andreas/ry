@@ -70,6 +70,8 @@
 | 5:      b    15   0.0    11    27
 | [1]  2 12 13 14 15
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
 - 2.500000 (type 'double') at RHS position 1 out-of-range(NA) or truncated (precision lost) when assigning to type 'integer' (column 2 named 'x') (in `[.data.table`(dt, 1L, `:=`(x, 2.5)))
 [errors]

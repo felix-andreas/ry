@@ -1,49 +1,58 @@
 [stdout]
-|    a V1
-| 1: 1  9
-| 2: 2  6
-| 3: 3  7
+|        a    V1
+|    <int> <num>
+| 1:     1     9
+| 2:     2     6
+| 3:     3     7
 | [1] "c" "b" "a"
-| warning: No non-missing values found in at least one group. Coercing to numeric type and returning 'Inf' for such groups to be consistent with base 
-|    g  V1
-| 1: 1   3
-| 2: 2 Inf
-|    g  m
-| 1: 1 lo
-| 2: 2 hi
-|    k v
-| 1: 1 1
-| 2: 1 2
-| 3: 2 2
-| 4: 4 4
-|    k  v
-| 1: 1  1
-| 2: 1  2
-| 3: 2  3
-| 4: 4 NA
-|    k v
-| 1: 1 1
-| 2: 1 2
-| 3: 2 2
-| 4: 4 4
-|    k v
-| 1: 1 1
-| 2: 2 2
-| 3: 4 4
-|    k  k n
-| 1: 1  1 2
-| 2: 2 NA 0
-| 3: 4 NA 0
-|    k v  w
-| 1: 1 1 NA
-| 2: 1 2 NA
-| 3: 3 3  6
-| 4: 3 4  8
-|    k v  w
-| 1: 1 1 NA
-| 2: 1 2 NA
-| 3: 3 3  6
-| 4: 3 4  8
+|        g    V1
+|    <int> <int>
+| 1:     1     3
+| 2:     2    NA
+|        g     m
+|    <int> <ord>
+| 1:     1    lo
+| 2:     2    hi
+|        k     v
+|    <num> <num>
+| 1:     1     1
+| 2:     1     2
+| 3:     2     2
+| 4:     4     4
+|        k     v
+|    <num> <num>
+| 1:     1     1
+| 2:     1     2
+| 3:     2     3
+| 4:     4    NA
+|        k     v
+|    <num> <num>
+| 1:     1     1
+| 2:     1     2
+| 3:     2     2
+| 4:     4     4
+|        k     v
+|    <num> <num>
+| 1:     1     1
+| 2:     2     2
+| 3:     4     4
+|        k     k     n
+|    <num> <num> <int>
+| 1:     1     1     2
+| 2:     2    NA     0
+| 3:     4    NA     0
+|        k     v     w
+|    <num> <num> <num>
+| 1:     1     1    NA
+| 2:     1     2    NA
+| 3:     3     3     6
+| 4:     3     4     8
+|        k     v     w
+|    <num> <num> <num>
+| 1:     1     1    NA
+| 2:     1     2    NA
+| 3:     3     3     6
+| 4:     3     4     8
 | [1] TRUE
 |  Named int 2
 |  - attr(*, "names")= chr "q"
@@ -59,8 +68,9 @@
 | 4  7  8 rr
 | 5 NA NA   
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
-- No non-missing values found in at least one group. Coercing to numeric type and returning 'Inf' for such groups to be consistent with base (in gmin(y, na.rm = TRUE))
 - nomatch isn't relevant together with :=, ignoring nomatch (in `[.data.table`(y, data.table(k = 3), `:=`(w, v * 2), on = "k", )
 [errors]
 [value]

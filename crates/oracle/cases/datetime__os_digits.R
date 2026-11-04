@@ -7,8 +7,8 @@ for (f in c("%OS0", "%OS1", "%OS3", "%OS6", "%OS9", "%OS", "%OSx", "%OS0%OS2", "
 format(as.POSIXct("2026-10-01 08:00:59.9999", tz = "UTC"), c("%OS0", "%OS2"))
 options(digits.secs = 3); format(x, "%OS"); format(x, "%OS0"); format(x)
 options(digits.secs = NULL)
-# Parsing `%OS` reads the longest number, keeps it only when it lies in [0, 61], and treats
-# a digit after it as literal text.
+# Parsing `%OS` reads the longest number and gives NA when it lies outside [0, 61]; the
+# digit of `%OSn` is skipped.
 p <- function(s, f = "%H:%M:%OS") format(strptime(s, f, tz = "UTC"), "%H:%M:%OS6")
 p("08:00:07.5"); p("08:00: 7"); p("08:00:1e1"); p("08:00:07,5"); p("08:00:70")
 p("08:00:61"); p("08:00:.5"); p("08:00:-1"); p("08:00:"); p("08:00:7.")

@@ -22,21 +22,22 @@
 |       [,1] [,2]
 |  [1,]    1   11
 |  [2,]    2   12
-|  [ reached getOption("max.print") -- omitted 8 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 8 rows ]
 | [1] 1 2 3
-|  [ reached getOption("max.print") -- omitted 7 entries ]
+|  [ reached 'max' / getOption("max.print") -- omitted 7 entries ]
 |         [,1]
 |  [1,]      1
 |  [2,]      2
 |  [3,]      3
 |  [4,]      4
 |  [5,]      5
-|  [ reached getOption("max.print") -- omitted 5 rows ]
-|      [,1] [,2] [,3]
-|  [ reached getOption("max.print") -- omitted 2 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 5 rows ]
+|      [,1]
+| [1,]    1
+|  [ reached 'max' / getOption("max.print") -- omitted 1 row and 2 columns ]
 |      [,1] [,2] [,3] [,4]
 | [1,]    1    6   11   16
-|  [ reached getOption("max.print") -- omitted 4 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 4 rows ]
 |   a b
 | 1 1 a
 | 2 2 b

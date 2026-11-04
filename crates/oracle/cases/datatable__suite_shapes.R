@@ -1,3 +1,4 @@
+# oracle: requires data.table
 # Query shapes from data.table's own test suite: each answer must match data.table's, whether the
 # engine answers or declines.
 library(data.table)
