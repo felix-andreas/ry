@@ -1,6 +1,6 @@
 ---
 title: Typed ry's hill climb
-description: How typed ry grows: a fitness function over speed, friendliness and soundness, and the log of each step
+description: "How typed ry grows: a fitness function over speed, friendliness and soundness, and the log of each step"
 ---
 
 Typed ry grows by a hill climb. Each step is one change to the language or its implementation, and

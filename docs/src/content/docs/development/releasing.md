@@ -198,6 +198,8 @@ version that differs from any of the three.
    and the Windows archive is `ry-x86_64-pc-windows-gnullvm.zip` (say that `ry run` and `ry load`
    work on Windows only if the Windows smoke test passed).
 9. Append this release's rows to the progress dashboard, as the next section describes.
+10. Deploy the docs site so the news and installation pages show the release: in the Actions tab, open
+    **Docs**, select **Run workflow**, and enter the branch `main`.
 
 ## The progress dashboard
 
