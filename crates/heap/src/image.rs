@@ -459,7 +459,10 @@ impl Heap {
         }
         // Objects that existed before the load keep their reference counts at least as high as
         // the image's, and an old one that comes to point at a loaded object is remembered.
-        let mut preexisting = vec![true; fixed_count];
+        let mut preexisting = vec![0u64; object_count.div_ceil(64)];
+        for position in 0..fixed_count {
+            preexisting[position / 64] |= 1 << (position % 64);
+        }
         let nil = self.known.nil;
 
         while objects.len() < object_count {
@@ -501,14 +504,16 @@ impl Heap {
                 ORIGIN_FRESH => (self.allocate_from_image(&mut input, relocation)?, false),
                 _ => return Err(invalid("an object has an unknown origin")),
             };
+            if existed {
+                preexisting[objects.len() / 64] |= 1 << (objects.len() % 64);
+            }
             objects.push(object);
-            preexisting.push(existed);
         }
 
         for position in 0..object_count {
             let object = objects[position];
             let refcount = input.u16()?;
-            let existed = preexisting[position];
+            let existed = preexisting[position / 64] & (1 << (position % 64)) != 0;
             if existed {
                 object.set_refcount(object.refcount().max(refcount));
             } else {
@@ -856,6 +861,7 @@ fn kind_of(code: u8) -> Result<SexpType, ImageError> {
     SexpType::from_code(u32::from(code)).ok_or_else(|| invalid("an object has an unknown type"))
 }
 
+#[inline(always)]
 fn lookup(objects: &[Sexp], position: u32) -> Result<Sexp, ImageError> {
     objects
         .get(position as usize)
@@ -863,6 +869,7 @@ fn lookup(objects: &[Sexp], position: u32) -> Result<Sexp, ImageError> {
         .ok_or_else(|| invalid("a reference points past the objects loaded so far"))
 }
 
+#[cold]
 fn invalid(message: &str) -> ImageError {
     ImageError::Invalid(message.to_owned())
 }
@@ -909,6 +916,7 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    #[inline(always)]
     pub fn take(&mut self, count: usize) -> Result<&'a [u8], ImageError> {
         if self.bytes.len() < count {
             return Err(invalid("it ends early"));
@@ -918,28 +926,34 @@ impl<'a> Reader<'a> {
         Ok(taken)
     }
 
+    #[inline(always)]
     fn array<const N: usize>(&mut self) -> Result<[u8; N], ImageError> {
         let mut array = [0; N];
         array.copy_from_slice(self.take(N)?);
         Ok(array)
     }
 
+    #[inline(always)]
     pub fn u8(&mut self) -> Result<u8, ImageError> {
         Ok(self.array::<1>()?[0])
     }
 
+    #[inline(always)]
     pub fn u16(&mut self) -> Result<u16, ImageError> {
         Ok(u16::from_le_bytes(self.array()?))
     }
 
+    #[inline(always)]
     pub fn u32(&mut self) -> Result<u32, ImageError> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
+    #[inline(always)]
     pub fn u64(&mut self) -> Result<u64, ImageError> {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
+    #[inline(always)]
     pub fn blob(&mut self) -> Result<&'a [u8], ImageError> {
         let length = self.u64()?;
         let length = usize::try_from(length).map_err(|_| invalid("a length is too large"))?;
@@ -951,6 +965,11 @@ impl<'a> Reader<'a> {
         if self.bytes.len() < count * 4 {
             return Err(invalid("it ends early"));
         }
-        (0..count).map(|_| self.u32()).collect()
+        let (words, rest) = self.bytes.split_at(count * 4);
+        self.bytes = rest;
+        Ok(words
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect())
     }
 }

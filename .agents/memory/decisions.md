@@ -7646,3 +7646,29 @@ Each one trades a narrow class of missed errors for a class of false reports see
   re-run of the environment steps fell from about 20 ms to about 10 ms; what remains is GNU R's
   profile (`.expand_R_libs_env_var` about 3 ms, the `Autoloads` attach about 1 ms) and the first
   S3 dispatch of each generic (about 0.3 ms, method lookup through `UseMethod`).
+
+## The start-up image carries the host's environment, regex automata are built lazily, and the heap uses huge pages
+
+- **Previous shape.** Every start parsed and evaluated the loader's runtime source to build
+  `tools:ry`, and every compiled regex that needed leftmost-longest or minimal matching built two
+  `regex-automata` meta regexes eagerly, each with a full (dense) DFA. The 17 patterns start-up
+  compiles (8 of them in `.expand_R_libs_env_var`) spent about 29M of 181M instructions there.
+- **Target shape.** `ImageHost::environment` builds the host's environment when the image is
+  written; `Globals::host_environment` roots it and `image::save_state` carries it, and
+  `ry_runtime::attach` takes it from the image (`image::host_environment`) or builds it on a slow
+  start. `Matcher::Automaton` holds a `LazyAutomata` that builds both automata on first use, so a
+  `sub`/`gsub` whose replacement refers to groups (which only runs the backtracking regex) never
+  builds them, and builds them with `dfa(false)`: the full DFA was most of the build cost, and the
+  lazy DFA searches as fast (same ns per string in a standalone benchmark; ry's `gsub`/`grepl`/`sub`
+  micro-benchmark 800 ms against GNU R's 1012 ms). The image reader's primitive reads are
+  `#[inline(always)]` and its "object existed before the load" flags are a bitset.
+- **Page faults, not instructions, were the larger cost.** A minor fault costs about 2.5 µs in a
+  VM, and an empty run took 7,838 of them (21 ms of system time). The heap's reservation starts at
+  a 2 MiB boundary, commits 2 MiB at a time and is advised `MADV_HUGEPAGE`, so the kernel
+  (`transparent_hugepage=madvise`) backs it with huge pages. The image file is mapped read-only
+  with `MAP_POPULATE` (`image::ImageFile`) instead of read into a private buffer. Faults fell to
+  about 3,500 and resident memory is unchanged (39 MB). `MADV_POPULATE_WRITE` on small pages gave
+  nothing: it pays the same per-page cost up front.
+- **Impact.** Empty `ry run` 181M to 123M instructions, 52 ms to 34 ms median on the same machine
+  (GNU R `Rscript` 152 ms). The image load (79M instructions) and the remaining faults are the
+  floor. Analysis is unaffected.

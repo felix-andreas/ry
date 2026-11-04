@@ -36,7 +36,11 @@ use {
     },
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
-    std::{borrow::Cow, cell::RefCell, rc::Rc},
+    std::{
+        borrow::Cow,
+        cell::{OnceCell, RefCell},
+        rc::Rc,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -2877,10 +2881,12 @@ enum Matcher {
     ///
     /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`), or
     /// with groups the leftmost-first match, whose capture groups come from `first`.
+    ///
+    /// The automata are built on first use, since a `sub` or `gsub` whose replacement refers to
+    /// groups only ever runs `regex`. A pattern they cannot express runs on `regex` alone.
     Automaton {
         regex: Rc<Regex>,
-        first: meta::Regex,
-        longest: meta::Regex,
+        automata: Rc<LazyAutomata>,
         shortest: bool,
         fresh_start: bool,
     },
@@ -2894,6 +2900,43 @@ enum Matcher {
     /// A POSIX pattern with approximate settings such as `{+}`, run as TRE's approximate
     /// matcher runs it.
     Approximate(Rc<ApproximateRegex>),
+}
+
+/// The `first` and `longest` automata of [`Matcher::Automaton`], built from the translated
+/// pattern the first time a search needs them.
+struct LazyAutomata {
+    pattern: String,
+    ignore_case: bool,
+    built: OnceCell<Option<Automata>>,
+}
+
+struct Automata {
+    first: meta::Regex,
+    longest: meta::Regex,
+}
+
+impl LazyAutomata {
+    /// The automata, or `None` when the engine cannot build them for this pattern.
+    fn get(&self) -> Option<&Automata> {
+        self.built
+            .get_or_init(|| {
+                // The full DFA is built eagerly for every small pattern and was most of what
+                // compiling one cost, about a third of a millisecond, while the lazy DFA it would
+                // replace searches R's typically short strings about as fast.
+                let build = |kind: MatchKind| {
+                    meta::Regex::builder()
+                        .configure(meta::Regex::config().match_kind(kind).dfa(false))
+                        .syntax(syntax::Config::new().case_insensitive(self.ignore_case))
+                        .build(&self.pattern)
+                        .ok()
+                };
+                Some(Automata {
+                    first: build(MatchKind::LeftmostFirst)?,
+                    longest: build(MatchKind::All)?,
+                })
+            })
+            .as_ref()
+    }
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2971,33 +3014,17 @@ impl Matcher {
             Ok(regex) => (Ok(regex), true),
             Err(_) => (build(false), false),
         };
-        let automaton = |kind: MatchKind| {
-            meta::Regex::builder()
-                .configure(meta::Regex::config().match_kind(kind))
-                .syntax(syntax::Config::new().case_insensitive(options.ignore_case))
-                .build(&translated.pattern)
-                .ok()
-        };
         let matcher = match compiled {
-            Ok(regex) if longest || translated.minimal => {
-                let regex = Rc::new(regex);
-                match (
-                    automaton(MatchKind::LeftmostFirst),
-                    automaton(MatchKind::All),
-                ) {
-                    (Some(first), Some(longest)) => Matcher::Automaton {
-                        regex,
-                        first,
-                        longest,
-                        shortest: translated.minimal,
-                        fresh_start: translated.fresh_start,
-                    },
-                    _ => Matcher::Pattern {
-                        regex,
-                        fresh_start: translated.fresh_start,
-                    },
-                }
-            }
+            Ok(regex) if longest || translated.minimal => Matcher::Automaton {
+                regex: Rc::new(regex),
+                automata: Rc::new(LazyAutomata {
+                    pattern: translated.pattern,
+                    ignore_case: options.ignore_case,
+                    built: OnceCell::new(),
+                }),
+                shortest: translated.minimal,
+                fresh_start: translated.fresh_start,
+            },
             Ok(regex) => Matcher::Pattern {
                 regex: Rc::new(regex),
                 fresh_start: translated.fresh_start,
@@ -3042,11 +3069,17 @@ impl Matcher {
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
             Matcher::Automaton {
-                first,
-                longest,
+                regex,
+                automata,
                 shortest,
                 ..
             } => {
+                let Some(Automata { first, longest }) = automata.get() else {
+                    return regex
+                        .find_from_pos(text, from)
+                        .map(|found| found.map(|found| (found.start(), found.end())))
+                        .map_err(matching_error);
+                };
                 let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
                 };
@@ -3086,10 +3119,10 @@ impl Matcher {
                 Ok(self.find_at(text, from)?.map(|span| vec![Some(span)]))
             }
             Matcher::Automaton {
-                first,
+                automata,
                 shortest: true,
                 ..
-            } => {
+            } if let Some(Automata { first, .. }) = automata.get() => {
                 // Only a plain find minimizes over the top-level alternatives. With submatches
                 // GNU R's TRE keeps the leftmost-first match: `sub("(a).*?Z|(a)(.*?)Y", ...)`
                 // takes the first alternative even though the second ends sooner.
