@@ -1,1 +1,2 @@
 2026-11-04	17d5610	friendly=20/21	suffixes per 100 lines=0.7	unsound=1/40	rejected=0/40	top-level literals are ry values; literal values through if, logic and annotations
+2026-11-04	2cebe6c	typed ry / Rust (geomean)=10.29	untyped ry / GNU R (geomean)=0.38	speed baseline, release build

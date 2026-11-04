@@ -775,6 +775,7 @@ fn check_item_in<'db>(
         errors: Vec::new(),
         record_strict_origins,
         strict_origins: Vec::new(),
+        file_holds_ry_values: top_level_ry_values,
         // A statement with its own annotation is typed by the annotation, as in a function.
         top_level_ry_values: top_level_ry_values
             && annotation.is_none_or(|annotation| annotation.declared.is_none()),
@@ -1417,8 +1418,11 @@ struct Checker<'db, 'a> {
     /// Off outside strict files, where nothing reports the origins.
     record_strict_origins: bool,
     strict_origins: Vec<StrictOrigin>,
-    /// The file is strict or written with ry syntax, so a literal bound outside any function is
-    /// a ry value: nothing outside its own top-level statement can decide its type.
+    /// The file is strict or written with ry syntax, so a literal variable nothing decides is a
+    /// ry number, string or `Bool`, not R's type.
+    file_holds_ry_values: bool,
+    /// The same, outside any function: there a literal binding is a ry value at once, because
+    /// nothing outside its own top-level statement can decide its type.
     top_level_ry_values: bool,
     /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
     /// off so it cannot decide the winner (exact matches outrank conversions).
@@ -3213,7 +3217,7 @@ impl<'db> Checker<'db, '_> {
                         });
                         let value_ty = match literal {
                             Some(literal) => {
-                                let native = self.binds_ry_value();
+                                let native = self.file_holds_ry_values;
                                 let constraint = if literal.is_fraction()
                                     || (native && literal.default_native() == NativeScalar::F64)
                                 {
@@ -3237,7 +3241,7 @@ impl<'db> Checker<'db, '_> {
                                         LiteralKind::String(_) => Constraint::StrLiteral,
                                         _ => Constraint::BoolLiteral,
                                     };
-                                    let native = self.binds_ry_value();
+                                    let native = self.file_holds_ry_values;
                                     let ty = self.fresh_literal(constraint, native);
                                     self.record(value, ty)
                                 }
