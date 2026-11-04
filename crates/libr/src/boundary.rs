@@ -20,8 +20,8 @@ use {
         arena::{Arena, Watermark},
         object::{Sexp, SexpType},
     },
-    rustc_hash::FxHashMap,
     interp::unwind::INTERRUPTS_SUSPENDED,
+    rustc_hash::FxHashMap,
     std::{
         any::Any,
         ffi::{CStr, c_char, c_int, c_void},
@@ -374,15 +374,16 @@ unsafe fn native_activity(function: DlFunc) -> activity::Scope {
 }
 
 /// The package a native routine belongs to, read from its shared library's file name
-/// (`.../data.table/libs/data.table.so` is `data.table`).
-unsafe fn library_package(function: DlFunc) -> String {
-    let mut info: libc::Dl_info = std::mem::zeroed();
-    if libc::dladdr(function as *const c_void, &mut info) == 0 || info.dli_fname.is_null() {
+/// (`.../data.table/libs/data.table.so` is `data.table`, and `data.table.dll` on Windows).
+fn library_package(function: DlFunc) -> String {
+    let Some(path) = interp::platform::library_path(function as *const c_void) else {
         return "unknown".to_owned();
-    }
-    let path = CStr::from_ptr(info.dli_fname).to_string_lossy();
-    let file = path.rsplit('/').next().unwrap_or(&path);
-    let stem = file.split(".so").next().unwrap_or(file);
+    };
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+    let stem = match file.strip_suffix(".dll") {
+        Some(stem) => stem,
+        None => file.split(".so").next().unwrap_or(file),
+    };
     stem.to_owned()
 }
 
