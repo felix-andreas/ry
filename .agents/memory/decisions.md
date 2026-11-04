@@ -7486,11 +7486,23 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
   a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
   slow design"). Until then it stays, because restoring is about 10 times faster than running the
-  definitions natively (61 ms against about 850 ms), and incremental reload of it is not worth
+  definitions natively (61 ms against about 145 ms for the run alone, plus about 200 ms for the
+  save, on `target/s4heavy`), and incremental reload of it is not worth
   building for a cache that is going away. It is saved uncompressed: the save fell from 344 to
   about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
   exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
   during a session and the saved state would depend on what ran.
+- **The rest of the gap goes to a native class table, not more ported functions.** With
+  `setMethod` on primitives, inherited single-argument dispatch and most
+  `setClass` and `setGeneric` shapes native, a cold run of the 2,892 definitions takes about 145 ms and
+  only about 24 calls still bail, yet that is about 670M instructions against the roughly 250M a
+  sub-100 ms cold `new()` allows. The profile is flat: environment lookups of `.__C__` and
+  `.__T__` bindings, slot reads of class representations, `substitute`-built extension objects and
+  allocation, spread over every definition. Porting more functions one by one cannot remove that,
+  because every ported function still reads and writes the R-level metadata objects. The next
+  step is a native class table with dense class ids, a bitset extends relation and method tables
+  keyed by id, which materializes the R objects (`classRepresentation`, `.MTable` environments)
+  only when R code reads them.
 - **Unions and `cacheMetaData` replicate GNU R's quirks, not its intent.** The native
   `setClassUnion` and `cacheMetaData` must leave state that `serialize()`s identically, so they
   copy behavior that looks like a bug: `.recacheSubclasses` tests `match(what, names(subDef@contains))`

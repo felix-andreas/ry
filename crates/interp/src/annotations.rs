@@ -522,7 +522,8 @@ pub unsafe fn admits_storage(
         let mask = mask_at(masks, slot);
         if mask != 0 {
             match arguments.get(slot - FIRST_FORMAL_SLOT) {
-                Some(&storage) if formal.tag() != values::symbols().dots && admitted(mask, storage) => {}
+                Some(&storage)
+                    if formal.tag() != values::symbols().dots && admitted(mask, storage) => {}
                 _ => return false,
             }
         }

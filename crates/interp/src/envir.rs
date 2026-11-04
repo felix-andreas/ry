@@ -453,6 +453,12 @@ unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
     } else {
         call.env
     };
+    Ok(top_env(env, target))
+}
+
+/// `topenv(env, target)`: the first environment from `env` outward that is `target`, the global
+/// or base environment, a namespace, a package environment, or one that binds `.packageName`.
+pub unsafe fn top_env(env: Sexp, target: Sexp) -> Sexp {
     let mut current = env;
     while current != empty_env() {
         if current == target
@@ -465,11 +471,11 @@ unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
                 .frame_cell(current, symbols().dot_package_name)
                 .is_some()
         {
-            return Ok(current);
+            return current;
         }
         current = current.enclosure();
     }
-    Ok(global_env())
+    global_env()
 }
 
 /// Whether `env` is a namespace: the base namespace, or an environment holding
