@@ -2712,10 +2712,22 @@ impl Heap {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
                     self.weak_pairs.push(object);
-                } else if matches!(
-                    object.kind(),
-                    SexpType::String | SexpType::List | SexpType::Expression
-                ) {
+                } else if object.kind() == SexpType::String {
+                    // A character vector usually repeats a few strings, like a column of
+                    // categories, and marking one again only finds it marked. A small table of
+                    // the addresses this vector already marked skips the repeats. Its elements
+                    // are CHARSXPs, which hold no references, so a skipped repeat loses nothing.
+                    let mut marked = [0usize; 64];
+                    for &element in object.slice::<Sexp>() {
+                        let address = element.as_ptr() as usize;
+                        let slot = (address >> 4) as u8 as usize % marked.len();
+                        if marked[slot] == address {
+                            continue;
+                        }
+                        marked[slot] = address;
+                        self.mark(element);
+                    }
+                } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
                     for index in 0..object.length() as usize {
                         self.mark(object.element(index));
                     }
