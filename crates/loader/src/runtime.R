@@ -682,6 +682,14 @@ View <- function(x, title) {
   }, assign.env = state$ns)
 }
 
+.ry_s4_failed_placeholder <- function(state, name) {
+  package <- methods::getPackageName(state$ns)
+  delayedAssign(name, stop(sprintf(
+    "`%s` is unavailable because loading the S4 definitions of %s failed; fix the error above and run `load_all()` again",
+    name, package
+  ), call. = FALSE), assign.env = state$ns)
+}
+
 # Runs held-back units, each once: the first unit when `generic` is `NULL` or not split off,
 # and otherwise the first unit if it has not run and then that generic's. `all` runs every
 # unit left, which a reload that reaches the definitions needs. During the load that deferred
@@ -736,6 +744,20 @@ View <- function(x, title) {
   # placeholders of a lazy generic this force also runs go first: that generic's own
   # placeholder may be the promise under evaluation that started the force.
   .ry_remove_s4_placeholders(state, unlist(lapply(units[units != 0L], unit_names)))
+  # A unit that fails leaves the lazy generics forced with it unbound, and nothing defers them
+  # again, so their names report the failure instead of a missing function.
+  finished <- integer()
+  on.exit({
+    for (unit in setdiff(units[units != 0L], finished)) {
+      names <- unit_names(unit)
+      for (name in names[!vapply(names, exists, NA, envir = ns, inherits = FALSE)]) {
+        .ry_s4_failed_placeholder(state, name)
+      }
+      if (!is.null(state$package_env)) {
+        .ry_sync_package_env(state, names, keeps_names = TRUE)
+      }
+    }
+  }, add = TRUE)
   for (unit in units) {
     # A unit can reach another, which then runs inside it.
     if (state$s4_ran[[unit + 1L]]) {
@@ -770,6 +792,7 @@ View <- function(x, title) {
       .ry_sync_package_env(state, names, keeps_names = TRUE)
     }
     if (unit == 0L) step("S4 exports")
+    finished <- c(finished, unit)
   }
   if (all(state$s4_ran)) {
     state$s4_deferred <- NULL

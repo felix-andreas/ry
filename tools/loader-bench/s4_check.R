@@ -1,5 +1,5 @@
 # Runs the probe of a package from `s4_package.py` and saves its result, so that loads with S4
-# held back, run eagerly, restored from the cache, and in GNU R can be compared.
+# held back, run eagerly, and in GNU R can be compared.
 #
 #   PKG=pkg OUT=lazy.rds ry run s4_check.R
 #   PKG=pkg OUT=eager.rds LAZY=FALSE ry run s4_check.R

@@ -358,7 +358,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
-    crate::heap().release_handles(mark);
+    heap.release_handles(mark);
+    // Releasing dropped the roots made while forcing, and the promise may hold the only
+    // reference to the value it returns.
+    if let Ok(value) = &settled {
+        heap.root(*value);
+    }
     settled
 }
 

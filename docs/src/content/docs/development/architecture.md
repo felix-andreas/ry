@@ -469,10 +469,10 @@ the database first cancels it.
 A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
 loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
 methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
-[package loading](/reference/package-loading#s4-definitions) has the contract. When the definitions
-read only S4 constructors and their own names, the loader gives the unit a cache key
-(`DeferredS4::cache_key`), and `.ry_force_s4` in `runtime.R` restores the bindings a previous process
-saved instead of running the definitions.
+[package loading](/reference/package-loading#s4-definitions) has the contract. The first unit holds
+the classes and the methods on other packages' generics, and each generic the package defines is a
+unit of its own that a placeholder binding runs on first use (`.ry_force_s4` in `runtime.R`). Nothing
+about the definitions is cached across processes.
 
 Running the definitions and using the classes goes through the methods package's native core
 (`crates/interp/src/methods_core.rs`). The methods package keeps GNU R's R code and its metadata

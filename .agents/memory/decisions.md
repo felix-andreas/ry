@@ -7263,7 +7263,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Problem.** A warm `ry load` of a large S4 package spends most of its time before the package's
   own code runs: process start (base, `methods` and the default packages, about 130 to 170 ms) and
   the imports' `loadNamespace` (about 230 to 300 ms for lubridate, data.table and xts). Both run
-  GNU R's own R code from the installed R home, so neither the loader nor the S4 cache touches them.
+  GNU R's own R code from the installed R home, so the loader does not touch them.
 - **Options weighed.**
   - *A preloaded heap image* of the state after start-up (and after the imports). The heap sits in
     one fixed reservation, but the interpreter's own state (symbol and string tables, `Globals`,

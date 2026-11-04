@@ -83,6 +83,13 @@ packages' generics at first S4 use, each package generic at its own first use
 bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
 lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 
+- **Held-back units differ from an eager load in two edge cases.** A unit that errors midway
+  stays marked as run and half-defined (its generic is not merged into `.genericTable`), where
+  an eager `load_all` would have failed. Lazy generics forced alongside a failing unit report the
+  failure on every use (`.ry_s4_failed_placeholder`). And a unit-0 statement that calls a lazy
+  generic while it runs (`prototype = prototype(v = helper())` with `helper()` calling it) runs
+  that generic's unit before the rest of unit 0, so its methods may register before their
+  classes exist. Fix: compute unit dependencies through the call graph, not direct reads only.
 - **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
   the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.

@@ -637,6 +637,48 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
 }
 
+/// A held-back definition that fails when a lazy generic's first use runs it leaves that
+/// generic reporting the failure on every later use, not missing.
+#[test]
+fn a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: failing\nVersion: 1.0\n"),
+        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "R/a.R",
+            "setClass(\"A\", representation(x = \"numeric\"))\n\
+             setGeneric(\"foo\", function(x) standardGeneric(\"foo\"))\n\
+             setMethod(\"foo\", \"A\", function(x) x@x)\n\
+             setClass(\"B\", contains = \"Missing\")\n",
+        ),
+    ]);
+    let reload = format!(
+        "options(ry.load.lazy_s4 = TRUE); load_all({:?}, full = TRUE)",
+        root.path().display().to_string()
+    );
+    let probe = "first <- tryCatch(foo(1), error = conditionMessage); \
+                 later <- tryCatch(foo(1), error = conditionMessage); \
+                 cat('probe:', grepl('Missing', first), later, '\\n')";
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("load")
+        .arg(root.path())
+        .args(["-e", &reload, "-e", probe])
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .output()
+        .expect("run ry load");
+    let text = text(&output);
+    assert!(
+        text.contains(
+            "probe: TRUE `foo` is unavailable because loading the S4 definitions of failing \
+             failed; fix the error above and run `load_all()` again"
+        ),
+        "{text}"
+    );
+}
+
 /// Unions that name basic classes, with or without one of the package's classes, and coercions
 /// with `setAs()`, are held back with the classes they name, and each first use, in a process of
 /// its own, sees what an eager load shows: union membership of the basic classes, everything a
