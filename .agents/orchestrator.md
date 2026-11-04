@@ -80,7 +80,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 | --- | --- | --- |
 | session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | #338 merged (d64db8b9): recommended packages bundled (15 on Linux, 12 on macOS/Windows), Windows stray `R` argument fixed; dry run 4 started on it about 10:16 UTC | done unless dry run 4 fails |
 | in-session worker (release prep) | bump, news, docs, results.json; regression check clean except stats-only start-up peak +6 MiB (follow-up with the speed session) | done; 0.4.2-beta published 11:19 UTC (Linux only, run 41817919826) |
-| in-session worker (post-release) | checklist steps 7 to 9: install check, installation.md, dashboard rows | running |
+| in-session worker (post-release) | archive installs and works (version, run, lattice, check); installation.md correct; dashboard rows added (perf, memory, S4, check, loc) | done |
 | session_0111kWqBiUsHhdvToMM3XK3p (untyped speed) | #304 merged: argument arena, in-place `[[<-`/`[<-` growth, matrix subassign bytecode, a direct PCRE2 binding, in-place textConnection output | #337 merged (typed peak-memory fix); bench-real before/after in progress, then idle until the release; next the `<-`/rep/`[[<-` builtin costs and the JIT matrix store, then re-profile the call-heavy workloads (objects, validation, functional) |
 | session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | merged as #333: first new() on an S4-heavy package 80-87 ms cold, S4 cache deleted, fixes the S4 forcing that #332 broke | done |
 | session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); the vector_arith swing is GNU R and machine noise | done, idle |
@@ -90,7 +90,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 
 Scheduled tasks: session babysit trig_01LuX97P7ZbAg4TRxYu7c1tu (minute 11) is on; the goal reread trig_01AqDtgjMPTkniw7hzX4x4d1 and the dry-run reminder trig_01SHeL8HM3b3p3DHgS7MJF9c are paused to save budget.
 
-Later: `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN installs are denied by the session network policy.
+Later: a worker saw `f <- function(x) x + 1; f('a')` with `double` annotations pass `ry check` with no problem (annotation form not recorded; check whether it should be flagged); `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN installs are denied by the session network policy.
 
 ## Next
 
