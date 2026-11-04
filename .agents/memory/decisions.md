@@ -7778,6 +7778,6 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `/usr/lib/R/library` in `R_LIBS_SITE`, but site libraries come before `.Library`, so GNU R's
   `stats`, `utils` and the other base packages there would shadow ry's own. `gnu_r_site_libraries`
   in `crates/interp/src/session.rs` leaves out every library that holds `base` for that reason.
-- **Cost.** On Linux the fifteen packages take about 85 s to install and 29 MB without help pages.
+- **Cost.** On Linux the fifteen packages add about 85 s to the build and 34 MB to the base R tree (63 MB in all).
 - **Windows.** The unversioned `Recommended/*.tgz` names are symlinks, which tar cannot create on
   Windows, so the build extracts only the versioned tarballs.
