@@ -3392,6 +3392,15 @@ pub fn pbeta(x: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
     pbeta_raw(x, a, b, lower, log)
 }
 
+/// `R_Log1_Exp` as TOMS 708 defines it, with its own `rexpm1` instead of the C library's `expm1`.
+fn log1_exp_toms(x: f64) -> f64 {
+    if x > -M_LN2 {
+        (-rexpm1(x)).ln()
+    } else {
+        (-x.exp()).ln_1p()
+    }
+}
+
 /// The incomplete beta ratio `I_x(a, b)` and its complement `1 - I_x(a, b)`, with `y = 1 - x`
 /// passed separately for accuracy near one, and TOMS 708's error code.
 fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
@@ -3478,7 +3487,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         let path;
         if b0 < eps.min(eps * a0) {
             w = fpser(a0, b0, x0, eps, log);
-            w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+            w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
             return finish(w, w1, do_swap, ierr);
         }
         if a0 < eps.min(eps * b0) && b0 * x0 <= 1.0 {
@@ -3521,12 +3530,12 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         match path {
             Path::WBpser => {
                 w = bpser(a0, b0, x0, eps, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::W1Bpser => {
                 w1 = bpser(b0, a0, y0, eps, log);
-                w = if log { log1_exp(w1) } else { 0.5 - w1 + 0.5 };
+                w = if log { log1_exp_toms(w1) } else { 0.5 - w1 + 0.5 };
                 done = Done::Both;
             }
             Path::Bgrat {
@@ -3606,17 +3615,17 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         match path {
             Path::WBpser => {
                 w = bpser(a0, b0, x0, eps, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Bfrac => {
                 w = bfrac(a0, b0, x0, y0, lambda, eps * 15.0, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Basym => {
                 w = basym(a0, b0, lambda, eps * 100.0, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Bup => {
@@ -3630,7 +3639,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
                 if w < DBL_MIN && log {
                     b0 += n as f64;
                     w = bpser(a0, b0, x0, eps, log);
-                    w1 = log1_exp(w);
+                    w1 = log1_exp_toms(w);
                     done = Done::Both;
                 } else if x0 <= 0.7 {
                     w += bpser(a0, b0, x0, eps, false);
@@ -3665,7 +3674,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         Done::FromW1 => return end_from_w1(w1, log, do_swap, ierr),
         Done::FromW1Log => {
             if log {
-                w = log1_exp(w1);
+                w = log1_exp_toms(w1);
             } else {
                 w = -w1.exp_m1();
                 w1 = w1.exp();
@@ -3956,14 +3965,34 @@ fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log: bool) -> f6
     let mut bnp1 = c / c1;
     let mut r = c1 / c;
     let mut r0;
+    // R 4.5.1 caps the iterations at 1000 instead of 10000, orders the product `n x (b - n)`
+    // differently, and rescales the terms when `n x (b - n)` overflows for a huge `b`.
+    let current = crate::system::r_at_least_release(4, 5, 1);
+    let maximum = if current { 1000.0 } else { 10000.0 };
     loop {
         n += 1.0;
+        let mut rescale = false;
+        let w = if current {
+            let w = n * x * (b - n);
+            if finite(w) {
+                w
+            } else {
+                rescale = true;
+                n * x * ldexp(b - n, -20)
+            }
+        } else {
+            n * (b - n) * x
+        };
         let mut t = n / a;
-        let w = n * (b - n) * x;
         let mut e = a / s;
         let alpha = p * (p + c0) * e * e * (w * x);
         e = (t + 1.0) / (c1 + t + t);
-        let beta = n + w / s + e * (c + n * yp1);
+        let beta = if current {
+            let tail = n + e * (c + n * yp1);
+            w / s + if rescale { ldexp(tail, -20) } else { tail }
+        } else {
+            n + w / s + e * (c + n * yp1)
+        };
         p = t + 1.0;
         s += 2.0;
         t = alpha * an + beta * anp1;
@@ -3981,13 +4010,13 @@ fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log: bool) -> f6
         bn /= bnp1;
         anp1 = r;
         bnp1 = 1.0;
-        if n >= 10000.0 {
+        if n >= maximum {
             break;
         }
     }
-    if n >= 10000.0 && (r - r0).abs() > eps * r {
+    if n >= maximum && (r - r0).abs() > eps * r {
         warning(format!(
-            " bfrac(a={a}, b={b}, x={x}, y={y}, lambda={lambda}) did *not* converge (in 10000 steps)"
+            " bfrac(a={a}, b={b}, x={x}, y={y}, lambda={lambda}) did *not* converge (in {maximum} steps)"
         ));
     }
     if log { brc + r.ln() } else { brc * r }
