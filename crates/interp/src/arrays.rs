@@ -495,8 +495,15 @@ pub unsafe fn item(array: Sexp, position: usize) -> R<Sexp> {
 /// A new Array of the items of `array` from `start` up to, not including, `end`, stored like
 /// `array`.
 pub unsafe fn slice(array: Sexp, start: usize, end: usize) -> R<Sexp> {
-    let result = alloc(array.kind(), end.saturating_sub(start))?;
-    for (target, source) in (start..end).enumerate() {
+    gather(array, start..end.max(start))
+}
+
+/// A new Array of the items of `array` at `positions`, in that order, stored like `array`. The
+/// items move in their packed form, so a million doubles reordered allocate one vector rather
+/// than a million scalars.
+pub unsafe fn gather(array: Sexp, positions: impl ExactSizeIterator<Item = usize>) -> R<Sexp> {
+    let result = alloc(array.kind(), positions.len())?;
+    for (target, source) in positions.enumerate() {
         copy_item(array, source, result, target);
     }
     Ok(finish(result))

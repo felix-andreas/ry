@@ -631,6 +631,20 @@ unsafe fn subset(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     sequence(call, like, items)
 }
 
+/// The items of `list` at `positions`, in that order, as [`subset`] would build them. An Array's
+/// items stay packed instead of passing through one boxed value each.
+unsafe fn picked(
+    call: &Call<'_>,
+    list: Sexp,
+    positions: impl ExactSizeIterator<Item = usize>,
+) -> R<Sexp> {
+    if list.is_array() {
+        return arrays::gather(list, positions);
+    }
+    let items: Vec<Sexp> = positions.map(|index| list.element(index)).collect();
+    subset(call, list, &items)
+}
+
 /// A list the library builds from scratch: a ry list when its items can form one, and an R list
 /// when they cannot, as when a dictionary holds R vectors.
 unsafe fn new_list(items: &[Sexp]) -> R<Sexp> {
@@ -1140,7 +1154,7 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     let index = whole(call, "index", index)?;
     let f = function(call, "f", f)?;
     let Some(at) = position(index, count) else {
-        return subset(call, list, &list_slice(list, 0, count)?);
+        return picked(call, list, 0..count);
     };
     // The call holds a reference while the callback runs, the way an R closure's argument does,
     // so a callback that assigns into the list with `<<-` copies it instead of changing the
@@ -1226,9 +1240,8 @@ fn list_size(call: &Call<'_>, size: usize) -> R<usize> {
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    let mut items = list_elements(call, "list", list)?;
-    items.reverse();
-    subset(call, list, &items)
+    let count = list_count(call, "list", list)?;
+    picked(call, list, (0..count).rev())
 }
 
 unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
@@ -1752,22 +1765,22 @@ unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, usize, usize)> {
 
 unsafe fn list_take_first(call: &Call<'_>) -> R<Sexp> {
     let (list, _, taken) = list_and_count(call)?;
-    subset(call, list, &list_slice(list, 0, taken)?)
+    picked(call, list, 0..taken)
 }
 
 unsafe fn list_take_last(call: &Call<'_>) -> R<Sexp> {
     let (list, total, taken) = list_and_count(call)?;
-    subset(call, list, &list_slice(list, total - taken, total)?)
+    picked(call, list, total - taken..total)
 }
 
 unsafe fn list_drop_first(call: &Call<'_>) -> R<Sexp> {
     let (list, total, dropped) = list_and_count(call)?;
-    subset(call, list, &list_slice(list, dropped, total)?)
+    picked(call, list, dropped..total)
 }
 
 unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
     let (list, total, dropped) = list_and_count(call)?;
-    subset(call, list, &list_slice(list, 0, total - dropped)?)
+    picked(call, list, 0..total - dropped)
 }
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
@@ -1795,14 +1808,13 @@ unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let taken = count(call, "count", taken)?;
     let from = start.min(total);
     let to = from.saturating_add(taken).min(total);
-    subset(call, list, &list_slice(list, from, to)?)
+    picked(call, list, from..to)
 }
 
 unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
     let (list, total, before) = list_and_count(call)?;
-    let items = list_slice(list, 0, total)?;
-    let first = subset(call, list, &items[..before])?;
-    let others = subset(call, list, &items[before..])?;
+    let first = picked(call, list, 0..before)?;
+    let others = picked(call, list, before..total)?;
     record(&[("before", first), ("others", others)])
 }
 
