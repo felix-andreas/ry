@@ -114,6 +114,14 @@ fn runtime_peak_memory_stays_near_gnu_r() {
         eprintln!("skipped: no GNU R installation on this machine");
         return;
     }
+    // ry's runtime has an R home of its own, so it sees packages installed for GNU R, such as
+    // data.table in the site library, only through GNU R's library paths. Both engines then
+    // load the same build of each package.
+    let libraries = Command::new("Rscript")
+        .args(["-e", "cat(.libPaths(), sep = ':')"])
+        .output()
+        .expect("ask GNU R for its library paths");
+    let libraries = String::from_utf8_lossy(&libraries.stdout).into_owned();
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut over = Vec::new();
     for (name, body) in RUNTIME_CASES {
@@ -123,8 +131,13 @@ fn runtime_peak_memory_stays_near_gnu_r() {
             eprintln!("{name}: skipped, it does not run on GNU R here");
             continue;
         };
-        let ry = script_peak(Command::new(binary).arg("run").arg(&script))
-            .unwrap_or_else(|| panic!("{name} runs on GNU R but fails on ry's runtime"));
+        let ry = script_peak(
+            Command::new(binary)
+                .arg("run")
+                .arg(&script)
+                .env("R_LIBS", &libraries),
+        )
+        .unwrap_or_else(|| panic!("{name} runs on GNU R but fails on ry's runtime"));
         let ratio = ry as f64 / gnu_r as f64;
         eprintln!(
             "{name}: peak {} MiB on ry, {} MiB on GNU R ({ratio:.2}x)",
