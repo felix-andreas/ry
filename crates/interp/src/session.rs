@@ -114,11 +114,11 @@ unsafe fn start_from_image(home: &str) -> R<()> {
     )?;
     // utils' hook also assigns `osVersion`, this machine's, into its sealed namespace.
     eval_text(
-        "for (name in c(\"utils\", \"grDevices\", \"stats\")) { \
+        "local(for (name in c(\"utils\", \"grDevices\", \"stats\")) { \
          namespace <- asNamespace(name); \
          if (name == \"utils\") unlockBinding(\"osVersion\", namespace); \
          namespace$.onLoad(dirname(getNamespaceInfo(name, \"path\")), name); \
-         if (name == \"utils\") lockBinding(\"osVersion\", namespace) }",
+         if (name == \"utils\") lockBinding(\"osVersion\", namespace) })",
         base_env(),
     )?;
     remove_library_site()?;

@@ -1341,7 +1341,9 @@ pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
             .to_string_lossy()
             .into_owned(),
     );
-    match interp::session::write_start_image(IMAGE_HOST, &path) {
+    let written = interp::session::write_start_image(IMAGE_HOST, &path);
+    interp::system::remove_session_temp_dir();
+    match written {
         Ok(()) => 0,
         Err(unwind) => {
             interp::session::report_toplevel(unwind);

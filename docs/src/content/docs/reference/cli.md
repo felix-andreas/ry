@@ -225,7 +225,8 @@ and the other variables they read take effect on every run, as they do on GNU R.
 slow way, with the same result, when it is interactive, sources a site or user profile (which
 `ry run` never does and ry's `Rscript` does when one exists), or sets a variable that changes which
 packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
-`_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_` or `_R_METHODS_DONT_CHECKSUBCLASSES`.
+`_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_`, `_R_METHODS_DONT_CHECKSUBCLASSES`
+or `RY_METHODS_NATIVE`.
 
 | Variable | Effect |
 | --- | --- |

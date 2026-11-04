@@ -10,6 +10,7 @@ file report.R
 | cat("attached", "package:stats" %in% search(), "\n")
 | cat("search", search(), "\n")
 | cat("seeded", exists(".Random.seed", globalenv()), "\n")
+| cat("leaked", exists("namespace", baseenv(), inherits = FALSE), "\n")
 | methods::setClass("Point", methods::representation(x = "numeric"))
 | cat("point", methods::new("Point", x = 3)@x, "\n")
 | cat("stats", basename(getNamespaceInfo("stats", "path")), file.exists(getNamespaceInfo("stats", "path")), "\n")
@@ -21,6 +22,7 @@ expect stdout "editor vi"
 expect stdout "attached TRUE"
 expect stdout "search .GlobalEnv tools:ry package:std package:ry package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base"
 expect stdout "seeded FALSE"
+expect stdout "leaked FALSE"
 expect stdout "point 3"
 expect stdout "stats stats TRUE"
 expect stderr lacks "start-up image"

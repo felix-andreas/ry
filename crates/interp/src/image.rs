@@ -40,6 +40,7 @@ const MAGIC: &[u8; 8] = b"RYSTART\x03";
 /// image holds as the fixed build environment loaded them.
 const LOADING_VARIABLES: &[&str] = &[
     "R_DEFAULT_PACKAGES",
+    "RY_METHODS_NATIVE",
     "R_TESTS",
     "_R_TRACE_LOADNAMESPACE_",
     "_R_NO_REPORT_MISSING_NAMESPACES_",
@@ -112,7 +113,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     // links to the tree's packages: a slow start records the packages' resolved paths too.
     let tree = std::fs::canonicalize(path)
         .ok()
-        .and_then(|image| Some(image.ancestors().nth(4)?.to_str()?.to_owned()))
+        .and_then(|image| Some(r_path(image.ancestors().nth(4)?)))
         .unwrap_or_else(|| home.to_owned());
     let mut relocation = Relocation::default();
     for _ in 0..input.u32().map_err(untouched)? {
@@ -145,6 +146,17 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
     Ok(true)
+}
+
+/// `path` as R spells a resolved path: without Windows' verbatim `\\?\` prefix and with forward
+/// slashes, as the Windows front end exports `R_HOME`.
+fn r_path(path: &Path) -> String {
+    let text = crate::platform::path_text(path);
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
 }
 
 /// A checksum of an image's contents, so that a damaged file is rejected before the heap takes
@@ -205,10 +217,9 @@ pub(crate) unsafe fn write(
     let mut payload = Writer::default();
     let mut homes = vec![home.to_owned()];
     if let Ok(canonical) = std::fs::canonicalize(home)
-        && let Some(canonical) = canonical.to_str()
-        && canonical != home
+        && r_path(&canonical) != home
     {
-        homes.push(canonical.to_owned());
+        homes.push(r_path(&canonical));
     }
     payload.u32(homes.len() as u32);
     for home in &homes {
