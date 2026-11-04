@@ -3426,7 +3426,11 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
     }
     if object.kind() == SexpType::Object {
         let class = get_attr(object, symbols().class);
-        let class = if class == nil() { "S4".to_string() } else { char_str(class.element(0)).to_string() };
+        let class = if class == nil() {
+            "S4".to_string()
+        } else {
+            char_str(class.element(0)).to_string()
+        };
         return Err(call.error(format!(
             "invalid to use names()<- on an S4 object of class '{class}'"
         )));
