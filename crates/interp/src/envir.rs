@@ -1263,6 +1263,16 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             scalar_integer(count)
         }
+        "matprod" => {
+            let mode = values::first_string(value).unwrap_or_default();
+            if !matches!(
+                &*mode,
+                "default" | "internal" | "blas" | "default.simd"
+            ) {
+                return Err(error("invalid value for 'matprod'"));
+            }
+            Ok(value)
+        }
         "warn" => {
             let number = if length(value) == 1
                 && matches!(

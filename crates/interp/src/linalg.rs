@@ -16,7 +16,9 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
         coerce::coerce_vector,
         conditions,
+        envir::get_option,
         format::format_g,
+        long_double::{self, LongDouble},
         makeconf::{expand_make, make_assignments},
         platform,
         unwind::{R, error},
@@ -166,9 +168,11 @@ enum Product {
     TransposedCross,
 }
 
-/// `%*%`, `crossprod` and `tcrossprod`, as GNU R's default `matprod` computes them on its
-/// reference BLAS. They run in ry's own kernels rather than the installed BLAS, so they need no
-/// library and give the same bits on every machine.
+/// `%*%`, `crossprod` and `tcrossprod`, as GNU R computes them for `options(matprod=)`. The
+/// modes `"default"`, `"blas"` and `"default.simd"` all give what GNU R's reference BLAS gives
+/// (its NaN screen only chooses between loops that sum in the same order), and `"internal"`
+/// accumulates in long double. They run in ry's own kernels rather than the installed BLAS, so
+/// they need no library and give the same bits on every machine.
 unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
     let internal = crate::interp()
         .builtin(call.op.primitive_index())
@@ -258,9 +262,11 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
         Product::TransposedCross => (x_rows, y_rows),
     };
     let result = alloc_matrix(mode, result_rows, result_cols)?;
+    let internal = values::first_string(get_option("matprod")).is_some_and(|mode| mode == "internal");
     if mode == SexpType::Complex {
         complex_product(
             product,
+            internal,
             &shape,
             complexes(x_values),
             complexes(y_values),
@@ -269,6 +275,7 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
     } else {
         real_product(
             product,
+            internal,
             symmetric,
             &shape,
             reals(x_values),
@@ -304,6 +311,7 @@ struct Shape {
 /// survives, and that keeps `NA` apart from `NaN`.
 fn real_product(
     product: Product,
+    extended: bool,
     symmetric: bool,
     shape: &Shape,
     x: &[f64],
@@ -318,6 +326,10 @@ fn real_product(
     } = *shape;
     if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
         z.fill(0.0);
+        return;
+    }
+    if extended {
+        long_double_product(product, shape, x, y, z);
         return;
     }
     match product {
@@ -374,6 +386,38 @@ fn real_product(
     }
 }
 
+/// GNU R's `internal` loops: every entry is a long double total of the double products of its
+/// terms, in index order, rounded once to double. Each product is rounded to double first, as
+/// the SSE multiplication GNU R compiles to does.
+fn long_double_product(product: Product, shape: &Shape, x: &[f64], y: &[f64], z: &mut [f64]) {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    // For entry (row, col): the terms are x[x_start + t * x_step] * y[y_start + t * y_step].
+    let (rows, cols, terms) = match product {
+        Product::Matrix => (x_rows, y_cols, x_cols),
+        Product::Cross => (x_cols, y_cols, x_rows),
+        Product::TransposedCross => (x_rows, y_rows, x_cols),
+    };
+    let mut products = vec![0.0; terms];
+    for col in 0..cols {
+        for row in 0..rows {
+            let (x_start, x_step, y_start, y_step) = match product {
+                Product::Matrix => (row, x_rows, col * y_rows, 1),
+                Product::Cross => (row * x_rows, 1, col * y_rows, 1),
+                Product::TransposedCross => (row, x_rows, col, y_rows),
+            };
+            for (term, slot) in products.iter_mut().enumerate() {
+                *slot = x[x_start + term * x_step] * y[y_start + term * y_step];
+            }
+            z[row + col * rows] = long_double::add_all(LongDouble::ZERO, &products).to_f64();
+        }
+    }
+}
+
 /// The complex products, in reference `zgemm`'s order for the same reasons as `real_product`.
 /// GNU R calls `zgemm` unless an operand holds a NaN or an infinity, and `zgemm` multiplies with
 /// Fortran's plain formula, which overflows to NaN where C99's product, the one GNU R's fallback
@@ -381,6 +425,7 @@ fn real_product(
 /// because the sums start at positive zero and so never hold a negative zero.
 fn complex_product(
     product: Product,
+    extended: bool,
     shape: &Shape,
     x: &[Rcomplex],
     y: &[Rcomplex],
@@ -395,6 +440,10 @@ fn complex_product(
     let zero = Rcomplex { r: 0.0, i: 0.0 };
     if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
         z.fill(zero);
+        return;
+    }
+    if extended {
+        long_double_complex_product(product, shape, x, y, z);
         return;
     }
     let finite = |values: &[Rcomplex]| {
@@ -446,6 +495,49 @@ fn complex_product(
                     }
                 }
             }
+        }
+    }
+}
+
+/// GNU R's `internal` complex loops: the real and imaginary totals are long doubles over the
+/// C99 products of the terms.
+fn long_double_complex_product(
+    product: Product,
+    shape: &Shape,
+    x: &[Rcomplex],
+    y: &[Rcomplex],
+    z: &mut [Rcomplex],
+) {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    let (rows, cols, terms) = match product {
+        Product::Matrix => (x_rows, y_cols, x_cols),
+        Product::Cross => (x_cols, y_cols, x_rows),
+        Product::TransposedCross => (x_rows, y_rows, x_cols),
+    };
+    let mut reals = vec![0.0; terms];
+    let mut imaginaries = vec![0.0; terms];
+    for col in 0..cols {
+        for row in 0..rows {
+            let (x_start, x_step, y_start, y_step) = match product {
+                Product::Matrix => (row, x_rows, col * y_rows, 1),
+                Product::Cross => (row * x_rows, 1, col * y_rows, 1),
+                Product::TransposedCross => (row, x_rows, col, y_rows),
+            };
+            for term in 0..terms {
+                let term_product =
+                    c99_multiply(x[x_start + term * x_step], y[y_start + term * y_step]);
+                reals[term] = term_product.r;
+                imaginaries[term] = term_product.i;
+            }
+            z[row + col * rows] = Rcomplex {
+                r: long_double::add_all(LongDouble::ZERO, &reals).to_f64(),
+                i: long_double::add_all(LongDouble::ZERO, &imaginaries).to_f64(),
+            };
         }
     }
 }

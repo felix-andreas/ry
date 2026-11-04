@@ -42,6 +42,7 @@ pub mod distributions;
 pub mod envir;
 pub mod eval;
 #[cfg(unix)]
+mod fft;
 pub mod fork;
 pub mod format;
 pub mod frame;

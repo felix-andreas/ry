@@ -12,7 +12,9 @@ use {
         arith,
         builtin_libraries::{NativeCall, NativeFn, c_result},
         coerce::coerce_vector,
-        distributions, linalg,
+        distributions,
+        fft::{fft_array, fft_columns, fft_vector},
+        linalg,
         long_double::{self, LongDouble},
         random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
         stats_optimize, stats_port, stats_spline, stats_tests,
@@ -565,11 +567,19 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     .collect::<Vec<f64>>()
             };
             let observations = used.iter().filter(|&&flag| flag).count();
-            let x_scale = scales(&x_data, &missing_x, &x_means);
-            let y_scale = if has_y {
-                scales(&y_data, &missing_y, &y_means)
+            // With two arguments GNU R takes the standard deviations from a long double
+            // `sqrtl`; with one it takes `sqrt` of the already rounded variances on the
+            // diagonal of the covariance matrix.
+            let (x_scale, y_scale) = if has_y {
+                (
+                    scales(&x_data, &missing_x, &x_means),
+                    scales(&y_data, &missing_y, &y_means),
+                )
             } else {
-                x_scale.clone()
+                let deviations: Vec<f64> = (0..x_columns)
+                    .map(|i| result[i + i * x_columns].sqrt())
+                    .collect();
+                (deviations.clone(), deviations)
             };
             for i in 0..x_columns {
                 for j in 0..y_columns {
@@ -966,70 +976,38 @@ unsafe fn compcases(call: &NativeCall<'_>) -> R<Sexp> {
 /// dimension of an array.
 unsafe fn fft(call: &NativeCall<'_>) -> R<Sexp> {
     let z = complex_copy(call.arg(0))?;
-    let sign = fft_sign(call)?;
+    let inverse = fft_inverse(call);
     let data = values::complexes_mut(z);
-    match values::dims(z) {
-        Some(dims) if dims.len() > 1 => {
-            let mut stride = 1;
-            for &extent in &dims {
-                let block = stride * extent;
-                if extent > 1 {
-                    for start in (0..data.len()).step_by(block.max(1)) {
-                        for offset in 0..stride {
-                            let indices: Vec<usize> =
-                                (0..extent).map(|k| start + offset + k * stride).collect();
-                            let mut line: Vec<Complex> = indices
-                                .iter()
-                                .map(|&index| Complex::from(data[index]))
-                                .collect();
-                            transform(&mut line, sign);
-                            for (&index, value) in indices.iter().zip(line) {
-                                data[index] = value.into();
-                            }
-                        }
-                    }
-                }
-                stride = block;
-            }
-        }
-        _ => {
-            let mut line: Vec<Complex> = data.iter().map(|&value| Complex::from(value)).collect();
-            transform(&mut line, sign);
-            for (slot, value) in data.iter_mut().zip(line) {
-                *slot = value.into();
-            }
-        }
-    }
+    let result = match values::dims(z) {
+        Some(dims) if data.len() > 1 => fft_array(complex_doubles(data), &dims, inverse),
+        _ => fft_vector(complex_doubles(data), inverse),
+    };
+    result.map_err(|_| call.error("fft factorization error"))?;
     Ok(z)
 }
 
 /// `mvfft(z, inverse)`: the transform of each column of a matrix.
 unsafe fn mvfft(call: &NativeCall<'_>) -> R<Sexp> {
-    let z = complex_copy(call.arg(0))?;
-    let sign = fft_sign(call)?;
-    let Some(dims) = values::dims(z).filter(|dims| dims.len() == 2) else {
+    let Some(dims) = values::dims(call.arg(0)).filter(|dims| dims.len() == 2) else {
         return Err(call.error("vector-valued (multivariate) series required"));
     };
-    let (rows, columns) = (dims[0], dims[1]);
-    let data = values::complexes_mut(z);
-    for column in 0..columns {
-        let slice = &mut data[column * rows..(column + 1) * rows];
-        let mut line: Vec<Complex> = slice.iter().map(|&value| Complex::from(value)).collect();
-        transform(&mut line, sign);
-        for (slot, value) in slice.iter_mut().zip(line) {
-            *slot = value.into();
-        }
-    }
+    let z = complex_copy(call.arg(0))?;
+    let inverse = fft_inverse(call);
+    fft_columns(complex_doubles(values::complexes_mut(z)), dims[0], dims[1], inverse)
+        .map_err(|_| call.error("fft factorization error"))?;
     Ok(z)
 }
 
-unsafe fn fft_sign(call: &NativeCall<'_>) -> R<f64> {
+unsafe fn fft_inverse(call: &NativeCall<'_>) -> bool {
     let inverse = values::as_logical_scalar(call.arg(1));
-    Ok(if inverse == heap::object::NA_LOGICAL || inverse == 0 {
-        -2.0
-    } else {
-        2.0
-    })
+    inverse != heap::object::NA_LOGICAL && inverse != 0
+}
+
+/// The (real, imaginary) pairs of complex values as one slice of doubles, which is the layout
+/// the transform works on.
+fn complex_doubles(values: &mut [heap::object::Rcomplex]) -> &mut [f64] {
+    // SAFETY: `Rcomplex` is two consecutive doubles with no padding.
+    unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr().cast(), values.len() * 2) }
 }
 
 /// A fresh complex copy of `z`, keeping its attributes.
@@ -1040,138 +1018,6 @@ unsafe fn complex_copy(z: Sexp) -> R<Sexp> {
     } else {
         Ok(converted)
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Complex {
-    re: f64,
-    im: f64,
-}
-
-impl From<heap::object::Rcomplex> for Complex {
-    fn from(value: heap::object::Rcomplex) -> Complex {
-        Complex {
-            re: value.r,
-            im: value.i,
-        }
-    }
-}
-
-impl From<Complex> for heap::object::Rcomplex {
-    fn from(value: Complex) -> heap::object::Rcomplex {
-        heap::object::Rcomplex {
-            r: value.re,
-            i: value.im,
-        }
-    }
-}
-
-/// An in-place mixed-radix transform: `sign` is -2 for the forward transform (exponent
-/// -2πi jk/n) and 2 for the inverse. The length is split into prime factors, and each pass
-/// combines butterflies of one factor, decimating in time (the scheme of Singleton's mixed
-/// radix algorithm, which GNU R uses).
-fn transform(data: &mut [Complex], sign: f64) {
-    let n = data.len();
-    if n <= 1 {
-        return;
-    }
-    let factors = factorize(n);
-    let output = mixed_radix(data, &factors, sign / 2.0);
-    data.copy_from_slice(&output);
-}
-
-fn factorize(mut n: usize) -> Vec<usize> {
-    let mut factors = Vec::new();
-    while n % 4 == 0 {
-        factors.push(4);
-        n /= 4;
-    }
-    if n % 2 == 0 {
-        factors.push(2);
-        n /= 2;
-    }
-    let mut divisor = 3;
-    while divisor * divisor <= n {
-        while n.is_multiple_of(divisor) {
-            factors.push(divisor);
-            n /= divisor;
-        }
-        divisor += 2;
-    }
-    if n > 1 {
-        factors.push(n);
-    }
-    factors
-}
-
-/// The recursive Cooley-Tukey step for the first factor `p` of `n = p m`: transform the `p`
-/// decimated subsequences of length `m`, then combine them with twiddles.
-fn mixed_radix(data: &[Complex], factors: &[usize], direction: f64) -> Vec<Complex> {
-    let n = data.len();
-    let Some((&radix, rest)) = factors.split_first() else {
-        return data.to_vec();
-    };
-    if n == 1 {
-        return data.to_vec();
-    }
-    let m = n / radix;
-    let subsequences: Vec<Vec<Complex>> = (0..radix)
-        .map(|offset| {
-            let decimated: Vec<Complex> = (0..m).map(|k| data[offset + k * radix]).collect();
-            mixed_radix(&decimated, rest, direction)
-        })
-        .collect();
-    let angle = direction * 2.0 * std::f64::consts::PI / n as f64;
-    let mut output = vec![Complex::default(); n];
-    for k in 0..m {
-        let twiddled: Vec<Complex> = (0..radix)
-            .map(|offset| {
-                let value = subsequences[offset][k];
-                if offset == 0 || k == 0 {
-                    return value;
-                }
-                let (sin, cos) = unit_root(angle, offset * k, n);
-                Complex {
-                    re: value.re * cos - value.im * sin,
-                    im: value.re * sin + value.im * cos,
-                }
-            })
-            .collect();
-        for q in 0..radix {
-            let mut sum = Complex::default();
-            for (offset, value) in twiddled.iter().enumerate() {
-                let (sin, cos) = unit_root(
-                    direction * 2.0 * std::f64::consts::PI / radix as f64,
-                    offset * q,
-                    radix,
-                );
-                sum.re += value.re * cos - value.im * sin;
-                sum.im += value.re * sin + value.im * cos;
-            }
-            output[k + q * m] = sum;
-        }
-    }
-    output
-}
-
-/// `(sin, cos)` of `angle * multiple`, exact at the multiples of a quarter turn so that the
-/// transforms of exactly representable data keep their exact zeros.
-fn unit_root(angle: f64, multiple: usize, period: usize) -> (f64, f64) {
-    let reduced = multiple % period;
-    if reduced == 0 {
-        return (0.0, 1.0);
-    }
-    if (4 * reduced).is_multiple_of(period) {
-        let quarter = 4 * reduced / period;
-        let direction = angle.signum();
-        return match quarter {
-            1 => (direction, 0.0),
-            2 => (0.0, -1.0),
-            _ => (-direction, 0.0),
-        };
-    }
-    let theta = angle * reduced as f64;
-    (theta.sin(), theta.cos())
 }
 
 /// `nextn(n, factors)`: for each `n`, the smallest integer at least `n` that factors entirely

@@ -430,6 +430,22 @@ pub fn running_sums(values: &[f64], out: &mut [f64]) {
     }
 }
 
+/// GNU R's `cumprod` of doubles: each running long double product, rounded to double into
+/// `out`, for the shorter of the two. NA and NaN propagate as in `running_sums`.
+pub fn running_products(values: &[f64], out: &mut [f64]) {
+    let count = values.len().min(out.len());
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    x87::running_products(&values[..count], &mut out[..count]);
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut product = LongDouble::from(1.0);
+        for (&value, out) in values[..count].iter().zip(&mut out[..count]) {
+            product = product * LongDouble::from(value);
+            *out = product.to_f64();
+        }
+    }
+}
+
 /// GNU R's `rowSums` (`divisor` 1) or `rowMeans` (`divisor` the column count) of a column-major
 /// matrix with `rows` rows: each row's long double total, added column by column, divided by
 /// `divisor` in long double and rounded once to double into `out`. Returns which rows were
@@ -702,6 +718,39 @@ mod x87 {
                 "jz 3f",
                 "2:",
                 "fadd qword ptr [{data}]",
+                "fst qword ptr [{out}]",
+                "add {data}, 8",
+                "add {out}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp st(0)",
+                data = inout(reg) values.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving
+    /// the register. `out` must be as long as `values`.
+    pub(super) fn running_products(values: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            values.len(),
+            out.len(),
+            "running products need an output per value"
+        );
+        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        unsafe {
+            asm!(
+                "fld1",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fmul qword ptr [{data}]",
                 "fst qword ptr [{out}]",
                 "add {data}, 8",
                 "add {out}, 8",

@@ -2757,12 +2757,16 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             result
         }
-        (SexpType::Real, Cumulative::Sum) => {
+        (SexpType::Real, Cumulative::Sum | Cumulative::Product) => {
             let result = values::alloc_uninit(SexpType::Real, count)?;
             let out = values::reals_mut(result);
-            long_double::running_sums(values::reals(operand), out);
-            // NA's payload outranks a plain NaN's on the x87 unit GNU R sums on, so from the
-            // first NA on every total is NA, whatever NaN came before it.
+            if kind == Cumulative::Sum {
+                long_double::running_sums(values::reals(operand), out);
+            } else {
+                long_double::running_products(values::reals(operand), out);
+            }
+            // NA's payload outranks a plain NaN's on the x87 unit GNU R accumulates on, so from
+            // the first NA on every total is NA, whatever NaN came before it.
             if out.last().is_some_and(|total| total.is_nan())
                 && let Some(first) = values::reals(operand)
                     .iter()
@@ -2811,41 +2815,21 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             result
         }
-        (SexpType::Integer | SexpType::Logical | SexpType::Real, _) => {
-            let result = alloc(SexpType::Real, count)?;
-            let mut accumulator = match kind {
-                Cumulative::Sum => 0.0,
-                Cumulative::Product => 1.0,
-                Cumulative::Max => f64::NEG_INFINITY,
-                Cumulative::Min => f64::INFINITY,
-            };
-            let mut na = false;
+        // Everything else is the product of integers or logicals, which GNU R widens to double
+        // before it multiplies in long double.
+        (SexpType::Integer | SexpType::Logical, _) => {
+            let widened = alloc(SexpType::Real, count)?;
             for index in 0..count {
-                let value = real_at(operand, index);
-                if na {
-                    values::reals_mut(result)[index] = NA_REAL;
-                    continue;
-                }
-                if matches!(kind, Cumulative::Max | Cumulative::Min) && value.is_nan() {
-                    na = true;
-                    values::reals_mut(result)[index] =
-                        if is_na_real(value) { NA_REAL } else { f64::NAN };
-                    continue;
-                }
-                // GNU R accumulates in x87 long double, where NA's payload outranks a plain
-                // NaN's, so NA wins over NaN in whichever order they come.
-                accumulator = match kind {
-                    Cumulative::Sum | Cumulative::Product
-                        if is_na_real(accumulator) || is_na_real(value) =>
-                    {
-                        NA_REAL
-                    }
-                    Cumulative::Sum => accumulator + value,
-                    Cumulative::Product => accumulator * value,
-                    Cumulative::Max => accumulator.max(value),
-                    Cumulative::Min => accumulator.min(value),
-                };
-                values::reals_mut(result)[index] = accumulator;
+                values::reals_mut(widened)[index] = real_at(operand, index);
+            }
+            let result = alloc(SexpType::Real, count)?;
+            long_double::running_products(values::reals(widened), values::reals_mut(result));
+            if values::reals(result).last().is_some_and(|total| total.is_nan())
+                && let Some(first) = values::reals(widened)
+                    .iter()
+                    .position(|&value| is_na_real(value))
+            {
+                values::reals_mut(result)[first..].fill(NA_REAL);
             }
             result
         }
@@ -2944,16 +2928,27 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     match function {
         Summary::Sum => {
             if kind == SexpType::Complex {
+                // Each argument totals in long double and is rounded to double before it joins
+                // the running total, which is a double.
                 let mut total = Rcomplex { r: 0.0, i: 0.0 };
                 for &item in &items {
-                    for index in 0..length(item) {
-                        let z = complex_at(item, index);
-                        if na_rm && (z.r.is_nan() || z.i.is_nan()) {
-                            continue;
+                    let part = if item.kind() == SexpType::Complex {
+                        complex_total(values::complexes(item), na_rm)
+                    } else {
+                        let mut reals = Vec::with_capacity(length(item));
+                        for index in 0..length(item) {
+                            let value = real_at(item, index);
+                            if !(na_rm && value.is_nan()) {
+                                reals.push(value);
+                            }
                         }
-                        total.r += z.r;
-                        total.i += z.i;
-                    }
+                        Rcomplex {
+                            r: long_double::add_all(LongDouble::ZERO, &reals).to_f64(),
+                            i: 0.0,
+                        }
+                    };
+                    total.r += part.r;
+                    total.i += part.i;
                 }
                 return values::scalar_complex(total);
             }
@@ -3028,6 +3023,30 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 return scalar_real(total as f64);
             }
             scalar_integer(total as i32)
+        }
+        Summary::Product if kind == SexpType::Complex => {
+            let mut total = Rcomplex { r: 1.0, i: 0.0 };
+            for &item in &items {
+                if item.kind() == SexpType::Complex {
+                    let part = complex_product_total(values::complexes(item), na_rm);
+                    total = Rcomplex {
+                        r: total.r * part.r - total.i * part.i,
+                        i: total.r * part.i + total.i * part.r,
+                    };
+                } else {
+                    let mut product = LongDouble::from(1.0);
+                    for index in 0..length(item) {
+                        let value = real_at(item, index);
+                        if !(na_rm && value.is_nan()) {
+                            product = product * LongDouble::from(value);
+                        }
+                    }
+                    let factor = product.to_f64();
+                    total.r *= factor;
+                    total.i *= factor;
+                }
+            }
+            values::scalar_complex(total)
         }
         Summary::Product => {
             // Each argument's product accumulates in x87 long double, as GNU R's does, and the
@@ -3330,21 +3349,66 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             }
             scalar_real(long_double_mean(data).to_f64())
         }
-        SexpType::Complex => {
-            let mut total = Rcomplex { r: 0.0, i: 0.0 };
-            for &value in values::complexes(operand) {
-                total.r += value.r;
-                total.i += value.i;
-            }
-            values::scalar_complex(Rcomplex {
-                r: total.r / count as f64,
-                i: total.i / count as f64,
-            })
-        }
+        SexpType::Complex => values::scalar_complex(complex_mean(values::complexes(operand))),
         _ => Err(call.error(format!(
             "invalid 'type' ({}) of argument",
             operand.kind().name()
         ))),
+    }
+}
+
+/// GNU R's `csum`: the real and imaginary parts total separately in long double, skipping an
+/// element with a NaN in either part when `na_rm`.
+fn complex_total(values: &[Rcomplex], na_rm: bool) -> Rcomplex {
+    let (reals, imaginaries) = complex_parts(values, na_rm);
+    Rcomplex {
+        r: long_double::add_all(LongDouble::ZERO, &reals).to_f64(),
+        i: long_double::add_all(LongDouble::ZERO, &imaginaries).to_f64(),
+    }
+}
+
+/// GNU R's `cprod`: the running product is a pair of long doubles.
+fn complex_product_total(values: &[Rcomplex], na_rm: bool) -> Rcomplex {
+    let mut real = LongDouble::from(1.0);
+    let mut imaginary = LongDouble::ZERO;
+    for value in values {
+        if na_rm && (value.r.is_nan() || value.i.is_nan()) {
+            continue;
+        }
+        let (re, im) = (LongDouble::from(value.r), LongDouble::from(value.i));
+        let next_real = real * re - imaginary * im;
+        imaginary = real * im + imaginary * re;
+        real = next_real;
+    }
+    Rcomplex {
+        r: real.to_f64(),
+        i: imaginary.to_f64(),
+    }
+}
+
+fn complex_parts(values: &[Rcomplex], na_rm: bool) -> (Vec<f64>, Vec<f64>) {
+    values
+        .iter()
+        .filter(|value| !(na_rm && (value.r.is_nan() || value.i.is_nan())))
+        .map(|value| (value.r, value.i))
+        .unzip()
+}
+
+/// GNU R's complex mean: long double totals divided by the count, refined by the mean of the
+/// deviations unless a total is not finite.
+fn complex_mean(values: &[Rcomplex]) -> Rcomplex {
+    let (reals, imaginaries) = complex_parts(values, false);
+    let count = values.len();
+    let mut real = long_double::add_all(LongDouble::ZERO, &reals) / count;
+    let mut imaginary = long_double::add_all(LongDouble::ZERO, &imaginaries) / count;
+    if real.to_f64().is_finite() && imaginary.to_f64().is_finite() {
+        real = real + long_double::add_differences(LongDouble::ZERO, &reals, real) / count;
+        imaginary = imaginary
+            + long_double::add_differences(LongDouble::ZERO, &imaginaries, imaginary) / count;
+    }
+    Rcomplex {
+        r: real.to_f64(),
+        i: imaginary.to_f64(),
     }
 }
 
