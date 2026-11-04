@@ -53,7 +53,7 @@ The quality bar is four things.
 
 ## Open: what bundling base R left undone
 
-- **Start-up image follow-ups.** An empty `ry run` takes about 60 ms from the image, of which about 12 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions.md`, "The start-up image is build output of the base tree"). Next: give user packages the same as install-time output of `ry install` (a per-library image of the installed namespaces, written when the library changes, never at run time); profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
+- **Start-up image follow-ups.** An empty `ry run` takes about 48 ms from the image, of which about 10 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions.md`, "The start-up image is build output of the base tree"; installed packages get no image, "Installed packages load through native fast paths"). Next: the first S3 dispatch of each generic costs about 0.3 ms against 6 µs for a plain closure call (`UseMethod` lookup); `.expand_R_libs_env_var` in the profile about 3 ms; profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
 - **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
@@ -89,8 +89,8 @@ A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch cos
 - The `setClass` shapes that still bail (`RY_TRACE_METHODS_BAILS=1`): a classRepresentation passed
   in by `setClassUnion`, supers from another package, several `contains` with data parts, and
   classes that are virtual for lack of slots.
-- `cacheMetaData` and `.checkGroupSigLength` (about 125 ms cold, 45 ms warm, and the import cost, see "Start-up and
-  imports are the floor of a warm `ry load`" below).
+- `cacheMetaData` (`.checkGroupSigLength` runs natively; about 2.9 ms per namespace against
+  GNU R's 16 ms, see "Start-up and imports are the floor of a warm `ry load`" below).
 - The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
@@ -160,17 +160,11 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   lubridate,data.table,xts`) spends about 130 ms reaching the load and about 200 ms importing,
   against under 60 ms for the first `new()`. `registerS3methods` runs natively (`decisions.md`,
   "start-up and imports run GNU R's code"), so what remains is GNU R's other R code:
-  - Process start, best of five: base alone 33 ms (`R_DEFAULT_PACKAGES=NULL`), with methods 74 ms,
-    with utils 93 ms, with stats 119 ms, all defaults 130 ms (GNU R's `Rscript`: 153 ms). The levers
-    are interpreter speed, or the preloaded base image of "bundle base R into the `ry` binary"
-    above, which could carry the default packages already loaded.
-  - Imports: `methods::cacheMetaData` is about 150 ms of them, and `.checkGroupSigLength` about
-    70 ms of that (an upper bound measured by stubbing it out): `.updateMethodsInTable` runs it for
-    every member of a group generic, and each call rescans the whole group tree through
-    `getGeneric` (1.2 ms per call on ry, 0.8 ms on GNU R; 67 calls for lubridate, data.table and
-    xts, none of which reset anything). A replacement guarded like `registerS3methods` could skip a
-    rescan whose generics and `.SigLength` values cannot have changed, but proving that cheaply needs
-    an invalidation signal for `.genericTable` and every `.SigLength` assignment. Deferring an
+  - Process start: an empty `ry run` starts from the start-up image in about 48 ms (GNU R's
+    `Rscript`: 129 ms).
+  - Imports: `.checkGroupSigLength` runs natively (`decisions.md`, "Installed packages load
+    through native fast paths, not an image"), which brings `cacheMetaData` to about 2.9 ms per
+    namespace (GNU R 16 ms).
     import's `loadNamespace` until a name is used is not exact: `.onLoad` side effects (options, S3
     registrations that dispatch on objects read back with `readRDS`) would move.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's

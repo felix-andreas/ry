@@ -634,6 +634,13 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   heap takes any of it, and a damaged image starts the slow way with a line on stderr. A failure
   past that point (`LoadError::Partial`) would leave the heap half-built, so the start fails.
 
+- **Promoted on load.** Every object the image loads joins the old generation at once
+  (`Heap::promote_young`), so the first minor collection does not trace them.
+- **The base tree only.** Installed packages have no image. Lazy loading already fetches a small
+  fraction of a namespace's objects, so their cost is setup work (S4 metadata, S3 registration,
+  `.onLoad`), which runs natively behind hash-guarded prologues instead (`decisions.md`,
+  "Installed packages load through native fast paths, not an image").
+
 Interpreter state outside the heap is saved beside it: methods' dispatch globals, templates and
 primitive method tables, the S4 extends and implicit-class tables, the loaded builtin libraries
 and data.table's namespace. Per-process state, such as the command line, the temporary directory,
