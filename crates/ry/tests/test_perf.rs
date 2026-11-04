@@ -166,7 +166,7 @@ fn runtime_peak_memory_stays_near_gnu_r() {
 /// arithmetic and the `1:n` loop page-faulted in a fresh mapping for every large temporary, and
 /// the data frame pipeline ran a major collection per call under too tight a vector limit.
 const RUNTIME_SPEEDUPS: [(&str, f64); 3] =
-    [("vector_arith", 0.85), ("loop_sum", 3.0), ("sales", 1.2)];
+    [("vector_arith", 0.85), ("loop_sum", 3.0), ("sales", 1.8)];
 
 #[test]
 #[ignore = "needs a release build with libR beside it; run in release with --ignored"]

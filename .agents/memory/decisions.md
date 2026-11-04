@@ -6583,11 +6583,23 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** A per-type hybrid in `crates/heap/src/heap.rs` (`note_zero`, `reconcile`, `shallow_roots`, `free_released`):
   - Every counted store releases the old value through `release_reference`, which reports a count that fell from one to zero. Such an object goes into the zero-count table (`Heap::zero_count`, a flat `Vec<Sexp>` with the `ZERO_LISTED` header bit against duplicates) when it can be reclaimed: a non-ALTREP list, or a non-ALTREP large logical, integer, double, complex or raw vector. Strings and small vectors are left to tracing, since their pages are not returned one at a time.
   - The table is reconciled only inside `maybe_collect`, at an allocation, because C code may hold an unprotected `SEXP` until its next allocation, as GNU R allows. A reconcile runs once the candidates add up to 4 MiB (`RECONCILE_BYTES`) or the table reaches 65,536 entries beyond those held. It sets `HELD` on the shallow roots: the protect stack, precious set, handles, handouts and globals, everything the root sources trace (interpreter frames, the bytecode register file, pending `.Call` arguments, condition handlers), one level deep, weak references, the fields of every object whose fields do not count (`untrack_references`, R's `DISABLE_REFCNT`), and the elements of every list that native code has seen (escaped lists, whose `SET_VECTOR_ELT` stores do not count). A candidate still at zero and not held is released: a list gives up its elements, which may cascade, and a large atomic vector's pages are freed at once.
-  - Environments, closures, promises and external pointers stay with the tracing collector, which handles the cyclic subset (the shape of CPython's cycle collector and Nim's ORC). Counts only ever overcount, because sweeping a dead object does not decrement its children, so a missed decrement keeps an object for tracing and never frees one early.
+  - Environments, closures, promises and external pointers stay with the tracing collector, which handles the cyclic subset (the shape of CPython's cycle collector and Nim's ORC). Counts only ever overcount, so a missed decrement keeps an object for tracing and never frees one early. A sweep decrements children in two places only, because elsewhere a leftover count is harmless: a swept zero-listed list releases its elements (`release_swept_lists`), so the columns of a dead data frame become candidates again, and a swept frame waiting for release is cleared first (see "Frames released at return").
   - A freed vector's bytes stay counted until the next collection recounts them, so the collection schedule matches tracing alone. Uncounting them put collections off, and the dead temporaries only a collection finds (forced promise values) piled up: `rep` peaked about a quarter higher.
 - **Soundness check.** `RY_GC_VERIFY=1` makes a reconcile free nothing; it runs a full collection instead and panics if anything it would have freed is reachable. The heap fuzzers (`fuzz_reconciles_free_only_unreachable_vectors`, `fuzz_temporaries_are_freed_and_live_vectors_kept`) run that cross-check, and the oracle cases pass under `RY_GC_STRESS=1 RY_GC_VERIFY=1` with the same results as the default run.
 - **Measured.** Peak RSS in MiB from `wait4`, ry against GNU R 4.3.3, for the scripts in `reference/cli.md` ("Memory"): subset loop 1097 against 1386 (tracing alone reached 1100 only with `R_GC_MEM_GROW=0`), data.table loop 277 against 340, `rep` 239 against 239 (its live data). Suite CPU is unchanged against tracing alone (finbench 18.4 s, dsbench 20.7 s against 21.6 s, biobench 25.3 s, collector time 0.57 to 0.74 s either way).
-- **Not done.** Freeing a closure's frame at return (GNU R's `R_CleanupEnvir`) would need counted enclosures; environments stay traced (`backlog.md`).
+- **Frames.** A closure's frame is released at return; see "Frames released at return".
+
+## Frames released at return
+
+- **Previous source of truth.** Only tracing freed a closure's frame, so every binding in it (argument promises and their values, local temporaries) lived until a collection found the frame dead. On `sales`, the dead frames of `[.data.frame` and friends held the subset columns, and three majors ran per call.
+- **Shape** (`Heap::release_frame`, `release_returned`, `clear_frame` in `crates/heap/src/heap.rs`, called from `run_closure` and `apply_internal_method` in `crates/interp`), following GNU R's `R_CleanupEnvir` and `unpromiseArgs`:
+  - Enclosures count: `alloc_environment`, `set_enclosure` and weak references go through counted stores, so a frame's count is exactly its references from the heap.
+  - At return, a frame whose count equals the cycles it holds on itself (refcount-1 closures and promises bound in it whose environment is the frame, not the result) and that is not the result, not precious and not a symbol frame is cleared at once: refcount-1 promises give up value and environment, bindings are set to nil, and the enclosure is dropped.
+  - Otherwise the frame goes on `Heap::returned` with the closures it created (`Interp::frame_closures`, at most `FRAME_CLOSURES` per frame). At the next reconcile, a frame not reached by a non-handle shallow root is cleared once its count equals its own cycles plus its dead closures (count zero, not held) plus closures a sweep already freed. The caller's scope handle roots every frame it made, which is why frames are tested against the roots before the handles are marked.
+  - A collection clears an unmarked pending frame before the sweep, so its children's counts do not stay overcounted.
+  - Arguments are released after the call (`release_arguments`) for calls that own their promises; `UseMethod` dispatch does not, because the generic's frame still reaches them.
+- **Why deferred.** A frame that created a closure (an `on.exit` handler, a local helper, a promise) is usually dead at return too, but only a root scan proves the closure dead, and a scan per return is too slow; batching at the reconcile pays one scan for every pending frame.
+- **Impact.** `sales` runs one major per call instead of three, 0.044 to 0.046 s against 0.052 s for the previous release and about 0.084 s on GNU R 4.3.3. Correctness rests on counts only overcounting: `RY_GC_VERIFY=1` checks each reconcile against a full collection, and the oracle cases give identical output with frame release on and off.
 
 ## Start-up memory: release relocation tables and preflight code pages
 
@@ -7297,7 +7309,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   strings by their text, attributes ignored) equals the 4.6.2 one. Another release keeps its own
   function at its own speed, and a mismatch on the bundled 4.6.2 is an error, because it means the
   copy and the bundled tree drifted apart. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
-  updating the constant with the copy.
+  updating the constant with the copy. The hash skips a nested `function` call's fourth element
+  (its srcref), because a parse from source fills it and GNU R's saved namespace leaves it out:
+  hashing it made the pristine function hash one way in `build-base` and another in a built home,
+  and pinning the second broke every clean build. ry's own built base namespace saves the
+  replacement, which the guard recognises by the replacement's own hash and leaves in place.
+  `stable_hash_ignores_nested_function_srcrefs` in `session.rs` pins the srcref rule, and CI's
+  `just base-r dev` is the end-to-end check because it builds base R from the source tarball.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
   branch: known generics, another package's generic, an overwrite and its message, local plain and

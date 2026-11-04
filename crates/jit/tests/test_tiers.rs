@@ -817,8 +817,20 @@ fn run_time_binding_shadows_cached_global_function() {
             outcomes.push((name, run(&call("TRUE"))));
         }
         jit::install_mode(Mode::Off);
+        // R 4.4 stopped forwarding the generic's locals to the method, so from then on the
+        // method's `g` is the global one.
+        let forwarded = if interp::system::r_at_least(4, 4) {
+            "\"global\""
+        } else {
+            "\"local\""
+        };
         for (name, outcome) in outcomes {
-            assert_eq!(outcome, "\"local\"", "{name}");
+            let expected = if name == "gen" {
+                forwarded
+            } else {
+                "\"local\""
+            };
+            assert_eq!(outcome, expected, "{name}");
         }
     });
 }
@@ -2704,8 +2716,13 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         // SAFETY: the interpreter is installed.
         unsafe {
             run("empty_items <- function(xs: List<I64>) .Internal(typeof(xs))");
-            run("empty_result <- function() -> List<I64> List.map(List.range(7L, 6), \\(v) v * 4i64)");
-            assert_eq!(run("empty_items(List.map(List.range(7L, 6), \\(v) v * 4i64))"), run("\"I64\""));
+            run(
+                "empty_result <- function() -> List<I64> List.map(List.range(7L, 6), \\(v) v * 4i64)",
+            );
+            assert_eq!(
+                run("empty_items(List.map(List.range(7L, 6), \\(v) v * 4i64))"),
+                run("\"I64\"")
+            );
             assert_eq!(run(".Internal(typeof(empty_result()))"), run("\"I64\""));
         }
         // A library constant the body assigns later is read as the local on the next iteration.

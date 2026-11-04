@@ -224,9 +224,9 @@ unsafe fn start_slowly(
 }
 
 /// GNU R 4.6.2's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
-/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the installed one, for updating this together with
-/// `register_s3_methods.R`.
-const GNU_REGISTER_S3_METHODS: u64 = 0x0c89_27a0_c611_ff8c;
+/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the one base R defines, for updating this
+/// together with `register_s3_methods.R`.
+const GNU_REGISTER_S3_METHODS: u64 = 0x54a3_acc7_9c94_1f6c;
 
 /// Replaces base R's `registerS3methods()` with `register_s3_methods.R`, which runs its two
 /// per-method loops natively: they cost every namespace load about a millisecond per hundred S3
@@ -247,6 +247,15 @@ unsafe fn install_register_s3_methods() -> R<()> {
     if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
         eprintln!("registerS3methods {hash:#018x}");
     }
+    let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
+    // ry builds its bundled base R itself, so the base namespace it saved holds the replacement
+    // already, while a build from the source release defines GNU R's own function.
+    let mut replacement_hash = FNV_OFFSET;
+    stable_hash(replacement.car(), &mut replacement_hash);
+    stable_hash(crate::bytecode::closure_body(replacement), &mut replacement_hash);
+    if hash == replacement_hash {
+        return Ok(());
+    }
     if hash != GNU_REGISTER_S3_METHODS {
         if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
             return Err(crate::unwind::error(format!(
@@ -257,7 +266,6 @@ unsafe fn install_register_s3_methods() -> R<()> {
         }
         return Ok(());
     }
-    let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
     eval::define(symbol, replacement, base_namespace())
 }
 
@@ -350,11 +358,25 @@ pub(crate) unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
             }
         }
         SexpType::Pairlist | SexpType::Language => {
+            // A `function` call's fourth element is its srcref, which a parse with source
+            // references fills with line numbers and a saved namespace may not hold at all.
+            let elements = if object.kind() == SexpType::Language
+                && object.car().kind() == SexpType::Symbol
+                && object.car().car().bytes() == b"function"
+            {
+                3
+            } else {
+                usize::MAX
+            };
             let mut cell = object;
-            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+            let mut position = 0;
+            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language)
+                && position < elements
+            {
                 stable_hash(cell.tag(), hash);
                 stable_hash(cell.car(), hash);
                 cell = cell.cdr();
+                position += 1;
             }
         }
         _ => {}
@@ -919,4 +941,31 @@ unsafe fn do_mk_unbound(call: &Call<'_>) -> R<Sexp> {
     }
     crate::heap().remove_binding(base_env(), symbol)?;
     Ok(nil())
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::testing::with_interpreter};
+
+    /// A function parsed from source holds srcrefs in its nested `function` calls, while the copy
+    /// a namespace saves may not, and the guards on base R's functions must hash both alike.
+    #[test]
+    fn stable_hash_ignores_nested_function_srcrefs() {
+        let text = "function(x) {\n  inner <- function(y) y + 1\n  inner(x)\n}";
+        with_interpreter(|| {
+            // SAFETY: the interpreter is installed.
+            unsafe {
+                let hash_of = |srcfile: Sexp| -> R<u64> {
+                    let parsed = crate::lower::parse_with_srcfile(text, "<test>", srcfile)?;
+                    let mut hash = FNV_OFFSET;
+                    stable_hash(parsed.element(0), &mut hash);
+                    Ok(hash)
+                };
+                let with_source = hash_of(values::new_env(base_env()).expect("environment"))
+                    .expect("parse with source");
+                let without_source = hash_of(nil()).expect("parse without source");
+                assert_eq!(with_source, without_source);
+            }
+        });
+    }
 }

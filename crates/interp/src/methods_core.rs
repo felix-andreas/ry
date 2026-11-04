@@ -66,13 +66,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
 const FAST_PATHS: &[(&str, &[u64])] = &[
     ("new", &[0xed04_11d7_4c52_3b14]),
     ("initialize", &[0x0cbc_a8bc_242d_4840]),
-    ("validObject", &[0xcfec_1557_eba8_fe90]),
+    ("validObject", &[0x8f82_3d83_2f02_0ff0]),
     ("is", &[0xa975_8041_9461_37c4, 0x4826_09db_60cf_b7e5]),
-    ("extends", &[0x2df8_66a4_f3b4_1f5e]),
-    ("setGeneric", &[0xe3ac_b876_a896_9c54]),
+    ("extends", &[0x244f_7420_923b_771e]),
+    ("setGeneric", &[0xbaa0_ee27_203e_a2f4]),
     ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
     ("setClass", &[0x3a03_d885_5064_d505]),
-    (".checkGroupSigLength", &[0x5f8d_dfdc_b708_b922]),
+    (".checkGroupSigLength", &[0x83f1_310d_2df4_2522]),
     ("setClassUnion", &[0x432d_d49c_dabe_37aa]),
     ("cacheMetaData", &[0xacce_736a_7865_842c]),
 ];
