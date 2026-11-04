@@ -7547,8 +7547,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **No "existing objects" check.** Rust state that holds heap objects across start-up must be a
   fixed object, a heap root, or saved by `image::save_state`; a check that refused every object
   live before start-up flagged only `package:ry`'s frame, which the loader overwrites safely.
-- **Impact.** Empty `ry run`: 125 ms to about 50 ms median. `methods::getClass("numeric")` with
-  `R_DEFAULT_PACKAGES=NULL`: 64 ms to 56 ms. The four cache bugs cannot occur: no image depends on
+- **Impact.** Empty `ry run`: about 120 ms to 60 ms median. Re-running the environment steps
+  costs about 12 ms against loading a run-time image (47 ms). `methods::getClass("numeric")` with
+  `R_DEFAULT_PACKAGES=NULL` starts the slow way (63 ms; the run-time image keyed that variable and
+  took 56 ms). The four cache bugs cannot occur: no image depends on
   the run-time environment. Options, the search path and namespace paths match a slow start
   (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
   image is rewritten. Analysis is unaffected: the image is runtime-only.
