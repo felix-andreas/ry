@@ -64,6 +64,7 @@ pub mod native;
 pub mod numbers;
 pub mod parallel;
 pub mod parse_data;
+mod pcre;
 pub mod platform;
 pub mod plotmath;
 pub mod print;

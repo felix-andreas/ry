@@ -18,6 +18,7 @@ use {
         conditions::warning,
         eval,
         format::{display_width, scientific_text},
+        pcre::{CompileError, PerlRegex},
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
@@ -30,10 +31,6 @@ use {
         strings::Encoding,
     },
     memchr::memmem,
-    pcre2::bytes::{
-        CaptureLocations as PerlCaptureLocations, Regex as PerlRegex,
-        RegexBuilder as PerlRegexBuilder,
-    },
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
@@ -2890,13 +2887,8 @@ enum Matcher {
         shortest: bool,
         fresh_start: bool,
     },
-    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does. Every match reuses `locations`,
-    /// because fresh capture locations carry fresh match data, and with it a JIT stack of the
-    /// 64 MB maximum, which made `gsub` with groups about 40 times slower than GNU R.
-    Perl {
-        regex: Rc<PerlRegex>,
-        locations: Rc<RefCell<PerlCaptureLocations>>,
-    },
+    /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
+    Perl(Rc<PerlRegex>),
     /// A POSIX pattern with approximate settings such as `{+}`, run as TRE's approximate
     /// matcher runs it.
     Approximate(Rc<ApproximateRegex>),
@@ -3092,10 +3084,7 @@ impl Matcher {
                     .map_or(found.end(), |longest| longest.end());
                 Ok(Some((found.start(), end)))
             }
-            Matcher::Perl { regex, .. } => regex
-                .find_at(text.as_bytes(), from)
-                .map(|found| found.map(|found| (found.start(), found.end())))
-                .map_err(perl_matching_error),
+            Matcher::Perl(regex) => regex.find_at(text, from).map_err(perl_matching_error),
             Matcher::Approximate(regex) => Ok(approximate_search(regex, text, from)?
                 .map(|groups| groups[0].unwrap_or((from, from)))),
         }
@@ -3154,27 +3143,7 @@ impl Matcher {
                         .collect(),
                 ))
             }
-            Matcher::Perl { regex, locations } => {
-                // Matching never re-enters itself, so the shared locations are always free; a
-                // fresh set keeps a surprise re-entry correct rather than a panic.
-                let mut fresh;
-                let mut shared = locations.try_borrow_mut();
-                let locations = match shared.as_deref_mut() {
-                    Ok(locations) => locations,
-                    Err(_) => {
-                        fresh = regex.capture_locations();
-                        &mut fresh
-                    }
-                };
-                let found = regex
-                    .captures_read_at(locations, text.as_bytes(), from)
-                    .map_err(perl_matching_error)?;
-                Ok(found.map(|_| {
-                    (0..locations.len())
-                        .map(|group| locations.get(group))
-                        .collect()
-                }))
-            }
+            Matcher::Perl(regex) => regex.captures_at(text, from).map_err(perl_matching_error),
         }
     }
 
@@ -3183,7 +3152,7 @@ impl Matcher {
             Matcher::Pattern { fresh_start, .. } | Matcher::Automaton { fresh_start, .. } => {
                 *fresh_start
             }
-            Matcher::Literal(_) | Matcher::Perl { .. } | Matcher::Approximate(_) => false,
+            Matcher::Literal(_) | Matcher::Perl(_) | Matcher::Approximate(_) => false,
         }
     }
 
@@ -3194,7 +3163,7 @@ impl Matcher {
             Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 regex.captures_len().saturating_sub(1)
             }
-            Matcher::Perl { regex, .. } => regex.captures_len().saturating_sub(1),
+            Matcher::Perl(regex) => regex.groups().saturating_sub(1),
             Matcher::Approximate(regex) => regex.group_count(),
         }
     }
@@ -3208,8 +3177,8 @@ impl Matcher {
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
                 .collect(),
-            Matcher::Perl { regex, .. } => regex
-                .capture_names()
+            Matcher::Perl(regex) => regex
+                .names()
                 .iter()
                 .skip(1)
                 .map(|name| name.clone().unwrap_or_default())
@@ -3256,30 +3225,10 @@ fn remember(key: (String, bool, bool), matcher: &Matcher) {
 /// asked, and JIT-compiled when PCRE2 supports it. Text is always valid UTF-8 here, so UTF mode
 /// is right even for ASCII input, where it makes no difference.
 unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
-    let mut builder = PerlRegexBuilder::new();
-    builder
-        .utf(true)
-        .caseless(ignore_case)
-        .jit_if_available(true)
-        // GNU R's default `R_PCRE_JIT_STACK_MAXSIZE`, 64 MB; PCRE2's own 32 KB fails on a
-        // long subject such as 5,000 repeats of `(a|b)+`.
-        .max_jit_stack_size(Some(64 * 1024 * 1024));
-    match builder.build(pattern) {
-        Ok(regex) => Ok(Matcher::Perl {
-            locations: Rc::new(RefCell::new(regex.capture_locations())),
-            regex: Rc::new(regex),
-        }),
-        Err(failure) => {
-            // The crate prefixes PCRE2's message with its own text, which GNU R does not print.
+    match PerlRegex::new(pattern, ignore_case) {
+        Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
+        Err(CompileError { message, offset }) => {
             // GNU R prints the message and the rest of the pattern from the error's byte offset.
-            let offset = failure.offset().unwrap_or(0);
-            let text = failure.to_string();
-            let message = text
-                .strip_prefix(&format!(
-                    "PCRE2: error compiling pattern at offset {offset}: "
-                ))
-                .or_else(|| text.strip_prefix("PCRE2: error compiling pattern: "))
-                .unwrap_or(&text);
             let rest = pattern.get(offset..).unwrap_or_default();
             warning(format!(
                 "PCRE pattern compilation error\n\t'{message}'\n\tat '{rest}'"
@@ -3293,7 +3242,7 @@ fn matching_error(failure: fancy_regex::Error) -> crate::unwind::Unwind {
     error(format!("regular expression matching failed: {failure}"))
 }
 
-fn perl_matching_error(failure: pcre2::Error) -> crate::unwind::Unwind {
+fn perl_matching_error(failure: String) -> crate::unwind::Unwind {
     error(format!("regular expression matching failed: {failure}"))
 }
 

@@ -1728,7 +1728,10 @@ impl Compiler {
                 .base_primitive(values::install("$<-")?, "$<-")?
                 .map(|primitive| (kind, primitive, smallvec![index])));
         }
-        if !subscripts.iter().all(|(_, index)| self.side_effect_free_index(*index, 0)) {
+        if !subscripts
+            .iter()
+            .all(|(_, index)| self.side_effect_free_index(*index, 0))
+        {
             return Ok(None);
         }
         let name = if kind == ElementKind::Double {
@@ -1737,27 +1740,34 @@ impl Compiler {
             "[<-"
         };
         let replacement = values::install(name)?;
-        Ok(self
-            .base_primitive(replacement, name)?
-            .map(|primitive| (kind, primitive, subscripts.iter().map(|(_, index)| *index).collect())))
+        Ok(self.base_primitive(replacement, name)?.map(|primitive| {
+            (
+                kind,
+                primitive,
+                subscripts.iter().map(|(_, index)| *index).collect(),
+            )
+        }))
     }
 
-    /// Whether evaluating the subscript `index` cannot change a variable, so the compiled
-    /// assignment may evaluate it before reading the target: a local variable that is not a
-    /// formal (which could be a promise), a numeric constant, or base arithmetic on those.
+    /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
+    /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
+    /// formal's promise runs in the caller's frame), a numeric constant, or base arithmetic on
+    /// those.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
                 index != symbols().dots
                     && index != missing_arg()
                     && eval::dot_dot_index(index).is_none()
-                    && !self.formals.contains(&index)
-                    && self
-                        .local_symbols
-                        .as_ref()
-                        .is_some_and(|found| found.contains(&index))
+                    && (self.formals.contains(&index)
+                        || self
+                            .local_symbols
+                            .as_ref()
+                            .is_some_and(|found| found.contains(&index)))
             }
-            SexpType::Integer | SexpType::Real => length(index) == 1 && !values::has_attributes(index),
+            SexpType::Integer | SexpType::Real => {
+                length(index) == 1 && !values::has_attributes(index)
+            }
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
@@ -1805,7 +1815,14 @@ impl Compiler {
         let mut registers: SmallVec<[u32; 2]> = SmallVec::new();
         for &subscript in subscripts {
             let register = self.allocate();
-            self.expression(subscript, register)?;
+            if self.formals.contains(&subscript) {
+                // A missing argument selects everything, which only the general assignment
+                // does, so the instruction looks the formal up itself (see `subscript_value`).
+                let symbol = self.constant(subscript);
+                self.emit(Op::Constant, &[register, symbol]);
+            } else {
+                self.expression(subscript, register)?;
+            }
             registers.push(register);
         }
         let variable = self.constant(target.cdr().car());
@@ -3473,7 +3490,11 @@ unsafe fn step(
                 1 => ElementKind::Double,
                 _ => ElementKind::Dollar,
             };
-            if !assign_element_in_place(env, variable, register(operand(2)), value, kind)? {
+            let done = match subscript_value(env, register(operand(2)))? {
+                Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
+                None => false,
+            };
+            if !done {
                 eval::complex_assign(call, call.cdr().car(), value, env, false)?;
             }
             set(operand(0), value);
@@ -3483,8 +3504,16 @@ unsafe fn step(
             let call = decoded.constants.element(operand(5));
             let value = register(operand(4));
             let variable = decoded.constants.element(operand(1));
-            let (row, column) = (register(operand(2)), register(operand(3)));
-            if !assign_matrix_element_in_place(env, variable, row, column, value)? {
+            let done = match (
+                subscript_value(env, register(operand(2)))?,
+                subscript_value(env, register(operand(3)))?,
+            ) {
+                (Some(row), Some(column)) => {
+                    assign_matrix_element_in_place(env, variable, row, column, value)?
+                }
+                _ => false,
+            };
+            if !done {
                 eval::complex_assign(call, call.cdr().car(), value, env, false)?;
             }
             set(operand(0), value);
@@ -3612,6 +3641,20 @@ unsafe fn assign_element_in_place(
     }
     cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
     Ok(true)
+}
+
+/// The value of a compiled assignment's subscript register. A register holding a symbol holds a
+/// formal the compiler left for this lookup, and `None` means the formal is missing.
+unsafe fn subscript_value(env: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if index.kind() != SexpType::Symbol {
+        return Ok(Some(index));
+    }
+    if eval::argument_is_missing(index, env)? {
+        return Ok(None);
+    }
+    let value = eval::eval_symbol(index, env)?;
+    crate::heap().root(value);
+    Ok(Some(value))
 }
 
 /// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
